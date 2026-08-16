@@ -811,10 +811,11 @@ fn lexical_path_variants(path: &Path) -> Vec<PathBuf> {
 
 fn normalized_parent_path(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
-    let file_name = path.file_name()?;
-    fs::canonicalize(parent)
-        .ok()
-        .map(|parent| parent.join(file_name))
+    parent.ancestors().find_map(|ancestor| {
+        let canonical = fs::canonicalize(ancestor).ok()?;
+        let suffix = path.strip_prefix(ancestor).ok()?;
+        Some(canonical.join(suffix))
+    })
 }
 
 fn absolute_lexical_path(path: &Path) -> Option<PathBuf> {
@@ -1189,5 +1190,10 @@ mod tests {
 
         let target_event = Event::new(EventKind::Any).add_path(target);
         assert!(event_affects_target(&target_event, &link, false));
+
+        let missing = alias_root.join("missing-parent").join("rsi-meta.toml");
+        let recreated_parent =
+            Event::new(EventKind::Any).add_path(physical_root.join("missing-parent"));
+        assert!(event_affects_target(&recreated_parent, &missing, false));
     }
 }
