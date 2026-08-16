@@ -127,7 +127,13 @@ fn accept_without_sleep(
     let deadline = Instant::now() + CHILD_DEADLINE;
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // Accepted-stream nonblocking inheritance differs across
+                // Unix implementations. The gate read below is deadline-
+                // bounded blocking I/O, so configure that contract explicitly.
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if let Some(status) = child.try_wait().unwrap() {
                     panic!("feature child exited before the staging gate: {status}");
