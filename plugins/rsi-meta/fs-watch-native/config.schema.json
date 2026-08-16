@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-meta.invalid/plugins/fs-watch-native-config-v0.json",
+  "title": "Native fs.watch configuration",
+  "type": "object",
+  "properties": {
+    "recursive": { "type": "boolean", "default": false }
+  },
+  "additionalProperties": false
+}

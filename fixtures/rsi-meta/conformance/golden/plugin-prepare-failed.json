@@ -1,0 +1,11 @@
+{
+  "protocol": "rsi-meta.plugin",
+  "version": 0,
+  "kind": "lifecycle",
+  "phase": "prepare_failed",
+  "generation": 7,
+  "config": {
+    "code": "state_read_failed",
+    "message": "state.cas returned conflict"
+  }
+}

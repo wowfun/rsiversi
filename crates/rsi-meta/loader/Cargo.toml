@@ -1,0 +1,45 @@
+[package]
+name = "rsi-meta-loader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[features]
+default = ["config"]
+config = ["dep:jsonschema", "dep:keyring"]
+test-failpoints = []
+
+[[example]]
+name = "stage-failpoint-child"
+path = "tests/support/stage_failpoint_child.rs"
+required-features = ["test-failpoints"]
+
+[dependencies]
+hex.workspace = true
+jsonschema = { version = "0.33", default-features = false, optional = true }
+keyring = { workspace = true, optional = true }
+libc.workspace = true
+libloading.workspace = true
+rsi-meta-plugin = { path = "../plugin" }
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

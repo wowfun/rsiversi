@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-meta.invalid/schemas/composition-v0.json",
+  "title": "rsi-meta composition manifest v0",
+  "type": "object",
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
+    },
+    "service": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$"
+    }
+  },
+  "required": ["format_version", "composition", "scopes", "instances"],
+  "properties": {
+    "format_version": { "const": 0 },
+    "composition": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identity" },
+        "mode": { "enum": ["development", "production"] }
+      },
+      "additionalProperties": false
+    },
+    "scopes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identity" },
+          "parent": {
+            "oneOf": [
+              { "$ref": "#/$defs/identity" },
+              { "type": "null" }
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "package", "scope"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identity" },
+          "package": { "type": "string", "minLength": 1 },
+          "scope": { "$ref": "#/$defs/identity" },
+          "enabled": { "type": "boolean", "default": true },
+          "config": {},
+          "bindings": {
+            "type": "object",
+            "propertyNames": { "$ref": "#/$defs/service" },
+            "additionalProperties": { "$ref": "#/$defs/identity" }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

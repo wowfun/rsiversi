@@ -1,0 +1,37 @@
+[package]
+name = "rsi-meta-plugin-fs-watch-polling"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hex = "0.4"
+libc = "0.2"
+rsi-meta-frame-contract = { path = "../frame-contract" }
+rsi-meta-plugin = { path = "../../../crates/rsi-meta/plugin" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+rsi-meta-loader = { path = "../../../crates/rsi-meta/loader", default-features = false }
+rsi-meta-plugin-testkit = { path = "../../../fixtures/rsi-meta/plugin-testkit" }
+tempfile = "3.20"
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = { level = "allow", priority = 0 }
+must_use_candidate = { level = "allow", priority = 0 }

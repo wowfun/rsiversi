@@ -1,0 +1,33 @@
+[package]
+name = "rsi-meta-release-demo"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+futures-util = { version = "0.3", features = ["sink"] }
+rsi-meta = { path = "../../../crates/rsi-meta/core" }
+rsi-meta-cli = { path = "../../../crates/rsi-meta/cli" }
+rsi-meta-loader = { path = "../../../crates/rsi-meta/loader" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.20"
+tokio = { version = "1.48", features = ["full"] }
+tokio-tungstenite = "0.29"
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = { level = "allow", priority = 0 }
+must_use_candidate = { level = "allow", priority = 0 }

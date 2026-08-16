@@ -1,0 +1,7 @@
+{
+  "protocol": "rsi-meta.plugin",
+  "version": 0,
+  "kind": "lifecycle",
+  "phase": "prepared",
+  "generation": 7
+}

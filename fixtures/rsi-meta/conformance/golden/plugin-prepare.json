@@ -1,0 +1,8 @@
+{
+  "protocol": "rsi-meta.plugin",
+  "version": 0,
+  "kind": "lifecycle",
+  "phase": "prepare",
+  "generation": 7,
+  "config": { "path": "/workspace" }
+}

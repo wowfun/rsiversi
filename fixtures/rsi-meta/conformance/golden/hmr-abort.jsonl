@@ -1,0 +1,3 @@
+{"protocol":"rsi-meta.plugin","version":0,"kind":"lifecycle","phase":"prepare","generation":2,"config":{}}
+{"protocol":"rsi-meta.plugin","version":0,"kind":"lifecycle","phase":"prepared","generation":2}
+{"protocol":"rsi-meta.plugin","version":0,"kind":"lifecycle","phase":"abort","generation":2}

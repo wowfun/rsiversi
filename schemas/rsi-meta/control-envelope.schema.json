@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-meta.invalid/schemas/control-envelope-v0.json",
+  "title": "rsi-meta control envelope v0",
+  "type": "object",
+  "required": ["protocol", "version", "kind", "payload"],
+  "properties": {
+    "protocol": { "const": "rsi-meta.control" },
+    "version": { "const": 0 },
+    "kind": { "enum": ["command", "result", "event"] },
+    "command_id": { "$ref": "#/$defs/id" },
+    "operation_id": { "$ref": "#/$defs/id" },
+    "expected_graph_revision": { "$ref": "#/$defs/u64" },
+    "cursor": { "$ref": "#/$defs/u64" },
+    "graph_revision": { "$ref": "#/$defs/u64" },
+    "payload": {
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "type": "string", "minLength": 1 } }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "command" } }, "required": ["kind"] },
+      "then": {
+        "required": ["command_id"],
+        "not": { "anyOf": [{ "required": ["operation_id"] }, { "required": ["cursor"] }, { "required": ["graph_revision"] }] },
+        "allOf": [
+          {
+            "if": { "required": ["expected_graph_revision"] },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": { "type": { "const": "apply_manifest_path" } },
+                  "required": ["type"]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "result" } }, "required": ["kind"] },
+      "then": {
+        "required": ["command_id", "graph_revision"],
+        "not": { "anyOf": [{ "required": ["operation_id"] }, { "required": ["cursor"] }, { "required": ["expected_graph_revision"] }] }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "event" } }, "required": ["kind"] },
+      "then": {
+        "required": ["cursor", "graph_revision"],
+        "not": { "anyOf": [{ "required": ["command_id"] }, { "required": ["expected_graph_revision"] }] }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "result" },
+          "payload": {
+            "type": "object",
+            "properties": { "type": { "const": "graph" } },
+            "required": ["type"]
+          }
+        },
+        "required": ["kind", "payload"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": ["graph", "cursor"],
+            "properties": { "cursor": { "$ref": "#/$defs/u64" } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[!-~]+$"
+    },
+    "u64": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,29 @@
+format_version = 0
+provides = ["hmr.watch-consumer"]
+capabilities = ["control.apply-manifest", "fs.read"]
+config_schema = "config.schema.json"
+
+[package]
+id = "hmr.watch-consumer"
+version = "0.0.1"
+process_fixed = true
+
+[host_api]
+major = 0
+minimum_minor = 0
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+path = "target/x86_64-unknown-linux-gnu/release/librsi_meta_plugin_hmr_consumer.so"
+
+[[artifacts]]
+target = "aarch64-apple-darwin"
+path = "target/aarch64-apple-darwin/release/librsi_meta_plugin_hmr_consumer.dylib"
+
+[[injects]]
+contract = "fs.watch"
+required = true
+
+[[injects]]
+contract = "runtime.tick"
+required = true

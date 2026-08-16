@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-meta.invalid/plugins/fs-watch-polling-config-v0.json",
+  "title": "Polling fs.watch configuration",
+  "type": "object",
+  "properties": {
+    "hash_contents": { "type": "boolean", "default": true }
+  },
+  "additionalProperties": false
+}
