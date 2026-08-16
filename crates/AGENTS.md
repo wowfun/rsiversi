@@ -1,0 +1,2 @@
+- A product family README owns the product contract and component navigation. A package README must not explain sibling packages beyond naming a consumer or linking the owning document.
+- Product documentation may live beside packages at `crates/<product>/docs` only when the root workspace explicitly excludes that directory.

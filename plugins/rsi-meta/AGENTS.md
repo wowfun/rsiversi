@@ -1,0 +1,2 @@
+- These workspaces implement or support trusted native packages for [`rsi-meta`](../../crates/rsi-meta/README.md). Follow the product [architecture](../../crates/rsi-meta/docs/architecture.md), [security](../../crates/rsi-meta/docs/security.md), and [plugin authoring](../../crates/rsi-meta/docs/cookbook/plugin-authoring.md) contracts.
+- Preserve the bounded control/data lane and lifecycle semantics from the product [protocol](../../crates/rsi-meta/docs/subsystems/protocols.md). Unsafe fixture or ABI code must document every operation contract.

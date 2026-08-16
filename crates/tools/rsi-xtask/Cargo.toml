@@ -1,0 +1,28 @@
+[package]
+name = "rsi-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "rsi-xtask"
+path = "src/main.rs"
+
+[dependencies]
+percent-encoding.workspace = true
+pulldown-cmark.workspace = true
+proc-macro2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+syn.workspace = true
+toml.workspace = true
+yaml_serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

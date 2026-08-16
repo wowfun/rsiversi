@@ -1,0 +1,3 @@
+- Examples are runnable tutorials grouped by owning product. They demonstrate one successful path and link reference owners for complete behavior.
+- Do not make an example manifest, lock, or README a second contract for schemas, protocols, or package semantics.
+- Keep generated state and lock outputs ignored unless a file is an intentional golden fixture.

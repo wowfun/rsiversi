@@ -1,0 +1,3 @@
+- These schemas own the exact `rsi-meta` composition, package, lock, control, stream, and private fixture-frame shapes. Read the product [configuration](../../crates/rsi-meta/docs/subsystems/configuration.md) and [protocol](../../crates/rsi-meta/docs/subsystems/protocols.md) references for semantics.
+- Preserve existing `https://rsi-meta.invalid/...` logical ids across physical path-only changes.
+- Update the conformance schema validators and any Rust DTO serialization tests whenever a field, bound, default, or compatibility rule changes.

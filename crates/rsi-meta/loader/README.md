@@ -1,0 +1,13 @@
+# rsi-meta-loader
+
+`rsi-meta-loader` is the workspace-private loader used by the composition host to turn untrusted package, configuration, filesystem, and lock input into a validated trusted-plugin handle. It owns package parsing, configuration preparation, target and hash checks, immutable artifact staging, and dynamic-library lifetime.
+
+## Package and configuration preparation
+
+`PluginPackage` parses package metadata and, with the default `config` feature, prepares configuration and retains a redacted projection. Loader-only consumers may disable that feature to avoid configuration-schema and keyring backends. `PluginLoader` checks the current target, locked manifest and artifact hashes, filesystem constraints, ABI compatibility, and the exact entry symbol before loading code. The lock covers the selected library file; transitive libraries resolved by the operating-system loader are not recursively discovered or hashed and belong to the trusted deployment environment. The [configuration reference](../docs/subsystems/configuration.md) owns the cross-package input model; the plugin crate owns the raw ABI declarations.
+
+## Crash-safe staging
+
+Artifacts are limited to 256 MiB, copied and hashed in bounded memory, reverified, and published under content-derived paths inside a current-user-private cache. Growth is checked during both hashing and copying. Manifest-declared artifact and schema parents are physically resolved and must remain inside the package root; the final file is opened without following a symlink. Digest-scoped staging locks serialize publication and let a retry reap crash-orphaned temporary files. Linux and Android map the same open file description that was hashed, closing the path-replacement window between verification and dynamic loading. Interrupted staging cannot make an incomplete entry authoritative, and package manifests and schemas are size-bounded.
+
+Loaded libraries remain mapped until process exit because the loader cannot prove that trusted plugin threads, callbacks, or code pointers no longer refer to the image. Plugin instances may still be destroyed after retirement acknowledgement and lease drain. Unsafe operations are limited to operating-system and dynamic-loading boundaries and state their validity, ownership, and lifetime requirements in source.

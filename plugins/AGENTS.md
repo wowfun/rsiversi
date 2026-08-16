@@ -1,0 +1,4 @@
+- This collection contains maintained standalone plugin workspaces and plugin-support packages, grouped by owning product. It is not part of the root Cargo workspace.
+- Each standalone Cargo package retains its own lockfile.
+- A plugin package README explains the provided capability or support contract for its consumers. Keep exact provided/injected contracts, targets, and configuration in `plugin.toml`, schemas, or source.
+- Follow the owning product's testing guide for manifest-scoped checks and conformance escalation.

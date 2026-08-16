@@ -1,0 +1,4 @@
+- This collection contains standalone test and release-evidence workspaces grouped by owning product. Fixtures are evidence, not public product APIs.
+- A fixture README states the evidence it provides, the public surfaces it observes, and its consumers. Each fixture retains its own lockfile.
+- Keep testing mechanisms at the lowest owning fixture. Higher testing documents link here rather than narrating fixture internals.
+- Follow the owning product's testing guide for manifest-scoped checks and conformance escalation.

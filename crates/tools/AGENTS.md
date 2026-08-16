@@ -1,0 +1,3 @@
+- Repository tools are implementation infrastructure, not products. Their README describes the commands and behavior a caller relies on; contributor verification follows the root [test policy](../../AGENTS.md#tests), not a README checklist.
+- Keep tool interfaces deterministic, read-only by default, and explicit about any write mode. Collect and stably order independent diagnostics when practical.
+- Tooling policy changes require the owning process or testing Agent Note and focused tool tests.

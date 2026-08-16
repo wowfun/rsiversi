@@ -1,0 +1,9 @@
+version = 0
+hard_limit = 1200
+
+[regions]
+composition = 877
+loader = 828
+persistence = 1167
+routing = 1095
+runtime = 992

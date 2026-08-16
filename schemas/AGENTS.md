@@ -1,0 +1,3 @@
+- Schemas are exact versioned external syntax grouped by owning product. Human documentation explains semantics and links here rather than restating complete field tables.
+- A physical repository move does not change a logical schema `$id`; change an id only with an explicit schema identity/version decision and matching contract tests.
+- Keep schemas bounded and closed where forward compatibility does not require unknown fields. Update DTO/schema conformance tests in the same change.

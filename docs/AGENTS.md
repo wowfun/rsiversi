@@ -1,0 +1,5 @@
+- This subtree owns only current facts that span products or define repository-wide documentation and development behavior. Product behavior belongs in the owning product docs.
+- Place the ordered product map in `architecture.md`. Create `subsystems/`, `cookbook/`, `user/`, or `postmortem/` only when a cross-product subject actually needs that tier.
+- Classify prose as tutorial or reference. Tutorials lead an ordered path to an outcome; references define a lookup scope and current behavior. Split substantial mixtures.
+- Describe direct children only by responsibility and high-level behavior. Link to descendant product or package owners for lower-level detail.
+- Do not create `adr`, `rfc`, `rfcs`, or `specs` directories under a documentation tree.

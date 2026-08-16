@@ -1,0 +1,1 @@
+- Read [README.md](README.md) before creating, moving, rejecting, superseding, archiving, or otherwise changing an Agent Note; it owns the format, lifecycle, link-repair, and archive rules.
