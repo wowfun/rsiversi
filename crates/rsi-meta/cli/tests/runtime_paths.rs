@@ -58,14 +58,20 @@ fn offline_lock_does_not_require_daemon_runtime_paths() {
 
 #[test]
 fn relative_or_empty_environment_state_homes_are_rejected() {
+    let platform_state_home = if cfg!(target_os = "macos") {
+        "HOME"
+    } else {
+        "XDG_STATE_HOME"
+    };
     for state_home in ["", "relative"] {
         let output = Command::new(env!("CARGO_BIN_EXE_rsi-meta"))
             .env_remove("RSI_META_STATE_DIR")
             .env_remove("RSI_META_HOME")
             .env_remove("RSI_META_SOCKET")
             .env_remove("RSI_META_TOKEN_FILE")
-            .env("XDG_STATE_HOME", state_home)
-            .env("HOME", "/tmp/rsi-meta-test-home")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("HOME")
+            .env(platform_state_home, state_home)
             .arg("graph")
             .output()
             .unwrap();
@@ -73,7 +79,9 @@ fn relative_or_empty_environment_state_homes_are_rejected() {
         assert!(!output.status.success());
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
-            stderr.contains("XDG_STATE_HOME must be an absolute, non-empty path"),
+            stderr.contains(&format!(
+                "{platform_state_home} must be an absolute, non-empty path"
+            )),
             "unexpected diagnostic for {state_home:?}: {stderr}"
         );
     }
