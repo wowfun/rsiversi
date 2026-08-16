@@ -736,14 +736,17 @@ fn notification_change(
 }
 
 fn event_directly_affects(event: &Event, target: &Path, current: &PathFingerprint) -> bool {
-    let absolute = absolute_lexical_path(target).unwrap_or_else(|| target.to_path_buf());
+    let target_paths = lexical_path_variants(target);
     let canonical = fs::canonicalize(target).ok();
-    event.paths.iter().any(|path| {
-        let path = absolute_lexical_path(path).unwrap_or_else(|| path.clone());
-        let matches = |candidate: &Path| {
-            path == candidate || (current.is_directory && path.starts_with(candidate))
-        };
-        matches(&absolute) || canonical.as_deref().is_some_and(matches)
+    event.paths.iter().any(|event_path| {
+        lexical_path_variants(event_path).iter().any(|event_path| {
+            let matches = |candidate: &Path| {
+                event_path == candidate
+                    || (current.is_directory && event_path.starts_with(candidate))
+            };
+            target_paths.iter().any(|target| matches(target))
+                || canonical.as_deref().is_some_and(matches)
+        })
     })
 }
 
@@ -759,27 +762,25 @@ fn event_affects_observed_paths(event: &Event, observed_paths: &[ObservedPath]) 
         return true;
     }
     event.paths.iter().any(|event_path| {
-        observed_paths.iter().any(|observed| {
-            event_path.as_path() == observed.path.as_path()
-                || (observed.includes_descendants && event_path.starts_with(&observed.path))
-                || observed.path.starts_with(event_path)
+        lexical_path_variants(event_path).iter().any(|event_path| {
+            observed_paths.iter().any(|observed| {
+                event_path.as_path() == observed.path.as_path()
+                    || (observed.includes_descendants && event_path.starts_with(&observed.path))
+                    || observed.path.starts_with(event_path)
+            })
         })
     })
 }
 
 fn observed_paths(path: &Path, target_is_directory: bool) -> Vec<ObservedPath> {
     let resolved = fs::canonicalize(path).ok();
-    let absolute = absolute_lexical_path(path).unwrap_or_else(|| path.to_path_buf());
-    let requested =
-        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            normalized_link_path(path).unwrap_or_else(|| absolute.clone())
-        } else {
-            resolved.clone().unwrap_or(absolute)
-        };
-    let mut observed = vec![ObservedPath {
-        path: requested,
-        includes_descendants: target_is_directory && resolved.is_none(),
-    }];
+    let mut observed = lexical_path_variants(path)
+        .into_iter()
+        .map(|path| ObservedPath {
+            path,
+            includes_descendants: target_is_directory,
+        })
+        .collect::<Vec<_>>();
     if let Some(resolved) = resolved {
         let candidate = ObservedPath {
             path: resolved,
@@ -797,7 +798,18 @@ fn observed_paths(path: &Path, target_is_directory: bool) -> Vec<ObservedPath> {
     observed
 }
 
-fn normalized_link_path(path: &Path) -> Option<PathBuf> {
+fn lexical_path_variants(path: &Path) -> Vec<PathBuf> {
+    let absolute = absolute_lexical_path(path).unwrap_or_else(|| path.to_path_buf());
+    let mut variants = vec![absolute.clone()];
+    if let Some(normalized) = normalized_parent_path(&absolute)
+        && normalized != absolute
+    {
+        variants.push(normalized);
+    }
+    variants
+}
+
+fn normalized_parent_path(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let file_name = path.file_name()?;
     fs::canonicalize(parent)
@@ -1162,8 +1174,12 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::TempDir::new().unwrap();
-        let target_dir = temp.path().join("target");
-        let link_dir = temp.path().join("link");
+        let physical_root = temp.path().join("physical");
+        let alias_root = temp.path().join("alias");
+        fs::create_dir(&physical_root).unwrap();
+        symlink(&physical_root, &alias_root).unwrap();
+        let target_dir = alias_root.join("target");
+        let link_dir = alias_root.join("link");
         fs::create_dir_all(&target_dir).unwrap();
         fs::create_dir_all(&link_dir).unwrap();
         let target = target_dir.join("rsi-meta.toml");
