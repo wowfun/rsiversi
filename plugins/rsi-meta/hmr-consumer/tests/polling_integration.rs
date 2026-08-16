@@ -138,6 +138,7 @@ struct PackageTree {
 }
 
 fn write_package_tree(root: &Path) -> PackageTree {
+    let root = fs::canonicalize(root).unwrap();
     let manifest = root.join("rsi-meta.toml");
     let lock = root.join("rsi-meta.lock");
     let package = root.join("provider");
@@ -615,8 +616,9 @@ fn native_backend_retires_when_the_data_lane_is_full() {
 fn more_than_mailbox_capacity_retries_all_watch_opens_without_blocking_control() {
     const PACKAGE_COUNT: usize = 100;
     let temp = TempDir::new().unwrap();
-    let manifest = temp.path().join("rsi-meta.toml");
-    let lock = temp.path().join("rsi-meta.lock");
+    let physical_root = fs::canonicalize(temp.path()).unwrap();
+    let manifest = physical_root.join("rsi-meta.toml");
+    let lock = physical_root.join("rsi-meta.lock");
     fs::write(
         &manifest,
         r#"format_version = 0
@@ -635,7 +637,7 @@ mode = "development"
     );
     let mut expected_paths = BTreeSet::from([manifest.clone(), lock.clone()]);
     for index in 0..PACKAGE_COUNT {
-        let package = temp.path().join(format!("package-{index}"));
+        let package = physical_root.join(format!("package-{index}"));
         let plugin_manifest = package.join("plugin.toml");
         let schema = package.join("config.schema.json");
         let artifact = package.join("artifact.bin");

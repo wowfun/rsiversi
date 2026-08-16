@@ -25,9 +25,10 @@ struct PackageTree {
 
 fn package_tree() -> PackageTree {
     let root = TempDir::new().unwrap();
-    let manifest = root.path().join("rsi-meta.toml");
-    let lock = root.path().join("rsi-meta.lock");
-    let package = root.path().join("provider");
+    let physical_root = fs::canonicalize(root.path()).unwrap();
+    let manifest = physical_root.join("rsi-meta.toml");
+    let lock = physical_root.join("rsi-meta.lock");
+    let package = physical_root.join("provider");
     let plugin_manifest = package.join("plugin.toml");
     let schema = package.join("config.schema.json");
     let linux_artifact = package.join("target/linux/provider.so");
