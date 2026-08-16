@@ -40,6 +40,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0

@@ -9,12 +9,21 @@ use std::time::{Duration, Instant};
 
 use rsi_meta::{
     ApplyRequest, ApplyResult, CompositionHost, CompositionLock, CompositionProject,
-    CompositionWorkspace, GraphRevision, HostEventRecord, InstanceId, LockResult, OpenOptions,
-    OperationId, ServiceKey, ServiceOpenRequest, StreamKind,
+    CompositionWorkspace, GraphRevision, HostEventRecord, InstallRequest, InstanceId, LockResult,
+    OpenOptions, OperationId, ServiceKey, ServiceOpenRequest, StreamKind,
 };
 use rsi_meta_loader::{ApiVersion, BUILD_TARGET, ContentHash};
 use rusqlite::Connection;
 use tempfile::{TempDir, tempdir};
+
+const WORKSPACE_ALIAS_CHILD_DATABASE: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_DATABASE";
+const WORKSPACE_ALIAS_CHILD_CACHE: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_CACHE";
+const WORKSPACE_ALIAS_CHILD_MANIFEST: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_MANIFEST";
+const WORKSPACE_ALIAS_CHILD_LOCK: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_LOCK";
+const WORKSPACE_ALIAS_CHILD_PROJECT_MANIFEST: &str =
+    "RSI_META_WORKSPACE_ALIAS_CHILD_PROJECT_MANIFEST";
+const WORKSPACE_ALIAS_CHILD_PROJECT_LOCK: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_PROJECT_LOCK";
+const WORKSPACE_ALIAS_CHILD_MARKER: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_MARKER";
 
 #[derive(Clone, Debug, PartialEq)]
 enum Command {
@@ -118,6 +127,56 @@ fn workspace(database: impl AsRef<Path>, cache: impl AsRef<Path>) -> Composition
 
 fn open_options(database: impl AsRef<Path>, cache: impl AsRef<Path>) -> OpenOptions {
     OpenOptions::new(workspace(database, cache))
+}
+
+#[test]
+fn hard_link_alias_install_child() {
+    let Some(database_path) = std::env::var_os(WORKSPACE_ALIAS_CHILD_DATABASE) else {
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("child runtime");
+    runtime.block_on(async move {
+        let error = CompositionHost::install_offline(InstallRequest {
+            operation_id: OperationId("hard-link-alias-child".to_owned()),
+            workspace: CompositionWorkspace {
+                database_path: database_path.into(),
+                cache_root: std::env::var_os(WORKSPACE_ALIAS_CHILD_CACHE)
+                    .expect("child cache")
+                    .into(),
+                manifest_path: std::env::var_os(WORKSPACE_ALIAS_CHILD_MANIFEST)
+                    .expect("child installed manifest")
+                    .into(),
+                lock_path: std::env::var_os(WORKSPACE_ALIAS_CHILD_LOCK)
+                    .expect("child installed lock")
+                    .into(),
+            },
+            project: CompositionProject {
+                manifest_path: std::env::var_os(WORKSPACE_ALIAS_CHILD_PROJECT_MANIFEST)
+                    .expect("child project manifest")
+                    .into(),
+                lock_path: Some(
+                    std::env::var_os(WORKSPACE_ALIAS_CHILD_PROJECT_LOCK)
+                        .expect("child project lock")
+                        .into(),
+                ),
+            },
+        })
+        .await
+        .expect_err("a live physical workspace must reject a hard-link alias");
+        assert!(matches!(
+            error,
+            rsi_meta::HostError::OperationRejected { ref code, .. }
+                if code == "workspace_busy"
+        ));
+        fs::write(
+            std::env::var_os(WORKSPACE_ALIAS_CHILD_MARKER).expect("child marker"),
+            "workspace_busy",
+        )
+        .expect("write child marker");
+    });
 }
 
 async fn assert_offline_install_conflict(request: rsi_meta::InstallRequest) {
@@ -1660,6 +1719,72 @@ async fn offline_install_waits_for_lease_and_activates_once_on_next_open() {
     );
 
     assert_installed_workspace_activates_once(workspace).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_host_blocks_cross_process_hard_link_alias_install() {
+    let live_root = tempdir().expect("live workspace");
+    let alias_root = tempdir().expect("alias workspace");
+    let project_root = tempdir().expect("candidate project");
+    let live_workspace = workspace(
+        live_root.path().join("state.sqlite3"),
+        live_root.path().join("cache"),
+    );
+    let host = CompositionHost::open(OpenOptions::new(live_workspace.clone()))
+        .await
+        .expect("open live workspace");
+
+    let alias_database = alias_root.path().join("state.sqlite3");
+    fs::hard_link(&live_workspace.database_path, &alias_database)
+        .expect("hard-link database alias");
+    let project_manifest = project_root.path().join("composition.toml");
+    let project_lock = project_root.path().join("rsi-meta.lock");
+    let child_marker = alias_root.path().join("child-result");
+    fs::write(&project_manifest, empty_composition_source()).expect("candidate manifest");
+    CompositionProject {
+        manifest_path: project_manifest.clone(),
+        lock_path: Some(project_lock.clone()),
+    }
+    .lock()
+    .expect("candidate lock");
+
+    let output = ProcessCommand::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "hard_link_alias_install_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(WORKSPACE_ALIAS_CHILD_DATABASE, &alias_database)
+        .env(WORKSPACE_ALIAS_CHILD_CACHE, alias_root.path().join("cache"))
+        .env(
+            WORKSPACE_ALIAS_CHILD_MANIFEST,
+            alias_root.path().join("composition.toml"),
+        )
+        .env(
+            WORKSPACE_ALIAS_CHILD_LOCK,
+            alias_root.path().join("rsi-meta.lock"),
+        )
+        .env(WORKSPACE_ALIAS_CHILD_PROJECT_MANIFEST, &project_manifest)
+        .env(WORKSPACE_ALIAS_CHILD_PROJECT_LOCK, &project_lock)
+        .env(WORKSPACE_ALIAS_CHILD_MARKER, &child_marker)
+        .output()
+        .expect("run hard-link alias child");
+    assert!(
+        output.status.success(),
+        "hard-link alias child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(child_marker).expect("child result marker"),
+        "workspace_busy"
+    );
+
+    host.shutdown(Instant::now() + Duration::from_secs(1))
+        .await
+        .expect("shutdown live workspace");
 }
 
 #[tokio::test]

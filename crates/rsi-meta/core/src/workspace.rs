@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use rustix::fs::{FlockOperation, flock};
+use rustix::fs::{FlockOperation, Mode, OFlags, flock};
 
 use crate::domain::CompositionWorkspace;
 use crate::model::PackageId;
 use crate::{HostError, Result};
 
-static HELD_WORKSPACES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+static HELD_WORKSPACES: OnceLock<Mutex<BTreeSet<PhysicalWorkspaceIdentity>>> = OnceLock::new();
 type ProcessFixedFingerprints = BTreeSet<(PackageId, String)>;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum PhysicalWorkspaceIdentity {
@@ -23,29 +23,30 @@ static LOADED_PROCESS_FIXED: OnceLock<Mutex<ProcessFixedByWorkspace>> = OnceLock
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceLease {
-    identity: PathBuf,
+    identity: PhysicalWorkspaceIdentity,
     #[allow(dead_code)]
     sidecar: File,
     #[allow(dead_code)]
-    database: File,
+    physical: File,
 }
 
 impl WorkspaceLease {
     pub(crate) fn acquire(workspace: &CompositionWorkspace) -> Result<Self> {
-        let identity = normalize_absolute(&workspace.database_path)?;
+        let display_path = normalize_absolute(&workspace.database_path)?;
+        let (sidecar, identity) = open_path_guard(&workspace.database_path)?;
         let held = HELD_WORKSPACES.get_or_init(|| Mutex::new(BTreeSet::new()));
         {
             let mut held = held.lock().expect("workspace lease registry poisoned");
             if !held.insert(identity.clone()) {
-                return Err(workspace_busy(&identity));
+                return Err(workspace_busy(&display_path));
             }
         }
 
-        match open_and_lock(&workspace.database_path) {
-            Ok((sidecar, database)) => Ok(Self {
+        match open_physical_guard(&identity, &display_path) {
+            Ok(physical) => Ok(Self {
                 identity,
                 sidecar,
-                database,
+                physical,
             }),
             Err(error) => {
                 held.lock()
@@ -59,7 +60,7 @@ impl WorkspaceLease {
 
 impl Drop for WorkspaceLease {
     fn drop(&mut self) {
-        let _ = flock(&self.database, FlockOperation::Unlock);
+        let _ = flock(&self.physical, FlockOperation::Unlock);
         let _ = flock(&self.sidecar, FlockOperation::Unlock);
         HELD_WORKSPACES
             .get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -104,7 +105,7 @@ pub(crate) fn installed_files(
     }
 }
 
-fn open_and_lock(database_path: &Path) -> Result<(File, File)> {
+fn open_path_guard(database_path: &Path) -> Result<(File, PhysicalWorkspaceIdentity)> {
     let lock_path = lease_path(database_path)?;
     let parent = lock_path.parent().ok_or_else(|| HostError::Io {
         path: lock_path.clone(),
@@ -138,8 +139,72 @@ fn open_and_lock(database_path: &Path) -> Result<(File, File)> {
             path: database_path.to_owned(),
             source,
         })?;
-    lock_file(&database, database_path, database_path)?;
-    Ok((sidecar, database))
+    let identity = physical_workspace_identity_from_file(&database, database_path)?;
+    Ok((sidecar, identity))
+}
+
+#[cfg(unix)]
+fn open_physical_guard(
+    identity: &PhysicalWorkspaceIdentity,
+    workspace_path: &Path,
+) -> Result<File> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let effective_uid = rustix::process::geteuid().as_raw();
+    let root = PathBuf::from("/tmp").join(format!("rsi-meta-workspace-leases-{effective_uid}"));
+    let mut builder = DirBuilder::new();
+    builder.mode(0o700);
+    if let Err(source) = builder.create(&root)
+        && source.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return Err(HostError::Io { path: root, source });
+    }
+    let root_metadata = std::fs::symlink_metadata(&root).map_err(|source| HostError::Io {
+        path: root.clone(),
+        source,
+    })?;
+    if !root_metadata.file_type().is_dir()
+        || root_metadata.uid() != effective_uid
+        || root_metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(HostError::Io {
+            path: root,
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workspace lease root must be an owner-only directory",
+            ),
+        });
+    }
+    let PhysicalWorkspaceIdentity::DeviceInode { device, inode } = identity;
+    let guard_path = root.join(format!("device-{device}-inode-{inode}.lock"));
+    let descriptor = rustix::fs::open(
+        &guard_path,
+        OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|source| HostError::Io {
+        path: guard_path.clone(),
+        source: source.into(),
+    })?;
+    let guard = File::from(descriptor);
+    let metadata = guard.metadata().map_err(|source| HostError::Io {
+        path: guard_path.clone(),
+        source,
+    })?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != effective_uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(HostError::Io {
+            path: guard_path,
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workspace identity lease must be an owner-only regular file",
+            ),
+        });
+    }
+    lock_file(&guard, &guard_path, workspace_path)?;
+    Ok(guard)
 }
 
 fn lock_file(file: &File, lock_path: &Path, workspace_path: &Path) -> Result<()> {
@@ -235,16 +300,11 @@ pub(crate) fn require_fresh_process_for_changed_fixed(
 fn physical_workspace_identity(database_path: &Path) -> Result<PhysicalWorkspaceIdentity> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-
-        let metadata = std::fs::metadata(database_path).map_err(|source| HostError::Io {
+        let database = File::open(database_path).map_err(|source| HostError::Io {
             path: database_path.to_owned(),
             source,
         })?;
-        Ok(PhysicalWorkspaceIdentity::DeviceInode {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
+        physical_workspace_identity_from_file(&database, database_path)
     }
     #[cfg(not(unix))]
     {
@@ -255,6 +315,23 @@ fn physical_workspace_identity(database_path: &Path) -> Result<PhysicalWorkspace
                 source,
             })
     }
+}
+
+#[cfg(unix)]
+fn physical_workspace_identity_from_file(
+    database: &File,
+    database_path: &Path,
+) -> Result<PhysicalWorkspaceIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = database.metadata().map_err(|source| HostError::Io {
+        path: database_path.to_owned(),
+        source,
+    })?;
+    Ok(PhysicalWorkspaceIdentity::DeviceInode {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 fn workspace_busy(path: &Path) -> HostError {
