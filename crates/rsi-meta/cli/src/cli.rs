@@ -378,6 +378,10 @@ async fn serve_daemon(
     // durable host, or creating bearer material. A refused daemon start must
     // not have security-relevant side effects.
     require_loopback(http_bind)?;
+    // Readiness promises that external supervisors can signal the daemon
+    // immediately. Install handlers before publishing any endpoint or ready
+    // record so SIGINT/SIGTERM cannot race with lazy signal registration.
+    let mut shutdown_signals = ShutdownSignals::install()?;
     // Claim the single-user control endpoint before opening durable state or
     // publishing a fresh bearer, so a second daemon cannot disrupt the first.
     let unix = UnixServer::bind(&paths.socket)?;
@@ -426,7 +430,7 @@ async fn serve_daemon(
             lifecycle_stop = true;
             None
         }
-        signal = shutdown_signal() => {
+        signal = shutdown_signals.recv() => {
             signal?;
             None
         }
@@ -478,23 +482,50 @@ async fn serve_daemon(
 }
 
 #[cfg(unix)]
-async fn shutdown_signal() -> Result<()> {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("install SIGTERM handler")?;
-    tokio::select! {
-        signal = tokio::signal::ctrl_c() => signal.context("install Ctrl-C handler"),
-        signal = terminate.recv() => {
-            signal.context("SIGTERM handler closed unexpectedly")?;
-            Ok(())
+struct ShutdownSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    fn install() -> Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .context("install SIGINT handler")?,
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("install SIGTERM handler")?,
+        })
+    }
+
+    async fn recv(&mut self) -> Result<()> {
+        tokio::select! {
+            signal = self.interrupt.recv() => {
+                signal.context("SIGINT handler closed unexpectedly")?;
+                Ok(())
+            }
+            signal = self.terminate.recv() => {
+                signal.context("SIGTERM handler closed unexpectedly")?;
+                Ok(())
+            }
         }
     }
 }
 
 #[cfg(not(unix))]
-async fn shutdown_signal() -> Result<()> {
-    tokio::signal::ctrl_c()
-        .await
-        .context("install Ctrl-C handler")
+struct ShutdownSignals;
+
+#[cfg(not(unix))]
+impl ShutdownSignals {
+    fn install() -> Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> Result<()> {
+        tokio::signal::ctrl_c()
+            .await
+            .context("install Ctrl-C handler")
+    }
 }
 
 async fn open_daemon_host(paths: &RuntimePaths, opener: &dyn HostOpener) -> Result<OpenedHost> {

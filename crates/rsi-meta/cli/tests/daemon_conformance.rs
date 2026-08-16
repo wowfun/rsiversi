@@ -1162,7 +1162,6 @@ async fn process_fixed_preflight_replays_then_external_install_activates_once() 
         .await?;
     lost_ack.write_all(b"\n").await?;
     lost_ack.shutdown().await?;
-    drop(lost_ack);
 
     timeout(IO_DEADLINE, async {
         loop {
@@ -1174,6 +1173,11 @@ async fn process_fixed_preflight_replays_then_external_install_activates_once() 
     })
     .await
     .context("process-fixed result was not persisted")??;
+    // Keep the read half alive until the daemon has accepted and durably
+    // completed the request. Dropping the whole socket immediately after the
+    // write can discard the request before the server reads it on some Unix
+    // implementations; not reading the response still models a lost ack.
+    drop(lost_ack);
 
     let first = send_unix(&daemon.ready.socket, &command).await?;
     ensure!(matches!(
