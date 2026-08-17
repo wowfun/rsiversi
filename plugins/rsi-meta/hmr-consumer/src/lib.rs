@@ -4,12 +4,16 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 
-use rsi_meta_frame_contract::{
-    DurableCommand, EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody,
-    LifecyclePhase, OP_CANCEL, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_plugin::sdk::{Host, Plugin};
+use rsi_meta_plugin::{
+    DurableCommand, EVENT_CANCEL, EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase,
+    OP_CANCEL, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin::{Lane, PostFrameOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -22,6 +26,7 @@ const MAX_WATCH_PLAN_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_WATCH_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WATCH_PLAN_CONTENT_BYTES: u64 = 512 * 1024 * 1024;
+const WATCH_PLAN_QUEUE_CAPACITY: usize = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +110,27 @@ struct HmrConsumer {
     candidate: Option<Candidate>,
     active: Option<Active>,
     pending_retired: Option<u64>,
+    worker_sender: mpsc::SyncSender<WorkerCommand>,
+    worker_results: mpsc::Receiver<WorkerResult>,
+    worker_stopping: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+    preparing_generation: Option<u64>,
+    refresh_in_flight: bool,
+    refresh_dirty: bool,
+}
+
+enum WorkerCommand {
+    Prepare { generation: u64, config: HmrConfig },
+    Refresh { generation: u64, config: HmrConfig },
+    Stop,
+}
+
+enum WorkerResult {
+    Prepared(Candidate),
+    Refreshed {
+        generation: u64,
+        result: Result<WatchPlan, HmrError>,
+    },
 }
 
 #[derive(Debug)]
@@ -248,18 +274,71 @@ impl HmrConsumer {
     }
 
     fn refresh_watch_plan(&mut self) -> Result<(), HmrError> {
-        let Some(config) = self.active.as_ref().map(|active| active.config.clone()) else {
+        let Some((generation, config)) = self
+            .active
+            .as_ref()
+            .map(|active| (active.generation, active.config.clone()))
+        else {
             return Err(HmrError("consumer is not committed"));
         };
-        if let Ok(plan) = derive_watch_plan(&config) {
-            self.apply_watch_plan(plan)
-        } else {
-            if let Some(active) = self.active.as_mut() {
-                active.plan_stale = true;
-                active.dirty = true;
-            }
-            Ok(())
+        if self.refresh_in_flight {
+            self.refresh_dirty = true;
+            return Ok(());
         }
+        match self
+            .worker_sender
+            .try_send(WorkerCommand::Refresh { generation, config })
+        {
+            Ok(()) => {
+                self.refresh_in_flight = true;
+                self.refresh_dirty = false;
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.refresh_dirty = true;
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(HmrError("watch-plan worker closed")),
+        }
+    }
+
+    fn drain_worker_results(&mut self) -> Result<(), HmrError> {
+        while let Ok(result) = self.worker_results.try_recv() {
+            match result {
+                WorkerResult::Prepared(candidate)
+                    if self.preparing_generation == Some(candidate.generation) =>
+                {
+                    self.preparing_generation = None;
+                    self.candidate = Some(candidate);
+                }
+                WorkerResult::Prepared(_) => {}
+                WorkerResult::Refreshed { generation, result } => {
+                    if self
+                        .active
+                        .as_ref()
+                        .is_none_or(|active| active.generation != generation)
+                    {
+                        continue;
+                    }
+                    self.refresh_in_flight = false;
+                    match result {
+                        Ok(plan) => self.apply_watch_plan(plan)?,
+                        Err(_) => {
+                            if let Some(active) = self.active.as_mut() {
+                                active.plan_stale = true;
+                                active.dirty = true;
+                            }
+                        }
+                    }
+                    if self.refresh_dirty
+                        && let Some(active) = self.active.as_mut()
+                    {
+                        active.plan_stale = true;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn drain_pending(&mut self) -> Result<(), HmrError> {
@@ -382,11 +461,109 @@ impl HmrConsumer {
     }
 }
 
-fn derive_watch_plan(config: &HmrConfig) -> Result<WatchPlan, HmrError> {
+fn watch_plan_worker(
+    host: &Host,
+    commands: &mpsc::Receiver<WorkerCommand>,
+    results: &mpsc::Sender<WorkerResult>,
+    stopping: &AtomicBool,
+) {
+    while let Ok(command) = commands.recv() {
+        if stopping.load(Ordering::Acquire) || matches!(command, WorkerCommand::Stop) {
+            break;
+        }
+        match command {
+            WorkerCommand::Prepare { generation, config } => {
+                match derive_watch_plan(&config, stopping) {
+                    Ok(watch_plan) => {
+                        if results
+                            .send(WorkerResult::Prepared(Candidate {
+                                generation,
+                                config,
+                                watch_plan,
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if post_worker_frame_required(
+                            host,
+                            Lane::Control,
+                            &Frame::lifecycle(LifecyclePhase::Prepared, generation, None),
+                            stopping,
+                        )
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) if !stopping.load(Ordering::Acquire) => {
+                        if post_worker_frame_required(
+                            host,
+                            Lane::Control,
+                            &Frame::lifecycle(
+                                LifecyclePhase::PrepareFailed,
+                                generation,
+                                Some(json!({
+                                    "code": "invalid_watch_plan",
+                                    "message": error.to_string(),
+                                })),
+                            ),
+                            stopping,
+                        )
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            WorkerCommand::Refresh { generation, config } => {
+                let result = derive_watch_plan(&config, stopping);
+                if stopping.load(Ordering::Acquire)
+                    || results
+                        .send(WorkerResult::Refreshed { generation, result })
+                        .is_err()
+                {
+                    break;
+                }
+            }
+            WorkerCommand::Stop => unreachable!("stop handled before work dispatch"),
+        }
+    }
+}
+
+fn post_worker_frame(host: &Host, lane: Lane, frame: &Frame) -> Result<PostFrameOutcome, HmrError> {
+    let bytes = frame.encode().map_err(|_| HmrError("encode frame"))?;
+    host.post_frame(lane, &bytes)
+        .map_err(|_| HmrError("host unavailable"))
+}
+
+fn post_worker_frame_required(
+    host: &Host,
+    lane: Lane,
+    frame: &Frame,
+    stopping: &AtomicBool,
+) -> Result<(), HmrError> {
+    while !stopping.load(Ordering::Acquire) {
+        match post_worker_frame(host, lane, frame)? {
+            PostFrameOutcome::Accepted => return Ok(()),
+            PostFrameOutcome::WouldBlock => {
+                thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+            PostFrameOutcome::Closed | PostFrameOutcome::Unknown(_) => {
+                return Err(HmrError("host closed"));
+            }
+        }
+    }
+    Err(HmrError("watch-plan worker stopping"))
+}
+
+fn derive_watch_plan(config: &HmrConfig, stopping: &AtomicBool) -> Result<WatchPlan, HmrError> {
     let manifest_path = canonicalize_following_symlinks(&config.manifest_path)?;
     let lock_path = canonicalize_following_symlinks(&config.lock_path)?;
-    let _: toml::Value = read_toml(&manifest_path, MAX_WATCH_PLAN_DOCUMENT_BYTES)?;
-    let lock: LockDocument = read_toml(&lock_path, MAX_WATCH_PLAN_DOCUMENT_BYTES)?;
+    let _: toml::Value = read_toml(&manifest_path, MAX_WATCH_PLAN_DOCUMENT_BYTES, stopping)?;
+    let lock: LockDocument = read_toml(&lock_path, MAX_WATCH_PLAN_DOCUMENT_BYTES, stopping)?;
     let lock_base = lock_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -397,11 +574,13 @@ fn derive_watch_plan(config: &HmrConfig) -> Result<WatchPlan, HmrError> {
     seen.insert(lock_path);
 
     for locked in lock.packages {
+        require_running(stopping)?;
         let package_manifest = canonicalize_no_follow(&resolve_from(&lock_base, &locked.path))?;
         if !seen.insert(package_manifest.clone()) {
             continue;
         }
-        let package: PackageDocument = read_toml(&package_manifest, MAX_PLUGIN_MANIFEST_BYTES)?;
+        let package: PackageDocument =
+            read_toml(&package_manifest, MAX_PLUGIN_MANIFEST_BYTES, stopping)?;
         let package_base = package_manifest
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -433,15 +612,16 @@ fn derive_watch_plan(config: &HmrConfig) -> Result<WatchPlan, HmrError> {
         return Err(HmrError("watch path limit exceeded"));
     }
     let paths = seen.into_iter().collect::<Vec<_>>();
-    let content_id = watch_content_id(&paths)?;
+    let content_id = watch_content_id(&paths, stopping)?;
     Ok(WatchPlan { paths, content_id })
 }
 
 fn read_toml<T: serde::de::DeserializeOwned>(
     path: &Path,
     maximum_bytes: usize,
+    stopping: &AtomicBool,
 ) -> Result<T, HmrError> {
-    let bytes = read_bounded_regular(path, maximum_bytes)?;
+    let bytes = read_bounded_regular(path, maximum_bytes, stopping)?;
     let source =
         std::str::from_utf8(&bytes).map_err(|_| HmrError("watch-plan input is not UTF-8"))?;
     toml::from_str(source).map_err(|_| HmrError("parse watch-plan input"))
@@ -465,11 +645,12 @@ fn canonicalize_following_symlinks(path: &Path) -> Result<PathBuf, HmrError> {
     fs::canonicalize(path).map_err(|_| HmrError("canonicalize watch-plan input"))
 }
 
-fn watch_content_id(paths: &[PathBuf]) -> Result<String, HmrError> {
+fn watch_content_id(paths: &[PathBuf], stopping: &AtomicBool) -> Result<String, HmrError> {
     let mut hash = Sha256::new();
     hash.update(b"rsi-meta.hmr-watch-plan.v0\0");
     let mut total_bytes = 0_u64;
     for path in paths {
+        require_running(stopping)?;
         let path_bytes = path.to_string_lossy();
         let mut file = open_regular_no_follow(path)?;
         let length = file
@@ -488,6 +669,7 @@ fn watch_content_id(paths: &[PathBuf]) -> Result<String, HmrError> {
         let mut observed = 0_u64;
         let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
         loop {
+            require_running(stopping)?;
             let read = file
                 .by_ref()
                 .take(length.saturating_add(1).saturating_sub(observed))
@@ -573,7 +755,11 @@ fn open_regular_follow(path: &Path) -> Result<fs::File, HmrError> {
     Ok(file)
 }
 
-fn read_bounded_regular(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, HmrError> {
+fn read_bounded_regular(
+    path: &Path,
+    maximum_bytes: usize,
+    stopping: &AtomicBool,
+) -> Result<Vec<u8>, HmrError> {
     let mut file = open_regular_no_follow(path)?;
     let length = file
         .metadata()
@@ -584,30 +770,70 @@ fn read_bounded_regular(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, Hm
     }
     let capacity = usize::try_from(length).map_err(|_| HmrError("watch-plan input too large"))?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.by_ref()
-        .take(maximum_bytes as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| HmrError("read watch-plan input"))?;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        require_running(stopping)?;
+        let read = file
+            .by_ref()
+            .take((maximum_bytes + 1 - bytes.len()) as u64)
+            .read(&mut buffer)
+            .map_err(|_| HmrError("read watch-plan input"))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > maximum_bytes {
+            return Err(HmrError("watch-plan input exceeds size limit"));
+        }
+    }
     if bytes.len() > maximum_bytes {
         return Err(HmrError("watch-plan input exceeds size limit"));
     }
     Ok(bytes)
 }
 
+fn require_running(stopping: &AtomicBool) -> Result<(), HmrError> {
+    if stopping.load(Ordering::Acquire) {
+        Err(HmrError("watch-plan worker stopping"))
+    } else {
+        Ok(())
+    }
+}
+
 impl Plugin for HmrConsumer {
     type Error = HmrError;
 
     fn create(host: Host) -> Result<Self, Self::Error> {
+        let (worker_sender, commands) = mpsc::sync_channel(WATCH_PLAN_QUEUE_CAPACITY);
+        let (results, worker_results) = mpsc::channel();
+        let worker_stopping = Arc::new(AtomicBool::new(false));
+        let worker = thread::Builder::new()
+            .name("rsi-meta-hmr-watch-plan".to_owned())
+            .spawn({
+                let worker_stopping = Arc::clone(&worker_stopping);
+                move || {
+                    watch_plan_worker(&host, &commands, &results, worker_stopping.as_ref());
+                }
+            })
+            .map_err(|_| HmrError("start watch-plan worker"))?;
         Ok(Self {
             host,
             candidate: None,
             active: None,
             pending_retired: None,
+            worker_sender,
+            worker_results,
+            worker_stopping,
+            worker: Some(worker),
+            preparing_generation: None,
+            refresh_in_flight: false,
+            refresh_dirty: false,
         })
     }
 
     #[allow(clippy::too_many_lines)] // One exhaustive HMR protocol-state transition table.
     fn on_frame(&mut self, lane: Lane, payload: &[u8]) -> Result<(), Self::Error> {
+        self.drain_worker_results()?;
         let frame = Frame::decode(payload).map_err(|_| HmrError("invalid frame"))?;
         match frame.body {
             FrameBody::Lifecycle {
@@ -617,18 +843,25 @@ impl Plugin for HmrConsumer {
             } if lane == Lane::Control => {
                 let config =
                     serde_json::from_value(config).map_err(|_| HmrError("invalid HMR config"))?;
-                let watch_plan = derive_watch_plan(&config)?;
-                self.candidate = Some(Candidate {
-                    generation,
-                    config,
-                    watch_plan,
-                });
-                if let Err(error) = self.post_required(
-                    Lane::Control,
-                    &Frame::lifecycle(LifecyclePhase::Prepared, generation, None),
-                ) {
-                    self.candidate = None;
-                    return Err(error);
+                self.candidate = None;
+                self.preparing_generation = Some(generation);
+                if self
+                    .worker_sender
+                    .try_send(WorkerCommand::Prepare { generation, config })
+                    .is_err()
+                {
+                    self.preparing_generation = None;
+                    self.post_required(
+                        Lane::Control,
+                        &Frame::lifecycle(
+                            LifecyclePhase::PrepareFailed,
+                            generation,
+                            Some(json!({
+                                "code": "watch_plan_worker_busy",
+                                "message": "watch-plan worker queue is full",
+                            })),
+                        ),
+                    )?;
                 }
                 Ok(())
             }
@@ -643,6 +876,9 @@ impl Plugin for HmrConsumer {
                     .is_some_and(|candidate| candidate.generation == generation)
                 {
                     self.candidate = None;
+                }
+                if self.preparing_generation == Some(generation) {
+                    self.preparing_generation = None;
                 }
                 Ok(())
             }
@@ -673,12 +909,11 @@ impl Plugin for HmrConsumer {
                 self.apply_watch_plan(candidate.watch_plan)?;
                 self.drain_pending()
             }
-            FrameBody::ServiceEvent {
-                request_id: Some(request_id),
+            FrameBody::ServiceDataEvent {
+                request_id,
                 service,
-                event,
                 payload,
-            } if lane == Lane::Data && service == "fs.watch" && event == EVENT_DATA => {
+            } if lane == Lane::Data && service == "fs.watch" => {
                 let payload = decode_data(&payload)?;
                 let refresh = {
                     let active = self
@@ -789,8 +1024,10 @@ impl Plugin for HmrConsumer {
                 active.apply_in_flight = None;
                 match event.as_str() {
                     "applied" | "unchanged" | "restart_required" | "rejected" => {
-                        active.dirty =
-                            request_id != format!("hmr-v0-{}", active.desired_content_id);
+                        active.dirty = active.plan_stale
+                            || self.refresh_in_flight
+                            || self.refresh_dirty
+                            || request_id != format!("hmr-v0-{}", active.desired_content_id);
                     }
                     "failed" => active.dirty = true,
                     _ => return Err(HmrError("unknown apply result")),
@@ -813,10 +1050,8 @@ impl Plugin for HmrConsumer {
                 if self.pending_retired.is_some() {
                     return self.flush_retired();
                 }
-                if self
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.plan_stale || active.dirty)
+                if self.active.as_ref().is_some_and(|active| active.plan_stale)
+                    && !self.refresh_in_flight
                 {
                     self.refresh_watch_plan()?;
                 }
@@ -845,6 +1080,8 @@ impl Plugin for HmrConsumer {
                         ),
                     );
                 }
+                self.refresh_in_flight = false;
+                self.refresh_dirty = false;
                 self.pending_retired = Some(generation);
                 self.flush_retired()
             }
@@ -853,8 +1090,20 @@ impl Plugin for HmrConsumer {
     }
 
     fn shutdown(&mut self) -> Result<(), Self::Error> {
+        self.worker_stopping.store(true, Ordering::Release);
+        let _ = self.worker_sender.try_send(WorkerCommand::Stop);
+        if self
+            .worker
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            return Err(HmrError("watch-plan worker panicked"));
+        }
         self.active = None;
         self.candidate = None;
+        self.preparing_generation = None;
+        self.refresh_in_flight = false;
+        self.refresh_dirty = false;
         self.pending_retired = None;
         Ok(())
     }
@@ -868,18 +1117,8 @@ fn payload_path(payload: &Value) -> Result<PathBuf, HmrError> {
         .ok_or(HmrError("watch event path missing"))
 }
 
-fn decode_data(payload: &Value) -> Result<Value, HmrError> {
-    let bytes = payload
-        .as_array()
-        .ok_or(HmrError("watch DATA is not a byte array"))?
-        .iter()
-        .map(|byte| {
-            byte.as_u64()
-                .and_then(|byte| u8::try_from(byte).ok())
-                .ok_or(HmrError("watch DATA contains a non-byte"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    serde_json::from_slice(&bytes).map_err(|_| HmrError("watch DATA JSON is invalid"))
+fn decode_data(payload: &[u8]) -> Result<Value, HmrError> {
+    serde_json::from_slice(payload).map_err(|_| HmrError("watch DATA JSON is invalid"))
 }
 
 rsi_meta_plugin::export_plugin!(HmrConsumer);

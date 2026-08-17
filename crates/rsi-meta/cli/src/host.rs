@@ -45,6 +45,10 @@ pub trait HostApi: fmt::Debug + Send + Sync + 'static {
 
     fn token_generation(&self) -> u64;
 
+    fn event_cursor(&self) -> u64 {
+        0
+    }
+
     fn open_service(&self, _request: ServiceOpenRequest) -> Result<BoxHostServiceStream> {
         anyhow::bail!("service streams are unavailable on this host")
     }
@@ -121,6 +125,24 @@ pub async fn submit_with_rejection(
                     format!("{error:#}"),
                     std::collections::BTreeMap::new(),
                 ),
+                Some(rsi_meta::HostError::EventCursorExpired {
+                    requested,
+                    minimum_available,
+                }) => (
+                    "cursor_expired".to_owned(),
+                    format!("{error:#}"),
+                    std::collections::BTreeMap::from([
+                        ("requested".to_owned(), serde_json::Value::from(*requested)),
+                        (
+                            "minimum_available".to_owned(),
+                            serde_json::Value::from(*minimum_available),
+                        ),
+                        (
+                            "resync_cursor".to_owned(),
+                            serde_json::Value::from(host.event_cursor()),
+                        ),
+                    ]),
+                ),
                 _ => (
                     "host_error".to_owned(),
                     format!("{error:#}"),
@@ -137,5 +159,67 @@ pub async fn submit_with_rejection(
             }
             outcome
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Command, CommandOutcome};
+
+    #[derive(Debug)]
+    struct ExpiredCursorHost;
+
+    #[async_trait]
+    impl HostApi for ExpiredCursorHost {
+        async fn submit(&self, _command: CommandEnvelope) -> Result<CommandOutcomeEnvelope> {
+            Err(rsi_meta::HostError::EventCursorExpired {
+                requested: 7,
+                minimum_available: 42,
+            }
+            .into())
+        }
+
+        async fn subscribe(&self, _after_cursor: u64) -> Result<HostEventStream> {
+            Ok(Box::pin(futures_util::stream::pending()))
+        }
+
+        fn graph_revision(&self) -> GraphRevision {
+            GraphRevision(9)
+        }
+
+        fn token_generation(&self) -> u64 {
+            0
+        }
+
+        fn event_cursor(&self) -> u64 {
+            99
+        }
+
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_cursor_is_a_typed_resynchronization_result() {
+        let outcome = submit_with_rejection(
+            &ExpiredCursorHost,
+            CommandEnvelope::new(
+                "expired-query",
+                Command::QueryEvents {
+                    after_cursor: 7,
+                    limit: 10,
+                },
+            ),
+        )
+        .await;
+        let CommandOutcome::Rejected { code, details, .. } = outcome.payload else {
+            panic!("cursor expiry must be a rejected result")
+        };
+        assert_eq!(code, "cursor_expired");
+        assert_eq!(details["requested"], 7);
+        assert_eq!(details["minimum_available"], 42);
+        assert_eq!(details["resync_cursor"], 99);
     }
 }

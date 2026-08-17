@@ -13,6 +13,11 @@
 #![warn(missing_debug_implementations)]
 
 use core::ffi::c_void;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
 
 /// ABI major version implemented by this crate.
 pub const ABI_MAJOR: u32 = 0;
@@ -263,6 +268,474 @@ impl CallOutcome {
             other => Self::Unknown(other),
         }
     }
+}
+
+/// Protocol identifier for host/plugin frames carried by the fixed-layout ABI.
+pub const FRAME_PROTOCOL: &str = "rsi-meta.plugin";
+/// Current host/plugin frame version.
+pub const FRAME_VERSION: u32 = 0;
+/// Maximum Unicode scalar count for identifiers in one plugin frame.
+pub const MAX_FRAME_ID_CHARACTERS: usize = 255;
+
+pub const OP_OPEN: &str = "open";
+pub const OP_DATA: &str = "data";
+pub const OP_CREDIT: &str = "credit";
+pub const OP_HALF_CLOSE: &str = "half_close";
+pub const OP_CANCEL: &str = "cancel";
+
+pub const EVENT_DATA: &str = "data";
+pub const EVENT_CREDIT: &str = "credit";
+pub const EVENT_END: &str = "end";
+pub const EVENT_CANCEL: &str = "cancel";
+
+pub const RUNTIME_TICK_SERVICE: &str = "runtime.tick";
+pub const RUNTIME_TICK_EVENT: &str = "tick";
+
+pub const STATE_OP_GET: &str = "get";
+pub const STATE_OP_COMPARE_AND_SWAP: &str = "compare_and_swap";
+pub const STATE_OP_DELETE: &str = "delete";
+
+pub const STATE_EVENT_VALUE: &str = "value";
+pub const STATE_EVENT_APPLIED: &str = "applied";
+pub const STATE_EVENT_CONFLICT: &str = "conflict";
+pub const STATE_EVENT_DELETED: &str = "deleted";
+
+const DATA_FRAME_MAGIC: &[u8; 4] = b"RMD0";
+const DATA_REQUEST: u8 = 0;
+const DATA_EVENT: u8 = 1;
+const DATA_HEADER_BYTES: usize = DATA_FRAME_MAGIC.len() + 1 + 2 + 2 + 4;
+
+/// Canonical validated host/plugin wire frame.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub protocol: String,
+    pub version: u32,
+    #[serde(flatten)]
+    pub body: FrameBody,
+}
+
+impl Frame {
+    pub fn new(body: FrameBody) -> Self {
+        Self {
+            protocol: FRAME_PROTOCOL.to_owned(),
+            version: FRAME_VERSION,
+            body,
+        }
+    }
+
+    pub fn lifecycle(phase: LifecyclePhase, generation: u64, config: Option<Value>) -> Self {
+        Self::new(FrameBody::Lifecycle {
+            phase,
+            generation,
+            config,
+        })
+    }
+
+    pub fn service_request(
+        request_id: impl Into<String>,
+        service: impl Into<String>,
+        operation: impl Into<String>,
+        payload: Value,
+    ) -> Self {
+        Self::new(FrameBody::ServiceRequest {
+            request_id: request_id.into(),
+            service: service.into(),
+            operation: operation.into(),
+            payload,
+        })
+    }
+
+    pub fn service_event(
+        request_id: Option<String>,
+        service: impl Into<String>,
+        event: impl Into<String>,
+        payload: Value,
+    ) -> Self {
+        Self::new(FrameBody::ServiceEvent {
+            request_id,
+            service: service.into(),
+            event: event.into(),
+            payload,
+        })
+    }
+
+    pub fn durable_command(command_id: impl Into<String>, command: DurableCommand) -> Self {
+        Self::new(FrameBody::DurableCommand {
+            command_id: command_id.into(),
+            command,
+        })
+    }
+
+    pub fn service_data_request(
+        request_id: impl Into<String>,
+        service: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::new(FrameBody::ServiceDataRequest {
+            request_id: request_id.into(),
+            service: service.into(),
+            payload: payload.into(),
+        })
+    }
+
+    pub fn service_data_event(
+        request_id: impl Into<String>,
+        service: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::new(FrameBody::ServiceDataEvent {
+            request_id: request_id.into(),
+            service: service.into(),
+            payload: payload.into(),
+        })
+    }
+
+    /// Encodes the validated frame as JSON for the control lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if a payload cannot be represented.
+    pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
+        if self.protocol != FRAME_PROTOCOL {
+            return Err(FrameError::UnsupportedProtocol {
+                found: self.protocol.clone(),
+            });
+        }
+        if self.version != FRAME_VERSION {
+            return Err(FrameError::UnsupportedVersion {
+                found: self.version,
+            });
+        }
+        self.body.validate()?;
+        match &self.body {
+            FrameBody::ServiceDataRequest {
+                request_id,
+                service,
+                payload,
+            } => encode_data_frame(DATA_REQUEST, request_id, service, payload),
+            FrameBody::ServiceDataEvent {
+                request_id,
+                service,
+                payload,
+            } => encode_data_frame(DATA_EVENT, request_id, service, payload),
+            _ => serde_json::to_vec(self).map_err(FrameError::Json),
+        }
+    }
+
+    /// Decodes and validates an untrusted plugin frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol, version, JSON, or field-bound error.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
+        if bytes.starts_with(DATA_FRAME_MAGIC) {
+            return decode_data_frame(bytes);
+        }
+        let frame: Self = serde_json::from_slice(bytes).map_err(FrameError::Json)?;
+        if frame.protocol != FRAME_PROTOCOL {
+            return Err(FrameError::UnsupportedProtocol {
+                found: frame.protocol,
+            });
+        }
+        if frame.version != FRAME_VERSION {
+            return Err(FrameError::UnsupportedVersion {
+                found: frame.version,
+            });
+        }
+        frame.body.validate()?;
+        Ok(frame)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FrameBody {
+    Lifecycle {
+        phase: LifecyclePhase,
+        generation: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<Value>,
+    },
+    ServiceRequest {
+        request_id: String,
+        service: String,
+        operation: String,
+        payload: Value,
+    },
+    ServiceEvent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        service: String,
+        event: String,
+        payload: Value,
+    },
+    #[serde(skip)]
+    ServiceDataRequest {
+        request_id: String,
+        service: String,
+        payload: Vec<u8>,
+    },
+    #[serde(skip)]
+    ServiceDataEvent {
+        request_id: String,
+        service: String,
+        payload: Vec<u8>,
+    },
+    DurableCommand {
+        command_id: String,
+        command: DurableCommand,
+    },
+}
+
+impl FrameBody {
+    fn validate(&self) -> Result<(), FrameError> {
+        match self {
+            Self::Lifecycle {
+                phase,
+                generation,
+                config,
+            } => {
+                if *generation == 0 {
+                    return Err(invalid_frame("lifecycle generation must be at least one"));
+                }
+                match phase {
+                    LifecyclePhase::Prepare => {}
+                    LifecyclePhase::PrepareFailed => validate_prepare_failure(config.as_ref())?,
+                    LifecyclePhase::Prepared
+                    | LifecyclePhase::Abort
+                    | LifecyclePhase::Committed
+                    | LifecyclePhase::Retire
+                    | LifecyclePhase::Retired => {
+                        if config.is_some() {
+                            return Err(invalid_frame(
+                                "this lifecycle phase must not carry config",
+                            ));
+                        }
+                    }
+                }
+            }
+            Self::ServiceRequest {
+                request_id,
+                service,
+                operation,
+                ..
+            } => {
+                require_bounded("service request id", request_id)?;
+                require_bounded("service request contract", service)?;
+                require_bounded("service request operation", operation)?;
+                if operation == OP_DATA {
+                    return Err(invalid_frame(
+                        "service DATA requests require the binary frame variant",
+                    ));
+                }
+            }
+            Self::ServiceEvent {
+                request_id,
+                service,
+                event,
+                ..
+            } => {
+                if let Some(request_id) = request_id {
+                    require_bounded("service event request id", request_id)?;
+                }
+                require_bounded("service event contract", service)?;
+                require_bounded("service event name", event)?;
+                if event == EVENT_DATA {
+                    return Err(invalid_frame(
+                        "service DATA events require the binary frame variant",
+                    ));
+                }
+            }
+            Self::ServiceDataRequest {
+                request_id,
+                service,
+                ..
+            } => {
+                require_bounded("service request id", request_id)?;
+                require_bounded("service request contract", service)?;
+            }
+            Self::ServiceDataEvent {
+                request_id,
+                service,
+                ..
+            } => {
+                require_bounded("service event request id", request_id)?;
+                require_bounded("service event contract", service)?;
+            }
+            Self::DurableCommand { command_id, .. } => {
+                require_bounded("durable command id", command_id)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn encode_data_frame(
+    kind: u8,
+    request_id: &str,
+    service: &str,
+    payload: &[u8],
+) -> Result<Vec<u8>, FrameError> {
+    require_bounded("service data request id", request_id)?;
+    require_bounded("service data contract", service)?;
+    let request_len = u16::try_from(request_id.len())
+        .map_err(|_| invalid_frame("service data request id is too large"))?;
+    let service_len = u16::try_from(service.len())
+        .map_err(|_| invalid_frame("service data contract is too large"))?;
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| invalid_frame("service data payload is too large"))?;
+    let capacity = DATA_HEADER_BYTES
+        .checked_add(request_id.len())
+        .and_then(|bytes| bytes.checked_add(service.len()))
+        .and_then(|bytes| bytes.checked_add(payload.len()))
+        .ok_or_else(|| invalid_frame("service data frame size overflow"))?;
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(DATA_FRAME_MAGIC);
+    encoded.push(kind);
+    encoded.extend_from_slice(&request_len.to_be_bytes());
+    encoded.extend_from_slice(&service_len.to_be_bytes());
+    encoded.extend_from_slice(&payload_len.to_be_bytes());
+    encoded.extend_from_slice(request_id.as_bytes());
+    encoded.extend_from_slice(service.as_bytes());
+    encoded.extend_from_slice(payload);
+    Ok(encoded)
+}
+
+fn decode_data_frame(bytes: &[u8]) -> Result<Frame, FrameError> {
+    if bytes.len() < DATA_HEADER_BYTES {
+        return Err(invalid_frame("truncated service data frame header"));
+    }
+    let kind = bytes[4];
+    let request_len = usize::from(u16::from_be_bytes([bytes[5], bytes[6]]));
+    let service_len = usize::from(u16::from_be_bytes([bytes[7], bytes[8]]));
+    let payload_len_u32 = u32::from_be_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]);
+    let payload_len = usize::try_from(payload_len_u32)
+        .map_err(|_| invalid_frame("service data payload length is unsupported"))?;
+    let request_end = DATA_HEADER_BYTES
+        .checked_add(request_len)
+        .ok_or_else(|| invalid_frame("service data frame size overflow"))?;
+    let service_end = request_end
+        .checked_add(service_len)
+        .ok_or_else(|| invalid_frame("service data frame size overflow"))?;
+    let payload_end = service_end
+        .checked_add(payload_len)
+        .ok_or_else(|| invalid_frame("service data frame size overflow"))?;
+    if payload_end != bytes.len() {
+        return Err(invalid_frame(
+            "service data frame length does not match header",
+        ));
+    }
+    let request_id = std::str::from_utf8(&bytes[DATA_HEADER_BYTES..request_end])
+        .map_err(|_| invalid_frame("service data request id is not UTF-8"))?
+        .to_owned();
+    let service = std::str::from_utf8(&bytes[request_end..service_end])
+        .map_err(|_| invalid_frame("service data contract is not UTF-8"))?
+        .to_owned();
+    let payload = bytes[service_end..payload_end].to_vec();
+    let body = match kind {
+        DATA_REQUEST => FrameBody::ServiceDataRequest {
+            request_id,
+            service,
+            payload,
+        },
+        DATA_EVENT => FrameBody::ServiceDataEvent {
+            request_id,
+            service,
+            payload,
+        },
+        _ => return Err(invalid_frame("unknown service data frame kind")),
+    };
+    body.validate()?;
+    Ok(Frame::new(body))
+}
+
+fn validate_prepare_failure(config: Option<&Value>) -> Result<(), FrameError> {
+    let object = config
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_frame("prepare_failed requires an object config"))?;
+    if object.keys().any(|key| key != "code" && key != "message") {
+        return Err(invalid_frame(
+            "prepare_failed config contains an unknown field",
+        ));
+    }
+    let code = object
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_frame("prepare_failed config requires a string code"))?;
+    if code.is_empty()
+        || code.len() > 64
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(invalid_frame(
+            "prepare_failed code is outside the v0 schema",
+        ));
+    }
+    if let Some(message) = object.get("message") {
+        let message = message
+            .as_str()
+            .ok_or_else(|| invalid_frame("prepare_failed message must be a string"))?;
+        if message.chars().count() > 256
+            || message
+                .chars()
+                .any(|character| character <= '\u{001f}' || character == '\u{007f}')
+        {
+            return Err(invalid_frame(
+                "prepare_failed message is outside the v0 schema",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_bounded(name: &str, value: &str) -> Result<(), FrameError> {
+    if value.is_empty() {
+        return Err(invalid_frame(format!("{name} must not be empty")));
+    }
+    if value.chars().count() > MAX_FRAME_ID_CHARACTERS {
+        return Err(invalid_frame(format!(
+            "{name} exceeds {MAX_FRAME_ID_CHARACTERS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_frame(message: impl Into<String>) -> FrameError {
+    FrameError::InvalidEnvelope(message.into())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePhase {
+    Prepare,
+    Prepared,
+    PrepareFailed,
+    Abort,
+    Committed,
+    Retire,
+    Retired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DurableCommand {
+    ApplyManifestPath {
+        manifest_path: PathBuf,
+        lock_path: PathBuf,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum FrameError {
+    #[error("invalid plugin JSON frame: {0}")]
+    Json(#[source] serde_json::Error),
+    #[error("unsupported plugin frame protocol `{found}`")]
+    UnsupportedProtocol { found: String },
+    #[error("unsupported plugin frame version {found}")]
+    UnsupportedVersion { found: u32 },
+    #[error("invalid plugin frame: {0}")]
+    InvalidEnvelope(String),
 }
 
 /// Safe Rust helpers used by plugin implementations.

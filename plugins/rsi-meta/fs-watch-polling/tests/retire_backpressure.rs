@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use rsi_meta_frame_contract::{
-    Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_loader::{
     BUILD_TARGET, ContentHash, ExpectedHashes, LoadedPlugin, PluginLoader, PluginMailbox,
     PluginMailboxOptions,
 };
 use rsi_meta_plugin::{ABI_MAJOR, ABI_MINOR, CallOutcome, Lane};
+use rsi_meta_plugin::{
+    Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -95,6 +96,19 @@ fn dispatch(plugin: &mut LoadedPlugin, lane: Lane, frame: Frame) -> CallOutcome 
     plugin.dispatch(lane, &frame.encode().unwrap())
 }
 
+fn recv_data(mailbox: &mut PluginMailbox) -> rsi_meta_loader::PostedFrame {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match mailbox.try_recv_data() {
+            Ok(frame) => return frame,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("polling worker DATA frame unavailable: {error}"),
+        }
+    }
+}
+
 fn open_and_credit(plugin: &mut LoadedPlugin, request_id: &str, watched: &Path) {
     assert_eq!(
         dispatch(
@@ -124,13 +138,7 @@ fn open_and_credit(plugin: &mut LoadedPlugin, request_id: &str, watched: &Path) 
     );
 }
 
-#[test]
-fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
-    let mut fixture = load_with_one_frame_data_lane();
-    let watched = fixture.root.path().join("watched.toml");
-    fs::write(&watched, b"watched").unwrap();
-    let generation = 52;
-
+fn prepare_and_commit(fixture: &mut LoadedFixture, generation: u64) {
     assert_eq!(
         dispatch(
             &mut fixture.plugin,
@@ -160,14 +168,33 @@ fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
         ),
         CallOutcome::Ok
     );
+}
+
+#[test]
+fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
+    let mut fixture = load_with_one_frame_data_lane();
+    let watched = fixture.root.path().join("watched.toml");
+    fs::write(&watched, b"watched").unwrap();
+    let generation = 52;
+
+    prepare_and_commit(&mut fixture, generation);
 
     open_and_credit(&mut fixture.plugin, "watch-1", &watched);
-    let ready = Frame::decode(fixture.mailbox.try_recv_data().unwrap().payload()).unwrap();
-    assert!(matches!(
-        ready.body,
-        FrameBody::ServiceEvent { ref event, .. } if event == "data"
-    ));
-    open_and_credit(&mut fixture.plugin, "watch-2", &watched);
+    let ready = Frame::decode(recv_data(&mut fixture.mailbox).payload()).unwrap();
+    assert!(matches!(ready.body, FrameBody::ServiceDataEvent { .. }));
+    assert_eq!(
+        dispatch(
+            &mut fixture.plugin,
+            Lane::Data,
+            Frame::service_request(
+                "watch-2",
+                "fs.watch",
+                OP_OPEN,
+                json!({"consumer": "retire-test", "sequence": 0, "path": watched}),
+            ),
+        ),
+        CallOutcome::Ok
+    );
 
     assert_eq!(
         dispatch(
@@ -182,13 +209,22 @@ fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
         fixture.mailbox.try_recv_control().is_err(),
         "Retired must wait until the stream terminals are accepted"
     );
-    let ready = Frame::decode(fixture.mailbox.try_recv_data().unwrap().payload()).unwrap();
-    assert!(matches!(
-        ready.body,
-        FrameBody::ServiceEvent { ref event, .. } if event == "data"
-    ));
-
-    for expected_request in ["watch-1", "watch-2"] {
+    for (index, expected_request) in ["watch-1", "watch-2"].into_iter().enumerate() {
+        let terminal = Frame::decode(recv_data(&mut fixture.mailbox).payload()).unwrap();
+        assert!(matches!(
+            terminal.body,
+            FrameBody::ServiceEvent {
+                request_id: Some(ref request_id),
+                ref event,
+                ref payload,
+                ..
+            } if request_id == expected_request
+                && event == "cancel"
+                && payload["reason"] == "provider_retired"
+        ));
+        if index != 0 {
+            continue;
+        }
         assert_eq!(
             dispatch(
                 &mut fixture.plugin,
@@ -202,18 +238,6 @@ fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
             ),
             CallOutcome::Ok
         );
-        let terminal = Frame::decode(fixture.mailbox.try_recv_data().unwrap().payload()).unwrap();
-        assert!(matches!(
-            terminal.body,
-            FrameBody::ServiceEvent {
-                request_id: Some(ref request_id),
-                ref event,
-                ref payload,
-                ..
-            } if request_id == expected_request
-                && event == "cancel"
-                && payload["reason"] == "provider_retired"
-        ));
     }
     let retired = Frame::decode(fixture.mailbox.try_recv_control().unwrap().payload()).unwrap();
     assert_eq!(

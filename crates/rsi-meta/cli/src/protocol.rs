@@ -8,14 +8,14 @@ use uuid::Uuid;
 
 pub use rsi_meta::{
     CompositionDigest, GraphRevision, HostEvent as Event, HostEventRecord, InstanceId,
-    PluginInspection, STREAM_PROTOCOL, ServiceOpenRequest, StreamEnvelope, StreamKind,
+    MAX_WIRE_ID_BYTES, PluginInspection, STREAM_PROTOCOL, ServiceOpenRequest, StreamEnvelope,
+    StreamId, StreamKind,
 };
 use rsi_meta::{GraphSnapshot, PackageId};
 
 pub const CONTROL_PROTOCOL: &str = "rsi-meta.control";
 pub const CONTROL_VERSION: u32 = 0;
 pub const MAX_CONTROL_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
-const MAX_WIRE_ID_CHARACTERS: usize = 255;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -400,7 +400,7 @@ pub fn validate_command(envelope: &CommandEnvelope) -> Result<()> {
         bail!("expected a command envelope");
     }
     if envelope.command_id.is_empty()
-        || envelope.command_id.len() > MAX_WIRE_ID_CHARACTERS
+        || envelope.command_id.len() > MAX_WIRE_ID_BYTES
         || !envelope
             .command_id
             .bytes()

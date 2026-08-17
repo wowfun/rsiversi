@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
-    OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_plugin::sdk::{Host, Plugin};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT,
+    OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin::{Lane, PostFrameOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -166,9 +166,8 @@ impl NestedConsumer {
         )
     }
 
-    fn outer_data(&mut self, outer_id: &str, payload: Value) -> Result<(), ConsumerError> {
-        validate_byte_array(&payload)?;
-        let encoded = encoded_len(&payload)?;
+    fn outer_data(&mut self, outer_id: &str, payload: Vec<u8>) -> Result<(), ConsumerError> {
+        let raw_bytes = payload.len() as u64;
         let inner_id = {
             let stream = self
                 .streams
@@ -178,7 +177,7 @@ impl NestedConsumer {
                 || stream
                     .input_credit
                     .saturating_sub(stream.reserved_input_credit)
-                    < encoded
+                    < raw_bytes
             {
                 return Err(ConsumerError("outer DATA exceeds inner credit"));
             }
@@ -186,8 +185,8 @@ impl NestedConsumer {
         };
         self.enqueue_frame(
             outer_id,
-            Frame::service_request(inner_id, "fixture.echo", OP_DATA, payload),
-            encoded,
+            Frame::service_data_request(inner_id, "fixture.echo", payload),
+            raw_bytes,
             0,
             false,
         )
@@ -281,33 +280,6 @@ impl NestedConsumer {
                     false,
                 )
             }
-            EVENT_DATA => {
-                validate_byte_array(&payload)?;
-                let encoded = encoded_len(&payload)?;
-                let stream = self
-                    .streams
-                    .get(&outer_id)
-                    .ok_or(ConsumerError("outer stream disappeared"))?;
-                if stream
-                    .output_credit
-                    .saturating_sub(stream.reserved_output_credit)
-                    < encoded
-                {
-                    return Err(ConsumerError("inner DATA exceeds outer credit"));
-                }
-                self.enqueue_frame(
-                    &outer_id,
-                    Frame::service_event(
-                        Some(outer_id.clone()),
-                        "fixture.nested-consumer",
-                        EVENT_DATA,
-                        payload,
-                    ),
-                    0,
-                    encoded,
-                    false,
-                )
-            }
             EVENT_END | EVENT_CANCEL => {
                 let stream = self
                     .streams
@@ -335,6 +307,33 @@ impl NestedConsumer {
             }
             _ => Err(ConsumerError("unknown inner stream event")),
         }
+    }
+
+    fn inner_data(&mut self, inner_id: &str, payload: Vec<u8>) -> Result<(), ConsumerError> {
+        let outer_id = self
+            .outer_by_inner
+            .get(inner_id)
+            .cloned()
+            .ok_or(ConsumerError("unknown inner stream"))?;
+        let raw_bytes = payload.len() as u64;
+        let stream = self
+            .streams
+            .get(&outer_id)
+            .ok_or(ConsumerError("outer stream disappeared"))?;
+        if stream
+            .output_credit
+            .saturating_sub(stream.reserved_output_credit)
+            < raw_bytes
+        {
+            return Err(ConsumerError("inner DATA exceeds outer credit"));
+        }
+        self.enqueue_frame(
+            &outer_id,
+            Frame::service_data_event(&outer_id, "fixture.nested-consumer", payload),
+            0,
+            raw_bytes,
+            false,
+        )
     }
 
     fn enqueue_frame(
@@ -594,11 +593,27 @@ impl Plugin for NestedConsumer {
                 match operation.as_str() {
                     OP_OPEN => self.open_outer(&request_id, &payload),
                     OP_CREDIT => self.grant_outer_output(&request_id, &payload),
-                    OP_DATA => self.outer_data(&request_id, payload),
                     OP_HALF_CLOSE => self.outer_half_close(&request_id, payload),
                     OP_CANCEL => self.cancel_outer(&request_id, payload),
                     _ => Err(ConsumerError("unknown outer stream operation")),
                 }
+            }
+            FrameBody::ServiceDataRequest {
+                request_id,
+                service,
+                payload,
+            } if lane == Lane::Data
+                && self.active.is_some()
+                && service == "fixture.nested-consumer" =>
+            {
+                self.outer_data(&request_id, payload)
+            }
+            FrameBody::ServiceDataEvent {
+                request_id,
+                service,
+                payload,
+            } if lane == Lane::Data && service == "fixture.echo" => {
+                self.inner_data(&request_id, payload)
             }
             FrameBody::ServiceEvent {
                 request_id: Some(request_id),
@@ -657,25 +672,6 @@ fn add_credit(current: u64, added: u64) -> Result<u64, ConsumerError> {
         .checked_add(added)
         .filter(|credit| *credit <= STREAM_CREDIT_LIMIT)
         .ok_or(ConsumerError("credit overflow"))
-}
-
-fn validate_byte_array(value: &Value) -> Result<(), ConsumerError> {
-    let bytes = value
-        .as_array()
-        .ok_or(ConsumerError("DATA is not a byte array"))?;
-    if bytes
-        .iter()
-        .any(|byte| byte.as_u64().is_none_or(|byte| byte > u8::MAX.into()))
-    {
-        return Err(ConsumerError("DATA contains a non-byte"));
-    }
-    Ok(())
-}
-
-fn encoded_len(value: &Value) -> Result<u64, ConsumerError> {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len() as u64)
-        .map_err(|_| ConsumerError("encode DATA payload"))
 }
 
 rsi_meta_plugin::export_plugin!(NestedConsumer);

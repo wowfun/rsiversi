@@ -25,95 +25,6 @@ const WORKSPACE_ALIAS_CHILD_PROJECT_MANIFEST: &str =
 const WORKSPACE_ALIAS_CHILD_PROJECT_LOCK: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_PROJECT_LOCK";
 const WORKSPACE_ALIAS_CHILD_MARKER: &str = "RSI_META_WORKSPACE_ALIAS_CHILD_MARKER";
 
-#[derive(Clone, Debug, PartialEq)]
-enum Command {
-    ApplyManifestPath {
-        manifest_path: PathBuf,
-        lock_path: PathBuf,
-    },
-    LockManifest {
-        manifest_path: PathBuf,
-        lock_path: PathBuf,
-    },
-    QueryGraph,
-    QueryEvents {
-        after_cursor: u64,
-        limit: u32,
-    },
-    RotateToken,
-    Unknown,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct CommandEnvelope {
-    command_id: String,
-    expected_graph_revision: Option<GraphRevision>,
-    payload: Command,
-}
-
-impl CommandEnvelope {
-    fn new(command_id: impl Into<String>, payload: Command) -> Self {
-        Self {
-            command_id: command_id.into(),
-            expected_graph_revision: None,
-            payload,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum CommandOutcome {
-    Applied {
-        graph: rsi_meta::GraphSnapshot,
-    },
-    NoChange {
-        graph: rsi_meta::GraphSnapshot,
-    },
-    RestartRequired,
-    Graph {
-        graph: rsi_meta::GraphSnapshot,
-        cursor: u64,
-    },
-    Events {
-        events: Vec<HostEventRecord>,
-    },
-    LockResolved {
-        lock: CompositionLock,
-    },
-    TokenRotated {
-        generation: u64,
-    },
-    Rejected {
-        code: String,
-        message: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct CommandOutcomeEnvelope {
-    command_id: String,
-    graph_revision: GraphRevision,
-    payload: CommandOutcome,
-}
-
-impl CommandOutcomeEnvelope {
-    fn rejected(
-        command_id: impl Into<String>,
-        graph_revision: GraphRevision,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            command_id: command_id.into(),
-            graph_revision,
-            payload: CommandOutcome::Rejected {
-                code: code.into(),
-                message: message.into(),
-            },
-        }
-    }
-}
-
 fn workspace(database: impl AsRef<Path>, cache: impl AsRef<Path>) -> CompositionWorkspace {
     let database_path = database.as_ref().to_owned();
     let root = database_path.parent().expect("database parent").to_owned();
@@ -231,94 +142,10 @@ impl TestOpenOptionsExt for OpenOptions {
 }
 
 trait TestHostExt {
-    async fn submit(&self, command: CommandEnvelope) -> rsi_meta::Result<CommandOutcomeEnvelope>;
     async fn shutdown(&self, deadline: Instant) -> rsi_meta::Result<()>;
 }
 
 impl TestHostExt for CompositionHost {
-    async fn submit(&self, command: CommandEnvelope) -> rsi_meta::Result<CommandOutcomeEnvelope> {
-        let command_id = command.command_id;
-        let result = match command.payload {
-            Command::ApplyManifestPath {
-                manifest_path,
-                lock_path,
-            } => self
-                .apply(ApplyRequest {
-                    operation_id: OperationId(command_id.clone()),
-                    project: CompositionProject {
-                        manifest_path,
-                        lock_path: Some(lock_path),
-                    },
-                    expected_revision: command.expected_graph_revision,
-                })
-                .await
-                .map(|result| match result {
-                    ApplyResult::Applied { snapshot } => CommandOutcome::Applied {
-                        graph: snapshot.graph,
-                    },
-                    ApplyResult::Unchanged { snapshot } => CommandOutcome::NoChange {
-                        graph: snapshot.graph,
-                    },
-                    ApplyResult::RestartRequired { .. } => CommandOutcome::RestartRequired,
-                }),
-            Command::LockManifest {
-                manifest_path,
-                lock_path,
-            } => CompositionProject {
-                manifest_path,
-                lock_path: Some(lock_path),
-            }
-            .lock()
-            .map(|result| match result {
-                LockResult::Created { lock } | LockResult::Unchanged { lock } => {
-                    CommandOutcome::LockResolved { lock }
-                }
-            }),
-            Command::QueryGraph => {
-                let snapshot = self.snapshot();
-                Ok(CommandOutcome::Graph {
-                    graph: snapshot.graph,
-                    cursor: snapshot.cursor,
-                })
-            }
-            Command::QueryEvents {
-                after_cursor,
-                limit,
-            } => self
-                .events_after(after_cursor, limit)
-                .await
-                .map(|page| CommandOutcome::Events {
-                    events: page.events,
-                }),
-            Command::RotateToken => self
-                .rotate_token(OperationId(command_id.clone()))
-                .await
-                .map(|rotation| CommandOutcome::TokenRotated {
-                    generation: rotation.generation,
-                }),
-            Command::Unknown => Ok(CommandOutcome::Rejected {
-                code: "unknown_command".to_owned(),
-                message: "unknown test command".to_owned(),
-            }),
-        };
-        match result {
-            Ok(payload) => Ok(CommandOutcomeEnvelope {
-                command_id,
-                graph_revision: self.snapshot().graph.revision,
-                payload,
-            }),
-            Err(rsi_meta::HostError::OperationRejected { code, message, .. }) => {
-                Ok(CommandOutcomeEnvelope::rejected(
-                    command_id,
-                    self.snapshot().graph.revision,
-                    code,
-                    message,
-                ))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     async fn shutdown(&self, deadline: Instant) -> rsi_meta::Result<()> {
         static NEXT_SHUTDOWN: AtomicU64 = AtomicU64::new(1);
         let sequence = NEXT_SHUTDOWN.fetch_add(1, Ordering::Relaxed);
@@ -568,13 +395,6 @@ scope = "app"
     .expect("composition fixture");
 }
 
-async fn submit(host: &CompositionHost, id: &str, payload: Command) -> CommandOutcome {
-    host.submit(CommandEnvelope::new(id, payload))
-        .await
-        .expect("command transport")
-        .payload
-}
-
 fn empty_composition_source() -> &'static str {
     r#"format_version = 0
 scopes = []
@@ -608,34 +428,31 @@ async fn apply_probe_host(
         .await
         .expect("open probe host");
     assert!(matches!(
-        submit(
-            &host,
-            &format!("{command_prefix}-lock"),
-            Command::LockManifest {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        )
-        .await,
-        CommandOutcome::LockResolved { .. }
+        (CompositionProject {
+            manifest_path: manifest.clone(),
+            lock_path: Some(lock.clone()),
+        })
+        .lock()
+        .expect("lock probe composition"),
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
     let outcome = tokio::time::timeout(
         Duration::from_secs(3),
-        host.submit(CommandEnvelope::new(
-            format!("{command_prefix}-apply"),
-            Command::ApplyManifestPath {
+        host.apply(ApplyRequest {
+            operation_id: OperationId(format!("{command_prefix}-apply")),
+            project: CompositionProject {
                 manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
+                lock_path: Some(lock.clone()),
             },
-        )),
+            expected_revision: None,
+        }),
     )
     .await
     .expect("probe apply deadline")
     .expect("probe apply transport");
     assert!(
-        matches!(outcome.payload, CommandOutcome::Applied { .. }),
-        "probe apply failed: {:?}",
-        outcome.payload
+        matches!(outcome, ApplyResult::Applied { .. }),
+        "probe apply failed: {outcome:?}",
     );
     (
         host,
@@ -660,32 +477,24 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
         .await
         .expect("open empty host");
 
-    let lock = submit(
-        &host,
-        "lock-v1",
-        Command::LockManifest {
-            manifest_path: manifest_path.clone(),
-            lock_path: lock_path.clone(),
-        },
-    )
-    .await;
-    assert!(matches!(lock, CommandOutcome::LockResolved { .. }));
+    let lock = CompositionProject {
+        manifest_path: manifest_path.clone(),
+        lock_path: Some(lock_path.clone()),
+    }
+    .lock()
+    .expect("lock v1");
+    assert!(matches!(lock, LockResult::Created { .. }));
 
-    let apply_command = CommandEnvelope::new(
-        "apply-v1",
-        Command::ApplyManifestPath {
+    let apply_request = ApplyRequest {
+        operation_id: OperationId("apply-v1".to_owned()),
+        project: CompositionProject {
             manifest_path: manifest_path.clone(),
-            lock_path: lock_path.clone(),
+            lock_path: Some(lock_path.clone()),
         },
-    );
-    let first_outcome = host
-        .submit(apply_command.clone())
-        .await
-        .expect("apply composition");
-    assert!(matches!(
-        first_outcome.payload,
-        CommandOutcome::Applied { .. }
-    ));
+        expected_revision: None,
+    };
+    let first_outcome = host.apply(apply_request).await.expect("apply composition");
+    assert!(matches!(first_outcome, ApplyResult::Applied { .. }));
 
     let snapshot = host.snapshot();
     assert_eq!(snapshot.graph.composition_id, "demo");
@@ -693,18 +502,9 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
     assert_eq!(snapshot.graph.bindings.len(), 1);
     assert!(snapshot.cursor > 0);
 
-    let graph_outcome = host
-        .submit(CommandEnvelope::new(
-            "query-graph-with-cursor",
-            Command::QueryGraph,
-        ))
-        .await
-        .expect("query graph with subscription cursor");
-    let CommandOutcome::Graph { graph, cursor } = graph_outcome.payload else {
-        panic!("query_graph did not return a graph snapshot")
-    };
-    assert_eq!(graph, snapshot.graph);
-    assert_eq!(cursor, snapshot.cursor);
+    let graph_outcome = host.snapshot();
+    assert_eq!(graph_outcome.graph, snapshot.graph);
+    assert_eq!(graph_outcome.cursor, snapshot.cursor);
 
     let mut old_stream = host
         .open_service(ServiceOpenRequest {
@@ -729,10 +529,7 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
         .await
         .expect("echo frame")
         .expect("echo is valid");
-    assert_eq!(
-        echoed.payload,
-        Some(serde_json::json!([98, 101, 102, 111, 114, 101]))
-    );
+    assert_eq!(echoed.data.as_deref(), Some(b"before".as_slice()));
 
     let mut events = host
         .subscribe(snapshot.cursor)
@@ -751,25 +548,23 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
         .write_all(b"\n# provider package v2\n")
         .expect("change provider package hash");
     let second_lock_path = temp.path().join("rsi-meta-v2.lock");
-    let _ = submit(
-        &host,
-        "lock-v2",
-        Command::LockManifest {
+    let _ = CompositionProject {
+        manifest_path: manifest_path.clone(),
+        lock_path: Some(second_lock_path.clone()),
+    }
+    .lock()
+    .expect("lock v2");
+    let second_request = ApplyRequest {
+        operation_id: OperationId("apply-v2".to_owned()),
+        project: CompositionProject {
             manifest_path: manifest_path.clone(),
-            lock_path: second_lock_path.clone(),
+            lock_path: Some(second_lock_path.clone()),
         },
-    )
-    .await;
-    let second_command = CommandEnvelope::new(
-        "apply-v2",
-        Command::ApplyManifestPath {
-            manifest_path: manifest_path.clone(),
-            lock_path: second_lock_path.clone(),
-        },
-    );
+        expected_revision: None,
+    };
     let applying_host = host.clone();
-    let applying_command = second_command.clone();
-    let lost_ack = tokio::spawn(async move { applying_host.submit(applying_command).await });
+    let applying_request = second_request.clone();
+    let lost_ack = tokio::spawn(async move { applying_host.apply(applying_request).await });
     let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
         .await
         .expect("event deadline")
@@ -779,7 +574,7 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
     // task after that point simulates a transport that lost the terminal reply.
     lost_ack.abort();
     let second_outcome = host
-        .submit(second_command.clone())
+        .apply(second_request.clone())
         .await
         .expect("same command id recovers durable outcome after ack loss");
     assert!(event.cursor > snapshot.cursor);
@@ -789,12 +584,13 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
             && entry.generation_count == 1
             && entry.lease_count >= 1
     }));
-    let graph = submit(&host, "graph-retiring", Command::QueryGraph).await;
-    assert!(matches!(
-        graph,
-        CommandOutcome::Graph { ref graph, .. }
-            if graph.retiring_instances.iter().any(|entry| entry.instance_id == InstanceId::new("provider"))
-    ));
+    assert!(
+        host.snapshot()
+            .graph
+            .retiring_instances
+            .iter()
+            .any(|entry| { entry.instance_id == InstanceId::new("provider") })
+    );
     assert_eq!(old_stream.provider(), &InstanceId::new("provider"));
     old_stream
         .send(b"after")
@@ -805,10 +601,7 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
         .await
         .expect("post-cutover echo")
         .expect("post-cutover echo valid");
-    assert_eq!(
-        echoed.payload,
-        Some(serde_json::json!([97, 102, 116, 101, 114]))
-    );
+    assert_eq!(echoed.data.as_deref(), Some(b"after".as_slice()));
     old_stream
         .cancel("test_complete")
         .await
@@ -833,20 +626,18 @@ async fn disk_lock_apply_snapshot_subscription_and_durable_retry() {
     .await
     .expect("reopen installed composition");
     let replayed = reopened
-        .submit(second_command)
+        .apply(second_request)
         .await
         .expect("retry acknowledged command");
-    assert_eq!(replayed.command_id, second_outcome.command_id);
-    assert_eq!(replayed.graph_revision, second_outcome.graph_revision);
-    let CommandOutcome::Applied { graph: replayed } = replayed.payload else {
+    let ApplyResult::Applied { snapshot: replayed } = replayed else {
         panic!("replayed apply changed result kind")
     };
-    let CommandOutcome::Applied { graph: first } = second_outcome.payload else {
+    let ApplyResult::Applied { snapshot: first } = second_outcome else {
         panic!("initial apply changed result kind")
     };
-    assert_eq!(replayed.revision, first.revision);
-    assert_eq!(replayed.composition_id, first.composition_id);
-    assert_eq!(replayed, reopened.snapshot().graph);
+    assert_eq!(replayed.graph.revision, first.graph.revision);
+    assert_eq!(replayed.graph.composition_id, first.graph.composition_id);
+    assert_eq!(replayed, reopened.snapshot());
     reopened
         .shutdown(Instant::now() + Duration::from_secs(2))
         .await
@@ -1002,12 +793,10 @@ async fn deferred_prepare_state_read_is_pumped_before_prepared_ack() {
     stream.send(b"ready").await.expect("send probe data");
     let data = recv_service(&mut stream).await;
     assert_eq!(data.kind, StreamKind::Data);
-    let expected = b"deferred-state\0ready"
-        .iter()
-        .copied()
-        .map(serde_json::Value::from)
-        .collect::<Vec<_>>();
-    assert_eq!(data.payload, Some(serde_json::Value::Array(expected)));
+    assert_eq!(
+        data.data.as_deref(),
+        Some(b"deferred-state\0ready".as_slice())
+    );
     stream
         .cancel("test_complete")
         .await
@@ -1075,33 +864,31 @@ async fn malformed_state_request_returns_prepare_failure_without_a_write() {
     .await
     .expect("host");
     assert!(matches!(
-        submit(
-            &host,
-            "malformed-state-lock",
-            Command::LockManifest {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        )
-        .await,
-        CommandOutcome::LockResolved { .. }
+        (CompositionProject {
+            manifest_path: manifest.clone(),
+            lock_path: Some(lock.clone()),
+        })
+        .lock()
+        .expect("lock malformed-state composition"),
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
     let rejected = tokio::time::timeout(
         Duration::from_secs(3),
-        host.submit(CommandEnvelope::new(
-            "malformed-state-apply",
-            Command::ApplyManifestPath {
+        host.apply(ApplyRequest {
+            operation_id: OperationId("malformed-state-apply".to_owned()),
+            project: CompositionProject {
                 manifest_path: manifest,
-                lock_path: lock,
+                lock_path: Some(lock),
             },
-        )),
+            expected_revision: None,
+        }),
     )
     .await
     .expect("malformed state response deadline")
-    .expect("durable rejection");
+    .expect_err("malformed state must reject prepare");
     assert!(matches!(
-        rejected.payload,
-        CommandOutcome::Rejected { ref code, ref message }
+        rejected,
+        rsi_meta::HostError::OperationRejected { ref code, ref message, .. }
             if code == "plugin_prepare_failed" && message.contains("malformed_state_rejected")
     ));
     let state_rows: i64 = Connection::open(temp.path().join("state.sqlite3"))
@@ -1149,6 +936,100 @@ async fn malformed_plugin_stream_events_emit_exactly_one_cancel_terminal() {
             .await
             .expect("faulty probe shutdown");
     }
+}
+
+#[tokio::test]
+async fn oversized_stream_send_is_rejected_before_consuming_credit() {
+    let temp = tempdir().expect("tempdir");
+    let (host, _, _) = apply_probe_host(temp.path(), "normal_ack", "none", "frame-bound").await;
+    let mut stream = host
+        .open_service(ServiceOpenRequest {
+            consumer: InstanceId::new("probe-client"),
+            service: ServiceKey::new("fixture.lifecycle-probe"),
+        })
+        .expect("open probe stream");
+    assert_eq!(recv_service(&mut stream).await.kind, StreamKind::Credit);
+    stream
+        .grant_credit(1024 * 1024)
+        .await
+        .expect("grant output credit");
+
+    assert!(matches!(
+        stream.send(&vec![0_u8; 1024 * 1024]).await,
+        Err(rsi_meta::HostError::PluginFrameTooLarge { .. })
+    ));
+    tokio::time::timeout(Duration::from_secs(1), stream.send(b"ok"))
+        .await
+        .expect("oversized attempt must not consume input credit")
+        .expect("small send after oversized attempt");
+    assert_eq!(
+        recv_service(&mut stream).await.data.as_deref(),
+        Some(b"frame-bound\0ok".as_slice())
+    );
+    host.shutdown(Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("probe shutdown");
+}
+
+#[tokio::test]
+async fn malformed_plugin_output_burst_emits_one_runtime_fault_event() {
+    let temp = tempdir().expect("tempdir");
+    let (host, _, _) = apply_probe_host(
+        temp.path(),
+        "normal_ack",
+        "malformed_json_burst",
+        "fault-burst",
+    )
+    .await;
+    let cursor = host.snapshot().cursor;
+    let mut events = host
+        .subscribe(cursor)
+        .await
+        .expect("subscribe before fault");
+    let mut stream = host
+        .open_service(ServiceOpenRequest {
+            consumer: InstanceId::new("probe-client"),
+            service: ServiceKey::new("fixture.lifecycle-probe"),
+        })
+        .expect("open faulty probe stream");
+    assert_eq!(recv_service(&mut stream).await.kind, StreamKind::Credit);
+    stream
+        .grant_credit(1024 * 1024)
+        .await
+        .expect("grant faulty output credit");
+
+    stream.send(b"fault").await.expect("trigger fault burst");
+    assert_eq!(recv_service(&mut stream).await.kind, StreamKind::Cancel);
+    let fault = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("runtime fault event deadline")
+        .expect("event stream remains open")
+        .expect("runtime fault event");
+    assert!(matches!(
+        fault.event,
+        rsi_meta::HostEvent::RuntimeFaulted { .. }
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err(),
+        "one faulty generation must emit only one durable runtime fault"
+    );
+    let persisted = host
+        .events_after(cursor, 64)
+        .await
+        .expect("query persisted runtime faults");
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| matches!(event.event, rsi_meta::HostEvent::RuntimeFaulted { .. }))
+            .count(),
+        1
+    );
+    host.shutdown(Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("faulty probe shutdown");
 }
 
 #[tokio::test]
@@ -1224,29 +1105,27 @@ scope = "root"
         .write_all(b"\n# changed process-fixed artifact descriptor\n")
         .expect("change package hash");
     assert!(matches!(
-        submit(
-            &host,
-            "process-fixed-lock-v2",
-            Command::LockManifest {
-                manifest_path: manifest_path.clone(),
-                lock_path: candidate_lock.clone(),
-            },
-        )
-        .await,
-        CommandOutcome::LockResolved { .. }
-    ));
-    let apply = CommandEnvelope::new(
-        "process-fixed-apply",
-        Command::ApplyManifestPath {
+        (CompositionProject {
             manifest_path: manifest_path.clone(),
-            lock_path: candidate_lock.clone(),
+            lock_path: Some(candidate_lock.clone()),
+        })
+        .lock()
+        .expect("lock process-fixed candidate"),
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
+    ));
+    let apply = ApplyRequest {
+        operation_id: OperationId("process-fixed-apply".to_owned()),
+        project: CompositionProject {
+            manifest_path: manifest_path.clone(),
+            lock_path: Some(candidate_lock.clone()),
         },
-    );
+        expected_revision: None,
+    };
     let before = host.snapshot();
     let installed_manifest_before = fs::read(&workspace.manifest_path).expect("installed manifest");
     let installed_lock_before = fs::read(&workspace.lock_path).expect("installed lock");
-    let first = host.submit(apply.clone()).await.expect("restart boundary");
-    assert!(matches!(first.payload, CommandOutcome::RestartRequired));
+    let first = host.apply(apply.clone()).await.expect("restart boundary");
+    assert!(matches!(first, ApplyResult::RestartRequired { .. }));
     assert_eq!(host.snapshot(), before);
     assert_eq!(
         fs::read(&workspace.manifest_path).unwrap(),
@@ -1265,17 +1144,10 @@ scope = "root"
     fs::remove_file(&manifest_path).expect("remove candidate manifest after durable result");
     fs::remove_file(&candidate_lock).expect("remove candidate lock after durable result");
     assert_eq!(
-        host.submit(apply).await.expect("cached terminal replay"),
+        host.apply(apply).await.expect("cached terminal replay"),
         first
     );
-    let graph = host
-        .submit(CommandEnvelope::new(
-            "query-after-cached-restart",
-            Command::QueryGraph,
-        ))
-        .await
-        .expect("cached replay must not stop registry");
-    assert!(matches!(graph.payload, CommandOutcome::Graph { .. }));
+    assert_eq!(host.snapshot(), before, "cached replay keeps registry live");
     host.shutdown(Instant::now() + Duration::from_secs(2))
         .await
         .expect("host shutdown");
@@ -1456,7 +1328,7 @@ scope = "root"
 }
 
 #[tokio::test]
-async fn read_ids_are_connection_correlation_while_mutation_ids_are_durable() {
+async fn typed_reads_are_ephemeral_while_mutation_ids_are_durable() {
     let temp = tempdir().expect("tempdir");
     let host = CompositionHost::open(open_options(
         temp.path().join("state.sqlite3"),
@@ -1468,42 +1340,29 @@ async fn read_ids_are_connection_correlation_while_mutation_ids_are_durable() {
         .subscribe(u64::MAX)
         .await
         .expect("a future u64 cursor has an empty durable replay");
-    host.submit(CommandEnvelope::new("same-id", Command::QueryGraph))
+    let _graph = host.snapshot();
+    let _events = host
+        .events_after(0, 1)
         .await
-        .expect("first command");
-    let events = host
-        .submit(CommandEnvelope::new(
-            "same-id",
-            Command::QueryEvents {
-                after_cursor: 0,
-                limit: 1,
-            },
-        ))
-        .await
-        .expect("read correlation ids may be reused after completion");
-    assert!(matches!(events.payload, CommandOutcome::Events { .. }));
+        .expect("typed reads do not enter durable operation storage");
 
-    let rotate = CommandEnvelope::new("rotate-1", Command::RotateToken);
+    let rotate = OperationId("rotate-1".to_owned());
     let first_generation = host
-        .submit(rotate.clone())
+        .rotate_token(rotate.clone())
         .await
         .expect("first token rotation");
-    assert!(matches!(
-        first_generation.payload,
-        CommandOutcome::TokenRotated { generation: 1 }
-    ));
+    assert_eq!(first_generation.generation, 1);
     assert_eq!(
-        host.submit(rotate).await.expect("idempotent token retry"),
+        host.rotate_token(rotate)
+            .await
+            .expect("idempotent token retry"),
         first_generation
     );
     let second_generation = host
-        .submit(CommandEnvelope::new("rotate-2", Command::RotateToken))
+        .rotate_token(OperationId("rotate-2".to_owned()))
         .await
         .expect("second token rotation");
-    assert!(matches!(
-        second_generation.payload,
-        CommandOutcome::TokenRotated { generation: 2 }
-    ));
+    assert_eq!(second_generation.generation, 2);
     host.shutdown(Instant::now() + Duration::from_secs(2))
         .await
         .expect("shutdown");
@@ -1514,44 +1373,14 @@ async fn read_ids_are_connection_correlation_while_mutation_ids_are_durable() {
     .await
     .expect("reopen host");
     let third_generation = reopened
-        .submit(CommandEnvelope::new("rotate-3", Command::RotateToken))
+        .rotate_token(OperationId("rotate-3".to_owned()))
         .await
         .expect("rotation after restart");
-    assert!(matches!(
-        third_generation.payload,
-        CommandOutcome::TokenRotated { generation: 3 }
-    ));
+    assert_eq!(third_generation.generation, 3);
     reopened
         .shutdown(Instant::now() + Duration::from_secs(2))
         .await
         .expect("shutdown reopened host");
-}
-
-#[tokio::test]
-async fn unsupported_test_adapter_commands_are_not_persisted_as_mutations() {
-    let temp = tempdir().expect("tempdir");
-    let host = CompositionHost::open(open_options(
-        temp.path().join("state.sqlite3"),
-        temp.path().join("cache"),
-    ))
-    .await
-    .expect("host");
-    let first_outcome = host
-        .submit(CommandEnvelope::new("unknown", Command::Unknown))
-        .await
-        .expect("first outcome");
-    let replayed = host
-        .submit(CommandEnvelope::new("unknown", Command::Unknown))
-        .await
-        .expect("read-like adapter rejection may be recomputed");
-    assert_eq!(first_outcome, replayed);
-    assert!(matches!(
-        replayed.payload,
-        CommandOutcome::Rejected { ref code, .. } if code == "unknown_command"
-    ));
-    host.shutdown(Instant::now() + Duration::from_secs(1))
-        .await
-        .expect("shutdown");
 }
 
 #[tokio::test]
@@ -1882,26 +1711,17 @@ scope = "root"
 "#,
     )
     .expect("composition");
-    let host = CompositionHost::open(open_options(
-        temp.path().join("state.sqlite3"),
-        temp.path().join("cache"),
-    ))
-    .await
-    .expect("host");
-
     let lock_path = temp.path().join("candidate.lock");
-    let outcome = submit(
-        &host,
-        "canonical-package-lock",
-        Command::LockManifest {
-            manifest_path: manifest.clone(),
-            lock_path: lock_path.clone(),
-        },
-    )
-    .await;
+    let outcome = CompositionProject {
+        manifest_path: manifest.clone(),
+        lock_path: Some(lock_path.clone()),
+    }
+    .lock()
+    .expect("lock canonical packages");
     match outcome {
-        CommandOutcome::LockResolved { lock } => assert_eq!(lock.packages.len(), 1),
-        other => panic!("unexpected lock outcome: {other:?}"),
+        LockResult::Created { lock } | LockResult::Unchanged { lock } => {
+            assert_eq!(lock.packages.len(), 1);
+        }
     }
 
     let report = CompositionProject {
@@ -1915,15 +1735,11 @@ scope = "root"
         "a lock created for a project must validate that same project: {:?}",
         report.diagnostics
     );
-
-    host.shutdown(Instant::now() + Duration::from_secs(1))
-        .await
-        .expect("shutdown");
 }
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // the v4 fixture spells out the durable foreign-key shape
-async fn legacy_v4_aborted_apply_does_not_block_migration() {
+async fn legacy_v4_store_is_rejected_without_mutation() {
     let temp = tempdir().expect("tempdir");
     let database = temp.path().join("legacy-v4.sqlite3");
     let connection = Connection::open(&database).expect("legacy database");
@@ -1985,12 +1801,25 @@ async fn legacy_v4_aborted_apply_does_not_block_migration() {
         .expect("legacy v4 schema");
     drop(connection);
 
-    let host = CompositionHost::open(open_options(&database, temp.path().join("cache")))
+    let error = CompositionHost::open(open_options(&database, temp.path().join("cache")))
         .await
-        .expect("v4 aborted apply must migrate without violating its journal foreign key");
-    host.shutdown(Instant::now() + Duration::from_secs(1))
-        .await
-        .expect("shutdown");
+        .expect_err("pre-release v0 accepts only the current store schema");
+    assert!(matches!(
+        error,
+        rsi_meta::HostError::UnsupportedStoreSchema {
+            found: 4,
+            supported: 2
+        }
+    ));
+    let connection = Connection::open(&database).expect("legacy database remains readable");
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM store_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy schema version remains");
+    assert_eq!(version, "4", "opening must not partially migrate the store");
 }
 
 #[tokio::test]
@@ -2082,27 +1911,16 @@ async fn lock_manifest_bounds_bytes_from_the_target_of_a_composition_symlink() {
     let manifest = temp.path().join("composition-link.toml");
     fs::write(&target, empty_composition_source()).expect("target composition");
     symlink(&target, &manifest).expect("composition symlink");
-    let host = CompositionHost::open(open_options(
-        temp.path().join("state.sqlite3"),
-        temp.path().join("cache"),
-    ))
-    .await
-    .expect("host");
-
-    let outcome = submit(
-        &host,
-        "symlinked-composition",
-        Command::LockManifest {
-            manifest_path: manifest,
-            lock_path: temp.path().join("candidate.lock"),
-        },
-    )
-    .await;
-    assert!(matches!(outcome, CommandOutcome::LockResolved { .. }));
-
-    host.shutdown(Instant::now() + Duration::from_secs(1))
-        .await
-        .expect("shutdown");
+    let outcome = CompositionProject {
+        manifest_path: manifest,
+        lock_path: Some(temp.path().join("candidate.lock")),
+    }
+    .lock()
+    .expect("lock symlinked composition");
+    assert!(matches!(
+        outcome,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
+    ));
 }
 
 #[tokio::test]
@@ -2144,31 +1962,29 @@ scope = "root"
     ))
     .await
     .expect("host");
-    let first_lock = match submit(
-        &host,
-        "schema-lock-v1",
-        Command::LockManifest {
-            manifest_path: manifest.clone(),
-            lock_path: installed_lock.clone(),
-        },
-    )
-    .await
+    let first_lock = match (CompositionProject {
+        manifest_path: manifest.clone(),
+        lock_path: Some(installed_lock.clone()),
+    })
+    .lock()
+    .expect("lock schema v1")
     {
-        CommandOutcome::LockResolved { lock } => lock,
-        other => panic!("unexpected lock outcome: {other:?}"),
+        LockResult::Created { lock } | LockResult::Unchanged { lock } => lock,
     };
     assert!(first_lock.packages[0].config_schema_sha256.is_some());
-    let first = submit(
-        &host,
-        "schema-apply-v1",
-        Command::ApplyManifestPath {
-            manifest_path: manifest.clone(),
-            lock_path: installed_lock.clone(),
-        },
-    )
-    .await;
+    let first = host
+        .apply(ApplyRequest {
+            operation_id: OperationId("schema-apply-v1".to_owned()),
+            project: CompositionProject {
+                manifest_path: manifest.clone(),
+                lock_path: Some(installed_lock.clone()),
+            },
+            expected_revision: None,
+        })
+        .await
+        .expect("apply schema v1");
     let first_revision = match first {
-        CommandOutcome::Applied { graph } => graph.revision,
+        ApplyResult::Applied { snapshot } => snapshot.graph.revision,
         other => panic!("unexpected apply outcome: {other:?}"),
     };
 
@@ -2182,35 +1998,33 @@ scope = "root"
         }"#,
     )
     .expect("replace only schema bytes");
-    let second_lock = match submit(
-        &host,
-        "schema-lock-v2",
-        Command::LockManifest {
-            manifest_path: manifest.clone(),
-            lock_path: candidate_lock.clone(),
-        },
-    )
-    .await
+    let second_lock = match (CompositionProject {
+        manifest_path: manifest.clone(),
+        lock_path: Some(candidate_lock.clone()),
+    })
+    .lock()
+    .expect("lock schema v2")
     {
-        CommandOutcome::LockResolved { lock } => lock,
-        other => panic!("unexpected candidate lock outcome: {other:?}"),
+        LockResult::Created { lock } | LockResult::Unchanged { lock } => lock,
     };
     assert_ne!(
         second_lock.packages[0].config_schema_sha256,
         first_lock.packages[0].config_schema_sha256
     );
-    let second = submit(
-        &host,
-        "schema-apply-v2",
-        Command::ApplyManifestPath {
-            manifest_path: manifest.clone(),
-            lock_path: candidate_lock,
-        },
-    )
-    .await;
+    let second = host
+        .apply(ApplyRequest {
+            operation_id: OperationId("schema-apply-v2".to_owned()),
+            project: CompositionProject {
+                manifest_path: manifest.clone(),
+                lock_path: Some(candidate_lock),
+            },
+            expected_revision: None,
+        })
+        .await
+        .expect("apply schema v2");
     assert!(matches!(
         second,
-        CommandOutcome::Applied { ref graph } if graph.revision > first_revision
+        ApplyResult::Applied { ref snapshot } if snapshot.graph.revision > first_revision
     ));
     assert_eq!(
         fs::read(temp.path().join("provider/plugin.toml")).expect("unchanged package manifest"),
@@ -2263,16 +2077,13 @@ async fn failed_apply_commit_restores_installed_pair_before_returning() {
     let candidate_lock = temp.path().join("candidate.lock");
     write_probe_composition(&candidate_manifest, "normal_ack", "none", "candidate");
     assert!(matches!(
-        submit(
-            &host,
-            "candidate-lock",
-            Command::LockManifest {
-                manifest_path: candidate_manifest.clone(),
-                lock_path: candidate_lock.clone(),
-            },
-        )
-        .await,
-        CommandOutcome::LockResolved { .. }
+        (CompositionProject {
+            manifest_path: candidate_manifest.clone(),
+            lock_path: Some(candidate_lock.clone()),
+        })
+        .lock()
+        .expect("lock candidate"),
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
 
     let connection = Connection::open(temp.path().join("state.sqlite3")).expect("open store");
@@ -2288,18 +2099,19 @@ async fn failed_apply_commit_restores_installed_pair_before_returning() {
         .expect("install commit failure trigger");
 
     let outcome = host
-        .submit(CommandEnvelope::new(
-            "candidate-apply",
-            Command::ApplyManifestPath {
+        .apply(ApplyRequest {
+            operation_id: OperationId("candidate-apply".to_owned()),
+            project: CompositionProject {
                 manifest_path: candidate_manifest,
-                lock_path: candidate_lock,
+                lock_path: Some(candidate_lock),
             },
-        ))
+            expected_revision: None,
+        })
         .await
-        .expect("commit failure is returned as a durable rejection");
+        .expect_err("commit failure is returned as a durable rejection");
     assert!(matches!(
-        outcome.payload,
-        CommandOutcome::Rejected { ref code, ref message }
+        outcome,
+        rsi_meta::HostError::OperationRejected { ref code, ref message, .. }
             if code == "apply_commit_failed"
                 && message.contains("injected apply commit failure")
     ));
@@ -2322,7 +2134,7 @@ async fn failed_apply_commit_restores_installed_pair_before_returning() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // the legacy schema fixture is intentionally explicit SQL
-async fn legacy_v0_store_migrates_transactionally_and_preserves_state() {
+async fn legacy_v0_store_is_rejected_without_mutation() {
     let temp = tempdir().expect("tempdir");
     let database = temp.path().join("legacy.sqlite3");
     let connection = Connection::open(&database).expect("legacy database");
@@ -2372,40 +2184,17 @@ async fn legacy_v0_store_migrates_transactionally_and_preserves_state() {
         .expect("legacy schema");
     drop(connection);
 
-    let host = CompositionHost::open(open_options(&database, temp.path().join("cache")))
+    let error = CompositionHost::open(open_options(&database, temp.path().join("cache")))
         .await
-        .expect("v0 migration through public open");
-    let queried = submit(
-        &host,
-        "legacy-events-query",
-        Command::QueryEvents {
-            after_cursor: 0,
-            limit: 10,
-        },
-    )
-    .await;
+        .expect_err("pre-release v0 accepts only the current store schema");
     assert!(matches!(
-        queried,
-        CommandOutcome::Events { ref events }
-            if events.len() == 1
-                && events[0].operation_id.as_ref().map(|id| id.0.as_str())
-                    == Some("system/legacy/1")
+        error,
+        rsi_meta::HostError::UnsupportedStoreSchema {
+            found: 0,
+            supported: 2
+        }
     ));
-    let mut subscribed = host.subscribe(0).await.expect("subscribe migrated events");
-    let replayed = subscribed
-        .recv()
-        .await
-        .expect("migrated event replay")
-        .expect("valid migrated event");
-    assert_eq!(
-        replayed.operation_id.as_ref().map(|id| id.0.as_str()),
-        Some("system/legacy/1")
-    );
-    host.shutdown(Instant::now() + Duration::from_secs(1))
-        .await
-        .expect("shutdown");
-
-    let connection = Connection::open(&database).expect("migrated database");
+    let connection = Connection::open(&database).expect("legacy database remains readable");
     let version: String = connection
         .query_row(
             "SELECT value FROM store_meta WHERE key = 'schema_version'",
@@ -2413,20 +2202,7 @@ async fn legacy_v0_store_migrates_transactionally_and_preserves_state() {
             |row| row.get(0),
         )
         .expect("schema version");
-    assert_eq!(version, "5");
-    let migrated_event: (String, String) = connection
-        .query_row(
-            "SELECT command_id, event_json FROM control_event WHERE cursor = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("migrated event row");
-    assert_eq!(migrated_event.0, "system/legacy/1");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&migrated_event.1).expect("migrated event JSON")
-            ["command_id"],
-        "system/legacy/1"
-    );
+    assert_eq!(version, "0");
     let state: (i64, String) = connection
         .query_row(
             "SELECT version, value_json FROM plugin_state
@@ -2436,14 +2212,6 @@ async fn legacy_v0_store_migrates_transactionally_and_preserves_state() {
         )
         .expect("legacy state");
     assert_eq!(state, (7, r#"{"count":7}"#.to_owned()));
-    drop(connection);
-    let reopened = CompositionHost::open(open_options(&database, temp.path().join("cache-reopen")))
-        .await
-        .expect("migrated store reopens");
-    reopened
-        .shutdown(Instant::now() + Duration::from_secs(1))
-        .await
-        .expect("reopened shutdown");
 }
 
 #[tokio::test]
@@ -2466,7 +2234,7 @@ async fn future_store_schema_is_rejected_without_mutation() {
         error,
         rsi_meta::HostError::UnsupportedStoreSchema {
             found: 999,
-            supported: 5
+            supported: 2
         }
     ));
     assert_eq!(
@@ -2524,16 +2292,13 @@ scope = "root"
         .await
         .expect("bootstrap host");
     assert!(matches!(
-        submit(
-            &bootstrap,
-            "initial-lock",
-            Command::LockManifest {
-                manifest_path: installed_manifest.clone(),
-                lock_path: installed_lock.clone(),
-            },
-        )
-        .await,
-        CommandOutcome::LockResolved { .. }
+        (CompositionProject {
+            manifest_path: installed_manifest.clone(),
+            lock_path: Some(installed_lock.clone()),
+        })
+        .lock()
+        .expect("lock initial relocatable project"),
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
     bootstrap
         .shutdown(Instant::now() + Duration::from_secs(1))
@@ -2546,28 +2311,26 @@ scope = "root"
     .await
     .expect("installed host");
     assert!(matches!(
-        submit(
-            &host,
-            "candidate-lock",
-            Command::LockManifest {
-                manifest_path: candidate_manifest.clone(),
-                lock_path: candidate_lock.clone(),
-            },
-        )
-        .await,
-        CommandOutcome::LockResolved { .. }
+        (CompositionProject {
+            manifest_path: candidate_manifest.clone(),
+            lock_path: Some(candidate_lock.clone()),
+        })
+        .lock()
+        .expect("lock relocatable candidate"),
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
     assert!(matches!(
-        submit(
-            &host,
-            "relocate-apply",
-            Command::ApplyManifestPath {
+        host.apply(ApplyRequest {
+            operation_id: OperationId("relocate-apply".to_owned()),
+            project: CompositionProject {
                 manifest_path: candidate_manifest,
-                lock_path: candidate_lock,
+                lock_path: Some(candidate_lock),
             },
-        )
-        .await,
-        CommandOutcome::Applied { .. }
+            expected_revision: None,
+        })
+        .await
+        .expect("apply relocatable candidate"),
+        ApplyResult::Applied { .. }
     ));
     let canonical_package =
         fs::canonicalize(packages.join("provider/plugin.toml")).expect("canonical package path");
@@ -2638,8 +2401,8 @@ async fn mixed_pair_pending_recovery_restores_both_previous_files() {
     connection
         .execute(
             "INSERT INTO command_outcome(
-               command_id,schema_version,composition_id,request_hash,status,outcome_json
-             ) VALUES (?1,2,'',X'01','pending',NULL)",
+               command_id,composition_id,request_hash,operation_kind,status
+             ) VALUES (?1,'',X'01','apply','pending')",
             [command_id],
         )
         .expect("pending command");
@@ -2652,8 +2415,8 @@ async fn mixed_pair_pending_recovery_restores_both_previous_files() {
                previous_manifest_bytes,previous_lock_bytes,
                previous_manifest_hash,previous_lock_hash,
                terminal_graph_revision,terminal_event_json,
-               terminal_outcome_json,terminal_desired_json,state
-             ) VALUES (?1,'',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13,?14,'pending')",
+               terminal_outcome_json,terminal_desired_json,operation_kind
+             ) VALUES (?1,'',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13,?14,'apply')",
             rusqlite::params![
                 command_id,
                 installed_manifest.to_str().expect("manifest path"),

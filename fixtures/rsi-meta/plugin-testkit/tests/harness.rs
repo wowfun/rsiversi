@@ -2,12 +2,12 @@ use std::convert::Infallible;
 use std::ffi::c_void;
 use std::time::Duration;
 
-use rsi_meta_frame_contract::{Frame, FrameBody};
 use rsi_meta_plugin::sdk::{Host, Plugin};
 use rsi_meta_plugin::{
     ABI_MAJOR, ABI_MINOR, CALL_FAILED, CALL_OK, CallOutcome, HostApi, INIT_OK, Lane, PluginApi,
     PostFrameOutcome,
 };
+use rsi_meta_plugin::{Frame, FrameBody};
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::json;
 

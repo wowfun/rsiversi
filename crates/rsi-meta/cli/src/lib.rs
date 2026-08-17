@@ -21,3 +21,5 @@ mod unix;
 
 /// Process exit used when an online apply requires an external stop/install cycle.
 pub const DAEMON_RESTART_EXIT_CODE: u8 = 75;
+
+pub use streams::{decode_stream_data, encode_stream_data};

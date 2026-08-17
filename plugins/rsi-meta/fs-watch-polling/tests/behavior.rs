@@ -1,24 +1,28 @@
 use std::fs;
+use std::time::Duration;
 
-use rsi_meta_frame_contract::{EVENT_DATA, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN};
 use rsi_meta_plugin::{CallOutcome, Lane};
+use rsi_meta_plugin::{Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN};
 use rsi_meta_plugin_fs_watch_polling::rsi_meta_plugin_entry_v0;
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn decode_data(body: FrameBody) -> Value {
-    let FrameBody::ServiceEvent { event, payload, .. } = body else {
-        panic!("expected service event")
+    let FrameBody::ServiceDataEvent { payload, .. } = body else {
+        panic!("expected service DATA event")
     };
-    assert_eq!(event, EVENT_DATA);
-    let bytes = payload
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
-        .collect::<Vec<_>>();
-    serde_json::from_slice(&bytes).unwrap()
+    serde_json::from_slice(&payload).unwrap()
+}
+
+fn recv_data(plugin: &PluginHarness) -> Value {
+    decode_data(
+        plugin
+            .recv(Duration::from_secs(5))
+            .expect("polling worker frame")
+            .frame
+            .body,
+    )
 }
 
 #[test]
@@ -73,11 +77,6 @@ fn polling_stream_withholds_data_until_credit_then_flushes_ready_and_change_fifo
     assert_eq!(plugin.send(Lane::Data, &open).unwrap(), CallOutcome::Ok);
     assert!(plugin.try_recv().unwrap().is_none());
 
-    fs::write(&watched, b"bravo").unwrap();
-    let tick = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 23}));
-    assert_eq!(plugin.send(Lane::Control, &tick).unwrap(), CallOutcome::Ok);
-    assert!(plugin.try_recv().unwrap().is_none());
-
     let one_byte = Frame::service_request("watch-1", "fs.watch", OP_CREDIT, json!({"bytes": 1}));
     assert_eq!(plugin.send(Lane::Data, &one_byte).unwrap(), CallOutcome::Ok);
     assert!(plugin.try_recv().unwrap().is_none());
@@ -93,14 +92,18 @@ fn polling_stream_withholds_data_until_credit_then_flushes_ready_and_change_fifo
         CallOutcome::Ok
     );
 
-    let ready = decode_data(plugin.try_recv().unwrap().unwrap().frame.body);
-    let changed = decode_data(plugin.try_recv().unwrap().unwrap().frame.body);
+    let ready = recv_data(&plugin);
     assert_eq!(ready["type"], "ready");
     assert_eq!(ready["path"], watched.to_string_lossy().as_ref());
     assert_eq!(
         ready["snapshot"]["content_sha256"],
         "e24bc62381f1224fbbb74688663f8f9743b9680b193edd666835e97b06e730eb"
     );
+
+    fs::write(&watched, b"bravo").unwrap();
+    let tick = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 23}));
+    assert_eq!(plugin.send(Lane::Control, &tick).unwrap(), CallOutcome::Ok);
+    let changed = recv_data(&plugin);
     assert_eq!(changed["type"], "changed");
     assert_eq!(changed["tick"], 23);
     assert_eq!(
@@ -231,10 +234,7 @@ fn one_path_io_error_does_not_starve_later_watch_streams() {
                 .unwrap(),
             CallOutcome::Ok
         );
-        assert_eq!(
-            decode_data(plugin.try_recv().unwrap().unwrap().frame.body)["type"],
-            "ready"
-        );
+        assert_eq!(recv_data(&plugin)["type"], "ready");
     }
 
     fs::remove_file(&broken).unwrap();
@@ -247,10 +247,10 @@ fn one_path_io_error_does_not_starve_later_watch_streams() {
         "a per-path metadata error must not abort the shared polling tick"
     );
 
-    let broken_event = decode_data(plugin.try_recv().unwrap().unwrap().frame.body);
+    let broken_event = recv_data(&plugin);
     assert_eq!(broken_event["type"], "error");
     assert_eq!(broken_event["path"], broken.to_string_lossy().as_ref());
-    let healthy_event = decode_data(plugin.try_recv().unwrap().unwrap().frame.body);
+    let healthy_event = recv_data(&plugin);
     assert_eq!(healthy_event["type"], "changed");
     assert_eq!(healthy_event["path"], healthy.to_string_lossy().as_ref());
     assert_eq!(healthy_event["tick"], 24);

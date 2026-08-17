@@ -2,29 +2,21 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rsi_meta_frame_contract::{
-    EVENT_DATA, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT,
-    RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_loader::PluginManifest;
 use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
+    Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin_fs_watch_native::rsi_meta_plugin_entry_v0;
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn decode_data(body: FrameBody) -> Value {
-    let FrameBody::ServiceEvent { event, payload, .. } = body else {
-        panic!("expected service event")
+    let FrameBody::ServiceDataEvent { payload, .. } = body else {
+        panic!("expected service DATA event")
     };
-    assert_eq!(event, EVENT_DATA);
-    let bytes = payload
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
-        .collect::<Vec<_>>();
-    serde_json::from_slice(&bytes).unwrap()
+    serde_json::from_slice(&payload).unwrap()
 }
 
 fn recv_changed(plugin: &PluginHarness, watched: &Path) -> Value {

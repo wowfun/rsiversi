@@ -1,12 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions as FileOpenOptions};
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rsi_meta_loader::{
-    ContentHash, ExpectedHashes, LoaderError, PluginLoader, PluginPackage, hash_regular_file,
-    prepare_config_with_schema, read_bounded_file_following_symlinks,
+    ContentHash, ExpectedHashes, LoaderError, PluginLoader, PluginPackage, compile_config_schema,
+    hash_regular_file, prepare_config_with_compiled_schema, read_bounded_file_following_symlinks,
     resolve_package_relative_file,
 };
 use serde::de::DeserializeOwned;
@@ -27,7 +26,9 @@ use crate::runtime::{
 };
 use crate::{HostError, Result};
 
+mod atomic_file;
 mod package_files;
+pub(crate) use atomic_file::{install_pair, write_bytes_atomic, write_lock_create_new};
 use package_files::{
     config_schema_bytes as package_config_schema_bytes,
     config_schema_hash as package_config_schema_hash,
@@ -172,16 +173,31 @@ pub(crate) fn affected_instances(
             affected.insert(route.0.clone());
         }
     }
-    let bindings = old_graph.bindings.iter().chain(&new_graph.bindings);
-    loop {
-        let before = affected.len();
-        for binding in bindings.clone() {
-            if affected.contains(&binding.provider) {
-                affected.insert(binding.consumer.clone());
+    include_affected_dependents(&mut affected, old_graph, new_graph);
+    affected
+}
+
+pub(crate) fn include_affected_dependents(
+    affected: &mut BTreeSet<InstanceId>,
+    old_graph: &GraphSnapshot,
+    new_graph: &GraphSnapshot,
+) {
+    let mut dependents = BTreeMap::<&InstanceId, BTreeSet<&InstanceId>>::new();
+    for binding in old_graph.bindings.iter().chain(&new_graph.bindings) {
+        dependents
+            .entry(&binding.provider)
+            .or_default()
+            .insert(&binding.consumer);
+    }
+    let mut pending: VecDeque<_> = affected.iter().cloned().collect();
+    while let Some(provider) = pending.pop_front() {
+        let Some(consumers) = dependents.get(&provider) else {
+            continue;
+        };
+        for consumer in consumers {
+            if affected.insert((*consumer).clone()) {
+                pending.push_back((*consumer).clone());
             }
-        }
-        if affected.len() == before {
-            return affected;
         }
     }
 }
@@ -312,7 +328,6 @@ pub(crate) async fn launch_and_prepare_pumping_services(
     tokio::pin!(launch);
     let result = loop {
         tokio::select! {
-            biased;
             call = host_services.recv() => {
                 let Some(call) = call else {
                     break launch.await;
@@ -358,9 +373,32 @@ fn resolve_instances(
                 package_path.display()
             ))
         })?;
-        let package = PluginPackage::open(&package_path)?;
+        let (package, artifact_hash, staged) = if stage {
+            let staged = loader.stage(
+                &package_path,
+                ExpectedHashes::new(
+                    locked_package.manifest_sha256,
+                    locked_package.artifact_sha256,
+                ),
+            )?;
+            (
+                staged.package().clone(),
+                staged.artifact_hash(),
+                Some(staged),
+            )
+        } else {
+            let package = PluginPackage::open(&package_path)?;
+            let artifact = loader.validate_manifest(package.manifest())?;
+            let actual_artifact = resolve_package_relative_file(
+                &package_path,
+                &artifact.path,
+                "artifacts.path",
+                "resolve plugin artifact",
+            )?;
+            let artifact_hash = hash_regular_file(&actual_artifact, "hash plugin artifact")?;
+            (package, artifact_hash, None)
+        };
         let descriptor = package.manifest();
-        let artifact = loader.validate_manifest(descriptor)?;
         if descriptor.package.id != locked_package.id.0
             || descriptor.package.version != locked_package.version
         {
@@ -369,13 +407,6 @@ fn resolve_instances(
                 instance.package.display()
             )));
         }
-        let actual_artifact = resolve_package_relative_file(
-            &package_path,
-            &artifact.path,
-            "artifacts.path",
-            "resolve plugin artifact",
-        )?;
-        let artifact_hash = hash_regular_file(&actual_artifact, "hash plugin artifact")?;
         if descriptor.package.process_fixed {
             process_fixed_packages.insert((
                 PackageId::new(descriptor.package.id.clone()),
@@ -383,6 +414,10 @@ fn resolve_instances(
             ));
         }
         let config_schema_bytes = package_config_schema_bytes(&package)?;
+        let compiled_schema = Arc::new(compile_config_schema(
+            &package,
+            config_schema_bytes.as_deref(),
+        )?);
         let schema_hash = config_schema_bytes.as_deref().map(ContentHash::digest);
         if package.manifest_hash() != locked_package.manifest_sha256
             || artifact_hash != locked_package.artifact_sha256
@@ -393,17 +428,6 @@ fn resolve_instances(
                 instance.package.display()
             )));
         }
-        let staged = if stage {
-            Some(loader.stage(
-                &package_path,
-                ExpectedHashes::new(
-                    locked_package.manifest_sha256,
-                    locked_package.artifact_sha256,
-                ),
-            )?)
-        } else {
-            None
-        };
         packages.insert(
             package_path.clone(),
             (
@@ -422,6 +446,7 @@ fn resolve_instances(
                 descriptor.package.process_fixed,
                 package_config_schema_path(&package)?,
                 config_schema_bytes,
+                compiled_schema,
                 package,
                 staged,
             ),
@@ -448,6 +473,7 @@ fn resolve_instances(
                 process_fixed,
                 config_schema_path,
                 config_schema_bytes,
+                compiled_schema,
                 package,
                 staged,
             ) = packages
@@ -458,11 +484,8 @@ fn resolve_instances(
             } else {
                 instance.config.clone()
             };
-            let prepared_config = prepare_config_with_schema(
-                package,
-                config_schema_bytes.as_deref(),
-                unresolved_config,
-            )?;
+            let prepared_config =
+                prepare_config_with_compiled_schema(compiled_schema, unresolved_config)?;
             let provides = provides.iter().cloned().map(ServiceKey::new).collect();
             let requires: Vec<_> = injects
                 .iter()
@@ -494,13 +517,7 @@ fn resolve_instances(
                 },
             );
             if let Some(staged) = staged {
-                let schema = config_schema_bytes
-                    .as_ref()
-                    .map(|bytes| {
-                        let value = serde_json::from_slice(bytes).map_err(HostError::from)?;
-                        Ok::<_, HostError>((value, ContentHash::digest(bytes)))
-                    })
-                    .transpose()?;
+                let schema = compiled_schema.schema().cloned().zip(schema_hash);
                 runtimes.insert(
                     instance.id.clone(),
                     PreparedRuntimeInstance {
@@ -572,7 +589,9 @@ pub(crate) fn composition_event(
                 (0_u32, 0_u32),
                 |(active, inactive), instance| match instance.status {
                     InstanceStatus::Active => (active.saturating_add(1), inactive),
-                    InstanceStatus::Inactive { .. } => (active, inactive.saturating_add(1)),
+                    InstanceStatus::Inactive { .. } | InstanceStatus::Faulted { .. } => {
+                        (active, inactive.saturating_add(1))
+                    }
                 },
             );
     Event::CompositionCommitted {
@@ -582,52 +601,6 @@ pub(crate) fn composition_event(
         lock_sha256: prepared.lock_hash.to_string(),
         active_instances,
         inactive_instances,
-    }
-}
-
-pub(crate) fn validate_paths(
-    manifest_path: &Path,
-    lock_path: Option<&Path>,
-    loader: &PluginLoader,
-) -> ValidationReport {
-    let result = if let Some(lock_path) = lock_path {
-        prepare_pair(
-            &CompositionFiles::new(manifest_path, lock_path),
-            loader,
-            false,
-        )
-        .and_then(|prepared| {
-            let mut next = 1;
-            resolve_prepared(&prepared, GraphRevision(0), None, &mut next).map(|_| ())
-        })
-    } else {
-        build_lock(manifest_path, loader).and_then(|lock| {
-            let (manifest, _) = read_toml::<CompositionManifest>(manifest_path)?;
-            let resolved = resolve_instances(&manifest, &lock, manifest_path, loader, false)?;
-            let mut next = 1;
-            resolve(
-                &manifest.composition.id,
-                &resolved.instances,
-                &manifest.scope_parents(),
-                GraphRevision(0),
-                None,
-                &mut next,
-            )
-            .map(|_| ())
-            .map_err(|report| HostError::InvalidManifest(format_diagnostics(&report)))
-        })
-    };
-    match result {
-        Ok(()) => ValidationReport {
-            diagnostics: Vec::new(),
-        },
-        Err(error) => ValidationReport {
-            diagnostics: vec![crate::model::Diagnostic::error(
-                "validation_failed",
-                error.to_string(),
-                None,
-            )],
-        },
     }
 }
 
@@ -737,133 +710,6 @@ pub(crate) fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<(T, Vec<u8>)
         message: error.to_string(),
     })?;
     Ok((value, bytes))
-}
-
-pub(crate) fn write_lock_create_new(path: &Path, lock: &CompositionLock) -> Result<()> {
-    let source = toml::to_string_pretty(lock)
-        .map_err(|error| HostError::InvalidManifest(error.to_string()))?;
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|source| HostError::Io {
-            path: parent.to_owned(),
-            source,
-        })?;
-    }
-    let temporary = path.with_extension(format!("lock-tmp-{}", uuid::Uuid::now_v7()));
-    let mut file = FileOpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|source| HostError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    if let Err(source) = file
-        .write_all(source.as_bytes())
-        .and_then(|()| file.sync_all())
-    {
-        let _ = fs::remove_file(&temporary);
-        return Err(HostError::Io {
-            path: temporary,
-            source,
-        });
-    }
-    drop(file);
-    if let Err(source) = fs::hard_link(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return if source.kind() == std::io::ErrorKind::AlreadyExists {
-            Err(HostError::LockAlreadyExists {
-                path: path.to_owned(),
-            })
-        } else {
-            Err(HostError::Io {
-                path: path.to_owned(),
-                source,
-            })
-        };
-    }
-    fs::remove_file(&temporary).map_err(|source| HostError::Io {
-        path: temporary,
-        source,
-    })?;
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        FileOpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| HostError::Io {
-                path: parent.to_owned(),
-                source,
-            })?;
-    }
-    Ok(())
-}
-
-pub(crate) fn install_pair(
-    prepared: &PreparedComposition,
-    installed: &CompositionFiles,
-    command_id: &str,
-) -> Result<()> {
-    #[cfg(not(feature = "test-failpoints"))]
-    let _ = command_id;
-    // The lock is installed last and is the recovery commit marker.
-    write_bytes_atomic(&installed.manifest_path, &prepared.manifest_bytes)?;
-    #[cfg(feature = "test-failpoints")]
-    crate::test_failpoints::gate(
-        command_id,
-        crate::test_failpoints::CrashPoint::ManifestReplacedBeforeLock,
-    );
-    write_bytes_atomic(&installed.lock_path, &prepared.lock_bytes)
-}
-
-pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|source| HostError::Io {
-            path: parent.to_owned(),
-            source,
-        })?;
-    }
-    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
-    let mut file = FileOpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|source| HostError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| HostError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    fs::rename(&temporary, path).map_err(|source| HostError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        FileOpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| HostError::Io {
-                path: parent.to_owned(),
-                source,
-            })?;
-    }
-    Ok(())
 }
 
 pub(crate) fn resolve_package_path(base: &Path, declared: &Path) -> PathBuf {

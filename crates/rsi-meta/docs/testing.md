@@ -8,7 +8,7 @@ The conformance suite observes behavior only through `CompositionHost`, the C AB
 |---|---|
 | Graph and lifecycle | Scope resolution, inactive instances, atomic cutover, generation leases, HMR, and retirement from the [composition runtime](subsystems/composition-runtime.md) |
 | ABI and package | Maintained header layout, safe SDK trampolines, package validation, and real `cdylib` loading |
-| State and recovery | Workspace leases, pair integrity, domain-operation idempotency, v4-to-v5 migration, apply/install recovery, and failpoints |
+| State and recovery | Workspace leases, pair integrity, domain-operation idempotency, strict single-version store rejection, bounded retention/quotas, apply/install recovery, and failpoints |
 | Daemon and stream | Local adapters, replay cursor, reconnect reasons, and credit-bounded streams from the [protocol contract](subsystems/protocols.md) |
 | Security | Local-only admission, credentials, ownership checks, redaction, bounds, and fail-closed behavior from [security.md](security.md) |
 

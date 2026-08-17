@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use rsi_meta_fixture_echo_bidi::rsi_meta_plugin_entry_v0;
-use rsi_meta_frame_contract::{
-    EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_DATA,
-    OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
+    EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_HALF_CLOSE, OP_OPEN,
+    RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::json;
 
@@ -93,12 +93,11 @@ fn failed_initial_credit_does_not_retain_the_stream_id() {
 #[test]
 fn data_would_block_is_retained_and_charged_once() {
     let mut plugin = committed_echo();
-    let payload = json!([1, 2, 3]);
-    let encoded = serde_json::to_vec(&payload).unwrap().len() as u64;
-    open_echo(&mut plugin, "blocked-data", encoded);
+    let payload = vec![1, 2, 3];
+    open_echo(&mut plugin, "blocked-data", payload.len() as u64);
 
     plugin.set_post_outcome(PostFrameOutcome::WouldBlock);
-    let data = Frame::service_request("blocked-data", "fixture.echo", OP_DATA, payload.clone());
+    let data = Frame::service_data_request("blocked-data", "fixture.echo", payload.clone());
     assert_eq!(
         plugin.send(Lane::Data, &data).unwrap(),
         CallOutcome::Ok,
@@ -113,10 +112,9 @@ fn data_would_block_is_retained_and_charged_once() {
     );
     assert_eq!(
         plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
-        FrameBody::ServiceEvent {
-            request_id: Some("blocked-data".to_owned()),
+        FrameBody::ServiceDataEvent {
+            request_id: "blocked-data".to_owned(),
             service: "fixture.echo".to_owned(),
-            event: EVENT_DATA.to_owned(),
             payload,
         }
     );
@@ -246,8 +244,8 @@ fn committed_echo_service_obeys_open_credit_data_and_end() {
         }
     );
 
-    let bytes = json!([104, 101, 108, 108, 111]);
-    let encoded_len = serde_json::to_vec(&bytes).unwrap().len() as u64;
+    let bytes = b"hello".to_vec();
+    let encoded_len = bytes.len() as u64;
     let reply_credit = Frame::service_request(
         "echo-1",
         "fixture.echo",
@@ -259,14 +257,13 @@ fn committed_echo_service_obeys_open_credit_data_and_end() {
         CallOutcome::Ok
     );
 
-    let data = Frame::service_request("echo-1", "fixture.echo", OP_DATA, bytes.clone());
+    let data = Frame::service_data_request("echo-1", "fixture.echo", bytes.clone());
     assert_eq!(plugin.send(Lane::Data, &data).unwrap(), CallOutcome::Ok);
     assert_eq!(
         plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
-        FrameBody::ServiceEvent {
-            request_id: Some("echo-1".to_owned()),
+        FrameBody::ServiceDataEvent {
+            request_id: "echo-1".to_owned(),
             service: "fixture.echo".to_owned(),
-            event: EVENT_DATA.to_owned(),
             payload: bytes,
         }
     );

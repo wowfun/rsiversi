@@ -8,15 +8,14 @@ use super::{
     Arc, ArcSwap, BTreeMap, BTreeSet, CasResult, Command, CommandEnvelope, CommandOutcome,
     CommandOutcomeEnvelope, CompositionChangeSource, CompositionDigest, CompositionFiles,
     CompositionMode, ContentHash, DesiredState, Event, EventEnvelope, GraphRevision, HostError,
-    HostServiceCall, InstanceFingerprint, InstanceId, Path, Persistence, PluginCommandRequest,
+    HostServiceCall, InstanceFingerprint, InstanceId, Persistence, PluginCommandRequest,
     PluginFrame, PluginInspection, PluginLoader, RegistryMessage, Result, RetirementRegistry,
-    RoutingSnapshot, RuntimeLaunchContext, StdMutex, StoredCommand, SubscriptionStart,
-    abort_prepared_reverse, affected_instances, broadcast, build_inspections, build_lock,
-    composition_event, dependency_waves, graph_with_retirements, install_pair,
+    RoutingSnapshot, RuntimeFault, RuntimeLaunchContext, StdMutex, StoredCommand,
+    SubscriptionStart, abort_prepared_reverse, affected_instances, broadcast, build_inspections,
+    build_lock, composition_event, dependency_waves, include_affected_dependents, install_pair,
     instance_fingerprints, launch_and_prepare_pumping_services, mpsc,
     normalize_prepared_for_install, prepare_pair, publish_routing_cutover, read_optional_bytes,
-    remove_file_and_sync_parent, resolve_prepared, restore_previous_pair, validate_paths,
-    write_lock_create_new,
+    remove_file_and_sync_parent, resolve_prepared, restore_previous_pair,
 };
 use retirement::register_retirement_waves;
 use state::{validate_state_key, validate_state_value};
@@ -35,8 +34,10 @@ pub(super) struct RegistryActor {
     pub(super) launch_context: RuntimeLaunchContext,
     pub(super) plugin_command_receiver: mpsc::Receiver<PluginCommandRequest>,
     pub(super) host_service_receiver: mpsc::Receiver<HostServiceCall>,
+    pub(super) runtime_fault_receiver: mpsc::Receiver<RuntimeFault>,
     pub(super) retirements: RetirementRegistry,
     pub(super) current_mode: CompositionMode,
+    pub(super) fatal: bool,
     pub(super) _workspace_lease: crate::workspace::WorkspaceLease,
 }
 
@@ -44,7 +45,6 @@ impl RegistryActor {
     pub(super) async fn run(mut self, mut receiver: mpsc::Receiver<RegistryMessage>) {
         loop {
             tokio::select! {
-                biased;
                 message = receiver.recv() => {
                     let Some(message) = message else {
                         break;
@@ -101,10 +101,46 @@ impl RegistryActor {
                     }
                 }
                 Some(call) = self.host_service_receiver.recv() => self.handle_host_service(call),
+                Some(fault) = self.runtime_fault_receiver.recv() => self.handle_runtime_fault(fault),
                 else => break,
             }
         }
-        self.stop_current_runtimes().await;
+        if !self.fatal {
+            self.stop_current_runtimes().await;
+        }
+    }
+
+    fn handle_runtime_fault(&mut self, fault: RuntimeFault) {
+        let snapshot = self.routing.load_full();
+        let Some(generation) = snapshot.generation(&fault.instance) else {
+            return;
+        };
+        if generation.id != fault.generation || generation.has_healthy_runtime() {
+            return;
+        }
+        generation.stop_admission();
+        let command_id = format!("system:runtime-fault:{}", fault.generation);
+        let event = match self.persistence.append_event(
+            snapshot.graph().composition_id.as_str(),
+            &command_id,
+            snapshot.revision(),
+            Event::RuntimeFaulted {
+                instance_id: fault.instance,
+                reason: fault.reason,
+            },
+        ) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::error!(%error, "failed to persist runtime fault; stopping admission");
+                self.fail_stop_admission();
+                return;
+            }
+        };
+        let _cutover = self.cutover.lock().expect("routing cutover mutex poisoned");
+        let mut updated = (*self.routing.load_full()).clone();
+        updated.set_event_cursor(event.cursor);
+        self.routing.store(Arc::new(updated));
+        let _ = self.events.send(event);
     }
 
     async fn handle_command(
@@ -143,6 +179,21 @@ impl RegistryActor {
                         "command {:?} is pending crash recovery",
                         command.command_id
                     ))),
+                    false,
+                );
+            }
+            Ok(Some(StoredCommand::Expired {
+                request_hash: stored_hash,
+                classification,
+            })) if stored_hash == request_hash => {
+                return (
+                    Err(HostError::OperationRejected {
+                        code: "operation_expired".to_owned(),
+                        message: format!(
+                            "operation result expired after terminal state {classification:?}"
+                        ),
+                        details: BTreeMap::new(),
+                    }),
                     false,
                 );
             }
@@ -197,50 +248,6 @@ impl RegistryActor {
                 )
                 .await
             }
-            Command::ValidateManifest {
-                manifest_path,
-                lock_path,
-            } => {
-                let report = validate_paths(&manifest_path, lock_path.as_deref(), &self.loader);
-                self.store_simple(
-                    &command_id,
-                    &request_hash,
-                    CommandOutcome::Validation { report },
-                )
-            }
-            Command::LockManifest {
-                manifest_path,
-                lock_path,
-            } => self.lock_manifest(&command_id, &request_hash, &manifest_path, &lock_path),
-            Command::QueryGraph => {
-                let snapshot = self.routing.load_full();
-                self.store_simple(
-                    &command_id,
-                    &request_hash,
-                    CommandOutcome::Graph {
-                        graph: graph_with_retirements(snapshot.graph(), &self.retirements),
-                        cursor: snapshot.event_cursor(),
-                    },
-                )
-            }
-            Command::QueryEvents {
-                after_cursor,
-                limit,
-            } => match self.persistence.query_events(after_cursor, limit) {
-                Ok(events) => self.store_simple(
-                    &command_id,
-                    &request_hash,
-                    CommandOutcome::Events { events },
-                ),
-                Err(error) => Err(error),
-            },
-            Command::InspectPlugin { instance_id } => self.store_simple(
-                &command_id,
-                &request_hash,
-                CommandOutcome::Plugin {
-                    instance: self.plugin_inspections.get(&instance_id).cloned(),
-                },
-            ),
             Command::RotateToken => self.rotate_token(&command_id, &request_hash, current_revision),
             Command::Shutdown => {
                 let outcome = CommandOutcomeEnvelope::new(
@@ -270,10 +277,12 @@ impl RegistryActor {
                 format!("command type {command_type:?} is not supported by this host"),
             ),
         };
-        let stop = matches!(&result, Ok(outcome) if matches!(
-            outcome.payload,
-            CommandOutcome::ShuttingDown
-        )) || matches!(&result, Err(HostError::PairRestoreFailed { .. }));
+        let stop = self.fatal
+            || matches!(&result, Ok(outcome) if matches!(
+                outcome.payload,
+                CommandOutcome::ShuttingDown
+            ))
+            || matches!(&result, Err(HostError::PairRestoreFailed { .. }));
         (result, stop)
     }
 
@@ -458,7 +467,14 @@ impl RegistryActor {
                 error.to_string(),
             );
         }
-        if self.current_hashes == Some((prepared.manifest_hash, prepared.lock_hash)) {
+        let current_runtimes_healthy = self
+            .routing
+            .load()
+            .generations()
+            .all(|generation| generation.has_healthy_runtime());
+        if self.current_hashes == Some((prepared.manifest_hash, prepared.lock_hash))
+            && current_runtimes_healthy
+        {
             let desired = DesiredState {
                 manifest_sha256: Some(prepared.manifest_hash.to_string()),
                 lock_sha256: Some(prepared.lock_hash.to_string()),
@@ -466,13 +482,7 @@ impl RegistryActor {
                 last_rejection_code: None,
                 plugin_restart_requested: false,
             };
-            return self.finish_reserved(
-                command_id,
-                CommandOutcome::NoChange {
-                    graph: self.routing.load().graph().clone(),
-                },
-                &desired,
-            );
+            return self.finish_reserved(command_id, CommandOutcome::NoChange, &desired);
         }
 
         let revision = GraphRevision(self.routing.load().revision().0.saturating_add(1));
@@ -499,12 +509,19 @@ impl RegistryActor {
             }
         };
         let candidate_fingerprints = instance_fingerprints(&prepared);
-        let affected = affected_instances(
+        let mut affected = affected_instances(
             &self.current_fingerprints,
             &candidate_fingerprints,
             old_routing.graph(),
             preview.graph(),
         );
+        affected.extend(
+            old_routing
+                .generations()
+                .filter(|generation| !generation.has_healthy_runtime())
+                .map(|generation| generation.instance.clone()),
+        );
+        include_affected_dependents(&mut affected, old_routing.graph(), preview.graph());
         let reusable: BTreeMap<_, _> = old_routing
             .generations()
             .filter(|generation| !affected.contains(&generation.instance))
@@ -537,23 +554,8 @@ impl RegistryActor {
             .filter(|fingerprint| fingerprint.process_fixed)
             .map(|fingerprint| fingerprint.package_id.clone())
             .collect();
-        let outcome = CommandOutcomeEnvelope::new(
-            command_id.to_owned(),
-            revision,
-            CommandOutcome::Applied {
-                graph: routing.graph().clone(),
-            },
-        );
-        if matches!(
-            outcome.payload,
-            CommandOutcome::Rejected { ref code, .. } if code == "outcome_too_large"
-        ) {
-            return self.finish_reserved_rejection(
-                command_id,
-                "outcome_too_large",
-                "candidate graph exceeds the durable control response limit".to_owned(),
-            );
-        }
+        let outcome =
+            CommandOutcomeEnvelope::new(command_id.to_owned(), revision, CommandOutcome::Applied);
         let installed_files = self
             .installed_files
             .clone()
@@ -756,8 +758,19 @@ impl RegistryActor {
             })
             .filter(|wave| !wave.is_empty())
             .collect();
+        let committed = futures_util::future::join_all(
+            prepared_runtimes
+                .iter()
+                .map(crate::runtime::RuntimeHandle::committed),
+        )
+        .await;
+        if let Some(error) = committed.into_iter().find_map(Result::err) {
+            self.fail_stop_admission();
+            return Err(HostError::PostCommitLifecycleFailure {
+                message: error.to_string(),
+            });
+        }
         for runtime in &prepared_runtimes {
-            runtime.committed().await;
             if let Some(generation) = routing.generation(runtime.instance()) {
                 generation.mark_admitting();
             }
@@ -779,6 +792,23 @@ impl RegistryActor {
         self.current_mode = prepared.manifest.composition.mode;
         let _ = self.events.send(event);
         Ok(outcome)
+    }
+
+    fn fail_stop_admission(&mut self) {
+        self.fatal = true;
+        let _cutover = self.cutover.lock().expect("routing cutover mutex poisoned");
+        let snapshot = self.routing.load_full();
+        snapshot.stop_admission();
+        for generation in snapshot.generations() {
+            generation.stop_admission();
+        }
+        let retirements = self
+            .retirements
+            .lock()
+            .expect("retirement registry mutex poisoned");
+        for retirement in retirements.values() {
+            let _ = retirement.cancel.send(true);
+        }
     }
 
     async fn stop_current_runtimes(&mut self) {
@@ -827,72 +857,6 @@ impl RegistryActor {
         let _ = call.reply.send(result);
     }
 
-    fn lock_manifest(
-        &mut self,
-        command_id: &str,
-        request_hash: &[u8],
-        manifest_path: &Path,
-        lock_path: &Path,
-    ) -> Result<CommandOutcomeEnvelope> {
-        let lock = match build_lock(manifest_path, &self.loader) {
-            Ok(lock) => lock,
-            Err(error) => {
-                return self.store_rejection(
-                    command_id,
-                    request_hash,
-                    "lock_failed",
-                    error.to_string(),
-                );
-            }
-        };
-        self.persistence.reserve_lock(
-            self.routing.load().graph().composition_id.as_str(),
-            command_id,
-            request_hash,
-            lock_path,
-            &lock,
-            self.routing.load().revision(),
-        )?;
-        match write_lock_create_new(lock_path, &lock) {
-            Ok(()) => {
-                #[cfg(feature = "test-failpoints")]
-                crate::test_failpoints::gate(
-                    command_id,
-                    crate::test_failpoints::CrashPoint::LockPublishedBeforeTerminal,
-                );
-                self.finish_pending_command(command_id, CommandOutcome::LockResolved { lock })
-            }
-            Err(HostError::LockAlreadyExists { path }) => self.finish_pending_rejection(
-                command_id,
-                "lock_exists",
-                format!("candidate lock path {} already exists", path.display()),
-            ),
-            Err(error) => {
-                self.finish_pending_rejection(command_id, "lock_failed", error.to_string())
-            }
-        }
-    }
-
-    fn store_simple(
-        &mut self,
-        command_id: &str,
-        request_hash: &[u8],
-        payload: CommandOutcome,
-    ) -> Result<CommandOutcomeEnvelope> {
-        let outcome = CommandOutcomeEnvelope::new(
-            command_id.to_owned(),
-            self.routing.load().revision(),
-            payload,
-        );
-        self.persistence.store_outcome(
-            self.routing.load().graph().composition_id.as_str(),
-            command_id,
-            request_hash,
-            &outcome,
-        )?;
-        Ok(outcome)
-    }
-
     fn finish_reserved(
         &mut self,
         command_id: &str,
@@ -906,38 +870,6 @@ impl RegistryActor {
         );
         self.persistence
             .finish_pending_outcome(command_id, &outcome, Some(desired))?;
-        Ok(outcome)
-    }
-
-    fn finish_pending_command(
-        &mut self,
-        command_id: &str,
-        payload: CommandOutcome,
-    ) -> Result<CommandOutcomeEnvelope> {
-        let outcome = CommandOutcomeEnvelope::new(
-            command_id.to_owned(),
-            self.routing.load().revision(),
-            payload,
-        );
-        self.persistence
-            .finish_pending_outcome(command_id, &outcome, None)?;
-        Ok(outcome)
-    }
-
-    fn finish_pending_rejection(
-        &mut self,
-        command_id: &str,
-        code: &str,
-        message: String,
-    ) -> Result<CommandOutcomeEnvelope> {
-        let outcome = CommandOutcomeEnvelope::rejected(
-            command_id,
-            self.routing.load().revision(),
-            code,
-            message,
-        );
-        self.persistence
-            .finish_pending_outcome(command_id, &outcome, None)?;
         Ok(outcome)
     }
 

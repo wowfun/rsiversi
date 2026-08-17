@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use rsi_meta_frame_contract::{Frame, FrameError};
 use rsi_meta_plugin::{
     CALL_FAILED, CALL_OK, CallOutcome, HostApi, INIT_OK, Lane, POST_FRAME_ACCEPTED,
     POST_FRAME_CLOSED, POST_FRAME_WOULD_BLOCK, PluginApi, PluginEntryFn, PostFrameOutcome,
 };
+use rsi_meta_plugin::{Frame, FrameError};
 use thiserror::Error;
 
 const MAX_CAPTURED_FRAME_BYTES: usize = 1024 * 1024;

@@ -12,11 +12,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
 use rsi_meta::{
-    GraphRevision, STREAM_PROTOCOL, ServiceKey, ServiceOpenRequest, StreamEnvelope, StreamKind,
+    GraphRevision, STREAM_PROTOCOL, ServiceKey, ServiceOpenRequest, StreamEnvelope, StreamId,
+    StreamKind,
 };
 use rsi_meta_cli::protocol::{
     Command as CoreCommand, CommandEnvelope, CommandOutcome, CommandOutcomeEnvelope, EventEnvelope,
 };
+use rsi_meta_cli::{decode_stream_data, encode_stream_data};
 use rsi_meta_loader::{ApiVersion, BUILD_TARGET};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
@@ -30,7 +32,7 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, Request, StatusCode, hea
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use tokio_util::codec::{Framed, LinesCodec};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 
 const IO_DEADLINE: Duration = Duration::from_secs(15);
@@ -38,7 +40,7 @@ const MAX_CONTROL_BYTES: usize = 1024 * 1024;
 const TRUSTED_ORIGIN: &str = "https://trusted.example";
 
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type UnixControl = Framed<UnixStream, LinesCodec>;
+type UnixControl = Framed<UnixStream, LengthDelimitedCodec>;
 
 #[derive(Debug)]
 struct Fixture {
@@ -673,7 +675,9 @@ async fn open_unix(socket: &Path) -> Result<UnixControl> {
         .context("Unix connect timed out")??;
     Ok(Framed::new(
         stream,
-        LinesCodec::new_with_max_length(MAX_CONTROL_BYTES),
+        LengthDelimitedCodec::builder()
+            .max_frame_length(5 * 1024 * 1024)
+            .new_codec(),
     ))
 }
 
@@ -682,14 +686,14 @@ async fn send_on(
     command: &CommandEnvelope,
 ) -> Result<CommandOutcomeEnvelope> {
     framed
-        .send(serde_json::to_string(command)?)
+        .send(bytes::Bytes::from(serde_json::to_vec(command)?))
         .await
         .context("send Unix command")?;
     let line = timeout(IO_DEADLINE, framed.next())
         .await
         .context("Unix response timed out")?
         .context("daemon closed before responding")??;
-    serde_json::from_str(&line).context("decode Unix outcome")
+    serde_json::from_slice(&line).context("decode Unix outcome")
 }
 
 async fn send_unix(socket: &Path, command: &CommandEnvelope) -> Result<CommandOutcomeEnvelope> {
@@ -931,7 +935,7 @@ async fn expect_close_code(socket: &mut ClientWebSocket, expected: CloseCode) ->
 }
 
 fn open_stream_frame(stream_id: &str) -> Result<StreamEnvelope> {
-    let mut frame = StreamEnvelope::new(stream_id, StreamKind::Open);
+    let mut frame = StreamEnvelope::new(StreamId::new(stream_id)?, StreamKind::Open);
     frame.payload = Some(serde_json::to_value(ServiceOpenRequest {
         consumer: rsi_meta::InstanceId::new("consumer"),
         service: ServiceKey::new("fixture.echo"),
@@ -940,24 +944,36 @@ fn open_stream_frame(stream_id: &str) -> Result<StreamEnvelope> {
 }
 
 fn credit_frame(stream_id: &str, bytes: u64) -> StreamEnvelope {
-    let mut frame = StreamEnvelope::new(stream_id, StreamKind::Credit);
+    let mut frame = StreamEnvelope::new(
+        StreamId::new(stream_id).expect("valid fixture stream id"),
+        StreamKind::Credit,
+    );
     frame.credit_bytes = Some(bytes);
     frame
 }
 
 fn data_frame(stream_id: &str, sequence: u64, bytes: &[u8]) -> StreamEnvelope {
-    let mut frame = StreamEnvelope::new(stream_id, StreamKind::Data);
+    let mut frame = StreamEnvelope::new(
+        StreamId::new(stream_id).expect("valid fixture stream id"),
+        StreamKind::Data,
+    );
     frame.sequence = Some(sequence);
-    frame.payload = Some(serde_json::json!(bytes));
+    frame.data = Some(bytes.to_vec());
     frame
 }
 
 fn half_close_frame(stream_id: &str) -> StreamEnvelope {
-    StreamEnvelope::new(stream_id, StreamKind::HalfClose)
+    StreamEnvelope::new(
+        StreamId::new(stream_id).expect("valid fixture stream id"),
+        StreamKind::HalfClose,
+    )
 }
 
 fn cancel_frame(stream_id: &str, reason: &str) -> StreamEnvelope {
-    let mut frame = StreamEnvelope::new(stream_id, StreamKind::Cancel);
+    let mut frame = StreamEnvelope::new(
+        StreamId::new(stream_id).expect("valid fixture stream id"),
+        StreamKind::Cancel,
+    );
     frame.payload = Some(serde_json::json!({"reason": reason}));
     frame
 }
@@ -970,6 +986,17 @@ async fn send_ws_envelope(
         .send(Message::Text(serde_json::to_string(envelope)?.into()))
         .await
         .context("send WebSocket envelope")
+}
+
+async fn send_ws_stream(socket: &mut ClientWebSocket, frame: &StreamEnvelope) -> Result<()> {
+    if frame.kind == StreamKind::Data {
+        socket
+            .send(Message::Binary(encode_stream_data(frame)?.into()))
+            .await
+            .context("send WebSocket DATA frame")
+    } else {
+        send_ws_envelope(socket, frame).await
+    }
 }
 
 async fn next_stream_ws(socket: &mut ClientWebSocket) -> Result<StreamEnvelope> {
@@ -989,7 +1016,8 @@ async fn next_stream_ws(socket: &mut ClientWebSocket) -> Result<StreamEnvelope> 
             }
             Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
             Message::Close(frame) => bail!("WebSocket closed before stream frame: {frame:?}"),
-            Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+            Message::Binary(bytes) => return decode_stream_data(&bytes),
+            Message::Pong(_) | Message::Frame(_) => {}
         }
     }
 }
@@ -1014,18 +1042,27 @@ async fn next_outcome_ws(socket: &mut ClientWebSocket) -> Result<CommandOutcomeE
 }
 
 async fn send_stream_unix(connection: &mut UnixControl, frame: &StreamEnvelope) -> Result<()> {
+    let encoded = if frame.kind == StreamKind::Data {
+        encode_stream_data(frame)?
+    } else {
+        serde_json::to_vec(frame)?
+    };
     connection
-        .send(serde_json::to_string(frame)?)
+        .send(bytes::Bytes::from(encoded))
         .await
         .context("send Unix stream frame")
 }
 
 async fn next_stream_unix(connection: &mut UnixControl) -> Result<StreamEnvelope> {
-    let line = timeout(IO_DEADLINE, connection.next())
+    let bytes = timeout(IO_DEADLINE, connection.next())
         .await
         .context("Unix stream frame timed out")?
         .context("Unix socket closed before a stream frame")??;
-    serde_json::from_str(&line).context("decode Unix stream frame")
+    if bytes.starts_with(b"RSD0") {
+        decode_stream_data(&bytes)
+    } else {
+        serde_json::from_slice(&bytes).context("decode Unix stream frame")
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1154,14 +1191,11 @@ async fn process_fixed_preflight_replays_then_external_install_activates_once() 
         },
     );
 
-    let mut lost_ack = timeout(IO_DEADLINE, UnixStream::connect(&daemon.ready.socket))
-        .await
-        .context("ack-loss Unix connect timed out")??;
+    let mut lost_ack = open_unix(&daemon.ready.socket).await?;
     lost_ack
-        .write_all(serde_json::to_string(&command)?.as_bytes())
+        .send(bytes::Bytes::from(serde_json::to_vec(&command)?))
         .await?;
-    lost_ack.write_all(b"\n").await?;
-    lost_ack.shutdown().await?;
+    lost_ack.get_mut().shutdown().await?;
 
     timeout(IO_DEADLINE, async {
         loop {
@@ -1457,32 +1491,32 @@ async fn real_echo_streams_route_over_websocket_and_unix_with_connection_binding
         false,
     )?)
     .await?;
-    send_ws_envelope(&mut websocket, &open_stream_frame("ws-echo")?).await?;
+    send_ws_stream(&mut websocket, &open_stream_frame("ws-echo")?).await?;
     let opened = next_stream_ws(&mut websocket).await?;
     ensure!(opened.kind == StreamKind::Open);
-    ensure!(opened.stream_id == "ws-echo");
+    ensure!(opened.stream_id.as_str() == "ws-echo");
     ensure!(opened.payload == Some(serde_json::json!({"provider": "provider"})));
     let input_credit = next_stream_ws(&mut websocket).await?;
     ensure!(input_credit.kind == StreamKind::Credit);
     ensure!(input_credit.credit_bytes == Some(1024 * 1024));
 
-    send_ws_envelope(&mut websocket, &credit_frame("ws-echo", 1024)).await?;
-    send_ws_envelope(&mut websocket, &data_frame("ws-echo", 1, b"first")).await?;
-    send_ws_envelope(&mut websocket, &data_frame("ws-echo", 2, b"second")).await?;
+    send_ws_stream(&mut websocket, &credit_frame("ws-echo", 1024)).await?;
+    send_ws_stream(&mut websocket, &data_frame("ws-echo", 1, b"first")).await?;
+    send_ws_stream(&mut websocket, &data_frame("ws-echo", 2, b"second")).await?;
     let first = next_stream_ws(&mut websocket).await?;
     let second = next_stream_ws(&mut websocket).await?;
     ensure!(first.kind == StreamKind::Data && first.sequence == Some(1));
-    ensure!(first.payload == Some(serde_json::json!(b"first")));
+    ensure!(first.data.as_deref() == Some(b"first".as_slice()));
     ensure!(second.kind == StreamKind::Data && second.sequence == Some(2));
-    ensure!(second.payload == Some(serde_json::json!(b"second")));
+    ensure!(second.data.as_deref() == Some(b"second".as_slice()));
 
-    send_ws_envelope(&mut websocket, &half_close_frame("ws-echo")).await?;
+    send_ws_stream(&mut websocket, &half_close_frame("ws-echo")).await?;
     let ended = next_stream_ws(&mut websocket).await?;
     ensure!(
         ended.kind == StreamKind::End,
         "unexpected echo terminal frame: {ended:?}"
     );
-    ensure!(ended.stream_id == "ws-echo");
+    ensure!(ended.stream_id.as_str() == "ws-echo");
     websocket.close(None).await?;
 
     let mut abandoned = open_unix(&daemon.ready.socket).await?;
@@ -1629,9 +1663,13 @@ async fn daemon_enforces_control_limits_and_the_bearer_origin_matrix() -> Result
         .await
         .context("oversized Unix client connect timed out")??;
     let oversized_line = vec![b'x'; MAX_CONTROL_BYTES + 1];
-    let write = oversized_unix.write_all(&oversized_line).await;
+    let oversized_length = u32::try_from(oversized_line.len())?.to_be_bytes();
+    let write = async {
+        oversized_unix.write_all(&oversized_length).await?;
+        oversized_unix.write_all(&oversized_line).await
+    }
+    .await;
     if write.is_ok() {
-        let _ = oversized_unix.write_all(b"\n").await;
         let _ = oversized_unix.shutdown().await;
         let mut byte = [0_u8; 1];
         match timeout(IO_DEADLINE, oversized_unix.read(&mut byte))

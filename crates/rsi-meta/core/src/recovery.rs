@@ -21,9 +21,9 @@ pub(crate) fn install_offline(request: &InstallRequest) -> Result<InstallResult>
     request.operation_id.validate()?;
     let project_files = project_files(&request.project)?;
     let request_hash = identity::offline_install_hash(request, &project_files)?;
-    let _lease = crate::workspace::WorkspaceLease::acquire(&request.workspace)?;
+    let lease = crate::workspace::WorkspaceLease::acquire(&request.workspace)?;
     let loader = PluginLoader::for_current_process(&request.workspace.cache_root);
-    let mut persistence = Persistence::open(&request.workspace.database_path)?;
+    let mut persistence = Persistence::open_leased(&request.workspace.database_path, &lease)?;
     recover_pending_applies(&mut persistence, &loader)?;
 
     match persistence.find_command(&request.operation_id.0)? {
@@ -31,10 +31,15 @@ pub(crate) fn install_offline(request: &InstallRequest) -> Result<InstallResult>
             request_hash: stored,
             outcome,
         }) if stored == request_hash => return install_result_from_outcome(outcome.payload),
-        Some(StoredCommand::Legacy) => {
+        Some(StoredCommand::Expired {
+            request_hash: stored,
+            classification,
+        }) if stored == request_hash => {
             return Err(HostError::OperationRejected {
-                code: "legacy_operation_id".to_owned(),
-                message: "operation id was used by a pre-v5 side effect".to_owned(),
+                code: "operation_expired".to_owned(),
+                message: format!(
+                    "operation result expired after reaching terminal state {classification:?}"
+                ),
                 details: BTreeMap::new(),
             });
         }
@@ -274,35 +279,6 @@ pub(crate) fn recover_pending_applies(
 fn recover_unjournaled_commands(persistence: &mut Persistence) -> Result<()> {
     for pending in persistence.unjournaled_commands()? {
         match pending.effect {
-            Some(PendingEffect::Lock {
-                lock_path,
-                lock,
-                graph_revision,
-            }) => {
-                let expected = toml::to_string_pretty(&lock)
-                    .map_err(|error| HostError::InvalidManifest(error.to_string()))?;
-                let outcome = if read_bounded_file_following_symlinks(
-                    &lock_path,
-                    "read reserved lock",
-                    MAX_COMPOSITION_DOCUMENT_BYTES,
-                )
-                .is_ok_and(|actual| actual == expected.as_bytes())
-                {
-                    CommandOutcomeEnvelope::new(
-                        pending.command_id.clone(),
-                        graph_revision,
-                        CommandOutcome::LockResolved { lock },
-                    )
-                } else {
-                    CommandOutcomeEnvelope::rejected(
-                        pending.command_id.clone(),
-                        graph_revision,
-                        "lock_not_committed",
-                        "lock target was not atomically published with the reserved command",
-                    )
-                };
-                persistence.finish_pending_outcome(&pending.command_id, &outcome, None)?;
-            }
             Some(PendingEffect::Apply {
                 mut requested_desired,
                 graph_revision,

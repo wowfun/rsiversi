@@ -4,15 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rsi_meta_frame_contract::{
-    DurableCommand, EVENT_DATA, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN,
-    RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_loader::{
     BUILD_TARGET, ContentHash, ExpectedHashes, LoadedPlugin, PluginLoader, PluginMailbox,
     PluginMailboxOptions, PluginPackage,
 };
 use rsi_meta_plugin::{CallOutcome, Lane};
+use rsi_meta_plugin::{
+    DurableCommand, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT,
+    RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin_hmr_consumer::rsi_meta_plugin_entry_v0 as hmr_entry;
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::json;
@@ -186,11 +186,32 @@ fn send(plugin: &mut LoadedPlugin, lane: Lane, frame: &Frame) {
 }
 
 fn recv_data(mailbox: &mut PluginMailbox) -> Frame {
-    Frame::decode(mailbox.try_recv_data().unwrap().payload()).unwrap()
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(posted) = mailbox.try_recv_data() {
+            return Frame::decode(posted.payload()).unwrap();
+        }
+        assert!(std::time::Instant::now() < deadline, "DATA frame timed out");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn recv_control(mailbox: &mut PluginMailbox) -> Frame {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(posted) = mailbox.try_recv_control() {
+            return Frame::decode(posted.payload()).unwrap();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "control frame timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn assert_mailbox_prepared(mailbox: &mut PluginMailbox, generation: u64) {
-    let frame = Frame::decode(mailbox.try_recv_control().unwrap().payload()).unwrap();
+    let frame = recv_control(mailbox);
     assert_eq!(
         frame.body,
         FrameBody::Lifecycle {
@@ -214,6 +235,59 @@ fn assert_harness_prepared(plugin: &PluginHarness, generation: u64) {
     );
 }
 
+fn recv_harness_after_tick(plugin: &mut PluginHarness, tick: u64) -> Frame {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert_eq!(
+            plugin
+                .send(
+                    Lane::Data,
+                    &Frame::service_event(
+                        None,
+                        RUNTIME_TICK_SERVICE,
+                        RUNTIME_TICK_EVENT,
+                        json!({"tick": tick}),
+                    ),
+                )
+                .unwrap(),
+            CallOutcome::Ok
+        );
+        if let Some(frame) = plugin.try_recv().unwrap() {
+            return frame.frame;
+        }
+        assert!(std::time::Instant::now() < deadline, "HMR frame timed out");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn recv_control_after_ticks(
+    plugin: &mut LoadedPlugin,
+    mailbox: &mut PluginMailbox,
+    tick: u64,
+) -> Frame {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        send(
+            plugin,
+            Lane::Data,
+            &Frame::service_event(
+                None,
+                RUNTIME_TICK_SERVICE,
+                RUNTIME_TICK_EVENT,
+                json!({"tick": tick}),
+            ),
+        );
+        if let Ok(posted) = mailbox.try_recv_control() {
+            return Frame::decode(posted.payload()).unwrap();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "HMR control frame timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn atomic_replace(path: &Path, sequence: usize, bytes: &[u8]) {
     let temporary = path.with_extension(format!("replace-{sequence}"));
     fs::write(&temporary, bytes).unwrap();
@@ -223,12 +297,7 @@ fn atomic_replace(path: &Path, sequence: usize, bytes: &[u8]) {
 #[allow(clippy::needless_pass_by_value)] // Test call sites construct one-shot event values inline.
 fn data_event(request_id: &str, event: serde_json::Value) -> Frame {
     let bytes = serde_json::to_vec(&event).unwrap();
-    Frame::service_event(
-        Some(request_id.to_owned()),
-        "fs.watch",
-        EVENT_DATA,
-        serde_json::Value::Array(bytes.into_iter().map(serde_json::Value::from).collect()),
-    )
+    Frame::service_data_event(request_id, "fs.watch", bytes)
 }
 
 #[test]
@@ -290,7 +359,12 @@ fn unchanged_composition_detects_atomic_lock_package_artifact_and_schema_replace
         let credit = hmr.recv(Duration::from_secs(1)).unwrap().frame;
         send(&mut watcher, Lane::Data, &credit);
         let ready = recv_data(&mut watcher_mailbox);
-        assert_eq!(hmr.send(Lane::Data, &ready).unwrap(), CallOutcome::Ok);
+        assert_eq!(
+            hmr.send(Lane::Data, &ready).unwrap(),
+            CallOutcome::Ok,
+            "HMR rejected watcher frame {:?}",
+            ready.body
+        );
     }
     assert!(hmr.try_recv().unwrap().is_none());
 
@@ -330,14 +404,6 @@ fn unchanged_composition_detects_atomic_lock_package_artifact_and_schema_replace
             "a changed path waits for the coalescing tick"
         );
 
-        assert_eq!(
-            hmr.send(
-                Lane::Data,
-                &Frame::service_event(None, "runtime.tick", "tick", json!({"tick": tick}),),
-            )
-            .unwrap(),
-            CallOutcome::Ok
-        );
         let FrameBody::DurableCommand {
             command_id,
             command:
@@ -345,7 +411,7 @@ fn unchanged_composition_detects_atomic_lock_package_artifact_and_schema_replace
                     manifest_path,
                     lock_path,
                 },
-        } = hmr.recv(Duration::from_secs(1)).unwrap().frame.body
+        } = recv_harness_after_tick(&mut hmr, tick).body
         else {
             panic!("expected durable apply command")
         };
@@ -475,10 +541,7 @@ fn assert_data_backpressure_does_not_block_retired(
             json!({"bytes": 1024 * 1024}),
         ),
     );
-    assert!(
-        mailbox.try_recv_data().is_ok(),
-        "ready must fill the one-frame DATA lane before retirement"
-    );
+    let _first_ready = recv_data(&mut mailbox);
     send(
         &mut watcher,
         Lane::Data,
@@ -489,18 +552,9 @@ fn assert_data_backpressure_does_not_block_retired(
             json!({"consumer": "hmr", "sequence": 0, "path": watched_path}),
         ),
     );
-    send(
-        &mut watcher,
-        Lane::Data,
-        &Frame::service_request(
-            "second-watch",
-            "fs.watch",
-            OP_CREDIT,
-            json!({"bytes": 1024 * 1024}),
-        ),
-    );
-    // The second ready now fills DATA. Retirement must retain both stream
-    // terminals until the host drains them, then acknowledge Retired.
+    // Retire synchronously fills the one-frame DATA lane with the first stream
+    // terminal. The second terminal must remain pending without depending on
+    // native worker scheduling or wall-clock sleeps.
     assert_eq!(
         watcher.dispatch(
             Lane::Control,
@@ -515,23 +569,8 @@ fn assert_data_backpressure_does_not_block_retired(
         mailbox.try_recv_control().is_err(),
         "Retired must follow every accepted stream terminal"
     );
-    let ready = Frame::decode(mailbox.try_recv_data().unwrap().payload()).unwrap();
-    assert!(matches!(
-        ready.body,
-        FrameBody::ServiceEvent { ref event, .. } if event == "data"
-    ));
-    for expected_request in ["retire-watch", "second-watch"] {
-        send(
-            &mut watcher,
-            Lane::Control,
-            &Frame::service_event(
-                None,
-                RUNTIME_TICK_SERVICE,
-                RUNTIME_TICK_EVENT,
-                json!({"tick": 100}),
-            ),
-        );
-        let terminal = Frame::decode(mailbox.try_recv_data().unwrap().payload()).unwrap();
+    for (index, expected_request) in ["retire-watch", "second-watch"].into_iter().enumerate() {
+        let terminal = recv_data(&mut mailbox);
         assert!(matches!(
             terminal.body,
             FrameBody::ServiceEvent {
@@ -543,8 +582,20 @@ fn assert_data_backpressure_does_not_block_retired(
                 && event == "cancel"
                 && payload["reason"] == "provider_retired"
         ));
+        if index == 0 {
+            send(
+                &mut watcher,
+                Lane::Control,
+                &Frame::service_event(
+                    None,
+                    RUNTIME_TICK_SERVICE,
+                    RUNTIME_TICK_EVENT,
+                    json!({"tick": 100}),
+                ),
+            );
+        }
     }
-    let retired = Frame::decode(mailbox.try_recv_control().unwrap().payload()).unwrap();
+    let retired = recv_control(&mut mailbox);
     assert_eq!(
         retired.body,
         FrameBody::Lifecycle {
@@ -722,12 +773,7 @@ artifact_sha256 = "{}"
         Lane::Data,
         &data_event(request_id, json!({"type": "overflow"})),
     );
-    send(
-        &mut hmr,
-        Lane::Data,
-        &Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1})),
-    );
-    let control = Frame::decode(mailbox.try_recv_control().unwrap().payload()).unwrap();
+    let control = recv_control_after_ticks(&mut hmr, &mut mailbox, 1);
     assert!(
         matches!(control.body, FrameBody::DurableCommand { .. }),
         "the bounded DATA queue must not block a durable control-lane apply"

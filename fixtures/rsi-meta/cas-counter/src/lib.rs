@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
-    OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-    STATE_EVENT_APPLIED, STATE_EVENT_CONFLICT, STATE_EVENT_VALUE, STATE_OP_COMPARE_AND_SWAP,
-    STATE_OP_GET,
-};
 use rsi_meta_plugin::sdk::{Host, Plugin};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT,
+    OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE, STATE_EVENT_APPLIED,
+    STATE_EVENT_CONFLICT, STATE_EVENT_VALUE, STATE_OP_COMPARE_AND_SWAP, STATE_OP_GET,
+};
 use rsi_meta_plugin::{Lane, PostFrameOutcome};
 use serde_json::{Value, json};
 
@@ -125,10 +124,10 @@ impl CasCounter {
         self.flush_output(stream_id)
     }
 
-    fn start_increment(&mut self, stream_id: &str, payload: &Value) -> Result<(), CounterError> {
+    fn start_increment(&mut self, stream_id: &str, payload: &[u8]) -> Result<(), CounterError> {
         let request = decode_data(payload)?;
         let key = string_field(&request, "key")?;
-        let encoded = encoded_len(payload)?;
+        let raw_bytes = payload.len() as u64;
         let read_id = format!("{stream_id}/read");
         let stream = self
             .streams
@@ -137,10 +136,10 @@ impl CasCounter {
         if stream.half_closed || stream.pending.is_some() || stream.pending_output.is_some() {
             return Err(CounterError("stream already has an increment"));
         }
-        if stream.input_credit < encoded {
+        if stream.input_credit < raw_bytes {
             return Err(CounterError("input credit exceeded"));
         }
-        stream.input_credit -= encoded;
+        stream.input_credit -= raw_bytes;
         stream.pending = Some(PendingIncrement {
             key: key.clone(),
             state_request_id: read_id.clone(),
@@ -243,29 +242,24 @@ impl CasCounter {
         };
         if !data_accepted {
             let data = encode_data(&payload)?;
-            let encoded = encoded_len(&data)?;
+            let raw_bytes = data.len() as u64;
             let stream = self
                 .streams
                 .get(stream_id)
                 .ok_or(CounterError("stream disappeared"))?;
-            if stream.output_credit < encoded {
+            if stream.output_credit < raw_bytes {
                 return Ok(());
             }
             match self.post_outcome(
                 Lane::Data,
-                &Frame::service_event(
-                    Some(stream_id.to_owned()),
-                    "fixture.cas-counter",
-                    EVENT_DATA,
-                    data,
-                ),
+                &Frame::service_data_event(stream_id, "fixture.cas-counter", data),
             )? {
                 PostFrameOutcome::Accepted => {
                     let stream = self
                         .streams
                         .get_mut(stream_id)
                         .ok_or(CounterError("stream disappeared"))?;
-                    stream.output_credit -= encoded;
+                    stream.output_credit -= raw_bytes;
                     stream
                         .pending_output
                         .as_mut()
@@ -474,7 +468,6 @@ impl Plugin for CasCounter {
                 match operation.as_str() {
                     OP_OPEN => self.open(&request_id, &payload),
                     OP_CREDIT => self.grant_output_credit(&request_id, &payload),
-                    OP_DATA => self.start_increment(&request_id, &payload),
                     OP_HALF_CLOSE => {
                         let stream = self
                             .streams
@@ -486,6 +479,16 @@ impl Plugin for CasCounter {
                     OP_CANCEL => self.cancel(&request_id, payload),
                     _ => Err(CounterError("unknown stream operation")),
                 }
+            }
+            FrameBody::ServiceDataRequest {
+                request_id,
+                service,
+                payload,
+            } if lane == Lane::Data
+                && self.active.is_some()
+                && service == "fixture.cas-counter" =>
+            {
+                self.start_increment(&request_id, &payload)
             }
             FrameBody::ServiceEvent {
                 request_id: Some(request_id),
@@ -550,29 +553,12 @@ fn nullable_counter(value: &Value) -> Result<u64, CounterError> {
     }
 }
 
-fn decode_data(payload: &Value) -> Result<Value, CounterError> {
-    let bytes = payload
-        .as_array()
-        .ok_or(CounterError("DATA is not a byte array"))?
-        .iter()
-        .map(|byte| {
-            byte.as_u64()
-                .and_then(|byte| u8::try_from(byte).ok())
-                .ok_or(CounterError("DATA contains a non-byte"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    serde_json::from_slice(&bytes).map_err(|_| CounterError("DATA JSON is invalid"))
+fn decode_data(payload: &[u8]) -> Result<Value, CounterError> {
+    serde_json::from_slice(payload).map_err(|_| CounterError("DATA JSON is invalid"))
 }
 
-fn encode_data(value: &Value) -> Result<Value, CounterError> {
-    let bytes = serde_json::to_vec(value).map_err(|_| CounterError("encode DATA JSON"))?;
-    Ok(Value::Array(bytes.into_iter().map(Value::from).collect()))
-}
-
-fn encoded_len(value: &Value) -> Result<u64, CounterError> {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len() as u64)
-        .map_err(|_| CounterError("encode DATA payload"))
+fn encode_data(value: &Value) -> Result<Vec<u8>, CounterError> {
+    serde_json::to_vec(value).map_err(|_| CounterError("encode DATA JSON"))
 }
 
 rsi_meta_plugin::export_plugin!(CasCounter);

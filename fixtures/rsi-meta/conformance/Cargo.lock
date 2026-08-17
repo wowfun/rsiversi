@@ -1297,6 +1297,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "clap",
  "futures-util",
  "hex",
@@ -1326,7 +1327,6 @@ dependencies = [
  "jsonschema",
  "rsi-meta",
  "rsi-meta-cli",
- "rsi-meta-frame-contract",
  "rsi-meta-loader",
  "rsi-meta-plugin",
  "rusqlite",
@@ -1334,15 +1334,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
-]
-
-[[package]]
-name = "rsi-meta-frame-contract"
-version = "0.0.1"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -1369,6 +1360,11 @@ dependencies = [
 [[package]]
 name = "rsi-meta-plugin"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "rusqlite"

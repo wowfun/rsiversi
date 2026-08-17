@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -12,14 +14,14 @@ use arc_swap::ArcSwap;
 use futures_util::Stream;
 use rsi_meta_loader::{ContentHash, PluginLoader};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
 use crate::composition::{
     InstanceFingerprint, affected_instances, build_inspections, build_lock, composition_event,
-    install_pair, instance_fingerprints, launch_and_prepare_pumping_services,
-    normalize_prepared_for_install, prepare_pair, resolve_prepared, validate_paths,
-    write_lock_create_new,
+    include_affected_dependents, install_pair, instance_fingerprints,
+    launch_and_prepare_pumping_services, normalize_prepared_for_install, prepare_pair,
+    resolve_prepared,
 };
 use crate::domain::{
     ApplyRequest, ApplyResult, CompositionDigest, CompositionProject, CompositionWorkspace,
@@ -28,8 +30,8 @@ use crate::domain::{
 };
 use crate::frame::PluginFrame;
 use crate::model::{
-    CompositionMode, DesiredState, GraphRevision, GraphSnapshot, InstanceId, RetirementPhase,
-    RetiringInstanceSnapshot, RouteKey, RoutingSnapshot, ServiceKey,
+    CompositionMode, DesiredState, GraphRevision, GraphSnapshot, InstanceId, RouteKey,
+    RoutingSnapshot, ServiceKey,
 };
 use crate::persistence::{CasResult, Persistence, StoredCommand};
 use crate::protocol::{
@@ -43,11 +45,14 @@ use crate::recovery::{
 use crate::resolver::dependency_waves;
 mod plugin_control;
 pub(crate) mod registry;
+mod snapshot;
 
 use registry::RegistryActor;
+use snapshot::{RetirementEntry, RetirementRegistry, graph_with_runtime_state};
 
 use crate::runtime::{
-    HostServiceCall, PluginCommandRequest, RuntimeLaunchContext, StreamPort, abort_prepared_reverse,
+    HostServiceCall, PluginCommandRequest, RuntimeFault, RuntimeLaunchContext, StreamPort,
+    abort_prepared_reverse,
 };
 use crate::{HostError, Result};
 
@@ -129,7 +134,7 @@ impl ServiceStream {
         self.port.send(payload).await
     }
 
-    /// Grants encoded JSON payload bytes for plugin-to-caller DATA frames.
+    /// Grants raw plugin-to-caller DATA bytes.
     ///
     /// # Errors
     ///
@@ -272,55 +277,6 @@ struct HostInner {
     retirements: RetirementRegistry,
 }
 
-type RetirementKey = (InstanceId, u64);
-type RetirementRegistry = Arc<StdMutex<BTreeMap<RetirementKey, RetirementEntry>>>;
-
-#[derive(Clone)]
-struct RetirementEntry {
-    generation: Arc<crate::model::Generation>,
-    phase: Arc<AtomicU8>,
-    cancel: watch::Sender<bool>,
-    done: watch::Receiver<bool>,
-}
-
-fn graph_with_retirements(
-    graph: &GraphSnapshot,
-    retirements: &RetirementRegistry,
-) -> GraphSnapshot {
-    let mut graph = graph.clone();
-    let mut by_instance = BTreeMap::<InstanceId, RetiringInstanceSnapshot>::new();
-    for entry in retirements
-        .lock()
-        .expect("retirement registry mutex poisoned")
-        .values()
-    {
-        let phase = match entry.phase.load(Ordering::Acquire) {
-            0 => RetirementPhase::Draining,
-            1 => RetirementPhase::Retiring,
-            _ => RetirementPhase::Stopping,
-        };
-        let aggregate = by_instance
-            .entry(entry.generation.instance.clone())
-            .or_insert_with(|| RetiringInstanceSnapshot {
-                instance_id: entry.generation.instance.clone(),
-                generation_count: 0,
-                lease_count: 0,
-                phase,
-            });
-        aggregate.generation_count = aggregate.generation_count.saturating_add(1);
-        aggregate.lease_count = aggregate
-            .lease_count
-            .saturating_add(entry.generation.lease_count());
-        // Report the least advanced phase across the private generations so a
-        // caller never mistakes a partially drained aggregate for completed.
-        if retirement_phase_rank(phase) < retirement_phase_rank(aggregate.phase) {
-            aggregate.phase = phase;
-        }
-    }
-    graph.retiring_instances = by_instance.into_values().collect();
-    graph
-}
-
 fn with_current_routing<T>(
     cutover: &StdMutex<()>,
     routing: &ArcSwap<RoutingSnapshot>,
@@ -397,14 +353,6 @@ fn publish_routing_cutover(
     routing.store(Arc::new(next));
 }
 
-const fn retirement_phase_rank(phase: RetirementPhase) -> u8 {
-    match phase {
-        RetirementPhase::Draining => 0,
-        RetirementPhase::Retiring => 1,
-        RetirementPhase::Stopping => 2,
-    }
-}
-
 impl CompositionHost {
     /// Installs a validated pair while no live host owns the workspace.
     ///
@@ -429,7 +377,8 @@ impl CompositionHost {
     #[allow(clippy::too_many_lines)]
     pub async fn open(options: OpenOptions) -> Result<Self> {
         let workspace_lease = crate::workspace::WorkspaceLease::acquire(&options.workspace)?;
-        let mut persistence = Persistence::open(&options.workspace.database_path)?;
+        let mut persistence =
+            Persistence::open_leased(&options.workspace.database_path, &workspace_lease)?;
         let loader = PluginLoader::for_current_process(&options.workspace.cache_root);
         let mut next_generation = 1;
         recover_pending_applies(&mut persistence, &loader)?;
@@ -445,10 +394,25 @@ impl CompositionHost {
             mpsc::channel(options.command_capacity.max(1));
         let (host_services, mut host_service_receiver) =
             mpsc::channel(options.command_capacity.max(1));
+        let (runtime_faults, runtime_fault_receiver) =
+            mpsc::channel(crate::model::MAX_COMPOSITION_INSTANCES);
+        let (runtime_tick_sender, runtime_ticks) = tokio::sync::watch::channel(0_u64);
+        tokio::spawn(async move {
+            let mut tick = 0_u64;
+            loop {
+                tokio::time::sleep(crate::runtime::RUNTIME_TICK_INTERVAL).await;
+                tick = tick.saturating_add(1);
+                if runtime_tick_sender.send(tick).is_err() {
+                    break;
+                }
+            }
+        });
         let retirements = RetirementRegistry::default();
         let launch_context = RuntimeLaunchContext {
             plugin_commands,
             host_services,
+            runtime_faults,
+            runtime_ticks,
         };
 
         let (routing, current_hashes, current_fingerprints, plugin_inspections, current_mode) =
@@ -536,8 +500,18 @@ impl CompositionHost {
                     abort_prepared_reverse(&prepared_runtimes).await;
                     return Err(error);
                 }
+                let committed = futures_util::future::join_all(
+                    prepared_runtimes
+                        .iter()
+                        .map(crate::runtime::RuntimeHandle::committed),
+                )
+                .await;
+                if let Some(error) = committed.into_iter().find_map(Result::err) {
+                    return Err(HostError::PostCommitLifecycleFailure {
+                        message: error.to_string(),
+                    });
+                }
                 for runtime in &prepared_runtimes {
-                    runtime.committed().await;
                     if let Some(generation) = routing.generation(runtime.instance()) {
                         generation.mark_admitting();
                     }
@@ -609,8 +583,10 @@ impl CompositionHost {
             launch_context,
             plugin_command_receiver,
             host_service_receiver,
+            runtime_fault_receiver,
             retirements: Arc::clone(&retirements),
             current_mode,
+            fatal: false,
             _workspace_lease: workspace_lease,
         };
         let join = tokio::spawn(actor.run(receiver));
@@ -630,7 +606,7 @@ impl CompositionHost {
     pub fn snapshot(&self) -> HostSnapshot {
         let snapshot = self.inner.routing.load();
         HostSnapshot {
-            graph: graph_with_retirements(snapshot.graph(), &self.inner.retirements),
+            graph: graph_with_runtime_state(&snapshot, &self.inner.retirements),
             cursor: snapshot.event_cursor(),
             token_generation: snapshot.token_generation(),
             active: snapshot.active().cloned(),
@@ -695,11 +671,11 @@ impl CompositionHost {
         );
         command.expected_graph_revision = request.expected_revision;
         match self.submit_internal(command).await?.payload {
-            CommandOutcome::Applied { graph } => Ok(ApplyResult::Applied {
-                snapshot: self.snapshot_for_operation(graph),
+            CommandOutcome::Applied => Ok(ApplyResult::Applied {
+                snapshot: self.snapshot_for_operation(),
             }),
-            CommandOutcome::NoChange { graph } => Ok(ApplyResult::Unchanged {
-                snapshot: self.snapshot_for_operation(graph),
+            CommandOutcome::NoChange => Ok(ApplyResult::Unchanged {
+                snapshot: self.snapshot_for_operation(),
             }),
             CommandOutcome::RestartRequired {
                 current,
@@ -721,7 +697,7 @@ impl CompositionHost {
         }
     }
 
-    fn snapshot_for_operation(&self, _stored_graph: GraphSnapshot) -> HostSnapshot {
+    fn snapshot_for_operation(&self) -> HostSnapshot {
         // A durable operation result may be replayed after later cutovers. The
         // stored result decides the result kind, while the public snapshot must
         // always come from one current routing publication; combining its
@@ -1517,7 +1493,7 @@ mode = "development"
 
     #[test]
     fn command_identifiers_are_bounded_before_persistence() {
-        let command = CommandEnvelope::new("c".repeat(256), Command::QueryGraph);
+        let command = CommandEnvelope::new("c".repeat(256), Command::RotateToken);
 
         assert!(command.validate().is_err());
     }
@@ -1563,6 +1539,44 @@ mode = "development"
             &graph("new", "provider-a"),
         );
         assert_eq!(identity_change.len(), fingerprints.len());
+    }
+
+    #[test]
+    fn affected_dependents_follow_old_and_new_edges_through_cycles() {
+        let binding = |consumer: &str, provider: &str| crate::model::BindingSnapshot {
+            consumer: InstanceId::new(consumer),
+            service: ServiceKey::new(format!("fixture.{consumer}.{provider}")),
+            provider: InstanceId::new(provider),
+            explicit: false,
+        };
+        let graph = |bindings| GraphSnapshot {
+            revision: GraphRevision(1),
+            composition_id: "demo".to_owned(),
+            instances: BTreeMap::new(),
+            bindings,
+            retiring_instances: Vec::new(),
+        };
+        let old_graph = graph(vec![
+            binding("middle", "provider"),
+            binding("outside", "unrelated"),
+        ]);
+        let new_graph = graph(vec![
+            binding("leaf", "middle"),
+            binding("provider", "leaf"),
+            binding("outside", "unrelated"),
+        ]);
+        let mut affected = BTreeSet::from([InstanceId::new("provider")]);
+
+        include_affected_dependents(&mut affected, &old_graph, &new_graph);
+
+        assert_eq!(
+            affected,
+            BTreeSet::from([
+                InstanceId::new("leaf"),
+                InstanceId::new("middle"),
+                InstanceId::new("provider"),
+            ])
+        );
     }
 
     #[test]

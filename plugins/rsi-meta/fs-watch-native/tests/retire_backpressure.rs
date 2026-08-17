@@ -1,14 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rsi_meta_frame_contract::{
-    Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_loader::{
     BUILD_TARGET, ContentHash, ExpectedHashes, LoadedPlugin, PluginLoader, PluginMailbox,
     PluginMailboxOptions,
 };
 use rsi_meta_plugin::{ABI_MAJOR, ABI_MINOR, CallOutcome, Lane};
+use rsi_meta_plugin::{
+    Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -163,10 +163,7 @@ fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
 
     open_and_credit(&mut fixture.plugin, "watch-1", &watched);
     let ready = Frame::decode(fixture.mailbox.try_recv_data().unwrap().payload()).unwrap();
-    assert!(matches!(
-        ready.body,
-        FrameBody::ServiceEvent { ref event, .. } if event == "data"
-    ));
+    assert!(matches!(ready.body, FrameBody::ServiceDataEvent { .. }));
     open_and_credit(&mut fixture.plugin, "watch-2", &watched);
 
     assert_eq!(
@@ -183,10 +180,7 @@ fn retire_waits_until_every_stream_cancel_survives_data_backpressure() {
         "Retired must wait until the stream terminals are accepted"
     );
     let ready = Frame::decode(fixture.mailbox.try_recv_data().unwrap().payload()).unwrap();
-    assert!(matches!(
-        ready.body,
-        FrameBody::ServiceEvent { ref event, .. } if event == "data"
-    ));
+    assert!(matches!(ready.body, FrameBody::ServiceDataEvent { .. }));
 
     for expected_request in ["watch-1", "watch-2"] {
         assert_eq!(

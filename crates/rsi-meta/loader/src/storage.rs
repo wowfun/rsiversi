@@ -1,11 +1,52 @@
-use super::{ContentHash, HashSubject, LoaderError};
+use super::{
+    ContentHash, HashSubject, LoaderError, MAX_CACHE_BYTES, MAX_CACHE_ENTRIES,
+    MAX_CACHE_SCAN_ENTRIES,
+};
 #[cfg(all(feature = "test-failpoints", unix))]
 use crate::test_failpoints;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::Builder as TempFileBuilder;
+
+pub(super) struct CacheMaintenanceGuard {
+    _lock: fs::File,
+}
+
+/// A shared cross-process lease that prevents eviction of one content hash.
+#[derive(Debug)]
+pub(super) struct CachePin {
+    _lock: fs::File,
+}
+
+impl CachePin {
+    pub(super) fn acquire(cache_root: &Path, hash: ContentHash) -> Result<Arc<Self>, LoaderError> {
+        let path = cache_pin_path(cache_root, hash);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| LoaderError::Io {
+                operation: "create plugin cache pin directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let lock = open_lock_file(&path, "open plugin cache pin")?;
+        lock.lock_shared().map_err(|source| LoaderError::Io {
+            operation: "lock plugin cache pin",
+            path,
+            source,
+        })?;
+        Ok(Arc::new(Self { _lock: lock }))
+    }
+}
+
+struct CacheEntry {
+    hash: ContentHash,
+    path: PathBuf,
+    bytes: usize,
+    modified: std::time::SystemTime,
+}
 
 enum BoundedReadError {
     Io(io::Error),
@@ -231,7 +272,7 @@ pub(super) fn hash_open_file(
     path: &Path,
     operation: &'static str,
 ) -> Result<ContentHash, LoaderError> {
-    reject_oversized_artifact(file, path, operation, 0)?;
+    reject_declared_artifact_size(file, path, operation)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut observed_bytes = 0_usize;
@@ -245,7 +286,7 @@ pub(super) fn hash_open_file(
             break;
         }
         observed_bytes = observed_bytes.saturating_add(read);
-        reject_oversized_artifact(file, path, operation, observed_bytes)?;
+        reject_observed_artifact_size(path, operation, observed_bytes)?;
         digest.update(&buffer[..read]);
     }
     Ok(ContentHash(digest.finalize().into()))
@@ -263,11 +304,10 @@ pub fn hash_regular_file(path: &Path, operation: &'static str) -> Result<Content
     hash_open_file(&mut file, path, operation)
 }
 
-fn reject_oversized_artifact(
+fn reject_declared_artifact_size(
     file: &fs::File,
     path: &Path,
     operation: &'static str,
-    observed_bytes: usize,
 ) -> Result<(), LoaderError> {
     let metadata_bytes = file
         .metadata()
@@ -279,11 +319,26 @@ fn reject_oversized_artifact(
         .len();
     let maximum_bytes = crate::MAX_PLUGIN_ARTIFACT_BYTES;
     let maximum_u64 = u64::try_from(maximum_bytes).unwrap_or(u64::MAX);
-    if observed_bytes > maximum_bytes || metadata_bytes > maximum_u64 {
+    if metadata_bytes > maximum_u64 {
         return Err(LoaderError::InputTooLarge {
             operation,
             path: path.to_path_buf(),
             maximum_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn reject_observed_artifact_size(
+    path: &Path,
+    operation: &'static str,
+    observed_bytes: usize,
+) -> Result<(), LoaderError> {
+    if observed_bytes > crate::MAX_PLUGIN_ARTIFACT_BYTES {
+        return Err(LoaderError::InputTooLarge {
+            operation,
+            path: path.to_path_buf(),
+            maximum_bytes: crate::MAX_PLUGIN_ARTIFACT_BYTES,
         });
     }
     Ok(())
@@ -306,7 +361,7 @@ pub(super) fn publish_cache_entry(
     })?;
 
     let stage_lock_path = parent.join(".stage.lock");
-    let stage_lock = open_stage_lock(&stage_lock_path)?;
+    let stage_lock = open_lock_file(&stage_lock_path, "open plugin cache staging lock")?;
     stage_lock.lock().map_err(|source| LoaderError::Io {
         operation: "lock plugin cache staging directory",
         path: stage_lock_path.clone(),
@@ -341,6 +396,7 @@ pub(super) fn publish_cache_entry(
             path: source_path.to_path_buf(),
             source,
         })?;
+    reject_declared_artifact_size(source, source_path, "read plugin artifact")?;
     let mut copied_hash = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut copied_bytes = 0_usize;
@@ -354,7 +410,7 @@ pub(super) fn publish_cache_entry(
             break;
         }
         copied_bytes = copied_bytes.saturating_add(read);
-        reject_oversized_artifact(source, source_path, "read plugin artifact", copied_bytes)?;
+        reject_observed_artifact_size(source_path, "read plugin artifact", copied_bytes)?;
         copied_hash.update(&buffer[..read]);
         temporary
             .write_all(&buffer[..read])
@@ -394,7 +450,7 @@ pub(super) fn publish_cache_entry(
     match temporary.persist_noclobber(cache_path) {
         Ok(_) => {
             sync_directory(parent)?;
-            verify_cache_entry(cache_path, expected_hash).map(drop)
+            Ok(())
         }
         Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
             make_writable_for_cleanup(error.file.path());
@@ -409,6 +465,235 @@ pub(super) fn publish_cache_entry(
                 source,
             })
         }
+    }
+}
+
+fn scan_cache_entries(hash_root: &Path) -> Result<Vec<CacheEntry>, LoaderError> {
+    let mut entries = Vec::new();
+    for (index, entry) in fs::read_dir(hash_root)
+        .map_err(|source| LoaderError::Io {
+            operation: "inspect plugin cache",
+            path: hash_root.to_path_buf(),
+            source,
+        })?
+        .enumerate()
+    {
+        if index >= MAX_CACHE_SCAN_ENTRIES {
+            return Err(LoaderError::CacheBudgetExceeded {
+                entries: index + 1,
+                bytes: usize::MAX,
+                maximum_entries: MAX_CACHE_ENTRIES,
+                maximum_bytes: MAX_CACHE_BYTES,
+            });
+        }
+        let entry = entry.map_err(|source| LoaderError::Io {
+            operation: "inspect plugin cache entry",
+            path: hash_root.to_path_buf(),
+            source,
+        })?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|source| LoaderError::Io {
+            operation: "inspect plugin cache entry",
+            path: entry.path(),
+            source,
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(LoaderError::InvalidCacheEntry(entry.path()));
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(LoaderError::InvalidCacheEntry(entry.path()));
+        };
+        let hash = name
+            .parse::<ContentHash>()
+            .map_err(|_| LoaderError::InvalidCacheEntry(entry.path()))?;
+        // Every publisher of a missing content hash holds the global
+        // maintenance lock for the complete stage operation. A matching
+        // temporary here therefore belongs to a process that exited and can
+        // be removed before it is counted or validated as durable cache data.
+        reap_stale_stage_files(&entry.path())?;
+        let mut bytes = 0_usize;
+        let mut modified = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        for child in fs::read_dir(entry.path()).map_err(|source| LoaderError::Io {
+            operation: "inspect plugin cache entry",
+            path: entry.path(),
+            source,
+        })? {
+            let child = child.map_err(|source| LoaderError::Io {
+                operation: "inspect plugin cache entry",
+                path: entry.path(),
+                source,
+            })?;
+            let child_metadata =
+                fs::symlink_metadata(child.path()).map_err(|source| LoaderError::Io {
+                    operation: "inspect plugin cache entry",
+                    path: child.path(),
+                    source,
+                })?;
+            if child.file_name() == ".stage.lock" {
+                continue;
+            }
+            if !child_metadata.file_type().is_file()
+                || child
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rsi-meta-stage-")
+            {
+                return Err(LoaderError::InvalidCacheEntry(child.path()));
+            }
+            bytes = bytes
+                .checked_add(usize::try_from(child_metadata.len()).unwrap_or(usize::MAX))
+                .ok_or(LoaderError::CacheBudgetExceeded {
+                    entries: entries.len() + 1,
+                    bytes: usize::MAX,
+                    maximum_entries: MAX_CACHE_ENTRIES,
+                    maximum_bytes: MAX_CACHE_BYTES,
+                })?;
+            modified = modified.max(
+                child_metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            );
+        }
+        entries.push(CacheEntry {
+            hash,
+            path: entry.path(),
+            bytes,
+            modified,
+        });
+    }
+    Ok(entries)
+}
+
+pub(super) fn maintain_cache_budget(
+    cache_root: &Path,
+    incoming_hash: ContentHash,
+    incoming_path: &Path,
+    incoming_bytes: usize,
+) -> Result<CacheMaintenanceGuard, LoaderError> {
+    let hash_root = cache_root.join("sha256");
+    fs::create_dir_all(&hash_root).map_err(|source| LoaderError::Io {
+        operation: "create plugin cache hash directory",
+        path: hash_root.clone(),
+        source,
+    })?;
+    let lock_path = cache_root.join(".maintenance.lock");
+    let lock = open_lock_file(&lock_path, "open plugin cache maintenance lock")?;
+    lock.lock().map_err(|source| LoaderError::Io {
+        operation: "lock plugin cache maintenance",
+        path: lock_path,
+        source,
+    })?;
+
+    match fs::symlink_metadata(incoming_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            return Ok(CacheMaintenanceGuard { _lock: lock });
+        }
+        Ok(_) => return Err(LoaderError::InvalidCacheEntry(incoming_path.to_path_buf())),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(LoaderError::Io {
+                operation: "inspect incoming plugin cache entry",
+                path: incoming_path.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    let mut entries = scan_cache_entries(&hash_root)?;
+
+    let incoming_directory_present = entries.iter().any(|entry| entry.hash == incoming_hash);
+    let mut projected_entries = entries.len() + usize::from(!incoming_directory_present);
+    let mut projected_bytes = entries
+        .iter()
+        .try_fold(0_usize, |total, entry| total.checked_add(entry.bytes))
+        .and_then(|total| total.checked_add(incoming_bytes))
+        .unwrap_or(usize::MAX);
+    if projected_entries > MAX_CACHE_ENTRIES || projected_bytes > MAX_CACHE_BYTES {
+        entries.sort_by_key(|entry| (entry.modified, entry.hash.to_hex()));
+        for entry in &entries {
+            if projected_entries <= MAX_CACHE_ENTRIES && projected_bytes <= MAX_CACHE_BYTES {
+                break;
+            }
+            if entry.hash == incoming_hash {
+                continue;
+            }
+            let Some(eviction_lock) = try_lock_cache_entry_for_eviction(cache_root, entry.hash)?
+            else {
+                continue;
+            };
+            remove_cache_entry(&entry.path)?;
+            projected_entries = projected_entries.saturating_sub(1);
+            projected_bytes = projected_bytes.saturating_sub(entry.bytes);
+            drop(eviction_lock);
+            remove_cache_pin_file(cache_root, entry.hash)?;
+        }
+    }
+    if projected_entries > MAX_CACHE_ENTRIES || projected_bytes > MAX_CACHE_BYTES {
+        return Err(LoaderError::CacheBudgetExceeded {
+            entries: projected_entries,
+            bytes: projected_bytes,
+            maximum_entries: MAX_CACHE_ENTRIES,
+            maximum_bytes: MAX_CACHE_BYTES,
+        });
+    }
+    sync_directory(&hash_root)?;
+    Ok(CacheMaintenanceGuard { _lock: lock })
+}
+
+fn remove_cache_entry(path: &Path) -> Result<(), LoaderError> {
+    if let Ok(children) = fs::read_dir(path) {
+        for child in children.flatten() {
+            make_writable_for_cleanup(&child.path());
+        }
+    }
+    fs::remove_dir_all(path).map_err(|source| LoaderError::Io {
+        operation: "remove unpinned plugin cache entry",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn cache_pin_path(cache_root: &Path, hash: ContentHash) -> PathBuf {
+    cache_root
+        .join(".pins")
+        .join(format!("{}.lock", hash.to_hex()))
+}
+
+fn try_lock_cache_entry_for_eviction(
+    cache_root: &Path,
+    hash: ContentHash,
+) -> Result<Option<fs::File>, LoaderError> {
+    let path = cache_pin_path(cache_root, hash);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| LoaderError::Io {
+            operation: "create plugin cache pin directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let lock = open_lock_file(&path, "open plugin cache eviction lock")?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(source)) => Err(LoaderError::Io {
+            operation: "lock plugin cache entry for eviction",
+            path,
+            source,
+        }),
+    }
+}
+
+fn remove_cache_pin_file(cache_root: &Path, hash: ContentHash) -> Result<(), LoaderError> {
+    let path = cache_pin_path(cache_root, hash);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(LoaderError::Io {
+            operation: "remove plugin cache eviction lock",
+            path,
+            source,
+        }),
     }
 }
 
@@ -451,7 +736,7 @@ pub(super) fn verify_cache_entry(
     Ok(file)
 }
 
-fn open_stage_lock(path: &Path) -> Result<fs::File, LoaderError> {
+fn open_lock_file(path: &Path, operation: &'static str) -> Result<fs::File, LoaderError> {
     #[cfg(unix)]
     let result = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -473,7 +758,7 @@ fn open_stage_lock(path: &Path) -> Result<fs::File, LoaderError> {
             .open(path)
     };
     result.map_err(|source| LoaderError::Io {
-        operation: "open plugin cache staging lock",
+        operation,
         path: path.to_path_buf(),
         source,
     })

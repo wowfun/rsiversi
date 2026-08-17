@@ -11,7 +11,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2"
-rsi-meta-frame-contract = { path = "../frame-contract" }
 rsi-meta-plugin = { path = "../../../crates/rsi-meta/plugin" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,12 +1,11 @@
 use std::time::Duration;
 
 use rsi_meta_fixture_lifecycle_probe::rsi_meta_plugin_entry_v0;
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
-    OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-    STATE_EVENT_VALUE,
-};
 use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
+    OP_CREDIT, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE, STATE_EVENT_VALUE,
+};
 use rsi_meta_plugin_testkit::{CapturedFrame, HarnessError, PluginHarness};
 use serde_json::{Value, json};
 
@@ -88,6 +87,54 @@ fn committed_probe_with_fault(tag: &str, stream_fault: &str) -> PluginHarness {
     plugin
 }
 
+fn trigger_stream_fault(fault: &str, request_id: &str) -> PluginHarness {
+    let mut plugin = committed_probe_with_fault("f", fault);
+    assert_eq!(
+        plugin
+            .send(
+                Lane::Data,
+                &Frame::service_request(
+                    request_id,
+                    SERVICE,
+                    OP_OPEN,
+                    json!({"consumer": "fault-test", "sequence": 0}),
+                ),
+            )
+            .unwrap(),
+        CallOutcome::Ok
+    );
+    assert_event(
+        recv_gate(&plugin),
+        request_id,
+        EVENT_CREDIT,
+        json!({"bytes": 1024 * 1024}),
+    );
+    assert_eq!(
+        plugin
+            .send(
+                Lane::Data,
+                &Frame::service_request(
+                    request_id,
+                    SERVICE,
+                    OP_CREDIT,
+                    json!({"bytes": 1024 * 1024}),
+                ),
+            )
+            .unwrap(),
+        CallOutcome::Ok
+    );
+    assert_eq!(
+        plugin
+            .send(
+                Lane::Data,
+                &Frame::service_data_request(request_id, SERVICE, vec![1]),
+            )
+            .unwrap(),
+        CallOutcome::Ok
+    );
+    plugin
+}
+
 #[test]
 fn failed_initial_credit_does_not_retain_the_stream_id() {
     let mut plugin = committed_probe("rollback-open");
@@ -117,78 +164,37 @@ fn adversarial_stream_modes_emit_exactly_one_malformed_event() {
             EVENT_DATA,
             json!([102, 0, 1]),
         ),
-        (
-            "unknown_event",
-            SERVICE,
-            "unknown_event",
-            json!([102, 0, 1]),
-        ),
-        (
-            "non_byte_data",
-            SERVICE,
-            EVENT_DATA,
-            json!({"not": "bytes"}),
-        ),
+        ("unknown_event", SERVICE, "unknown_event", json!({})),
     ] {
-        let mut plugin = committed_probe_with_fault("f", fault);
         let request_id = format!("fault-{fault}");
-        assert_eq!(
-            plugin
-                .send(
-                    Lane::Data,
-                    &Frame::service_request(
-                        &request_id,
-                        SERVICE,
-                        OP_OPEN,
-                        json!({"consumer": "fault-test", "sequence": 0}),
-                    ),
-                )
-                .unwrap(),
-            CallOutcome::Ok
-        );
-        assert_event(
-            recv_gate(&plugin),
-            &request_id,
-            EVENT_CREDIT,
-            json!({"bytes": 1024 * 1024}),
-        );
-        assert_eq!(
-            plugin
-                .send(
-                    Lane::Data,
-                    &Frame::service_request(
-                        &request_id,
-                        SERVICE,
-                        OP_CREDIT,
-                        json!({"bytes": 1024 * 1024}),
-                    ),
-                )
-                .unwrap(),
-            CallOutcome::Ok
-        );
-        assert_eq!(
-            plugin
-                .send(
-                    Lane::Data,
-                    &Frame::service_request(&request_id, SERVICE, OP_DATA, json!([1])),
-                )
-                .unwrap(),
-            CallOutcome::Ok
-        );
+        let plugin = trigger_stream_fault(fault, &request_id);
+        let expected = if fault == "wrong_service" {
+            Frame::service_data_event(request_id, expected_service, vec![102, 0, 1])
+        } else {
+            Frame::service_event(
+                Some(request_id),
+                expected_service,
+                expected_event,
+                expected_payload,
+            )
+        };
         assert_eq!(
             recv_gate(&plugin),
             CapturedFrame {
                 lane: Lane::Data,
-                frame: Frame::service_event(
-                    Some(request_id),
-                    expected_service,
-                    expected_event,
-                    expected_payload,
-                ),
+                frame: expected
             }
         );
         assert!(plugin.try_recv().unwrap().is_none());
     }
+
+    let request_id = "fault-non-byte-data";
+    let plugin = trigger_stream_fault("non_byte_data", request_id);
+    assert!(matches!(
+        plugin.recv(Duration::from_secs(1)),
+        Err(HarnessError::Frame(_))
+    ));
+    assert!(plugin.try_recv().unwrap().is_none());
 }
 
 #[test]
@@ -228,7 +234,7 @@ fn malformed_json_mode_posts_raw_invalid_bytes_through_the_public_abi() {
         plugin
             .send(
                 Lane::Data,
-                &Frame::service_request(request_id, SERVICE, OP_DATA, json!([1])),
+                &Frame::service_data_request(request_id, SERVICE, vec![1]),
             )
             .unwrap(),
         CallOutcome::Ok
@@ -254,6 +260,19 @@ fn assert_event(captured: CapturedFrame, request_id: &str, event: &str, payload:
             request_id: Some(request_id.to_owned()),
             service: SERVICE.to_owned(),
             event: event.to_owned(),
+            payload,
+        }
+    );
+}
+
+fn assert_data_event(captured: CapturedFrame, request_id: &str, payload: Vec<u8>) {
+    let CapturedFrame { lane, frame } = captured;
+    assert_eq!(lane, Lane::Data);
+    assert_eq!(
+        frame.body,
+        FrameBody::ServiceDataEvent {
+            request_id: request_id.to_owned(),
+            service: SERVICE.to_owned(),
             payload,
         }
     );
@@ -285,12 +304,11 @@ fn open_probe(plugin: &mut PluginHarness, request_id: &str, output_credit: u64) 
 #[test]
 fn data_would_block_is_retained_and_charged_once() {
     let mut plugin = committed_probe("tag");
-    let output = json!([116, 97, 103, 0, 7]);
-    let encoded = serde_json::to_vec(&output).unwrap().len() as u64;
-    open_probe(&mut plugin, "blocked-data", encoded);
+    let output = vec![116, 97, 103, 0, 7];
+    open_probe(&mut plugin, "blocked-data", output.len() as u64);
 
     plugin.set_post_outcome(PostFrameOutcome::WouldBlock);
-    let data = Frame::service_request("blocked-data", SERVICE, OP_DATA, json!([7]));
+    let data = Frame::service_data_request("blocked-data", SERVICE, vec![7]);
     assert_eq!(
         plugin.send(Lane::Data, &data).unwrap(),
         CallOutcome::Ok,
@@ -303,7 +321,7 @@ fn data_would_block_is_retained_and_charged_once() {
         plugin.send(Lane::Control, &tick(1)).unwrap(),
         CallOutcome::Ok
     );
-    assert_event(recv_gate(&plugin), "blocked-data", EVENT_DATA, output);
+    assert_data_event(recv_gate(&plugin), "blocked-data", output);
     assert!(plugin.try_recv().unwrap().is_none());
 }
 
@@ -353,9 +371,9 @@ fn stream_orders_open_credit_tagged_data_and_half_close() {
         json!({"bytes": 1024 * 1024}),
     );
 
-    // DATA remains a JSON byte array: UTF-8 tag, zero separator, request bytes.
-    let expected = json!([98, 108, 117, 101, 0, 7, 8]);
-    let encoded_len = serde_json::to_vec(&expected).unwrap().len() as u64;
+    // DATA stays binary: UTF-8 tag, zero separator, request bytes.
+    let expected = vec![98, 108, 117, 101, 0, 7, 8];
+    let encoded_len = expected.len() as u64;
     let credit = Frame::service_request(
         "stream-1",
         SERVICE,
@@ -365,9 +383,9 @@ fn stream_orders_open_credit_tagged_data_and_half_close() {
     assert_eq!(plugin.send(Lane::Data, &credit).unwrap(), CallOutcome::Ok);
     assert!(plugin.try_recv().unwrap().is_none());
 
-    let data = Frame::service_request("stream-1", SERVICE, OP_DATA, json!([7, 8]));
+    let data = Frame::service_data_request("stream-1", SERVICE, vec![7, 8]);
     assert_eq!(plugin.send(Lane::Data, &data).unwrap(), CallOutcome::Ok);
-    assert_event(recv_gate(&plugin), "stream-1", EVENT_DATA, expected);
+    assert_data_event(recv_gate(&plugin), "stream-1", expected);
 
     let half_close =
         Frame::service_request("stream-1", SERVICE, OP_HALF_CLOSE, json!({"sequence": 1}));

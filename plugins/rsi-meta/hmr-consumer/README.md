@@ -10,6 +10,6 @@
 
 The plugin emits content-derived apply requests only for the generation that admitted them and only for its configured manifest and lock pair. It keeps one request in flight: applied or unchanged feedback clears matching drift, deterministic rejection or `restart_required` suppresses retries for that content, and transient failure leaves it dirty for a later tick. A `Retired` terminal refused by bounded control-lane backpressure stays pending until `runtime.tick` can deliver it. The [composition runtime](../../../crates/rsi-meta/docs/subsystems/composition-runtime.md) owns candidate, cutover, and restart semantics.
 
-Watch-plan inputs are bounded to 256 MiB per file and 512 MiB in aggregate before the callback hashes their desired bytes.
+Watch-plan inputs are bounded to 256 MiB per file and 512 MiB in aggregate. One bounded background worker derives and hashes a plan; at most one refresh is in flight, and further notifications collapse into one dirty retry. A Prepare callback only admits that bounded work: its matching `Prepared` or `PrepareFailed` terminal is emitted asynchronously and retried under control-lane backpressure. Shutdown cancellation is checked between bounded reads.
 
 This package is trusted native code and inherits the product [security boundary](../../../crates/rsi-meta/docs/security.md).

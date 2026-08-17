@@ -13,11 +13,11 @@ use std::os::unix::fs::MetadataExt;
 
 use notify::EventKind;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT,
-    OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_plugin::sdk::{Host, Plugin};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT, OP_HALF_CLOSE,
+    OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin::{Lane, PostFrameOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -675,17 +675,14 @@ fn flush_stream(host: &Host, request_id: &str, stream: &mut WatchStream) -> Resu
             return Ok(());
         };
         let payload = encode_data(event)?;
-        let encoded_bytes = serde_json::to_vec(&payload)
-            .map_err(|_| WatchError("encode DATA payload"))?
-            .len() as u64;
-        if stream.output_credit < encoded_bytes {
+        let raw_bytes = payload.len() as u64;
+        if stream.output_credit < raw_bytes {
             return Ok(());
         }
-        let frame =
-            Frame::service_event(Some(request_id.to_owned()), "fs.watch", EVENT_DATA, payload);
+        let frame = Frame::service_data_event(request_id, "fs.watch", payload);
         match post_outcome(host, Lane::Data, &frame)? {
             PostFrameOutcome::Accepted => {
-                stream.output_credit -= encoded_bytes;
+                stream.output_credit -= raw_bytes;
                 stream.pending.pop_front();
             }
             PostFrameOutcome::WouldBlock => return Ok(()),
@@ -696,9 +693,8 @@ fn flush_stream(host: &Host, request_id: &str, stream: &mut WatchStream) -> Resu
     }
 }
 
-fn encode_data(event: &Value) -> Result<Value, WatchError> {
-    let bytes = serde_json::to_vec(event).map_err(|_| WatchError("encode watch event"))?;
-    Ok(Value::Array(bytes.into_iter().map(Value::from).collect()))
+fn encode_data(event: &Value) -> Result<Vec<u8>, WatchError> {
+    serde_json::to_vec(event).map_err(|_| WatchError("encode watch event"))
 }
 
 fn fingerprint_change(

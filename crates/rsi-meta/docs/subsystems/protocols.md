@@ -1,6 +1,6 @@
 # Control and service protocols
 
-The CLI-owned v0 control protocol projects `CompositionHost` onto Unix line-delimited JSON and WebSocket text messages. Exact envelope fields belong to the [published schemas](../../../../schemas/rsi-meta/). The embedded core exposes typed methods rather than control envelopes.
+The CLI-owned v0 control protocol projects `CompositionHost` onto Unix length-delimited JSON records and WebSocket text messages. Exact envelope fields belong to the [published schemas](../../../../schemas/rsi-meta/). The embedded core exposes typed methods rather than control envelopes.
 
 ## Commands, identities, and results
 
@@ -14,13 +14,14 @@ Apply results are `applied`, `no_change`, or `restart_required`. `restart_requir
 
 Every event receives a monotonic cursor before broadcast and carries the graph revision plus an optional `operation_id`. System lifecycle events omit the operation ID. `composition_committed` is emitted only when routing becomes active; `host_shutting_down` records explicit shutdown. There is no `daemon_restarting` event.
 
-A `query_graph` result contains a graph and cursor from the same immutable routing snapshot. `/ws?after=N` first replays events with cursor greater than `N`, then continues live without a gap. Generic clients retain unknown event payloads.
+A `query_graph` result contains a graph and cursor from the same immutable routing snapshot. `/ws?after=N` first replays events with cursor greater than `N`, then continues live without a gap. Full events are retained for seven days and at most 100,000 rows. A cursor older than the durable minimum is rejected as `cursor_expired`, with `minimum_available` and a current `resync_cursor`; the client obtains a fresh snapshot at that boundary before resuming. Generic clients retain unknown event payloads.
 
 Close reasons begin with stable space-separated `key=value` fields:
 
 | Status | Reason prefix | Client action |
 |---|---|---|
 | 1008 | `code=bearer_token_rotated` | Reload the token and reconnect. |
+| 1008 | `code=cursor_expired requested=N minimum_available=M resync_cursor=R` | Fetch a fresh graph at `R`, then resume from that boundary; do not retry `N`. |
 | 1013 | `code=event_stream_interrupted last_cursor=N` | Reconnect to `/ws?after=N`. |
 | 1013 | `code=event_delivery_interrupted last_cursor=N` | Reconnect after `last_cursor`; the cursor advances only after send. |
 | 1012 | `code=daemon_restarting` | Reconnect after the supervisor starts the reconciled daemon. |
@@ -31,6 +32,8 @@ Other terminal reasons are `code=daemon_shutdown`, `code=event_subscribe_failed`
 
 An `open` identifies a consumer instance and contract. Provider selection comes from the committed graph, and an explicit binding is the only cross-branch route. The host pins exactly one provider generation for the stream lifetime. Successful open acknowledges the stream with `{"provider": "provider-instance-id"}`.
 
-Client operations are `open`, `data`, `credit`, `half_close`, and `cancel`; provider events are `data`, `credit`, `end`, and `cancel`. Sequence numbers begin at 1 independently in each direction. DATA consumes credit equal to the UTF-8 byte length of its encoded payload array. `half_close` closes one sender, `cancel` closes both directions, and exactly one `end` or `cancel` is terminal. Streams are connection-scoped and never replayed.
+Client operations are `open`, DATA, `credit`, `half_close`, and `cancel`; provider events are DATA, `credit`, `end`, and `cancel`. Stream IDs match `[A-Za-z0-9][A-Za-z0-9._:-]{0,254}`. Sequence numbers begin at 1 independently in each direction. DATA consumes credit equal to its raw byte length. JSON DATA envelopes are invalid: WebSocket carries DATA in binary messages, while the Unix transport carries the same bytes as one length-delimited record. Both use `RSD0`, followed by a big-endian `u16` stream-ID length, `u64` sequence, `u32` payload length, then the UTF-8 stream ID and raw payload. `half_close` closes one sender, `cancel` closes both directions, and exactly one `end` or `cancel` is terminal. Streams are connection-scoped and never replayed.
+
+The native plugin lane uses the distinct [`RMD0`](../../plugin/README.md#calls-lanes-and-lifetime) record because it must identify request versus event and carry both the internal request ID and service contract. The host translates between that internal correlation and public `RSD0`; the two magics and layouts are not interchangeable.
 
 Connection ingress, control egress, plugin control/data lanes, frames, and outstanding credit are independently bounded. Each listener admits at most 128 connections, HTTP peers have five seconds to finish headers, and each HTTP connection has a 30-second maximum lifetime so an idle keep-alive peer cannot retain admission indefinitely. A lagging event subscriber disconnects with its last durable cursor; service DATA is never persisted.

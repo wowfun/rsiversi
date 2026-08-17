@@ -18,12 +18,12 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
-use libloading::Library;
+use rsi_meta_plugin::{ABI_MAJOR, ABI_MINOR, CallOutcome, HostApi, INIT_OK, Lane, PluginApi};
+#[cfg(test)]
 use rsi_meta_plugin::{
-    ABI_MAJOR, ABI_MINOR, CallOutcome, HostApi, INIT_OK, LANE_CONTROL, LANE_DATA, Lane,
-    PLUGIN_ENTRY_SYMBOL, POST_FRAME_ACCEPTED, POST_FRAME_CLOSED, POST_FRAME_WOULD_BLOCK, PluginApi,
-    PluginEntryFn,
+    LANE_CONTROL, LANE_DATA, POST_FRAME_ACCEPTED, POST_FRAME_CLOSED, POST_FRAME_WOULD_BLOCK,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
@@ -31,14 +31,28 @@ use thiserror::Error;
 
 #[cfg(feature = "config")]
 mod config;
+mod mailbox;
 mod manifest_validation;
 mod mapping;
+mod resident;
+mod staged;
 #[cfg(all(feature = "test-failpoints", unix))]
 mod test_failpoints;
 
 #[cfg(feature = "config")]
-pub use config::{ConfigPrepareError, PreparedConfig, prepare_config, prepare_config_with_schema};
+pub use config::{
+    ConfigPrepareError, PreparedConfig, PreparedConfigSchema, compile_config_schema,
+    prepare_config, prepare_config_with_compiled_schema, prepare_config_with_schema,
+};
+pub use mailbox::{PluginLaneReceiver, PluginMailbox, PluginMailboxOptions, PostedFrame};
+use mailbox::{QueueHostContext, queue_post_frame};
+#[cfg(test)]
+use mailbox::{posted_payload_copies, reset_posted_payload_copies};
 use manifest_validation::{validate_manifest_shape, validate_relative_path};
+use resident::ResidentArtifact;
+#[cfg(test)]
+use resident::{ResidentArtifactKey, ResidentArtifactRegistry};
+pub use staged::StagedPlugin;
 
 /// Target triple for which this loader was compiled.
 pub const BUILD_TARGET: &str = env!("RSI_META_BUILD_TARGET");
@@ -54,6 +68,16 @@ pub(crate) const MAX_CONFIG_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 /// a source file that grows while it is being copied.
 #[doc(hidden)]
 pub const MAX_PLUGIN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum unique native artifacts retained by one daemon process.
+pub const MAX_RESIDENT_ARTIFACTS: usize = 128;
+/// Maximum aggregate bytes reserved for process-resident native mappings.
+pub const MAX_RESIDENT_MAPPED_BYTES: usize = 1024 * 1024 * 1024;
+/// Maximum immutable artifacts retained in one local cache.
+pub const MAX_CACHE_ENTRIES: usize = 512;
+/// Maximum aggregate artifact bytes retained in one local cache.
+pub const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+// Bound recovery work while leaving room to inspect crash-orphaned hash directories.
+const MAX_CACHE_SCAN_ENTRIES: usize = MAX_CACHE_ENTRIES * 8;
 
 /// A SHA-256 content digest.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -133,7 +157,7 @@ impl<'de> Deserialize<'de> for ContentHash {
 pub struct InvalidContentHash;
 
 /// ABI version offered by a host or required by a package.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiVersion {
     pub major: u32,
@@ -357,6 +381,12 @@ pub enum LoaderError {
     InvalidContractName { field: &'static str },
     #[error("manifest field `{field}` contains duplicate `{value}`")]
     DuplicateManifestValue { field: &'static str, value: String },
+    #[error("manifest field `{field}` contains {actual} entries; maximum is {maximum}")]
+    ManifestCollectionLimit {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
     #[error(
         "manifest path `{path}` in field `{field}` must be a non-empty relative path without traversal"
     )]
@@ -405,244 +435,40 @@ pub enum LoaderError {
     DynamicLoad {
         path: PathBuf,
         #[source]
-        source: libloading::Error,
+        source: Arc<libloading::Error>,
     },
     #[error("resident plugin library `{path}` does not export `rsi_meta_plugin_entry_v0`")]
     MissingEntrySymbol {
         path: PathBuf,
         #[source]
-        source: libloading::Error,
+        source: Arc<libloading::Error>,
     },
+    #[error("resident plugin artifact limit of {maximum} reached")]
+    ResidentArtifactLimit { maximum: usize },
+    #[error(
+        "resident plugin mapping budget of {maximum_bytes} bytes exceeded by {requested_bytes} bytes"
+    )]
+    ResidentMappedBytesLimit {
+        maximum_bytes: usize,
+        requested_bytes: usize,
+    },
+    #[error(
+        "plugin cache budget exceeded: {entries} entries/{bytes} bytes; maximum is {maximum_entries} entries/{maximum_bytes} bytes"
+    )]
+    CacheBudgetExceeded {
+        entries: usize,
+        bytes: usize,
+        maximum_entries: usize,
+        maximum_bytes: usize,
+    },
+    #[error("cannot prepare resident plugin artifact `{path}`: {message}")]
+    ResidentArtifactPreparation { path: PathBuf, message: String },
     #[error("plugin entry point rejected initialization with status {0}")]
     PluginInit(u32),
     #[error("plugin returned an incompatible function table")]
     IncompatiblePluginTable,
     #[error("invalid plugin mailbox option: {0}")]
     InvalidMailboxOptions(&'static str),
-}
-
-/// Capacity and frame bound for the safe host callback adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PluginMailboxOptions {
-    pub control_capacity: usize,
-    pub data_capacity: usize,
-    pub max_frame_bytes: usize,
-}
-
-impl Default for PluginMailboxOptions {
-    fn default() -> Self {
-        Self {
-            control_capacity: 64,
-            data_capacity: 256,
-            max_frame_bytes: 1024 * 1024,
-        }
-    }
-}
-
-impl PluginMailboxOptions {
-    fn validate(self) -> Result<Self, LoaderError> {
-        if self.control_capacity == 0 {
-            return Err(LoaderError::InvalidMailboxOptions(
-                "control_capacity must be greater than zero",
-            ));
-        }
-        if self.data_capacity == 0 {
-            return Err(LoaderError::InvalidMailboxOptions(
-                "data_capacity must be greater than zero",
-            ));
-        }
-        if self.max_frame_bytes == 0 {
-            return Err(LoaderError::InvalidMailboxOptions(
-                "max_frame_bytes must be greater than zero",
-            ));
-        }
-        Ok(self)
-    }
-}
-
-/// One frame synchronously copied from an arbitrary plugin thread.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PostedFrame {
-    lane: Lane,
-    payload: Vec<u8>,
-}
-
-impl PostedFrame {
-    pub const fn lane(&self) -> Lane {
-        self.lane
-    }
-
-    pub fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
-    pub fn into_payload(self) -> Vec<u8> {
-        self.payload
-    }
-}
-
-/// Independent bounded receivers for lifecycle/control and service DATA.
-#[derive(Debug)]
-pub struct PluginMailbox {
-    control: tokio::sync::mpsc::Receiver<PostedFrame>,
-    data: tokio::sync::mpsc::Receiver<PostedFrame>,
-}
-
-impl PluginMailbox {
-    pub async fn recv_control(&mut self) -> Option<PostedFrame> {
-        self.control.recv().await
-    }
-
-    pub async fn recv_data(&mut self) -> Option<PostedFrame> {
-        self.data.recv().await
-    }
-
-    /// Attempts to receive a control frame without waiting.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Empty` or `Disconnected` from the bounded lane.
-    pub fn try_recv_control(
-        &mut self,
-    ) -> Result<PostedFrame, tokio::sync::mpsc::error::TryRecvError> {
-        self.control.try_recv()
-    }
-
-    /// Attempts to receive a DATA frame without waiting.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Empty` or `Disconnected` from the bounded lane.
-    pub fn try_recv_data(&mut self) -> Result<PostedFrame, tokio::sync::mpsc::error::TryRecvError> {
-        self.data.try_recv()
-    }
-
-    /// Splits the mailbox into independently owned control and data receivers.
-    ///
-    /// The tuple order is `(control, data)`. Each receiver has a fixed lane,
-    /// while every [`PostedFrame`] retains its lane for defensive routing and
-    /// observability at the consumer boundary.
-    pub fn into_lanes(self) -> (PluginLaneReceiver, PluginLaneReceiver) {
-        (
-            PluginLaneReceiver {
-                lane: Lane::Control,
-                receiver: self.control,
-            },
-            PluginLaneReceiver {
-                lane: Lane::Data,
-                receiver: self.data,
-            },
-        )
-    }
-}
-
-/// Independently owned receiver for exactly one plugin output lane.
-#[derive(Debug)]
-pub struct PluginLaneReceiver {
-    lane: Lane,
-    receiver: tokio::sync::mpsc::Receiver<PostedFrame>,
-}
-
-impl PluginLaneReceiver {
-    /// Lane permanently associated with this receiver.
-    pub const fn lane(&self) -> Lane {
-        self.lane
-    }
-
-    /// Waits for the next frame on this lane.
-    pub async fn recv(&mut self) -> Option<PostedFrame> {
-        self.receiver.recv().await
-    }
-
-    /// Attempts to receive a frame without waiting.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Empty` or `Disconnected` from this bounded lane.
-    pub fn try_recv(&mut self) -> Result<PostedFrame, tokio::sync::mpsc::error::TryRecvError> {
-        self.receiver.try_recv()
-    }
-}
-
-#[derive(Debug)]
-struct QueueHostContext {
-    control: tokio::sync::mpsc::Sender<PostedFrame>,
-    data: tokio::sync::mpsc::Sender<PostedFrame>,
-    max_frame_bytes: usize,
-}
-
-unsafe extern "C" fn queue_post_frame(
-    host_handle: *mut core::ffi::c_void,
-    lane: u32,
-    data_ptr: *const u8,
-    data_len: usize,
-) -> u32 {
-    if host_handle.is_null() || data_len > 0 && data_ptr.is_null() {
-        return POST_FRAME_CLOSED;
-    }
-    // SAFETY: `load_queued` retains this context at a stable address until the
-    // plugin destroy callback returns. Failed initialization leaks the context
-    // because the loader cannot prove that plugin-created threads stopped.
-    let context = unsafe { &*host_handle.cast::<QueueHostContext>() };
-    if data_len > context.max_frame_bytes {
-        return POST_FRAME_WOULD_BLOCK;
-    }
-    let payload = if data_len == 0 {
-        Vec::new()
-    } else {
-        // SAFETY: The ABI requires an outgoing slice to be readable only for
-        // this callback. `to_vec` performs the required synchronous copy.
-        unsafe { std::slice::from_raw_parts(data_ptr, data_len) }.to_vec()
-    };
-    let sender = match lane {
-        LANE_CONTROL => &context.control,
-        LANE_DATA => &context.data,
-        _ => return POST_FRAME_CLOSED,
-    };
-    match sender.try_send(PostedFrame {
-        lane: Lane::from_raw(lane).expect("validated lane"),
-        payload,
-    }) {
-        Ok(()) => POST_FRAME_ACCEPTED,
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => POST_FRAME_WOULD_BLOCK,
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => POST_FRAME_CLOSED,
-    }
-}
-
-/// A package artifact published in the immutable local cache.
-#[derive(Clone, Debug)]
-pub struct StagedPlugin {
-    package: PluginPackage,
-    artifact: ArtifactManifest,
-    source_artifact_path: PathBuf,
-    cached_artifact_path: PathBuf,
-    artifact_hash: ContentHash,
-}
-
-impl StagedPlugin {
-    pub const fn package(&self) -> &PluginPackage {
-        &self.package
-    }
-
-    pub const fn manifest(&self) -> &PluginManifest {
-        self.package.manifest()
-    }
-
-    pub const fn artifact(&self) -> &ArtifactManifest {
-        &self.artifact
-    }
-
-    pub fn source_artifact_path(&self) -> &Path {
-        &self.source_artifact_path
-    }
-
-    pub fn cached_artifact_path(&self) -> &Path {
-        &self.cached_artifact_path
-    }
-
-    pub const fn artifact_hash(&self) -> ContentHash {
-        self.artifact_hash
-    }
 }
 
 /// Validates packages for one host ABI/target and owns its CAS location.
@@ -760,12 +586,33 @@ impl PluginLoader {
 
         ensure_private_cache_root(&self.cache_root)?;
         let cached_artifact_path = self.cache_path(artifact_hash, &artifact.path);
+        let source_bytes = usize::try_from(
+            source_artifact
+                .metadata()
+                .map_err(|source| LoaderError::Io {
+                    operation: "inspect plugin artifact",
+                    path: source_artifact_path.clone(),
+                    source,
+                })?
+                .len(),
+        )
+        .unwrap_or(usize::MAX);
+        // Hold the process-shared maintenance lock through verification,
+        // publication, and pin acquisition. This closes both the cache-hit and
+        // newly-published windows before the staged artifact becomes visible.
+        let _cache_maintenance = maintain_cache_budget(
+            &self.cache_root,
+            artifact_hash,
+            &cached_artifact_path,
+            source_bytes,
+        )?;
         publish_cache_entry(
             &cached_artifact_path,
             &source_artifact_path,
             &mut source_artifact,
             artifact_hash,
         )?;
+        let cache_pin = CachePin::acquire(&self.cache_root, artifact_hash)?;
 
         Ok(StagedPlugin {
             package,
@@ -773,15 +620,16 @@ impl PluginLoader {
             source_artifact_path,
             cached_artifact_path,
             artifact_hash,
+            cache_pin,
         })
     }
 
     /// Maps and initializes a staged trusted plugin.
     ///
-    /// The mapped library is intentionally leaked as soon as `dlopen` succeeds,
-    /// even when symbol lookup or initialization later fails. This prevents an
-    /// unprovable `dlclose` while plugin-created threads or copied code pointers
-    /// might still exist.
+    /// Each unique artifact is mapped once into a bounded process-resident
+    /// registry. A mapping remains resident even when symbol lookup or instance
+    /// initialization fails, preventing an unprovable `dlclose` while native
+    /// initializers, threads, or copied code pointers might still exist.
     ///
     /// Raw host tables cross an explicit unsafe boundary:
     ///
@@ -857,8 +705,6 @@ impl PluginLoader {
     ) -> Result<LoadedPlugin, LoaderError> {
         ensure_private_cache_root(&self.cache_root)?;
         self.validate_manifest(staged.manifest())?;
-        let verified_cache_entry =
-            verify_cache_entry(&staged.cached_artifact_path, staged.artifact_hash)?;
 
         let table_version = ApiVersion {
             major: host_table.abi_major,
@@ -868,56 +714,15 @@ impl PluginLoader {
             return Err(LoaderError::InvalidHostTable(table_version));
         }
 
+        let resident = self.resident_artifact(staged)?;
         let host_table = Box::new(host_table);
-        let library_path = staged.cached_artifact_path.clone();
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let mapping_path = {
-            use std::os::fd::AsRawFd;
-
-            PathBuf::from(format!(
-                "/proc/self/fd/{}",
-                verified_cache_entry.as_raw_fd()
-            ))
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let mapping_path = library_path.clone();
-        // SAFETY: The package is trusted native code, its bytes and exact target
-        // were checked before staging. On Linux/Android the loader maps through
-        // the same still-open file description that was re-hashed above, closing
-        // the path replacement window. Other supported platforms retain the
-        // verified handle while mapping from the private cache path.
-        let library = unsafe { mapping::open_now(&mapping_path, &library_path) }?;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            // The process-resident library may retain the `/proc/self/fd/N`
-            // name in the dynamic loader. Keep N allocated for the same inode
-            // so a later plugin can never reuse that pathname for other bytes.
-            let _ = Box::leak(Box::new(verified_cache_entry));
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        drop(verified_cache_entry);
-
-        // Intentionally no matching `Box::from_raw`: this process-resident leak
-        // is the mechanism that guarantees the library is never actively closed.
-        let library: &'static Library = Box::leak(Box::new(library));
-        // SAFETY: The fixed symbol name is NUL-terminated and the ABI crate owns
-        // its exact function signature. The library is process-resident, so the
-        // copied function pointer cannot outlive its mapping.
-        let entry: PluginEntryFn = unsafe {
-            *library
-                .get::<PluginEntryFn>(PLUGIN_ENTRY_SYMBOL)
-                .map_err(|source| LoaderError::MissingEntrySymbol {
-                    path: library_path.clone(),
-                    source,
-                })?
-        };
 
         let mut plugin_table = PluginApi::EMPTY;
         // SAFETY: `host_table` has stable boxed storage retained by LoadedPlugin;
         // `plugin_table` is writable for the full fixed table. The trusted entry
         // point must obey the C ABI and may not retain the output pointer.
         let status = unsafe {
-            entry(
+            (resident.entry)(
                 &raw const *host_table,
                 &raw mut plugin_table,
                 core::mem::size_of::<PluginApi>(),
@@ -951,6 +756,7 @@ impl PluginLoader {
 
         Ok(LoadedPlugin {
             staged: staged.clone(),
+            resident,
             host_table,
             _host_context: host_context,
             plugin_table,
@@ -975,6 +781,7 @@ impl PluginLoader {
 /// Live plugin instance. Safe methods serialize calls through `&mut self`.
 pub struct LoadedPlugin {
     staged: StagedPlugin,
+    resident: Arc<ResidentArtifact>,
     // The plugin may retain the pointer supplied to its entry point.
     host_table: Box<HostApi>,
     // Present for the safe queued adapter and retained through destroy.
@@ -1008,6 +815,12 @@ impl fmt::Debug for LoadedPlugin {
 impl LoadedPlugin {
     pub const fn staged(&self) -> &StagedPlugin {
         &self.staged
+    }
+
+    /// Reports whether two instances reuse the exact process-resident mapping.
+    #[doc(hidden)]
+    pub fn shares_resident_artifact_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.resident, &other.resident)
     }
 
     /// Delivers one borrowed control- or data-lane frame.
@@ -1099,8 +912,8 @@ mod storage;
 
 pub(crate) use storage::read_file;
 use storage::{
-    ensure_private_cache_root, hash_open_file, open_regular_file, publish_cache_entry,
-    verify_cache_entry,
+    CachePin, ensure_private_cache_root, hash_open_file, maintain_cache_budget, open_regular_file,
+    publish_cache_entry,
 };
 pub use storage::{hash_regular_file, read_bounded_file, read_bounded_file_following_symlinks};
 
@@ -1146,5 +959,298 @@ mod tests {
             POST_FRAME_ACCEPTED
         );
         assert_eq!(control_receiver.try_recv().unwrap().payload(), small);
+    }
+
+    #[test]
+    fn rejected_frame_does_not_copy_plugin_memory() {
+        let (control, control_receiver) = tokio::sync::mpsc::channel(1);
+        let (data, data_receiver) = tokio::sync::mpsc::channel(1);
+        let mut context = QueueHostContext {
+            control,
+            data,
+            max_frame_bytes: 4,
+        };
+        let payload = [1_u8; 4];
+        reset_posted_payload_copies();
+
+        assert_eq!(
+            // SAFETY: The callback context and payload remain alive throughout
+            // this synchronous call and both lane receivers are open.
+            unsafe {
+                queue_post_frame(
+                    (&raw mut context).cast(),
+                    LANE_CONTROL,
+                    payload.as_ptr(),
+                    payload.len(),
+                )
+            },
+            POST_FRAME_ACCEPTED
+        );
+        assert_eq!(posted_payload_copies(), 1);
+
+        assert_eq!(
+            // SAFETY: Same stable callback context and borrowed-slice contract.
+            unsafe {
+                queue_post_frame(
+                    (&raw mut context).cast(),
+                    LANE_CONTROL,
+                    payload.as_ptr(),
+                    payload.len(),
+                )
+            },
+            POST_FRAME_WOULD_BLOCK
+        );
+        assert_eq!(posted_payload_copies(), 1);
+
+        assert_eq!(
+            // SAFETY: An invalid lane is rejected before accessing the valid
+            // borrowed payload.
+            unsafe {
+                queue_post_frame(
+                    (&raw mut context).cast(),
+                    u32::MAX,
+                    payload.as_ptr(),
+                    payload.len(),
+                )
+            },
+            POST_FRAME_CLOSED
+        );
+        assert_eq!(posted_payload_copies(), 1);
+
+        drop(data_receiver);
+        assert_eq!(
+            // SAFETY: Same stable callback context and borrowed-slice contract.
+            unsafe {
+                queue_post_frame(
+                    (&raw mut context).cast(),
+                    LANE_DATA,
+                    payload.as_ptr(),
+                    payload.len(),
+                )
+            },
+            POST_FRAME_CLOSED
+        );
+        assert_eq!(posted_payload_copies(), 1);
+
+        drop(control_receiver);
+    }
+
+    #[test]
+    fn resident_registry_reuses_keys_and_enforces_its_hard_limit() {
+        let registry = ResidentArtifactRegistry::new(1, 1024);
+        let first = ResidentArtifactKey {
+            target: "test-target".to_owned(),
+            host_api: ApiVersion::CURRENT,
+            hash: ContentHash::digest(b"first"),
+        };
+        let second = ResidentArtifactKey {
+            target: "test-target".to_owned(),
+            host_api: ApiVersion::CURRENT,
+            hash: ContentHash::digest(b"second"),
+        };
+
+        let first_cell = registry.cell(first.clone(), 16).unwrap();
+        for _ in 0..10_000 {
+            assert!(Arc::ptr_eq(
+                &first_cell,
+                &registry
+                    .cell(first.clone(), 16)
+                    .expect("same key must reuse its slot")
+            ));
+        }
+        let state = registry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.mapped_bytes, 16);
+        drop(state);
+        assert!(matches!(
+            registry.cell(second, 16),
+            Err(LoaderError::ResidentArtifactLimit { maximum: 1 })
+        ));
+    }
+
+    #[test]
+    fn resident_registry_enforces_aggregate_mapping_bytes() {
+        let registry = ResidentArtifactRegistry::new(8, 31);
+        let key = |value: &[u8]| ResidentArtifactKey {
+            target: "test-target".to_owned(),
+            host_api: ApiVersion::CURRENT,
+            hash: ContentHash::digest(value),
+        };
+
+        registry.cell(key(b"first"), 16).unwrap();
+        assert!(matches!(
+            registry.cell(key(b"second"), 16),
+            Err(LoaderError::ResidentMappedBytesLimit {
+                maximum_bytes: 31,
+                requested_bytes: 32,
+            })
+        ));
+    }
+
+    #[test]
+    fn cache_maintenance_evicts_only_unpinned_entries_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        ensure_private_cache_root(&cache).unwrap();
+        let hash_root = cache.join("sha256");
+        std::fs::create_dir_all(&hash_root).unwrap();
+        let mut hashes = Vec::new();
+        for index in 0..MAX_CACHE_ENTRIES {
+            let hash = ContentHash::digest(index.to_be_bytes());
+            let directory = hash_root.join(hash.to_hex());
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("artifact.so"), [0_u8]).unwrap();
+            hashes.push(hash);
+        }
+        let pinned = CachePin::acquire(&cache, hashes[0]).unwrap();
+        let incoming = ContentHash::digest(b"incoming");
+        let incoming_path = hash_root.join(incoming.to_hex()).join("artifact.so");
+        let guard = maintain_cache_budget(&cache, incoming, &incoming_path, 1).unwrap();
+        assert!(hash_root.join(hashes[0].to_hex()).is_dir());
+        assert_eq!(
+            std::fs::read_dir(&hash_root).unwrap().count(),
+            MAX_CACHE_ENTRIES - 1
+        );
+        drop(guard);
+        drop(pinned);
+    }
+
+    #[test]
+    fn pinned_cache_bytes_cause_explicit_quota_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        ensure_private_cache_root(&cache).unwrap();
+        let hash_root = cache.join("sha256");
+        std::fs::create_dir_all(&hash_root).unwrap();
+        let entry_bytes = MAX_CACHE_BYTES / 4;
+        let mut pins = Vec::new();
+        for index in 0_u64..4 {
+            let hash = ContentHash::digest(index.to_be_bytes());
+            let directory = hash_root.join(hash.to_hex());
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::File::create(directory.join("artifact.so"))
+                .unwrap()
+                .set_len(entry_bytes as u64)
+                .unwrap();
+            pins.push(CachePin::acquire(&cache, hash).unwrap());
+        }
+        assert!(matches!(
+            maintain_cache_budget(
+                &cache,
+                ContentHash::digest(b"incoming"),
+                &hash_root
+                    .join(ContentHash::digest(b"incoming").to_hex())
+                    .join("artifact.so"),
+                1,
+            ),
+            Err(LoaderError::CacheBudgetExceeded {
+                maximum_entries: MAX_CACHE_ENTRIES,
+                maximum_bytes: MAX_CACHE_BYTES,
+                ..
+            })
+        ));
+        drop(pins);
+    }
+
+    const CACHE_PIN_CHILD_ENV: &str = "RSI_META_LOADER_TEST_CACHE_PIN_CHILD";
+
+    #[test]
+    #[ignore = "subprocess helper for cross-process cache pin coverage"]
+    fn cross_process_cache_pin_child() {
+        let Some(encoded) = std::env::var_os(CACHE_PIN_CHILD_ENV) else {
+            return;
+        };
+        let encoded = encoded.into_string().expect("UTF-8 child configuration");
+        let (cache, rest) = encoded.split_once('\n').expect("cache root separator");
+        let (hash, address) = rest.split_once('\n').expect("hash separator");
+        let hash = hash.parse::<ContentHash>().expect("content hash");
+        let _pin = CachePin::acquire(Path::new(cache), hash).expect("acquire child cache pin");
+        let mut gate = std::net::TcpStream::connect(address).expect("connect parent gate");
+        std::io::Write::write_all(&mut gate, &[1]).expect("announce acquired pin");
+        let mut release = [0_u8; 1];
+        std::io::Read::read_exact(&mut gate, &mut release).expect("wait for release");
+    }
+
+    #[test]
+    fn cache_maintenance_honors_a_pin_owned_by_another_process() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        ensure_private_cache_root(&cache).unwrap();
+        let hash_root = cache.join("sha256");
+        std::fs::create_dir_all(&hash_root).unwrap();
+        let mut hashes = Vec::new();
+        for index in 0..MAX_CACHE_ENTRIES {
+            let hash = ContentHash::digest(index.to_be_bytes());
+            let directory = hash_root.join(hash.to_hex());
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("artifact.so"), [0_u8]).unwrap();
+            hashes.push(hash);
+        }
+        let local_pins = hashes[1..]
+            .iter()
+            .map(|hash| CachePin::acquire(&cache, *hash).unwrap())
+            .collect::<Vec<_>>();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let child_config = format!(
+            "{}\n{}\n{}",
+            cache.display(),
+            hashes[0],
+            listener.local_addr().unwrap()
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "tests::cross_process_cache_pin_child",
+            ])
+            .env(CACHE_PIN_CHILD_ENV, child_config)
+            .spawn()
+            .expect("spawn cache pin child");
+        let (mut gate, _) = listener.accept().expect("accept child gate");
+        let mut ready = [0_u8; 1];
+        std::io::Read::read_exact(&mut gate, &mut ready).expect("wait for acquired pin");
+
+        let incoming = ContentHash::digest(b"cross-process-incoming");
+        let result = maintain_cache_budget(
+            &cache,
+            incoming,
+            &hash_root.join(incoming.to_hex()).join("artifact.so"),
+            1,
+        );
+
+        std::io::Write::write_all(&mut gate, &[1]).expect("release child pin");
+        assert!(child.wait().expect("wait for child").success());
+        assert!(matches!(
+            result,
+            Err(LoaderError::CacheBudgetExceeded { .. })
+        ));
+        assert!(hash_root.join(hashes[0].to_hex()).is_dir());
+        drop(local_pins);
+    }
+
+    #[test]
+    fn cache_budget_counts_a_missing_target_inside_an_existing_hash_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        ensure_private_cache_root(&cache).unwrap();
+        let incoming = ContentHash::digest(b"same bytes, different artifact extension");
+        let directory = cache.join("sha256").join(incoming.to_hex());
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::File::create(directory.join("artifact.so"))
+            .unwrap()
+            .set_len(MAX_CACHE_BYTES as u64)
+            .unwrap();
+
+        assert!(matches!(
+            maintain_cache_budget(&cache, incoming, &directory.join("artifact.dylib"), 1),
+            Err(LoaderError::CacheBudgetExceeded {
+                maximum_entries: MAX_CACHE_ENTRIES,
+                maximum_bytes: MAX_CACHE_BYTES,
+                ..
+            })
+        ));
     }
 }

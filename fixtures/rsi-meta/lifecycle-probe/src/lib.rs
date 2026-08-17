@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
-use rsi_meta_frame_contract::{
+use rsi_meta_plugin::sdk::{Host, Plugin};
+use rsi_meta_plugin::{
     DurableCommand, EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody,
-    LifecyclePhase, OP_CANCEL, OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT,
+    LifecyclePhase, OP_CANCEL, OP_CREDIT, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT,
     RUNTIME_TICK_SERVICE, STATE_EVENT_APPLIED, STATE_EVENT_CONFLICT, STATE_EVENT_VALUE,
     STATE_OP_COMPARE_AND_SWAP, STATE_OP_GET,
 };
-use rsi_meta_plugin::sdk::{Host, Plugin};
 use rsi_meta_plugin::{Lane, PostFrameOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -57,6 +57,7 @@ enum StreamFault {
     UnknownEvent,
     NonByteData,
     MalformedJson,
+    MalformedJsonBurst,
 }
 
 #[derive(Debug)]
@@ -527,8 +528,7 @@ impl LifecycleProbe {
         self.flush_output(request_id)
     }
 
-    fn data(&mut self, request_id: &str, payload: &Value) -> Result<(), ProbeError> {
-        let input = byte_array(payload)?;
+    fn data(&mut self, request_id: &str, input: &[u8]) -> Result<(), ProbeError> {
         let tag = &self
             .active
             .as_ref()
@@ -538,8 +538,7 @@ impl LifecycleProbe {
         let mut tagged = Vec::with_capacity(tag.len() + 1 + input.len());
         tagged.extend_from_slice(tag.as_bytes());
         tagged.push(0);
-        tagged.extend_from_slice(&input);
-        let output = json!(tagged);
+        tagged.extend_from_slice(input);
         let fault = self
             .active
             .as_ref()
@@ -553,25 +552,64 @@ impl LifecycleProbe {
         if stream.input_closed {
             return Err(ProbeError("stream input is closed"));
         }
-        if fault == StreamFault::MalformedJson {
-            return self.enqueue_bytes(request_id, b"{".to_vec(), 1, false);
+        if matches!(
+            fault,
+            StreamFault::MalformedJson | StreamFault::MalformedJsonBurst
+        ) {
+            let count = if fault == StreamFault::MalformedJsonBurst {
+                8
+            } else {
+                1
+            };
+            for _ in 0..count {
+                self.enqueue_bytes(request_id, b"{".to_vec(), 0, false)?;
+            }
+            return Ok(());
         }
-        let (service, event, output) = match fault {
-            StreamFault::None => (SERVICE, EVENT_DATA, output),
-            StreamFault::WrongService => ("fixture.lifecycle-probe.wrong", EVENT_DATA, output),
-            StreamFault::UnknownEvent => (SERVICE, "unknown_event", output),
-            StreamFault::NonByteData => (SERVICE, EVENT_DATA, json!({"not": "bytes"})),
-            StreamFault::MalformedJson => unreachable!("handled before frame construction"),
-        };
-        let encoded_len = serde_json::to_vec(&output)
-            .map_err(|_| ProbeError("encode data payload"))?
-            .len() as u64;
-        self.enqueue_frame(
-            request_id,
-            Frame::service_event(Some(request_id.to_owned()), service, event, output),
-            encoded_len,
-            false,
-        )
+        let raw_bytes = tagged.len() as u64;
+        match fault {
+            StreamFault::None => self.enqueue_frame(
+                request_id,
+                Frame::service_data_event(request_id, SERVICE, tagged),
+                raw_bytes,
+                false,
+            ),
+            StreamFault::WrongService => self.enqueue_frame(
+                request_id,
+                Frame::service_data_event(request_id, "fixture.lifecycle-probe.wrong", tagged),
+                raw_bytes,
+                false,
+            ),
+            StreamFault::UnknownEvent => self.enqueue_frame(
+                request_id,
+                Frame::service_event(
+                    Some(request_id.to_owned()),
+                    SERVICE,
+                    "unknown_event",
+                    json!({}),
+                ),
+                0,
+                false,
+            ),
+            StreamFault::NonByteData => self.enqueue_bytes(
+                request_id,
+                serde_json::to_vec(&json!({
+                    "protocol": rsi_meta_plugin::FRAME_PROTOCOL,
+                    "version": rsi_meta_plugin::FRAME_VERSION,
+                    "kind": "service_event",
+                    "request_id": request_id,
+                    "service": SERVICE,
+                    "event": EVENT_DATA,
+                    "payload": {"not": "bytes"}
+                }))
+                .map_err(|_| ProbeError("encode malformed DATA frame"))?,
+                0,
+                false,
+            ),
+            StreamFault::MalformedJson | StreamFault::MalformedJsonBurst => {
+                unreachable!("handled before frame construction")
+            }
+        }
     }
 
     fn half_close(&mut self, request_id: &str, payload: &Value) -> Result<(), ProbeError> {
@@ -790,11 +828,20 @@ impl Plugin for LifecycleProbe {
                 match operation.as_str() {
                     OP_OPEN => self.open(&request_id, &payload),
                     OP_CREDIT => self.grant_output_credit(&request_id, &payload),
-                    OP_DATA => self.data(&request_id, &payload),
                     OP_HALF_CLOSE => self.half_close(&request_id, &payload),
                     OP_CANCEL => self.cancel(&request_id, payload),
                     _ => Err(ProbeError("unknown stream operation")),
                 }
+            }
+            FrameBody::ServiceDataRequest {
+                request_id,
+                service,
+                payload,
+            } if lane == Lane::Data
+                && service == SERVICE
+                && self.active.as_ref().is_some_and(|active| !active.retiring) =>
+            {
+                self.data(&request_id, &payload)
             }
             FrameBody::ServiceEvent {
                 request_id: Some(request_id),
@@ -835,20 +882,6 @@ impl Plugin for LifecycleProbe {
         self.streams.clear();
         Ok(())
     }
-}
-
-fn byte_array(value: &Value) -> Result<Vec<u8>, ProbeError> {
-    value
-        .as_array()
-        .ok_or(ProbeError("data is not a byte array"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or(ProbeError("data contains a non-byte value"))
-        })
-        .collect()
 }
 
 rsi_meta_plugin::export_plugin!(LifecycleProbe);

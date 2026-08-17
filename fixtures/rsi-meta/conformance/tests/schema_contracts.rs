@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use rsi_meta::{CompositionLock, CompositionManifest};
 use rsi_meta_cli::protocol::CommandOutcomeEnvelope;
-use rsi_meta_frame_contract::{Frame, LifecyclePhase};
 use rsi_meta_loader::{ApiVersion, PluginLoader, PluginPackage, prepare_config};
+use rsi_meta_plugin::{Frame, LifecyclePhase};
 use serde_json::{Value, json};
 
 fn repository() -> PathBuf {
@@ -316,9 +316,10 @@ fn stream_envelope_requires_sequence_and_credit_by_kind() {
         "stream_id": "stream-1",
         "credit_bytes": 5
     });
-    for valid in [&open, &data, &credit] {
+    for valid in [&open, &credit] {
         assert_valid(&validator, valid);
     }
+    assert_invalid(&validator, &data);
 
     let mut missing_sequence = data.clone();
     missing_sequence.as_object_mut().unwrap().remove("sequence");
@@ -352,6 +353,9 @@ fn stream_envelope_requires_sequence_and_credit_by_kind() {
     let mut oversized_stream_id = open;
     oversized_stream_id["stream_id"] = json!("x".repeat(256));
     assert_invalid(&validator, &oversized_stream_id);
+    let mut non_portable_stream_id = oversized_stream_id;
+    non_portable_stream_id["stream_id"] = json!("stream/path");
+    assert_invalid(&validator, &non_portable_stream_id);
 }
 
 #[test]
@@ -373,6 +377,29 @@ fn plugin_frame_schema_matches_rust_numeric_and_durable_command_shapes() {
     let mut unsupported = valid;
     unsupported["command"] = json!({"type": "shutdown"});
     assert_invalid(&validator, &unsupported);
+
+    for json_data in [
+        json!({
+            "protocol": "rsi-meta.plugin",
+            "version": 0,
+            "kind": "service_request",
+            "request_id": "stream-1",
+            "service": "fixture.echo",
+            "operation": "data",
+            "payload": [1, 2, 3]
+        }),
+        json!({
+            "protocol": "rsi-meta.plugin",
+            "version": 0,
+            "kind": "service_event",
+            "request_id": "stream-1",
+            "service": "fixture.echo",
+            "event": "data",
+            "payload": [1, 2, 3]
+        }),
+    ] {
+        assert_invalid(&validator, &json_data);
+    }
 
     let beyond_u64: Value = serde_json::from_str("18446744073709551616").unwrap();
     let lifecycle = json!({

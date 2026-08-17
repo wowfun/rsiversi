@@ -205,15 +205,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rsi-meta-frame-contract"
-version = "0.0.1"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "rsi-meta-loader"
 version = "0.0.1"
 dependencies = [
@@ -235,13 +226,17 @@ dependencies = [
 [[package]]
 name = "rsi-meta-plugin"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "rsi-meta-plugin-hmr-consumer"
 version = "0.0.1"
 dependencies = [
  "libc",
- "rsi-meta-frame-contract",
  "rsi-meta-loader",
  "rsi-meta-plugin",
  "rsi-meta-plugin-testkit",
@@ -256,7 +251,6 @@ dependencies = [
 name = "rsi-meta-plugin-testkit"
 version = "0.0.1"
 dependencies = [
- "rsi-meta-frame-contract",
  "rsi-meta-plugin",
  "thiserror",
 ]

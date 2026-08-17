@@ -1332,6 +1332,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "clap",
  "futures-util",
  "hex",
@@ -1383,8 +1384,11 @@ name = "rsi-meta-plugin"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]

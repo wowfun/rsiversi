@@ -8,12 +8,25 @@ use tokio::task::{AbortHandle, JoinSet};
 use crate::host::{BoxHostServiceStream, SharedHost};
 use crate::protocol::{
     CONTROL_PROTOCOL, CommandEnvelope, STREAM_PROTOCOL, ServiceOpenRequest, StreamEnvelope,
-    StreamKind,
+    StreamId, StreamKind,
 };
 
 const STREAM_COMMAND_CAPACITY: usize = 32;
 const STREAM_OUTPUT_CAPACITY: usize = 128;
 const MAX_STREAMS_PER_CONNECTION: usize = 128;
+const STREAM_DATA_MAGIC: &[u8; 4] = b"RSD0";
+const STREAM_DATA_HEADER_BYTES: usize = STREAM_DATA_MAGIC.len() + 2 + 8 + 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StreamDataLimitExceeded;
+
+impl std::fmt::Display for StreamDataLimitExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("binary DATA frame exceeds the configured message limit")
+    }
+}
+
+impl std::error::Error for StreamDataLimitExceeded {}
 
 #[derive(Debug)]
 pub enum WireEnvelope {
@@ -38,14 +51,103 @@ pub fn decode_wire_envelope(encoded: &str) -> Result<WireEnvelope> {
     }
 }
 
+/// Encodes one validated DATA envelope as an RSD0 binary record.
+///
+/// # Errors
+///
+/// Returns an error when the envelope is not canonical DATA, carries
+/// extensions, or exceeds an RSD0 length field.
+pub fn encode_stream_data(frame: &StreamEnvelope) -> Result<Vec<u8>> {
+    encode_stream_data_bounded(frame, usize::MAX)
+}
+
+pub(crate) fn encode_stream_data_bounded(
+    frame: &StreamEnvelope,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>> {
+    frame.validate().context("validate DATA stream envelope")?;
+    if frame.kind != StreamKind::Data {
+        bail!("binary stream encoding requires a DATA frame");
+    }
+    if !frame.extensions.is_empty() {
+        bail!("binary DATA frames cannot carry extensions");
+    }
+    let sequence = frame.sequence.context("DATA sequence is required")?;
+    let data = frame.data.as_deref().context("DATA bytes are required")?;
+    let stream_len = u16::try_from(frame.stream_id.len()).context("stream_id is too large")?;
+    let data_len = u32::try_from(data.len()).context("DATA payload is too large")?;
+    let capacity = STREAM_DATA_HEADER_BYTES
+        .checked_add(frame.stream_id.len())
+        .and_then(|bytes| bytes.checked_add(data.len()))
+        .context("DATA frame size overflow")?;
+    if capacity > maximum_bytes {
+        return Err(StreamDataLimitExceeded.into());
+    }
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(STREAM_DATA_MAGIC);
+    encoded.extend_from_slice(&stream_len.to_be_bytes());
+    encoded.extend_from_slice(&sequence.to_be_bytes());
+    encoded.extend_from_slice(&data_len.to_be_bytes());
+    encoded.extend_from_slice(frame.stream_id.as_bytes());
+    encoded.extend_from_slice(data);
+    Ok(encoded)
+}
+
+/// Decodes and validates one complete RSD0 binary DATA record.
+///
+/// # Errors
+///
+/// Returns an error for an invalid header, inconsistent lengths, an invalid
+/// stream identifier, trailing bytes, or a non-canonical DATA envelope.
+pub fn decode_stream_data(encoded: &[u8]) -> Result<StreamEnvelope> {
+    if encoded.len() < STREAM_DATA_HEADER_BYTES || !encoded.starts_with(STREAM_DATA_MAGIC) {
+        bail!("invalid binary DATA frame header");
+    }
+    let stream_len = usize::from(u16::from_be_bytes([encoded[4], encoded[5]]));
+    let sequence = u64::from_be_bytes(
+        encoded[6..14]
+            .try_into()
+            .context("invalid binary DATA sequence field")?,
+    );
+    let data_len = usize::try_from(u32::from_be_bytes(
+        encoded[14..18]
+            .try_into()
+            .context("invalid binary DATA length field")?,
+    ))
+    .context("DATA payload length is unsupported")?;
+    let stream_end = STREAM_DATA_HEADER_BYTES
+        .checked_add(stream_len)
+        .context("DATA frame size overflow")?;
+    let data_end = stream_end
+        .checked_add(data_len)
+        .context("DATA frame size overflow")?;
+    if data_end != encoded.len() {
+        bail!("binary DATA frame length does not match its header");
+    }
+    let stream_id = std::str::from_utf8(&encoded[STREAM_DATA_HEADER_BYTES..stream_end])
+        .context("binary DATA stream_id is not UTF-8")?;
+    let mut frame = StreamEnvelope::new(
+        StreamId::new(stream_id).context("binary DATA stream_id is invalid")?,
+        StreamKind::Data,
+    );
+    frame.sequence = Some(sequence);
+    frame.data = Some(encoded[stream_end..].to_vec());
+    frame.validate().context("validate binary DATA frame")?;
+    Ok(frame)
+}
+
+pub fn is_stream_data(encoded: &[u8]) -> bool {
+    encoded.starts_with(STREAM_DATA_MAGIC)
+}
+
 #[derive(Debug)]
 pub struct StreamRouter {
     host: SharedHost,
-    streams: BTreeMap<String, StreamEntry>,
+    streams: BTreeMap<StreamId, StreamEntry>,
     output_sender: mpsc::Sender<StreamEnvelope>,
     output_receiver: mpsc::Receiver<StreamEnvelope>,
-    completion_sender: mpsc::Sender<(String, u64)>,
-    completion_receiver: mpsc::Receiver<(String, u64)>,
+    completion_sender: mpsc::Sender<(StreamId, u64)>,
+    completion_receiver: mpsc::Receiver<(StreamId, u64)>,
     tasks: JoinSet<()>,
     next_task_id: u64,
 }
@@ -77,7 +179,6 @@ impl StreamRouter {
         loop {
             self.reap_completed();
             tokio::select! {
-                biased;
                 completed = self.completion_receiver.recv() => {
                     if let Some((stream_id, task_id)) = completed
                         && self.streams.get(&stream_id).is_some_and(|entry| entry.task_id == task_id)
@@ -184,7 +285,7 @@ impl StreamRouter {
         while self.tasks.try_join_next().is_some() {}
     }
 
-    fn abort_stream(&mut self, stream_id: &str) {
+    fn abort_stream(&mut self, stream_id: &StreamId) {
         if let Some(entry) = self.streams.remove(stream_id) {
             entry.task.abort();
         }
@@ -205,17 +306,16 @@ enum StreamActivity {
 }
 
 async fn run_stream(
-    external_id: String,
+    external_id: StreamId,
     task_id: u64,
     mut stream: BoxHostServiceStream,
     mut input: mpsc::Receiver<StreamEnvelope>,
     output: mpsc::Sender<StreamEnvelope>,
-    completion: mpsc::Sender<(String, u64)>,
+    completion: mpsc::Sender<(StreamId, u64)>,
 ) {
     let mut next_input_sequence = 1_u64;
     loop {
         let activity = tokio::select! {
-            biased;
             frame = input.recv() => StreamActivity::Input(frame),
             frame = stream.recv() => StreamActivity::Output(frame),
         };
@@ -237,7 +337,8 @@ async fn run_stream(
 
         match result {
             Ok(InputOutcome::Continue) => {}
-            Ok(InputOutcome::Terminal(mut frame)) => {
+            Ok(InputOutcome::Terminal(frame)) => {
+                let mut frame = *frame;
                 frame.stream_id.clone_from(&external_id);
                 let _ = output.send(frame).await;
                 break;
@@ -261,7 +362,7 @@ async fn run_stream(
 
 enum InputOutcome {
     Continue,
-    Terminal(StreamEnvelope),
+    Terminal(Box<StreamEnvelope>),
 }
 
 async fn handle_input(
@@ -272,8 +373,7 @@ async fn handle_input(
     match frame.kind {
         StreamKind::Data => {
             require_sequence(&frame, next_sequence)?;
-            let payload = frame.payload.context("DATA frame payload is required")?;
-            let bytes = decode_byte_array(&payload)?;
+            let bytes = frame.data.context("DATA frame bytes are required")?;
             stream.send(&bytes).await?;
             Ok(InputOutcome::Continue)
         }
@@ -305,7 +405,7 @@ async fn handle_input(
             // internal-ID terminal frame a second time.
             let mut cancelled = StreamEnvelope::new(frame.stream_id, StreamKind::Cancel);
             cancelled.payload = Some(json!({"reason": reason}));
-            Ok(InputOutcome::Terminal(cancelled))
+            Ok(InputOutcome::Terminal(Box::new(cancelled)))
         }
         StreamKind::Open => bail!("connection stream is already open"),
         StreamKind::End => bail!("END is server-to-client only"),
@@ -326,23 +426,8 @@ fn require_sequence(frame: &StreamEnvelope, next_sequence: &mut u64) -> Result<(
     Ok(())
 }
 
-fn decode_byte_array(payload: &Value) -> Result<Vec<u8>> {
-    let values = payload
-        .as_array()
-        .context("DATA payload must be a byte array")?;
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|byte| u8::try_from(byte).ok())
-                .context("DATA payload contains a non-byte value")
-        })
-        .collect()
-}
-
-pub fn cancel_envelope(stream_id: &str, code: &str, message: &str) -> StreamEnvelope {
-    let mut envelope = StreamEnvelope::new(stream_id, StreamKind::Cancel);
+pub fn cancel_envelope(stream_id: &StreamId, code: &str, message: &str) -> StreamEnvelope {
+    let mut envelope = StreamEnvelope::new(stream_id.clone(), StreamKind::Cancel);
     envelope.payload = Some(json!({"reason": code, "message": message}));
     envelope
 }
@@ -362,6 +447,10 @@ mod tests {
     use crate::protocol::{
         CommandEnvelope, CommandOutcomeEnvelope, EventEnvelope, GraphRevision, InstanceId,
     };
+
+    fn sid(value: impl Into<String>) -> StreamId {
+        StreamId::new(value).expect("valid fixture stream id")
+    }
 
     struct ProbeStream {
         dropped: Arc<AtomicBool>,
@@ -515,13 +604,13 @@ mod tests {
         fn open_service(&self, _request: ServiceOpenRequest) -> Result<BoxHostServiceStream> {
             let mut output = (1..=STREAM_OUTPUT_CAPACITY)
                 .map(|sequence| {
-                    let mut frame = StreamEnvelope::new("internal", StreamKind::Data);
+                    let mut frame = StreamEnvelope::new(sid("internal"), StreamKind::Data);
                     frame.sequence = Some(sequence as u64);
-                    frame.payload = Some(json!([sequence % 256]));
+                    frame.data = Some(vec![u8::try_from(sequence % 256).unwrap()]);
                     frame
                 })
                 .collect::<VecDeque<_>>();
-            output.push_back(StreamEnvelope::new("internal", StreamKind::End));
+            output.push_back(StreamEnvelope::new(sid("internal"), StreamKind::End));
             Ok(Box::new(BurstStream {
                 provider: InstanceId::new("provider"),
                 output,
@@ -534,7 +623,7 @@ mod tests {
     }
 
     fn open(stream_id: &str) -> StreamEnvelope {
-        let mut frame = StreamEnvelope::new(stream_id, StreamKind::Open);
+        let mut frame = StreamEnvelope::new(sid(stream_id), StreamKind::Open);
         frame.payload = Some(json!({
             "consumer": "consumer",
             "service": "fixture.echo",
@@ -583,9 +672,9 @@ mod tests {
         router.route(open("ordered")).unwrap();
         assert_eq!(router.recv().await.unwrap().kind, StreamKind::Open);
 
-        let mut data = StreamEnvelope::new("ordered", StreamKind::Data);
+        let mut data = StreamEnvelope::new(sid("ordered"), StreamKind::Data);
         data.sequence = Some(2);
-        data.payload = Some(json!([1, 2, 3]));
+        data.data = Some(vec![1, 2, 3]);
         router.route(data).unwrap();
         let cancelled = router.recv().await.unwrap();
         assert_eq!(cancelled.kind, StreamKind::Cancel);
@@ -609,7 +698,7 @@ mod tests {
         router.route(open("invalid")).unwrap();
         assert_eq!(router.recv().await.unwrap().kind, StreamKind::Open);
 
-        let invalid = StreamEnvelope::new("invalid", StreamKind::Credit);
+        let invalid = StreamEnvelope::new(sid("invalid"), StreamKind::Credit);
         assert!(router.route(invalid).is_err());
         tokio::task::yield_now().await;
 
@@ -668,7 +757,7 @@ mod tests {
             router
                 .output_sender
                 .try_send(StreamEnvelope::new(
-                    format!("queued-{index}"),
+                    sid(format!("queued-{index}")),
                     StreamKind::Credit,
                 ))
                 .unwrap();
@@ -695,12 +784,70 @@ mod tests {
         for index in 0..=MAX_STREAMS_PER_CONNECTION {
             router.route(open("reused")).unwrap();
             assert_eq!(router.recv().await.unwrap().kind, StreamKind::Open);
-            let mut cancel = StreamEnvelope::new("reused", StreamKind::Cancel);
+            let mut cancel = StreamEnvelope::new(sid("reused"), StreamKind::Cancel);
             cancel.payload = Some(json!({"reason": format!("iteration-{index}")}));
             router.route(cancel).unwrap();
             assert_eq!(router.recv().await.unwrap().kind, StreamKind::Cancel);
         }
 
         router.disconnect().await;
+    }
+
+    #[test]
+    fn binary_data_round_trip_is_raw_and_exact() {
+        let payload: Vec<_> = (0..=u8::MAX).collect();
+        let mut frame = StreamEnvelope::new(sid("raw"), StreamKind::Data);
+        frame.sequence = Some(42);
+        frame.data = Some(payload.clone());
+
+        let encoded = encode_stream_data(&frame).expect("encode DATA");
+        assert_eq!(encoded.len(), STREAM_DATA_HEADER_BYTES + 3 + payload.len());
+        assert_eq!(decode_stream_data(&encoded).expect("decode DATA"), frame);
+        assert_eq!(serde_json::to_value(&frame).unwrap().get("data"), None);
+    }
+
+    #[test]
+    fn binary_data_encoder_enforces_the_wire_limit_during_encoding() {
+        let mut frame = StreamEnvelope::new(sid("raw"), StreamKind::Data);
+        frame.sequence = Some(42);
+        frame.data = Some(vec![1, 2, 3]);
+        let exact_length = STREAM_DATA_HEADER_BYTES + frame.stream_id.len() + 3;
+
+        assert_eq!(
+            encode_stream_data_bounded(&frame, exact_length)
+                .expect("encode at exact limit")
+                .len(),
+            exact_length
+        );
+        let error = encode_stream_data_bounded(&frame, exact_length - 1)
+            .expect_err("reject record above limit");
+        assert!(error.downcast_ref::<StreamDataLimitExceeded>().is_some());
+    }
+
+    #[test]
+    fn binary_data_decoder_rejects_adversarial_lengths_and_identifiers() {
+        fn wire(stream_len: u16, data_len: u32, body: &[u8]) -> Vec<u8> {
+            let mut encoded = Vec::from(STREAM_DATA_MAGIC.as_slice());
+            encoded.extend_from_slice(&stream_len.to_be_bytes());
+            encoded.extend_from_slice(&1_u64.to_be_bytes());
+            encoded.extend_from_slice(&data_len.to_be_bytes());
+            encoded.extend_from_slice(body);
+            encoded
+        }
+
+        let invalid = [
+            STREAM_DATA_MAGIC.to_vec(),
+            wire(1, 2, b"a"),
+            wire(256, 0, &[b'a'; 256]),
+            wire(1, 0, &[0xff]),
+            wire(1, 0, b"ax"),
+        ];
+        for encoded in invalid {
+            assert!(
+                decode_stream_data(&encoded).is_err(),
+                "accepted adversarial DATA frame with {} bytes",
+                encoded.len()
+            );
+        }
     }
 }

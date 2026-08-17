@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use rsi_meta_loader::{
@@ -12,26 +13,27 @@ use rsi_meta_plugin::{CallOutcome, Lane};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 
+#[cfg(test)]
+use crate::frame::durable_command_unavailable;
 use crate::frame::{DurablePluginCommand, LifecyclePhase, PluginFrame, PluginFrameBody};
 use crate::model::{GenerationLease, InstanceId, ServiceKey};
 use crate::protocol::{
-    Command, CommandEnvelope, CommandOutcomeEnvelope, StreamEnvelope, StreamKind,
+    Command, CommandEnvelope, CommandOutcomeEnvelope, StreamEnvelope, StreamId, StreamKind,
 };
 use crate::{HostError, Result};
 
 const DATA_QUEUE_CAPACITY: usize = 128;
+const LIFECYCLE_QUEUE_CAPACITY: usize = 4;
 const STREAM_EVENT_CAPACITY: usize = 64;
 const MAX_STREAMS_PER_GENERATION: usize = 128;
 const STREAM_BYTE_BUDGET: u64 = 16 * 1024 * 1024;
-const RUNTIME_TICK_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const RUNTIME_TICK_INTERVAL: Duration = Duration::from_millis(250);
 const PLUGIN_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const OP_OPEN: &str = "open";
-const OP_DATA: &str = "data";
 const OP_CREDIT: &str = "credit";
 const OP_HALF_CLOSE: &str = "half_close";
 const OP_CANCEL: &str = "cancel";
-const EVENT_DATA: &str = "data";
 const EVENT_CREDIT: &str = "credit";
 const EVENT_END: &str = "end";
 const EVENT_CANCEL: &str = "cancel";
@@ -58,17 +60,27 @@ pub(crate) struct PluginCommandRequest {
     pub reply: Option<oneshot::Sender<Result<CommandOutcomeEnvelope>>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct RuntimeFault {
+    pub instance: InstanceId,
+    pub generation: u64,
+    pub reason: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct RuntimeHandle {
     instance: InstanceId,
     generation: u64,
+    max_frame_bytes: usize,
+    lifecycle: mpsc::Sender<LifecycleCommand>,
     control: mpsc::Sender<ControlCommand>,
     disconnects: mpsc::Sender<ClientDisconnect>,
     data: mpsc::Sender<DataCommand>,
     retired: watch::Receiver<bool>,
     stopped: watch::Receiver<bool>,
+    thread: Arc<StdMutex<Option<JoinHandle<()>>>>,
     healthy: Arc<AtomicBool>,
-    max_frame_bytes: usize,
+    fault_reason: Arc<StdMutex<Option<String>>>,
 }
 
 impl fmt::Debug for RuntimeHandle {
@@ -90,6 +102,13 @@ impl RuntimeHandle {
         self.healthy.load(Ordering::Acquire)
     }
 
+    pub(crate) fn fault_reason(&self) -> Option<String> {
+        self.fault_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start(
         plugin_loader: &PluginLoader,
@@ -103,17 +122,21 @@ impl RuntimeHandle {
         outbound_routes: BTreeMap<ServiceKey, OutboundRoute>,
         plugin_commands: mpsc::Sender<PluginCommandRequest>,
         host_services: mpsc::Sender<HostServiceCall>,
+        runtime_faults: mpsc::Sender<RuntimeFault>,
+        runtime_ticks: watch::Receiver<u64>,
     ) -> Result<Self> {
         let mailbox_options = PluginMailboxOptions::default();
         let max_frame_bytes = mailbox_options.max_frame_bytes;
         let (loaded, mailbox) = plugin_loader.load_queued(staged, mailbox_options)?;
         let (control_output, data_output) = mailbox.into_lanes();
+        let (lifecycle, lifecycle_receiver) = mpsc::channel(LIFECYCLE_QUEUE_CAPACITY);
         let (control, control_receiver) = mpsc::channel(128);
         let (disconnects, disconnect_receiver) = mpsc::channel(MAX_STREAMS_PER_GENERATION);
         let (data, data_receiver) = mpsc::channel(DATA_QUEUE_CAPACITY);
         let (retired_sender, retired) = watch::channel(false);
         let (stopped_sender, stopped) = watch::channel(false);
         let healthy = Arc::new(AtomicBool::new(true));
+        let fault_reason = Arc::new(StdMutex::new(None));
         let actor = RuntimeActor {
             composition_id,
             instance: instance.clone(),
@@ -123,6 +146,7 @@ impl RuntimeHandle {
             uses_runtime_tick,
             phase: RuntimePhase::Created,
             loaded,
+            lifecycle_receiver,
             control_receiver,
             disconnect_receiver,
             data_receiver,
@@ -141,82 +165,97 @@ impl RuntimeHandle {
             max_frame_bytes,
             stopped_sender,
             healthy: Arc::clone(&healthy),
+            fault_reason: Arc::clone(&fault_reason),
+            runtime_faults,
+            pending_runtime_fault: None,
             stop_replies: Vec::new(),
             prepare_reply: None,
-            tick: tokio::time::interval(RUNTIME_TICK_INTERVAL),
-            tick_sequence: 0,
+            runtime_ticks,
         };
-        tokio::spawn(actor.run());
+        let event_loop = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|source| HostError::PluginRuntimeStart {
+                instance: instance.clone(),
+                source,
+            })?;
+        let runtime_thread = std::thread::Builder::new()
+            .name(format!("rsi-meta-runtime-{generation}"))
+            .spawn(move || event_loop.block_on(actor.run()))
+            .map_err(|source| HostError::PluginRuntimeStart {
+                instance: instance.clone(),
+                source,
+            })?;
         Ok(Self {
             instance,
             generation,
+            max_frame_bytes,
+            lifecycle,
             control,
             disconnects,
             data,
             retired,
             stopped,
+            thread: Arc::new(StdMutex::new(Some(runtime_thread))),
             healthy,
-            max_frame_bytes,
+            fault_reason,
         })
     }
 
     pub(crate) async fn prepare(&self, config: Value) -> Result<()> {
-        self.lifecycle(LifecyclePhase::Prepare, Some(config), true)
-            .await
+        let (reply, response) = oneshot::channel();
+        self.lifecycle(
+            LifecycleCommand::Prepare { config, reply },
+            response,
+            "prepared",
+        )
+        .await
     }
 
     pub(crate) async fn abort_and_stop(&self) {
-        let _ = self.lifecycle(LifecyclePhase::Abort, None, false).await;
+        let (reply, response) = oneshot::channel();
+        let _ = self
+            .lifecycle(LifecycleCommand::Abort { reply }, response, "abort")
+            .await;
         let _ = self.stop().await;
     }
 
-    /// `committed` is deliberately non-vetoable: its dispatch result can be
-    /// observed internally but cannot roll back an already durable cutover.
-    pub(crate) async fn committed(&self) {
-        let _ = self
-            .control
-            .send(ControlCommand::Lifecycle {
-                phase: LifecyclePhase::Committed,
-                config: None,
-                reply: None,
-            })
-            .await;
+    /// A durable commit cannot be rolled back, so failure of this acknowledgement
+    /// requires the owning host to fail closed and recover in a fresh process.
+    pub(crate) async fn committed(&self) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.lifecycle(LifecycleCommand::Commit { reply }, response, "committed")
+            .await
     }
 
     pub(crate) async fn retire(&self) -> Result<()> {
-        self.lifecycle(LifecyclePhase::Retire, None, true).await
+        let (reply, response) = oneshot::channel();
+        self.lifecycle(LifecycleCommand::Retire { reply }, response, "retired")
+            .await
     }
 
     async fn lifecycle(
         &self,
-        phase: LifecyclePhase,
-        config: Option<Value>,
-        vetoable: bool,
+        command: LifecycleCommand,
+        response: oneshot::Receiver<Result<()>>,
+        phase: &'static str,
     ) -> Result<()> {
-        let (reply, response) = oneshot::channel();
-        self.control
-            .send(ControlCommand::Lifecycle {
-                phase,
-                config,
-                reply: Some(reply),
-            })
-            .await
-            .map_err(|_| HostError::PluginRuntimeClosed {
+        tokio::time::timeout(PLUGIN_LIFECYCLE_TIMEOUT, async {
+            self.lifecycle
+                .send(command)
+                .await
+                .map_err(|_| HostError::PluginRuntimeClosed {
+                    instance: self.instance.clone(),
+                })?;
+            response.await.map_err(|_| HostError::PluginRuntimeClosed {
                 instance: self.instance.clone(),
-            })?;
-        let result = tokio::time::timeout(PLUGIN_LIFECYCLE_TIMEOUT, response)
-            .await
-            .map_err(|_| HostError::PluginLifecycleTimeout {
-                instance: self.instance.clone(),
-                phase: lifecycle_phase_name(phase),
             })?
-            .map_err(|_| HostError::PluginRuntimeClosed {
-                instance: self.instance.clone(),
-            })?;
-        match result {
-            Err(error) if vetoable => Err(error),
-            Ok(()) | Err(_) => Ok(()),
-        }
+        })
+        .await
+        .map_err(|_| HostError::PluginLifecycleTimeout {
+            instance: self.instance.clone(),
+            phase,
+        })?
     }
 
     pub(crate) fn open_stream(
@@ -233,11 +272,16 @@ impl RuntimeHandle {
                 instance: self.instance.clone(),
             });
         }
-        let stream_id = uuid::Uuid::now_v7().to_string();
+        let stream_id = StreamId::new(uuid::Uuid::now_v7().to_string())
+            .expect("UUIDv7 is a valid stream identifier");
         let (events, receiver) = mpsc::channel(STREAM_EVENT_CAPACITY);
         let send_credit = Arc::new(ByteCredit::new());
         let terminal_fallback = Arc::new(TerminalFallback::default());
         let runtime_terminal = Arc::new(AtomicBool::new(false));
+        let data_frame_overhead =
+            PluginFrame::service_data_request(stream_id.to_string(), service.as_str(), Vec::new())
+                .encode()?
+                .len();
         let disconnect =
             self.disconnects
                 .clone()
@@ -271,6 +315,7 @@ impl RuntimeHandle {
                 },
             })?;
         Ok(StreamPort {
+            instance: self.instance.clone(),
             stream_id,
             service,
             control: self.control.clone(),
@@ -280,10 +325,11 @@ impl RuntimeHandle {
             send_credit,
             terminal_fallback,
             runtime_terminal,
+            max_frame_bytes: self.max_frame_bytes,
+            data_frame_overhead,
             sequence: 0,
             half_closed: false,
             terminal: false,
-            max_frame_bytes: self.max_frame_bytes,
         })
     }
 
@@ -308,19 +354,29 @@ impl RuntimeHandle {
 
     pub(crate) async fn stop(&self) -> Result<()> {
         let (reply, response) = oneshot::channel();
-        if self
-            .control
-            .send(ControlCommand::Stop { reply })
-            .await
-            .is_err()
-        {
-            self.wait_stopped().await;
-            return Ok(());
-        }
-        response.await.map_err(|_| HostError::PluginRuntimeClosed {
+        let result = tokio::time::timeout(PLUGIN_LIFECYCLE_TIMEOUT, async {
+            if self
+                .lifecycle
+                .send(LifecycleCommand::Stop { reply })
+                .await
+                .is_err()
+            {
+                self.wait_stopped().await;
+                return Ok(());
+            }
+            response.await.map_err(|_| HostError::PluginRuntimeClosed {
+                instance: self.instance.clone(),
+            })
+        })
+        .await
+        .map_err(|_| HostError::PluginLifecycleTimeout {
             instance: self.instance.clone(),
+            phase: "stopped",
         })?;
-        Ok(())
+        if result.is_ok() {
+            self.join_thread().await?;
+        }
+        result
     }
 
     async fn wait_stopped(&self) {
@@ -331,17 +387,24 @@ impl RuntimeHandle {
             }
         }
     }
-}
 
-const fn lifecycle_phase_name(phase: LifecyclePhase) -> &'static str {
-    match phase {
-        LifecyclePhase::Prepare => "prepared",
-        LifecyclePhase::Retire => "retired",
-        LifecyclePhase::Abort => "abort",
-        LifecyclePhase::Committed => "committed",
-        LifecyclePhase::Prepared | LifecyclePhase::PrepareFailed | LifecyclePhase::Retired => {
-            "invalid lifecycle phase"
-        }
+    async fn join_thread(&self) -> Result<()> {
+        let thread = self
+            .thread
+            .lock()
+            .expect("runtime thread mutex poisoned")
+            .take();
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .map_err(|_| HostError::PluginRuntimeClosed {
+                instance: self.instance.clone(),
+            })?
+            .map_err(|_| HostError::PluginRuntimeClosed {
+                instance: self.instance.clone(),
+            })
     }
 }
 
@@ -352,7 +415,8 @@ pub(crate) async fn abort_prepared_reverse(handles: &[RuntimeHandle]) {
 }
 
 pub(crate) struct StreamPort {
-    stream_id: String,
+    instance: InstanceId,
+    stream_id: StreamId,
     service: ServiceKey,
     control: mpsc::Sender<ControlCommand>,
     disconnect: Option<mpsc::OwnedPermit<ClientDisconnect>>,
@@ -361,10 +425,11 @@ pub(crate) struct StreamPort {
     send_credit: Arc<ByteCredit>,
     terminal_fallback: Arc<TerminalFallback>,
     runtime_terminal: Arc<AtomicBool>,
+    max_frame_bytes: usize,
+    data_frame_overhead: usize,
     sequence: u64,
     half_closed: bool,
     terminal: bool,
-    max_frame_bytes: usize,
 }
 
 impl fmt::Debug for StreamPort {
@@ -388,27 +453,46 @@ impl StreamPort {
     pub(crate) async fn send(&mut self, bytes: &[u8]) -> Result<()> {
         if self.half_closed || self.terminal {
             return Err(HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             });
         }
-        let (payload, encoded_u64) =
-            bounded_byte_array_payload(bytes, self.max_frame_bytes, &self.stream_id)?;
-        self.send_credit.consume(encoded_u64).await?;
+        let encoded_bytes = self.data_frame_overhead.saturating_add(bytes.len());
+        if encoded_bytes > self.max_frame_bytes {
+            return Err(HostError::PluginFrameTooLarge {
+                instance: self.instance.clone(),
+                bytes: encoded_bytes,
+                maximum: self.max_frame_bytes,
+            });
+        }
+        let raw_bytes =
+            u64::try_from(bytes.len()).map_err(|_| HostError::StreamByteBudgetExceeded {
+                stream_id: self.stream_id.to_string(),
+                requested: u64::MAX,
+                available: STREAM_BYTE_BUDGET,
+            })?;
+        if raw_bytes > STREAM_BYTE_BUDGET {
+            return Err(HostError::StreamByteBudgetExceeded {
+                stream_id: self.stream_id.to_string(),
+                requested: raw_bytes,
+                available: STREAM_BYTE_BUDGET,
+            });
+        }
+        self.send_credit.consume(raw_bytes).await?;
         self.sequence = self.sequence.checked_add(1).ok_or_else(|| {
             HostError::InvalidEnvelope("service stream sequence exhausted u64".to_owned())
         })?;
-        self.dispatch_data(OP_DATA, payload).await
+        self.dispatch_data(bytes).await
     }
 
     pub(crate) async fn grant_credit(&mut self, bytes: u64) -> Result<()> {
         if self.terminal {
             return Err(HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             });
         }
         if bytes > STREAM_BYTE_BUDGET {
             return Err(HostError::StreamByteBudgetExceeded {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
                 requested: bytes,
                 available: STREAM_BYTE_BUDGET,
             });
@@ -422,17 +506,17 @@ impl StreamPort {
             })
             .await
             .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             })?;
         response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.clone(),
+            stream_id: self.stream_id.to_string(),
         })?
     }
 
     pub(crate) async fn half_close(&mut self) -> Result<()> {
         if self.half_closed || self.terminal {
             return Err(HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             });
         }
         self.sequence = self.sequence.checked_add(1).ok_or_else(|| {
@@ -447,10 +531,10 @@ impl StreamPort {
             })
             .await
             .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             })?;
         response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.clone(),
+            stream_id: self.stream_id.to_string(),
         })??;
         self.half_closed = true;
         Ok(())
@@ -469,10 +553,10 @@ impl StreamPort {
             })
             .await
             .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             })?;
         response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.clone(),
+            stream_id: self.stream_id.to_string(),
         })??;
         self.terminal = true;
         drop(self.disconnect.take());
@@ -497,11 +581,10 @@ impl StreamPort {
         result
     }
 
-    async fn dispatch_data(&self, operation: &'static str, payload: Value) -> Result<()> {
-        let frame = PluginFrame::service_request(
-            self.stream_id.clone(),
+    async fn dispatch_data(&self, payload: &[u8]) -> Result<()> {
+        let frame = PluginFrame::service_data_request(
+            self.stream_id.to_string(),
             self.service.as_str(),
-            operation,
             payload,
         );
         let (reply, response) = oneshot::channel();
@@ -513,10 +596,10 @@ impl StreamPort {
             })
             .await
             .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.clone(),
+                stream_id: self.stream_id.to_string(),
             })?;
         response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.clone(),
+            stream_id: self.stream_id.to_string(),
         })?
     }
 }
@@ -626,14 +709,28 @@ impl ByteCredit {
     }
 }
 
-enum ControlCommand {
-    Lifecycle {
-        phase: LifecyclePhase,
-        config: Option<Value>,
-        reply: Option<oneshot::Sender<Result<()>>>,
+enum LifecycleCommand {
+    Prepare {
+        config: Value,
+        reply: oneshot::Sender<Result<()>>,
     },
+    Commit {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Retire {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Abort {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Stop {
+        reply: oneshot::Sender<()>,
+    },
+}
+
+enum ControlCommand {
     Open {
-        stream_id: String,
+        stream_id: StreamId,
         service: ServiceKey,
         payload: Value,
         events: mpsc::Sender<Result<StreamEnvelope>>,
@@ -642,35 +739,32 @@ enum ControlCommand {
         runtime_terminal: Arc<AtomicBool>,
     },
     GrantCredit {
-        stream_id: String,
+        stream_id: StreamId,
         bytes: u64,
         reply: oneshot::Sender<Result<()>>,
     },
     HalfClose {
-        stream_id: String,
+        stream_id: StreamId,
         sequence: u64,
         reply: oneshot::Sender<Result<()>>,
     },
     Cancel {
-        stream_id: String,
+        stream_id: StreamId,
         reason: String,
         reply: Option<oneshot::Sender<Result<()>>>,
     },
     HostServiceResponse(PluginFrame),
     PluginCommandResponse(PluginFrame),
-    Stop {
-        reply: oneshot::Sender<()>,
-    },
 }
 
 struct ClientDisconnect {
-    stream_id: String,
+    stream_id: StreamId,
     reason: String,
 }
 
 enum DataCommand {
     Dispatch {
-        stream_id: String,
+        stream_id: StreamId,
         frame: PluginFrame,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -686,22 +780,18 @@ struct OutboundRoute {
     _lease: GenerationLease,
 }
 
-struct OutboundBridgeCommand {
-    operation: String,
-    payload: Value,
+enum OutboundBridgeCommand {
+    Data(Vec<u8>),
+    Control { operation: String, payload: Value },
 }
 
 mod actor;
 mod bridge;
 
 #[cfg(test)]
-use actor::encoded_payload_bytes;
-#[cfg(test)]
 use actor::runtime_tick_enabled;
 use actor::{RuntimeActor, RuntimePhase};
-#[cfg(test)]
-use bridge::json_byte_array_encoded_len;
-use bridge::{bounded_byte_array_payload, run_outbound_bridge};
+use bridge::run_outbound_bridge;
 
 pub(crate) struct PreparedRuntimeInstance {
     pub instance: InstanceId,
@@ -739,6 +829,8 @@ impl fmt::Debug for PreparedRuntimeInstance {
 pub(crate) struct RuntimeLaunchContext {
     pub plugin_commands: mpsc::Sender<PluginCommandRequest>,
     pub host_services: mpsc::Sender<HostServiceCall>,
+    pub runtime_faults: mpsc::Sender<RuntimeFault>,
+    pub runtime_ticks: watch::Receiver<u64>,
 }
 
 pub(crate) async fn launch_and_prepare(
@@ -789,6 +881,8 @@ pub(crate) async fn launch_and_prepare(
                 outbound_routes,
                 context.plugin_commands.clone(),
                 context.host_services.clone(),
+                context.runtime_faults.clone(),
+                context.runtime_ticks.clone(),
             )?;
             if let Err(error) = runtime.prepare(instance.resolved_config.clone()).await {
                 runtime.abort_and_stop().await;
@@ -844,24 +938,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn byte_array_length_is_exact_without_materializing_json_values() {
-        for bytes in [
-            Vec::new(),
-            vec![0],
-            vec![9, 10, 99, 100, 255],
-            (0..=u8::MAX).collect(),
-        ] {
-            let payload = Value::Array(bytes.iter().copied().map(Value::from).collect());
-            assert_eq!(
-                json_byte_array_encoded_len(&bytes),
-                Some(encoded_payload_bytes(&payload).unwrap())
-            );
-        }
-    }
-
-    #[test]
     fn durable_command_outside_committed_phase_gets_an_explicit_failure() {
-        let frame = PluginFrame::durable_command_unavailable("hmr-content-id".to_owned());
+        let frame = durable_command_unavailable("hmr-content-id".to_owned());
         assert_eq!(
             frame.body,
             PluginFrameBody::ServiceEvent {
@@ -875,10 +953,11 @@ mod tests {
 
     fn idle_runtime_handle() -> (
         RuntimeHandle,
-        mpsc::Receiver<ControlCommand>,
+        mpsc::Receiver<LifecycleCommand>,
         watch::Sender<bool>,
     ) {
-        let (control, receiver) = mpsc::channel(1);
+        let (lifecycle, receiver) = mpsc::channel(1);
+        let (control, _) = mpsc::channel(1);
         let (disconnects, _) = mpsc::channel(1);
         let (data, _) = mpsc::channel(1);
         let (retired_sender, retired) = watch::channel(false);
@@ -887,13 +966,16 @@ mod tests {
             RuntimeHandle {
                 instance: InstanceId::new("timeout-probe"),
                 generation: 1,
+                max_frame_bytes: 1024 * 1024,
+                lifecycle,
                 control,
                 disconnects,
                 data,
                 retired,
                 stopped,
+                thread: Arc::new(StdMutex::new(None)),
                 healthy: Arc::new(AtomicBool::new(true)),
-                max_frame_bytes: 1024,
+                fault_reason: Arc::new(StdMutex::new(None)),
             },
             receiver,
             retired_sender,
@@ -918,6 +1000,42 @@ mod tests {
             }
         ));
         drop(pending_command);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_deadline_includes_queue_admission() {
+        let (runtime, _lifecycle, _retired) = idle_runtime_handle();
+        let (reply, _response) = oneshot::channel();
+        assert!(
+            runtime
+                .lifecycle
+                .try_send(LifecycleCommand::Commit { reply })
+                .is_ok()
+        );
+        let prepare = tokio::spawn(async move { runtime.prepare(json!({})).await });
+        tokio::time::advance(PLUGIN_LIFECYCLE_TIMEOUT).await;
+        let error = prepare
+            .await
+            .expect("prepare task")
+            .expect_err("full lifecycle queue must time out");
+        assert!(matches!(
+            error,
+            HostError::PluginLifecycleTimeout {
+                phase: "prepared",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn committed_reports_a_closed_runtime() {
+        let (runtime, lifecycle, _retired) = idle_runtime_handle();
+        drop(lifecycle);
+        let error = runtime
+            .committed()
+            .await
+            .expect_err("closed runtime must reject commit acknowledgement");
+        assert!(matches!(error, HostError::PluginRuntimeClosed { .. }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -954,8 +1072,21 @@ mod tests {
     fn runtime_health_is_visible_to_generation_reuse() {
         let (runtime, _control, _retired) = idle_runtime_handle();
         assert!(runtime.is_healthy());
+        let generation = Arc::new(crate::model::Generation::new(
+            1,
+            InstanceId::new("timeout-probe"),
+        ));
+        generation
+            .attach_runtime(runtime.clone())
+            .expect("attach runtime");
+        generation.mark_admitting();
+        assert!(generation.try_admit_lease().is_some());
         runtime.healthy.store(false, Ordering::Release);
         assert!(!runtime.is_healthy());
+        assert!(
+            generation.try_admit_lease().is_none(),
+            "faulted runtime must stop new admission immediately"
+        );
     }
 
     #[tokio::test]
@@ -1065,7 +1196,8 @@ mod tests {
         let (event_sender, events) = mpsc::channel(1);
         let runtime_terminal = Arc::new(AtomicBool::new(false));
         let port = StreamPort {
-            stream_id: "drop-stream".to_owned(),
+            instance: InstanceId::new("provider"),
+            stream_id: StreamId::new("drop-stream").expect("valid stream id"),
             service: ServiceKey::new("fixture.echo"),
             control,
             disconnect: Some(disconnect),
@@ -1074,10 +1206,11 @@ mod tests {
             send_credit: Arc::new(ByteCredit::new()),
             terminal_fallback: Arc::new(TerminalFallback::default()),
             runtime_terminal,
+            max_frame_bytes: 1024 * 1024,
+            data_frame_overhead: 32,
             sequence: 0,
             half_closed: false,
             terminal: false,
-            max_frame_bytes: 1024,
         };
         std::thread::spawn(move || drop(port))
             .join()
@@ -1087,7 +1220,7 @@ mod tests {
             .recv()
             .await
             .expect("disconnect cancellation");
-        assert_eq!(cancel.stream_id, "drop-stream");
+        assert_eq!(cancel.stream_id.as_str(), "drop-stream");
         assert_eq!(cancel.reason, "client_disconnected");
         drop(event_sender);
     }

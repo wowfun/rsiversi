@@ -1,21 +1,125 @@
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::domain::CompositionDigest;
-use crate::model::{
-    CompositionLock, GraphRevision, GraphSnapshot, InstanceId, InstanceSnapshot, ValidationReport,
-};
+use crate::model::{GraphRevision, InstanceSnapshot};
 
 pub const CONTROL_PROTOCOL: &str = "rsi-meta.control";
 pub const CONTROL_VERSION: u32 = 0;
 pub const STREAM_PROTOCOL: &str = "rsi-meta.stream";
 pub const STREAM_VERSION: u32 = 0;
-/// Maximum Unicode-scalar length of connection- and persistence-retained wire identifiers.
-pub const MAX_WIRE_ID_CHARACTERS: usize = 255;
+/// Maximum byte length of printable-ASCII wire identifiers retained by a connection or store.
+pub const MAX_WIRE_ID_BYTES: usize = 255;
 /// Maximum serialized size of a durable control result and its wire frame.
 pub const MAX_CONTROL_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+
+/// A connection-retained stream identifier validated once at its wire boundary.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StreamId(String);
+
+impl StreamId {
+    /// Creates a portable stream identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an envelope error when `value` is empty, longer than the wire
+    /// limit, does not begin with an ASCII alphanumeric byte, or contains a
+    /// byte outside `[A-Za-z0-9._:-]`.
+    pub fn new(value: impl Into<String>) -> crate::Result<Self> {
+        let value = value.into();
+        let mut bytes = value.bytes();
+        let valid_first = bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric());
+        let valid_rest = bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'));
+        if value.len() > MAX_WIRE_ID_BYTES || !valid_first || !valid_rest {
+            return Err(crate::HostError::InvalidEnvelope(format!(
+                "stream_id must match [A-Za-z0-9][A-Za-z0-9._:-]{{0,{}}}",
+                MAX_WIRE_ID_BYTES - 1
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for StreamId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for StreamId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for StreamId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for StreamId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for StreamId {
+    type Err = crate::HostError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for StreamId {
+    type Error = crate::HostError;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<StreamId> for String {
+    fn from(value: StreamId) -> Self {
+        value.0
+    }
+}
+
+impl Serialize for StreamId {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,11 +174,11 @@ impl CommandEnvelope {
             ));
         }
         if self.command_id.is_empty()
-            || self.command_id.len() > MAX_WIRE_ID_CHARACTERS
+            || self.command_id.len() > MAX_WIRE_ID_BYTES
             || !self.command_id.bytes().all(|byte| byte.is_ascii_graphic())
         {
             return Err(crate::HostError::InvalidEnvelope(format!(
-                "command_id must contain 1 to {MAX_WIRE_ID_CHARACTERS} printable ASCII bytes without spaces"
+                "command_id must contain 1 to {MAX_WIRE_ID_BYTES} printable ASCII bytes without spaces"
             )));
         }
         Ok(())
@@ -86,22 +190,6 @@ pub enum Command {
     ApplyManifestPath {
         manifest_path: std::path::PathBuf,
         lock_path: std::path::PathBuf,
-    },
-    ValidateManifest {
-        manifest_path: std::path::PathBuf,
-        lock_path: Option<std::path::PathBuf>,
-    },
-    LockManifest {
-        manifest_path: std::path::PathBuf,
-        lock_path: std::path::PathBuf,
-    },
-    QueryGraph,
-    QueryEvents {
-        after_cursor: u64,
-        limit: u32,
-    },
-    InspectPlugin {
-        instance_id: InstanceId,
     },
     RotateToken,
     Shutdown,
@@ -121,25 +209,6 @@ enum KnownCommand {
         manifest_path: std::path::PathBuf,
         lock_path: std::path::PathBuf,
     },
-    ValidateManifest {
-        manifest_path: std::path::PathBuf,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lock_path: Option<std::path::PathBuf>,
-    },
-    LockManifest {
-        manifest_path: std::path::PathBuf,
-        lock_path: std::path::PathBuf,
-    },
-    QueryGraph,
-    QueryEvents {
-        #[serde(default)]
-        after_cursor: u64,
-        #[serde(default = "default_event_query_limit")]
-        limit: u32,
-    },
-    InspectPlugin {
-        instance_id: InstanceId,
-    },
     RotateToken,
     Shutdown,
 }
@@ -154,29 +223,6 @@ impl From<KnownCommand> for Command {
                 manifest_path,
                 lock_path,
             },
-            KnownCommand::ValidateManifest {
-                manifest_path,
-                lock_path,
-            } => Self::ValidateManifest {
-                manifest_path,
-                lock_path,
-            },
-            KnownCommand::LockManifest {
-                manifest_path,
-                lock_path,
-            } => Self::LockManifest {
-                manifest_path,
-                lock_path,
-            },
-            KnownCommand::QueryGraph => Self::QueryGraph,
-            KnownCommand::QueryEvents {
-                after_cursor,
-                limit,
-            } => Self::QueryEvents {
-                after_cursor,
-                limit,
-            },
-            KnownCommand::InspectPlugin { instance_id } => Self::InspectPlugin { instance_id },
             KnownCommand::RotateToken => Self::RotateToken,
             KnownCommand::Shutdown => Self::Shutdown,
         }
@@ -194,31 +240,6 @@ impl TryFrom<&Command> for KnownCommand {
             } => Self::ApplyManifestPath {
                 manifest_path: manifest_path.clone(),
                 lock_path: lock_path.clone(),
-            },
-            Command::ValidateManifest {
-                manifest_path,
-                lock_path,
-            } => Self::ValidateManifest {
-                manifest_path: manifest_path.clone(),
-                lock_path: lock_path.clone(),
-            },
-            Command::LockManifest {
-                manifest_path,
-                lock_path,
-            } => Self::LockManifest {
-                manifest_path: manifest_path.clone(),
-                lock_path: lock_path.clone(),
-            },
-            Command::QueryGraph => Self::QueryGraph,
-            Command::QueryEvents {
-                after_cursor,
-                limit,
-            } => Self::QueryEvents {
-                after_cursor: *after_cursor,
-                limit: *limit,
-            },
-            Command::InspectPlugin { instance_id } => Self::InspectPlugin {
-                instance_id: instance_id.clone(),
             },
             Command::RotateToken => Self::RotateToken,
             Command::Shutdown => Self::Shutdown,
@@ -262,14 +283,7 @@ impl<'de> Deserialize<'de> for Command {
             .to_owned();
         if matches!(
             command_type.as_str(),
-            "apply_manifest_path"
-                | "validate_manifest"
-                | "lock_manifest"
-                | "query_graph"
-                | "query_events"
-                | "inspect_plugin"
-                | "rotate_token"
-                | "shutdown"
+            "apply_manifest_path" | "rotate_token" | "shutdown"
         ) {
             return serde_json::from_value::<KnownCommand>(serde_json::Value::Object(object))
                 .map(Into::into)
@@ -281,10 +295,6 @@ impl<'de> Deserialize<'de> for Command {
             payload: object,
         })
     }
-}
-
-fn default_event_query_limit() -> u32 {
-    1_000
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -367,32 +377,8 @@ impl CommandOutcomeEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum CommandOutcome {
-    Applied {
-        graph: GraphSnapshot,
-    },
-    NoChange {
-        graph: GraphSnapshot,
-    },
-    Validation {
-        report: ValidationReport,
-    },
-    LockResolved {
-        lock: CompositionLock,
-    },
-    Graph {
-        graph: GraphSnapshot,
-        /// Durable event cursor captured with the committed graph and revision.
-        /// Retiring entries in `graph` are a best-effort lifecycle overlay.
-        /// Clients subscribe strictly after this value.
-        #[serde(default)]
-        cursor: u64,
-    },
-    Events {
-        events: Vec<EventEnvelope>,
-    },
-    Plugin {
-        instance: Option<PluginInspection>,
-    },
+    Applied,
+    NoChange,
     TokenRotated {
         generation: u64,
     },
@@ -475,6 +461,10 @@ pub enum Event {
         candidate_manifest_sha256: String,
         candidate_lock_sha256: String,
     },
+    RuntimeFaulted {
+        instance_id: crate::model::InstanceId,
+        reason: String,
+    },
     HostShuttingDown,
     /// A future event retained byte-for-byte at the JSON value level so an
     /// older daemon can replay a newer audit log without failing startup.
@@ -501,6 +491,10 @@ enum KnownEvent {
         packages: Vec<crate::model::PackageId>,
         candidate_manifest_sha256: String,
         candidate_lock_sha256: String,
+    },
+    RuntimeFaulted {
+        instance_id: crate::model::InstanceId,
+        reason: String,
     },
     HostShuttingDown,
 }
@@ -535,6 +529,13 @@ impl From<KnownEvent> for Event {
                 packages,
                 candidate_manifest_sha256,
                 candidate_lock_sha256,
+            },
+            KnownEvent::RuntimeFaulted {
+                instance_id,
+                reason,
+            } => Self::RuntimeFaulted {
+                instance_id,
+                reason,
             },
             KnownEvent::HostShuttingDown => Self::HostShuttingDown,
         }
@@ -573,6 +574,13 @@ impl TryFrom<&Event> for KnownEvent {
                 packages: packages.clone(),
                 candidate_manifest_sha256: candidate_manifest_sha256.clone(),
                 candidate_lock_sha256: candidate_lock_sha256.clone(),
+            },
+            Event::RuntimeFaulted {
+                instance_id,
+                reason,
+            } => Self::RuntimeFaulted {
+                instance_id: instance_id.clone(),
+                reason: reason.clone(),
             },
             Event::HostShuttingDown => Self::HostShuttingDown,
             Event::Unknown {
@@ -615,7 +623,10 @@ impl<'de> Deserialize<'de> for Event {
             .to_owned();
         if matches!(
             event_type.as_str(),
-            "composition_committed" | "daemon_restarting" | "host_shutting_down"
+            "composition_committed"
+                | "daemon_restarting"
+                | "runtime_faulted"
+                | "host_shutting_down"
         ) {
             return serde_json::from_value::<KnownEvent>(serde_json::Value::Object(object))
                 .map(Into::into)
@@ -654,27 +665,31 @@ pub struct StreamEnvelope {
     pub protocol: String,
     pub version: u32,
     pub kind: StreamKind,
-    pub stream_id: String,
+    pub stream_id: StreamId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
+    /// Raw DATA bytes. Transports encode this out of band rather than as JSON.
+    #[serde(skip)]
+    pub data: Option<Vec<u8>>,
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 impl StreamEnvelope {
-    pub fn new(stream_id: impl Into<String>, kind: StreamKind) -> Self {
+    pub fn new(stream_id: StreamId, kind: StreamKind) -> Self {
         Self {
             protocol: STREAM_PROTOCOL.to_owned(),
             version: STREAM_VERSION,
             kind,
-            stream_id: stream_id.into(),
+            stream_id,
             sequence: None,
             credit_bytes: None,
             payload: None,
+            data: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -691,18 +706,15 @@ impl StreamEnvelope {
                 version: self.version,
             });
         }
-        if self.stream_id.is_empty() || self.stream_id.chars().count() > MAX_WIRE_ID_CHARACTERS {
-            return Err(crate::HostError::InvalidEnvelope(format!(
-                "stream_id must contain 1 to {MAX_WIRE_ID_CHARACTERS} characters"
-            )));
-        }
         match self.kind {
             StreamKind::Credit if self.credit_bytes.is_none() => Err(
                 crate::HostError::InvalidEnvelope("credit frames require credit_bytes".to_owned()),
             ),
-            StreamKind::Credit if self.sequence.is_some() || self.payload.is_some() => {
+            StreamKind::Credit
+                if self.sequence.is_some() || self.payload.is_some() || self.data.is_some() =>
+            {
                 Err(crate::HostError::InvalidEnvelope(
-                    "credit frames cannot carry sequence or payload".to_owned(),
+                    "credit frames cannot carry sequence, payload, or data".to_owned(),
                 ))
             }
             StreamKind::Credit => Ok(()),
@@ -714,27 +726,16 @@ impl StreamEnvelope {
                     "open payload must contain exactly consumer+service or provider".to_owned(),
                 ))
             }
-            StreamKind::Data if self.sequence.is_none() || self.payload.is_none() => {
+            StreamKind::Data
+                if self.sequence.is_none() || self.data.is_none() || self.payload.is_some() =>
+            {
                 Err(crate::HostError::InvalidEnvelope(
-                    "data frames require sequence and payload".to_owned(),
+                    "data frames require sequence and raw data without JSON payload".to_owned(),
                 ))
             }
             StreamKind::Data if self.sequence == Some(0) => Err(crate::HostError::InvalidEnvelope(
                 "data frame sequence must be greater than zero".to_owned(),
             )),
-            StreamKind::Data
-                if self.payload.as_ref().is_none_or(|payload| {
-                    payload.as_array().is_none_or(|bytes| {
-                        bytes
-                            .iter()
-                            .any(|byte| byte.as_u64().is_none_or(|byte| byte > u64::from(u8::MAX)))
-                    })
-                }) =>
-            {
-                Err(crate::HostError::InvalidEnvelope(
-                    "data frame payload must be a JSON byte array".to_owned(),
-                ))
-            }
             StreamKind::Open | StreamKind::HalfClose | StreamKind::Cancel | StreamKind::End
                 if self.sequence.is_some() =>
             {
@@ -745,6 +746,13 @@ impl StreamEnvelope {
             StreamKind::HalfClose if self.payload.is_some() => {
                 Err(crate::HostError::InvalidEnvelope(
                     "half_close frames cannot carry payload".to_owned(),
+                ))
+            }
+            StreamKind::Open | StreamKind::HalfClose | StreamKind::Cancel | StreamKind::End
+                if self.data.is_some() =>
+            {
+                Err(crate::HostError::InvalidEnvelope(
+                    "raw data is only valid on DATA frames".to_owned(),
                 ))
             }
             StreamKind::Cancel
@@ -802,33 +810,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stored_graph_outcomes_resume_with_a_conservative_cursor() {
-        let outcome: CommandOutcome = serde_json::from_value(serde_json::json!({
-            "type": "graph",
-            "graph": {
-                "revision": 3,
-                "composition_id": "legacy",
-                "instances": {},
-                "bindings": []
-            }
-        }))
-        .expect("pre-cursor v0 graph outcome remains resumable");
-        assert!(matches!(outcome, CommandOutcome::Graph { cursor: 0, .. }));
-    }
-
-    #[test]
     fn stream_identifiers_are_bounded_before_connection_state_retains_them() {
-        let frame = StreamEnvelope::new("s".repeat(256), StreamKind::Credit);
-        let mut frame = frame;
-        frame.credit_bytes = Some(1);
+        assert!(StreamId::new("s".repeat(255)).is_ok());
+        assert!(StreamId::new("s".repeat(256)).is_err());
+        assert!(StreamId::new("界").is_err());
+        assert!(StreamId::new("has space").is_err());
+        assert!(StreamId::new("line\nbreak").is_err());
+        assert!(StreamId::new("/path").is_err());
+        assert!(StreamId::new("stream/id").is_err());
+        assert!(StreamId::new("stream.id_1:part-2").is_ok());
 
-        assert!(frame.validate().is_err());
-
-        let mut unicode = StreamEnvelope::new("界".repeat(255), StreamKind::Credit);
-        unicode.credit_bytes = Some(1);
-        assert!(unicode.validate().is_ok());
-        unicode.stream_id.push('界');
-        assert!(unicode.validate().is_err());
+        let encoded = serde_json::json!({
+            "protocol": STREAM_PROTOCOL,
+            "version": STREAM_VERSION,
+            "kind": "credit",
+            "stream_id": "界",
+            "credit_bytes": 1
+        });
+        assert!(serde_json::from_value::<StreamEnvelope>(encoded).is_err());
     }
 
     #[test]
@@ -851,17 +850,17 @@ mod tests {
 
     #[test]
     fn command_identifier_matches_the_printable_ascii_json_schema_contract() {
-        let command = CommandEnvelope::new("x".repeat(255), Command::QueryGraph);
+        let command = CommandEnvelope::new("x".repeat(255), Command::RotateToken);
         assert!(command.validate().is_ok());
-        let command = CommandEnvelope::new("x".repeat(256), Command::QueryGraph);
+        let command = CommandEnvelope::new("x".repeat(256), Command::RotateToken);
         assert!(command.validate().is_err());
         assert!(
-            CommandEnvelope::new("unsafe\nlog", Command::QueryGraph)
+            CommandEnvelope::new("unsafe\nlog", Command::RotateToken)
                 .validate()
                 .is_err()
         );
         assert!(
-            CommandEnvelope::new("界", Command::QueryGraph)
+            CommandEnvelope::new("界", Command::RotateToken)
                 .validate()
                 .is_err()
         );
@@ -869,7 +868,7 @@ mod tests {
 
     #[test]
     fn stream_validation_matches_kind_specific_schema() {
-        let mut open = StreamEnvelope::new("stream", StreamKind::Open);
+        let mut open = StreamEnvelope::new(StreamId::new("stream").unwrap(), StreamKind::Open);
         assert!(open.validate().is_err());
         open.payload = Some(serde_json::json!({"consumer":"caller","service":"echo"}));
         assert!(open.validate().is_ok());
@@ -878,20 +877,21 @@ mod tests {
         open.payload = Some(serde_json::json!({"provider":"echo","extra":true}));
         assert!(open.validate().is_err());
 
-        let mut data = StreamEnvelope::new("stream", StreamKind::Data);
-        data.payload = Some(serde_json::json!([1]));
+        let mut data = StreamEnvelope::new(StreamId::new("stream").unwrap(), StreamKind::Data);
+        data.data = Some(vec![1]);
         assert!(data.validate().is_err());
         data.sequence = Some(1);
         assert!(data.validate().is_ok());
         data.sequence = Some(0);
         assert!(data.validate().is_err());
         data.sequence = Some(1);
-        data.payload = Some(serde_json::json!([256]));
+        data.payload = Some(serde_json::json!([1]));
         assert!(data.validate().is_err());
-        data.payload = Some(serde_json::json!(["not-a-byte"]));
+        data.payload = None;
+        data.data = None;
         assert!(data.validate().is_err());
 
-        let mut cancel = StreamEnvelope::new("stream", StreamKind::Cancel);
+        let mut cancel = StreamEnvelope::new(StreamId::new("stream").unwrap(), StreamKind::Cancel);
         cancel.sequence = Some(1);
         assert!(cancel.validate().is_err());
         cancel.sequence = None;
@@ -901,7 +901,8 @@ mod tests {
         cancel.payload = Some(serde_json::json!({"reason":"client_closed"}));
         assert!(cancel.validate().is_ok());
 
-        let mut half_close = StreamEnvelope::new("stream", StreamKind::HalfClose);
+        let mut half_close =
+            StreamEnvelope::new(StreamId::new("stream").unwrap(), StreamKind::HalfClose);
         half_close.payload = Some(serde_json::json!({}));
         assert!(half_close.validate().is_err());
     }

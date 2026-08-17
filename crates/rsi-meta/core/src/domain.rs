@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    CompositionLock, GraphRevision, GraphSnapshot, InstanceSnapshot, PackageId, ValidationReport,
+    CompositionLock, GraphRevision, GraphSnapshot, InstanceId, InstanceSnapshot, PackageId,
+    ValidationReport,
 };
 
 /// Files and durable state owned by one composition host.
@@ -170,6 +171,10 @@ pub enum HostEvent {
         active_instances: u32,
         inactive_instances: u32,
     },
+    RuntimeFaulted {
+        instance_id: InstanceId,
+        reason: String,
+    },
     HostShuttingDown,
     Unknown {
         event_type: String,
@@ -246,6 +251,13 @@ impl From<crate::protocol::EventEnvelope> for HostEventRecord {
                 inactive_instances,
             },
             crate::protocol::Event::HostShuttingDown => HostEvent::HostShuttingDown,
+            crate::protocol::Event::RuntimeFaulted {
+                instance_id,
+                reason,
+            } => HostEvent::RuntimeFaulted {
+                instance_id,
+                reason,
+            },
             crate::protocol::Event::DaemonRestarting {
                 source,
                 composition_id,

@@ -119,6 +119,16 @@
       }
     },
     {
+      "if": {
+        "properties": {
+          "kind": { "const": "service_request" },
+          "operation": { "const": "data" }
+        },
+        "required": ["kind", "operation"]
+      },
+      "then": false
+    },
+    {
       "if": { "properties": { "kind": { "const": "service_event" } } },
       "then": {
         "required": ["service", "event", "payload"],
@@ -133,6 +143,16 @@
           ]
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": { "const": "service_event" },
+          "event": { "const": "data" }
+        },
+        "required": ["kind", "event"]
+      },
+      "then": false
     },
     {
       "if": { "properties": { "kind": { "const": "durable_command" } } },

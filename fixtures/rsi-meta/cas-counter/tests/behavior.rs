@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use rsi_meta_fixture_cas_counter::rsi_meta_plugin_entry_v0;
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CREDIT,
-    OP_DATA, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE, STATE_EVENT_APPLIED,
-    STATE_EVENT_CONFLICT, STATE_EVENT_VALUE, STATE_OP_COMPARE_AND_SWAP, STATE_OP_GET,
-};
 use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CREDIT, OP_OPEN,
+    RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE, STATE_EVENT_APPLIED, STATE_EVENT_CONFLICT,
+    STATE_EVENT_VALUE, STATE_OP_COMPARE_AND_SWAP, STATE_OP_GET,
+};
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::{Value, json};
 
@@ -14,24 +14,12 @@ fn recv_body(plugin: &PluginHarness) -> FrameBody {
     plugin.recv(Duration::from_secs(1)).unwrap().frame.body
 }
 
-fn byte_array(value: &Value) -> Value {
-    Value::Array(
-        serde_json::to_vec(value)
-            .unwrap()
-            .into_iter()
-            .map(Value::from)
-            .collect(),
-    )
+fn data_bytes(value: &Value) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap()
 }
 
-fn decode_byte_array(value: &Value) -> Value {
-    let bytes = value
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
-        .collect::<Vec<_>>();
-    serde_json::from_slice(&bytes).unwrap()
+fn decode_data(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).unwrap()
 }
 
 fn tick(sequence: u64) -> Frame {
@@ -117,11 +105,10 @@ fn drive_increment_to_applied(
     );
     assert_eq!(plugin.send(Lane::Data, &credit).unwrap(), CallOutcome::Ok);
 
-    let increment = Frame::service_request(
+    let increment = Frame::service_data_request(
         stream_id,
         "fixture.cas-counter",
-        OP_DATA,
-        byte_array(&json!({"key": "counter"})),
+        data_bytes(&json!({"key": "counter"})),
     );
     assert_eq!(
         plugin.send(Lane::Data, &increment).unwrap(),
@@ -242,9 +229,7 @@ fn retirement_waits_for_backpressured_stream_terminals() {
 fn data_would_block_is_retryable_without_consuming_credit() {
     let mut plugin = committed_counter();
     let applied_payload = json!({"key": "counter", "version": 1, "value": 1});
-    let encoded_credit = serde_json::to_vec(&byte_array(&applied_payload))
-        .unwrap()
-        .len() as u64;
+    let encoded_credit = data_bytes(&applied_payload).len() as u64;
     let (applied, _) = drive_increment_to_applied(&mut plugin, "blocked-data", encoded_credit);
 
     plugin.set_post_outcome(PostFrameOutcome::WouldBlock);
@@ -262,7 +247,7 @@ fn data_would_block_is_retryable_without_consuming_credit() {
     );
     assert!(matches!(
         recv_body(&plugin),
-        FrameBody::ServiceEvent { event, .. } if event == EVENT_DATA
+        FrameBody::ServiceDataEvent { .. }
     ));
     assert!(matches!(
         recv_body(&plugin),
@@ -275,9 +260,7 @@ fn data_would_block_is_retryable_without_consuming_credit() {
 fn end_would_block_retries_only_the_terminal_frame() {
     let mut plugin = committed_counter();
     let applied_payload = json!({"key": "counter", "version": 1, "value": 1});
-    let encoded_credit = serde_json::to_vec(&byte_array(&applied_payload))
-        .unwrap()
-        .len() as u64;
+    let encoded_credit = data_bytes(&applied_payload).len() as u64;
     let (applied, _) = drive_increment_to_applied(&mut plugin, "blocked-end", encoded_credit);
 
     plugin.set_post_outcomes([PostFrameOutcome::Accepted, PostFrameOutcome::WouldBlock]);
@@ -288,7 +271,7 @@ fn end_would_block_retries_only_the_terminal_frame() {
     );
     assert!(matches!(
         recv_body(&plugin),
-        FrameBody::ServiceEvent { event, .. } if event == EVENT_DATA
+        FrameBody::ServiceDataEvent { .. }
     ));
     assert!(plugin.try_recv().unwrap().is_none());
 
@@ -318,11 +301,10 @@ fn state_request_would_block_does_not_fail_the_host_service_response() {
         recv_body(&plugin),
         FrameBody::ServiceEvent { event, .. } if event == EVENT_CREDIT
     ));
-    let increment = Frame::service_request(
+    let increment = Frame::service_data_request(
         "blocked-cas",
         "fixture.cas-counter",
-        OP_DATA,
-        byte_array(&json!({"key": "counter"})),
+        data_bytes(&json!({"key": "counter"})),
     );
     assert_eq!(
         plugin.send(Lane::Data, &increment).unwrap(),
@@ -421,12 +403,8 @@ fn standard_stream_retries_compare_and_swap_conflict_then_returns_data_and_end()
     assert!(plugin.try_recv().unwrap().is_none());
 
     let request = json!({"key": "requests"});
-    let increment = Frame::service_request(
-        "increment-1",
-        "fixture.cas-counter",
-        OP_DATA,
-        byte_array(&request),
-    );
+    let increment =
+        Frame::service_data_request("increment-1", "fixture.cas-counter", data_bytes(&request));
     assert_eq!(
         plugin.send(Lane::Data, &increment).unwrap(),
         CallOutcome::Ok
@@ -483,19 +461,17 @@ fn standard_stream_retries_compare_and_swap_conflict_then_returns_data_and_end()
         applied_payload.clone(),
     );
     assert_eq!(plugin.send(Lane::Data, &applied).unwrap(), CallOutcome::Ok);
-    let FrameBody::ServiceEvent {
+    let FrameBody::ServiceDataEvent {
         request_id,
         service,
-        event,
         payload,
     } = recv_body(&plugin)
     else {
         panic!("expected DATA result")
     };
-    assert_eq!(request_id.as_deref(), Some("increment-1"));
+    assert_eq!(request_id, "increment-1");
     assert_eq!(service, "fixture.cas-counter");
-    assert_eq!(event, EVENT_DATA);
-    assert_eq!(decode_byte_array(&payload), applied_payload);
+    assert_eq!(decode_data(&payload), applied_payload);
     assert_eq!(
         recv_body(&plugin),
         FrameBody::ServiceEvent {

@@ -12,7 +12,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 hex = "0.4"
 libc = "0.2"
-rsi-meta-frame-contract = { path = "../frame-contract" }
 rsi-meta-plugin = { path = "../../../crates/rsi-meta/plugin" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,6 +21,7 @@ sha2 = "0.10"
 rsi-meta-loader = { path = "../../../crates/rsi-meta/loader", default-features = false }
 rsi-meta-plugin-testkit = { path = "../../../fixtures/rsi-meta/plugin-testkit" }
 tempfile = "3.20"
+tokio = { version = "1.46", features = ["sync"] }
 
 [workspace]
 

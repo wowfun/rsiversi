@@ -10,6 +10,11 @@ publish = false
 path = "src/lib.rs"
 doctest = false
 
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
 [dev-dependencies]
 hex.workspace = true
 sha2.workspace = true

@@ -1,13 +1,16 @@
 use super::{
     Arc, AtomicBool, BTreeMap, ByteCredit, CallOutcome, ClientDisconnect, Command, CommandEnvelope,
     ControlCommand, DATA_QUEUE_CAPACITY, DataCommand, DurablePluginCommand, EVENT_CANCEL,
-    EVENT_CREDIT, EVENT_DATA, EVENT_END, HostError, HostServiceCall, InstanceId, Lane,
+    EVENT_CREDIT, EVENT_END, HostError, HostServiceCall, InstanceId, Lane, LifecycleCommand,
     LifecyclePhase, LoadedPlugin, MAX_STREAMS_PER_GENERATION, OP_CANCEL, OP_CREDIT, OP_HALF_CLOSE,
     OP_OPEN, Ordering, OutboundBridgeCommand, OutboundRoute, PluginCommandRequest, PluginFrame,
     PluginFrameBody, Result, STATE_SERVICE, STREAM_BYTE_BUDGET, ServiceKey, StreamEnvelope,
-    StreamKind, TICK_SERVICE, TerminalFallback, Value, json, mpsc, oneshot, run_outbound_bridge,
-    watch,
+    StreamId, StreamKind, TICK_SERVICE, TerminalFallback, Value, json, mpsc, oneshot,
+    run_outbound_bridge, watch,
 };
+use crate::frame::{durable_command_result, durable_command_unavailable};
+
+mod stream_state;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RuntimePhase {
@@ -44,6 +47,7 @@ pub(super) struct RuntimeActor {
     pub(super) uses_runtime_tick: bool,
     pub(super) phase: RuntimePhase,
     pub(super) loaded: LoadedPlugin,
+    pub(super) lifecycle_receiver: mpsc::Receiver<LifecycleCommand>,
     pub(super) control_receiver: mpsc::Receiver<ControlCommand>,
     pub(super) disconnect_receiver: mpsc::Receiver<ClientDisconnect>,
     pub(super) data_receiver: mpsc::Receiver<DataCommand>,
@@ -53,7 +57,7 @@ pub(super) struct RuntimeActor {
     pub(super) data_output: rsi_meta_loader::PluginLaneReceiver,
     pub(super) control_output_open: bool,
     pub(super) data_output_open: bool,
-    pub(super) streams: BTreeMap<String, RuntimeStream>,
+    pub(super) streams: BTreeMap<StreamId, RuntimeStream>,
     pub(super) outbound_routes: BTreeMap<ServiceKey, OutboundRoute>,
     pub(super) outbound_streams: BTreeMap<String, mpsc::Sender<OutboundBridgeCommand>>,
     pub(super) retired_sender: watch::Sender<bool>,
@@ -62,18 +66,33 @@ pub(super) struct RuntimeActor {
     pub(super) max_frame_bytes: usize,
     pub(super) stopped_sender: watch::Sender<bool>,
     pub(super) healthy: Arc<AtomicBool>,
+    pub(super) fault_reason: Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) runtime_faults: mpsc::Sender<super::RuntimeFault>,
+    pub(super) pending_runtime_fault: Option<super::RuntimeFault>,
     pub(super) stop_replies: Vec<oneshot::Sender<()>>,
     pub(super) prepare_reply: Option<oneshot::Sender<Result<()>>>,
-    pub(super) tick: tokio::time::Interval,
-    pub(super) tick_sequence: u64,
+    pub(super) runtime_ticks: watch::Receiver<u64>,
 }
 
 impl RuntimeActor {
     pub(super) async fn run(mut self) {
-        self.tick.reset();
         loop {
+            if let Some(fault) = self.pending_runtime_fault.take()
+                && self.runtime_faults.send(fault).await.is_err()
+            {
+                break;
+            }
             tokio::select! {
-                biased;
+                command = self.lifecycle_receiver.recv() => {
+                    match command {
+                        Some(command) => {
+                            if self.handle_lifecycle(command) {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
                 Some(disconnect) = self.disconnect_receiver.recv() => {
                     let _ = self.cancel_stream(&disconnect.stream_id, &disconnect.reason);
                 }
@@ -93,15 +112,13 @@ impl RuntimeActor {
                         None => self.control_output_open = false,
                     }
                 }
-                _ = self.tick.tick(), if runtime_tick_enabled(self.uses_runtime_tick, self.phase) => {
-                    self.tick_sequence = self.tick_sequence.saturating_add(1);
-                    let frame = PluginFrame::service_event(
-                        None,
-                        TICK_SERVICE,
-                        "tick",
-                        json!({"tick": self.tick_sequence}),
-                    );
-                    let _ = self.dispatch(Lane::Control, &frame);
+                changed = self.runtime_ticks.changed(), if runtime_tick_enabled(self.uses_runtime_tick, self.phase) => {
+                    if changed.is_err() {
+                        self.uses_runtime_tick = false;
+                        continue;
+                    }
+                    let tick = *self.runtime_ticks.borrow_and_update();
+                    let _ = self.dispatch_runtime_tick(tick);
                 }
                 frame = self.data_output.recv(), if self.data_output_open => {
                     match frame {
@@ -125,146 +142,87 @@ impl RuntimeActor {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn handle_control(&mut self, command: ControlCommand) -> bool {
+    fn handle_lifecycle(&mut self, command: LifecycleCommand) -> bool {
         match command {
-            ControlCommand::Lifecycle {
-                phase,
-                config,
-                reply,
-            } => {
-                if phase == LifecyclePhase::Prepare {
-                    if self.prepare_reply.is_some() || self.phase != RuntimePhase::Created {
-                        if let Some(reply) = reply {
-                            let _ = reply.send(Err(self.lifecycle_transition_error(phase)));
-                        }
-                        return false;
-                    }
-                    match self.dispatch(
-                        Lane::Control,
-                        &PluginFrame::lifecycle(phase, self.generation, config),
-                    ) {
-                        Ok(()) => {
-                            self.phase = RuntimePhase::Preparing;
-                            self.prepare_reply = reply;
-                        }
-                        Err(error) => {
-                            self.phase = RuntimePhase::Faulted;
-                            self.healthy.store(false, Ordering::Release);
-                            if let Some(reply) = reply {
-                                let _ = reply.send(Err(error));
-                            }
-                        }
-                    }
+            LifecycleCommand::Prepare { config, reply } => {
+                if self.prepare_reply.is_some() || self.phase != RuntimePhase::Created {
+                    let _ =
+                        reply.send(Err(self.lifecycle_transition_error(LifecyclePhase::Prepare)));
                     return false;
                 }
-                if matches!(
-                    phase,
-                    LifecyclePhase::Prepared
-                        | LifecyclePhase::PrepareFailed
-                        | LifecyclePhase::Retired
+                match self.dispatch(
+                    Lane::Control,
+                    &PluginFrame::lifecycle(LifecyclePhase::Prepare, self.generation, Some(config)),
                 ) {
-                    if let Some(reply) = reply {
-                        let _ = reply.send(Err(self.lifecycle_transition_error(phase)));
+                    Ok(()) => {
+                        self.phase = RuntimePhase::Preparing;
+                        self.prepare_reply = Some(reply);
                     }
-                    return false;
+                    Err(error) => {
+                        self.phase = RuntimePhase::Faulted;
+                        self.healthy.store(false, Ordering::Release);
+                        let _ = reply.send(Err(error));
+                    }
                 }
-                let valid_transition = match phase {
-                    LifecyclePhase::Committed => self.phase == RuntimePhase::Prepared,
-                    LifecyclePhase::Retire => self.phase == RuntimePhase::Committed,
-                    LifecyclePhase::Abort => true,
-                    LifecyclePhase::Prepare
-                    | LifecyclePhase::Prepared
-                    | LifecyclePhase::PrepareFailed
-                    | LifecyclePhase::Retired => false,
-                };
+                false
+            }
+            LifecycleCommand::Commit { reply } => {
+                let phase = LifecyclePhase::Committed;
+                let valid_transition = self.phase == RuntimePhase::Prepared;
                 let result = if valid_transition {
                     self.dispatch(
                         Lane::Control,
-                        &PluginFrame::lifecycle(phase, self.generation, config),
+                        &PluginFrame::lifecycle(phase, self.generation, None),
                     )
                 } else {
                     Err(self.lifecycle_transition_error(phase))
                 };
-                match phase {
-                    // These are post-decision notifications. A plugin failure
-                    // is diagnostic only and cannot reopen or roll back state.
-                    LifecyclePhase::Committed if valid_transition => {
-                        self.phase = RuntimePhase::Committed;
-                    }
-                    LifecyclePhase::Retire if valid_transition => {
-                        self.phase = RuntimePhase::Retiring;
-                    }
-                    LifecyclePhase::Abort => {
-                        self.fail_pending_prepare("plugin prepare was aborted");
-                        self.phase = RuntimePhase::Faulted;
-                        self.healthy.store(false, Ordering::Release);
-                    }
-                    LifecyclePhase::Prepare
-                    | LifecyclePhase::Prepared
-                    | LifecyclePhase::PrepareFailed
-                    | LifecyclePhase::Committed
-                    | LifecyclePhase::Retire
-                    | LifecyclePhase::Retired => {}
+                if valid_transition {
+                    self.phase = RuntimePhase::Committed;
                 }
-                if let Some(reply) = reply {
-                    let _ = reply.send(result);
-                }
+                let _ = reply.send(result);
                 false
             }
-            ControlCommand::Open {
-                stream_id,
-                service,
-                payload,
-                events,
-                send_credit,
-                terminal_fallback,
-                runtime_terminal,
-            } => {
-                if self.phase != RuntimePhase::Committed {
-                    runtime_terminal.store(true, Ordering::Release);
-                    let _ = events.try_send(Err(HostError::PluginRuntimeNotCommitted {
-                        instance: self.instance.clone(),
-                    }));
-                    return false;
+            LifecycleCommand::Retire { reply } => {
+                let phase = LifecyclePhase::Retire;
+                let valid_transition = self.phase == RuntimePhase::Committed;
+                let result = if valid_transition {
+                    self.dispatch(
+                        Lane::Control,
+                        &PluginFrame::lifecycle(phase, self.generation, None),
+                    )
+                } else {
+                    Err(self.lifecycle_transition_error(phase))
+                };
+                if valid_transition {
+                    self.phase = RuntimePhase::Retiring;
                 }
-                if self
-                    .streams
-                    .len()
-                    .saturating_add(self.outbound_streams.len())
-                    >= MAX_STREAMS_PER_GENERATION
-                {
-                    runtime_terminal.store(true, Ordering::Release);
-                    let mut terminal = StreamEnvelope::new(&stream_id, StreamKind::Cancel);
-                    terminal.payload = Some(json!({"reason": "stream_limit"}));
-                    if events.try_send(Ok(terminal.clone())).is_err() {
-                        terminal_fallback.store(terminal);
-                    }
-                    send_credit.close();
-                    return false;
-                }
-                self.streams.insert(
-                    stream_id.clone(),
-                    RuntimeStream {
-                        service: service.clone(),
-                        events,
-                        send_credit,
-                        terminal_fallback,
-                        runtime_terminal,
-                        receive_credit: 0,
-                        next_output_sequence: 0,
-                        terminal: false,
-                    },
+                let _ = reply.send(result);
+                false
+            }
+            LifecycleCommand::Abort { reply } => {
+                let result = self.dispatch(
+                    Lane::Control,
+                    &PluginFrame::lifecycle(LifecyclePhase::Abort, self.generation, None),
                 );
-                let frame = PluginFrame::service_request(
-                    stream_id.clone(),
-                    service.as_str(),
-                    OP_OPEN,
-                    payload,
-                );
-                if let Err(error) = self.dispatch(Lane::Data, &frame) {
-                    self.fail_stream(&stream_id, error);
-                }
+                self.fail_pending_prepare("plugin prepare was aborted");
+                self.phase = RuntimePhase::Faulted;
+                self.healthy.store(false, Ordering::Release);
+                let _ = reply.send(result);
+                false
+            }
+            LifecycleCommand::Stop { reply } => {
+                self.fail_pending_prepare("runtime stopped during prepare");
+                self.stop_replies.push(reply);
+                true
+            }
+        }
+    }
+
+    fn handle_control(&mut self, command: ControlCommand) -> bool {
+        match command {
+            command @ ControlCommand::Open { .. } => {
+                self.handle_open(command);
                 false
             }
             ControlCommand::GrantCredit {
@@ -322,11 +280,71 @@ impl RuntimeActor {
                 }
                 false
             }
-            ControlCommand::Stop { reply } => {
-                self.fail_pending_prepare("runtime stopped during prepare");
-                self.stop_replies.push(reply);
-                true
+        }
+    }
+
+    fn dispatch_runtime_tick(&mut self, tick: u64) -> Result<()> {
+        if !runtime_tick_enabled(self.uses_runtime_tick, self.phase) {
+            return Ok(());
+        }
+        self.dispatch(
+            Lane::Control,
+            &PluginFrame::service_event(None, TICK_SERVICE, "tick", json!({"tick": tick})),
+        )
+    }
+
+    fn handle_open(&mut self, command: ControlCommand) {
+        let ControlCommand::Open {
+            stream_id,
+            service,
+            payload,
+            events,
+            send_credit,
+            terminal_fallback,
+            runtime_terminal,
+        } = command
+        else {
+            unreachable!("handle_open receives only Open commands")
+        };
+        if self.phase != RuntimePhase::Committed {
+            runtime_terminal.store(true, Ordering::Release);
+            let _ = events.try_send(Err(HostError::PluginRuntimeNotCommitted {
+                instance: self.instance.clone(),
+            }));
+            return;
+        }
+        if self
+            .streams
+            .len()
+            .saturating_add(self.outbound_streams.len())
+            >= MAX_STREAMS_PER_GENERATION
+        {
+            runtime_terminal.store(true, Ordering::Release);
+            let mut terminal = StreamEnvelope::new(stream_id.clone(), StreamKind::Cancel);
+            terminal.payload = Some(json!({"reason": "stream_limit"}));
+            if events.try_send(Ok(terminal.clone())).is_err() {
+                terminal_fallback.store(terminal);
             }
+            send_credit.close();
+            return;
+        }
+        self.streams.insert(
+            stream_id.clone(),
+            RuntimeStream {
+                service: service.clone(),
+                events,
+                send_credit,
+                terminal_fallback,
+                runtime_terminal,
+                receive_credit: 0,
+                next_output_sequence: 0,
+                terminal: false,
+            },
+        );
+        let frame =
+            PluginFrame::service_request(stream_id.clone(), service.as_str(), OP_OPEN, payload);
+        if let Err(error) = self.dispatch(Lane::Data, &frame) {
+            self.fail_stream(&stream_id, error);
         }
     }
 
@@ -356,7 +374,7 @@ impl RuntimeActor {
         }
     }
 
-    fn cancel_stream(&mut self, stream_id: &str, reason: &str) -> Result<()> {
+    fn cancel_stream(&mut self, stream_id: &StreamId, reason: &str) -> Result<()> {
         let terminal_payload = json!({"reason": reason});
         let result = self.dispatch_stream_request(stream_id, OP_CANCEL, terminal_payload.clone());
         // Cancellation is host-owned and terminal even when a plugin accepts
@@ -488,7 +506,7 @@ impl RuntimeActor {
                                 );
                             }
                             if let Some(control) = control.upgrade() {
-                                let frame = PluginFrame::durable_command_result(command_id, result);
+                                let frame = durable_command_result(command_id, result);
                                 let _ = control
                                     .send(ControlCommand::PluginCommandResponse(frame))
                                     .await;
@@ -520,7 +538,22 @@ impl RuntimeActor {
                 event,
                 payload,
             } if lane == Lane::Data => {
+                let Ok(stream_id) = StreamId::new(stream_id) else {
+                    self.protocol_fault("plugin emitted an invalid stream identifier");
+                    return;
+                };
                 self.handle_service_event(&stream_id, &service, &event, payload);
+            }
+            PluginFrameBody::ServiceDataEvent {
+                request_id: stream_id,
+                service,
+                payload,
+            } if lane == Lane::Data => {
+                let Ok(stream_id) = StreamId::new(stream_id) else {
+                    self.protocol_fault("plugin emitted an invalid stream identifier");
+                    return;
+                };
+                self.handle_service_data_event(&stream_id, &service, payload);
             }
             PluginFrameBody::ServiceRequest {
                 request_id,
@@ -546,8 +579,23 @@ impl RuntimeActor {
                     );
                 }
             }
+            PluginFrameBody::ServiceDataRequest {
+                request_id,
+                service,
+                payload,
+            } if lane == Lane::Data => {
+                if self.phase == RuntimePhase::Committed {
+                    self.handle_outbound_service_data(&request_id, &service, payload);
+                } else {
+                    self.reject_outbound(
+                        &request_id,
+                        &service,
+                        "service_unavailable_during_prepare",
+                    );
+                }
+            }
             PluginFrameBody::DurableCommand { command_id, .. } if lane == Lane::Control => {
-                let frame = PluginFrame::durable_command_unavailable(command_id);
+                let frame = durable_command_unavailable(command_id);
                 if let Err(error) = self.dispatch(Lane::Control, &frame) {
                     tracing::warn!(
                         plugin_instance = %self.instance,
@@ -617,10 +665,24 @@ impl RuntimeActor {
             self.reject_outbound(&request_id, &service, "unknown_stream");
             return;
         };
-        let command = OutboundBridgeCommand { operation, payload };
+        let command = OutboundBridgeCommand::Control { operation, payload };
         if commands.try_send(command).is_err() {
             self.outbound_streams.remove(&request_id);
             self.reject_outbound(&request_id, &service, "stream_backpressure");
+        }
+    }
+
+    fn handle_outbound_service_data(&mut self, request_id: &str, service: &str, payload: Vec<u8>) {
+        let Some(commands) = self.outbound_streams.get(request_id).cloned() else {
+            self.reject_outbound(request_id, service, "unknown_stream");
+            return;
+        };
+        if commands
+            .try_send(OutboundBridgeCommand::Data(payload))
+            .is_err()
+        {
+            self.outbound_streams.remove(request_id);
+            self.reject_outbound(request_id, service, "stream_backpressure");
         }
     }
 
@@ -756,191 +818,6 @@ impl RuntimeActor {
         });
     }
 
-    fn handle_service_event(
-        &mut self,
-        stream_id: &str,
-        service: &str,
-        event: &str,
-        payload: Value,
-    ) {
-        let Some(stream) = self.streams.get_mut(stream_id) else {
-            // A terminal frame may race a host-owned cancellation. Once the
-            // host has removed the stream, a late terminal is harmless.
-            return;
-        };
-        if stream.terminal {
-            return;
-        }
-        if stream.service.as_str() != service {
-            let expected = stream.service.to_string();
-            let _ = stream;
-            self.fail_stream_reason(
-                stream_id,
-                &format!(
-                    "plugin_protocol_fault: service mismatch, expected {expected:?}, got {service:?}"
-                ),
-            );
-            return;
-        }
-        match event {
-            EVENT_CREDIT => {
-                let Some(bytes) = payload.get("bytes").and_then(Value::as_u64) else {
-                    self.fail_stream(
-                        stream_id,
-                        HostError::InvalidEnvelope("plugin credit has no byte count".to_owned()),
-                    );
-                    return;
-                };
-                if let Err(error) = stream.send_credit.add(bytes) {
-                    self.fail_stream(stream_id, error);
-                    return;
-                }
-                let mut envelope = StreamEnvelope::new(stream_id, StreamKind::Credit);
-                envelope.credit_bytes = Some(bytes);
-                let delivery = stream.events.try_send(Ok(envelope));
-                let _ = stream;
-                if delivery.is_err() {
-                    self.finish_stream(
-                        stream_id,
-                        StreamKind::Cancel,
-                        Some(json!({"reason": "slow_receiver"})),
-                    );
-                }
-            }
-            EVENT_DATA => {
-                if !is_json_byte_array(&payload) {
-                    self.fail_stream_reason(
-                        stream_id,
-                        "plugin_protocol_fault: DATA payload is not a JSON byte array",
-                    );
-                    return;
-                }
-                let Ok(encoded_bytes) = encoded_payload_bytes(&payload) else {
-                    self.fail_stream(
-                        stream_id,
-                        HostError::InvalidEnvelope("cannot encode plugin DATA payload".to_owned()),
-                    );
-                    return;
-                };
-                let encoded_bytes = encoded_bytes as u64;
-                if encoded_bytes > stream.receive_credit {
-                    let available = stream.receive_credit;
-                    let _ = stream;
-                    self.fail_stream(
-                        stream_id,
-                        HostError::StreamByteBudgetExceeded {
-                            stream_id: stream_id.to_owned(),
-                            requested: encoded_bytes,
-                            available,
-                        },
-                    );
-                    return;
-                }
-                stream.receive_credit -= encoded_bytes;
-                stream.next_output_sequence = stream.next_output_sequence.saturating_add(1);
-                let mut envelope = StreamEnvelope::new(stream_id, StreamKind::Data);
-                envelope.sequence = Some(stream.next_output_sequence);
-                envelope.payload = Some(payload);
-                let delivery = stream.events.try_send(Ok(envelope));
-                let _ = stream;
-                if delivery.is_err() {
-                    self.finish_stream(
-                        stream_id,
-                        StreamKind::Cancel,
-                        Some(json!({"reason": "slow_receiver"})),
-                    );
-                }
-            }
-            EVENT_END => self.finish_stream(stream_id, StreamKind::End, Some(payload)),
-            EVENT_CANCEL => self.finish_stream(stream_id, StreamKind::Cancel, Some(payload)),
-            _ => self.fail_stream_reason(
-                stream_id,
-                &format!("plugin_protocol_fault: unknown service event {event:?}"),
-            ),
-        }
-    }
-
-    fn grant_credit(&mut self, stream_id: &str, bytes: u64) -> Result<()> {
-        let stream = self
-            .streams
-            .get_mut(stream_id)
-            .ok_or_else(|| HostError::StreamClosed {
-                stream_id: stream_id.to_owned(),
-            })?;
-        stream.receive_credit = stream
-            .receive_credit
-            .checked_add(bytes)
-            .filter(|credit| *credit <= STREAM_BYTE_BUDGET)
-            .ok_or_else(|| HostError::StreamByteBudgetExceeded {
-                stream_id: stream_id.to_owned(),
-                requested: bytes,
-                available: STREAM_BYTE_BUDGET.saturating_sub(stream.receive_credit),
-            })?;
-        self.dispatch_stream_request(stream_id, OP_CREDIT, json!({"bytes": bytes}))
-    }
-
-    fn dispatch_stream_request(
-        &mut self,
-        stream_id: &str,
-        operation: &'static str,
-        payload: Value,
-    ) -> Result<()> {
-        let service = self
-            .streams
-            .get(stream_id)
-            .ok_or_else(|| HostError::StreamClosed {
-                stream_id: stream_id.to_owned(),
-            })?
-            .service
-            .clone();
-        self.dispatch(
-            Lane::Data,
-            &PluginFrame::service_request(stream_id, service.as_str(), operation, payload),
-        )
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    fn fail_stream(&mut self, stream_id: &str, error: HostError) {
-        self.fail_stream_reason(stream_id, &error.to_string());
-    }
-
-    fn fail_stream_reason(&mut self, stream_id: &str, reason: &str) {
-        if let Some(mut stream) = self.streams.remove(stream_id)
-            && !stream.terminal
-        {
-            stream.terminal = true;
-            stream.runtime_terminal.store(true, Ordering::Release);
-            stream.send_credit.close();
-            let mut terminal = StreamEnvelope::new(stream_id, StreamKind::Cancel);
-            terminal.payload = Some(json!({"reason": reason}));
-            if stream.events.try_send(Ok(terminal.clone())).is_err() {
-                stream.terminal_fallback.store(terminal);
-            }
-        }
-    }
-
-    fn finish_stream(&mut self, stream_id: &str, kind: StreamKind, payload: Option<Value>) {
-        if let Some(mut stream) = self.streams.remove(stream_id)
-            && !stream.terminal
-        {
-            stream.terminal = true;
-            stream.send_credit.close();
-            let mut envelope = StreamEnvelope::new(stream_id, kind);
-            envelope.payload = payload;
-            if stream.events.try_send(Ok(envelope.clone())).is_err() {
-                stream.terminal_fallback.store(envelope);
-            }
-        }
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    fn close_all_streams(&mut self, kind: StreamKind, payload: Option<Value>) {
-        let stream_ids: Vec<_> = self.streams.keys().cloned().collect();
-        for stream_id in stream_ids {
-            self.finish_stream(&stream_id, kind, payload.clone());
-        }
-    }
-
     fn lifecycle_transition_error(&self, phase: LifecyclePhase) -> HostError {
         HostError::InvalidEnvelope(format!(
             "invalid {:?} lifecycle transition from {:?} for plugin {}",
@@ -953,29 +830,6 @@ impl RuntimeActor {
             let _ = reply.send(Err(HostError::InvalidEnvelope(message.to_owned())));
         }
     }
-
-    fn protocol_fault(&mut self, reason: &str) {
-        self.phase = RuntimePhase::Faulted;
-        self.healthy.store(false, Ordering::Release);
-        self.fail_pending_prepare(reason);
-        self.close_all_streams(
-            StreamKind::Cancel,
-            Some(json!({"reason": "plugin_protocol_fault", "message": reason})),
-        );
-        self.outbound_streams.clear();
-    }
-}
-
-pub(super) fn encoded_payload_bytes(payload: &Value) -> Result<usize> {
-    Ok(serde_json::to_vec(payload)?.len())
-}
-
-fn is_json_byte_array(payload: &Value) -> bool {
-    payload.as_array().is_some_and(|bytes| {
-        bytes
-            .iter()
-            .all(|byte| byte.as_u64().is_some_and(|byte| u8::try_from(byte).is_ok()))
-    })
 }
 
 fn host_service_error_code(error: &HostError) -> &'static str {

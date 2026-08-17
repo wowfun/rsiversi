@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 pub const COMPOSITION_FORMAT_VERSION: u32 = 0;
 pub const LOCK_FORMAT_VERSION: u32 = 0;
 const MAX_IDENTITY_BYTES: usize = 255;
+pub const MAX_COMPOSITION_SCOPES: usize = 1_024;
+pub const MAX_SCOPE_DEPTH: usize = 64;
+pub const MAX_COMPOSITION_INSTANCES: usize = 1_024;
+pub const MAX_COMPOSITION_BINDINGS: usize = 16_384;
+pub const MAX_COMPOSITION_REQUIREMENTS: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -186,6 +191,45 @@ impl CompositionManifest {
             ));
         }
 
+        let binding_count = self.instances.iter().fold(0_usize, |total, instance| {
+            total.saturating_add(instance.bindings.len())
+        });
+        for (code, actual, maximum, path) in [
+            (
+                "scope_limit",
+                self.scopes.len(),
+                MAX_COMPOSITION_SCOPES,
+                "scopes",
+            ),
+            (
+                "instance_limit",
+                self.instances.len(),
+                MAX_COMPOSITION_INSTANCES,
+                "instances",
+            ),
+            (
+                "binding_limit",
+                binding_count,
+                MAX_COMPOSITION_BINDINGS,
+                "instances.bindings",
+            ),
+        ] {
+            if actual > maximum {
+                diagnostics.push(Diagnostic::error(
+                    code,
+                    format!("composition contains {actual} entries; maximum is {maximum}"),
+                    Some(path.to_owned()),
+                ));
+            }
+        }
+        if !diagnostics.is_empty()
+            && (self.scopes.len() > MAX_COMPOSITION_SCOPES
+                || self.instances.len() > MAX_COMPOSITION_INSTANCES
+                || binding_count > MAX_COMPOSITION_BINDINGS)
+        {
+            return ValidationReport { diagnostics };
+        }
+
         let mut scopes = BTreeMap::new();
         for (index, scope) in self.scopes.iter().enumerate() {
             if scope.id.0.trim().is_empty() {
@@ -245,21 +289,7 @@ impl CompositionManifest {
                 }
             }
         }
-        for scope in scopes.keys() {
-            let mut seen = BTreeSet::new();
-            let mut cursor = Some(scope);
-            while let Some(id) = cursor {
-                if !seen.insert(id.clone()) {
-                    diagnostics.push(Diagnostic::error(
-                        "scope_cycle",
-                        format!("scope parent graph contains a cycle through {id}"),
-                        Some("scopes".to_owned()),
-                    ));
-                    break;
-                }
-                cursor = scopes.get(id).and_then(Option::as_ref);
-            }
-        }
+        validate_scope_graph(&scopes, &mut diagnostics);
 
         let mut instances = BTreeSet::new();
         for (index, instance) in self.instances.iter().enumerate() {
@@ -335,6 +365,61 @@ impl CompositionManifest {
             .iter()
             .map(|scope| (scope.id.clone(), scope.parent.clone()))
             .collect()
+    }
+}
+
+fn validate_scope_graph(
+    scopes: &BTreeMap<ScopeId, Option<ScopeId>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut state = BTreeMap::<ScopeId, u8>::new();
+    let mut depths = BTreeMap::<ScopeId, usize>::new();
+    for start in scopes.keys() {
+        if state.get(start) == Some(&2) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut cursor = Some(start.clone());
+        let mut base_depth = 0_usize;
+        let mut cycle = None;
+        while let Some(scope) = cursor {
+            match state.get(&scope).copied().unwrap_or(0) {
+                2 => {
+                    base_depth = depths.get(&scope).copied().unwrap_or(0);
+                    break;
+                }
+                1 => {
+                    cycle = Some(scope);
+                    break;
+                }
+                _ => {
+                    state.insert(scope.clone(), 1);
+                    path.push(scope.clone());
+                    cursor = scopes.get(&scope).and_then(Clone::clone);
+                }
+            }
+        }
+        if let Some(scope) = cycle {
+            diagnostics.push(Diagnostic::error(
+                "scope_cycle",
+                format!("scope parent graph contains a cycle through {scope}"),
+                Some("scopes".to_owned()),
+            ));
+        }
+        let mut maximum_depth = base_depth;
+        while let Some(scope) = path.pop() {
+            base_depth = base_depth.saturating_add(1);
+            maximum_depth = maximum_depth.max(base_depth);
+            depths.insert(scope.clone(), base_depth);
+            state.insert(scope, 2);
+        }
+        if maximum_depth > MAX_SCOPE_DEPTH {
+            diagnostics.push(Diagnostic::error(
+                "scope_depth_limit",
+                format!("scope tree depth {maximum_depth} exceeds maximum {MAX_SCOPE_DEPTH}"),
+                Some("scopes".to_owned()),
+            ));
+        }
     }
 }
 
@@ -526,6 +611,7 @@ pub enum InactiveReason {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum InstanceStatus {
     Active,
+    Faulted { reason: String },
     Inactive { reasons: Vec<InactiveReason> },
 }
 
@@ -680,7 +766,7 @@ impl Generation {
             .admission_guard
             .lock()
             .expect("generation admission mutex poisoned");
-        if !self.admitting.load(Ordering::Acquire) {
+        if !self.admitting.load(Ordering::Acquire) || !self.has_healthy_runtime() {
             return None;
         }
         Some(self.new_lease())
@@ -940,6 +1026,42 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "scope_root_count")
+        );
+    }
+
+    #[test]
+    fn composition_cardinality_is_rejected_before_detailed_scans() {
+        let mut manifest = CompositionManifest::empty("bounded");
+        manifest.scopes = (0..=MAX_COMPOSITION_SCOPES)
+            .map(|index| ScopeSpec {
+                id: ScopeId::new(format!("scope-{index}")),
+                parent: (index != 0).then(|| ScopeId::new("scope-0")),
+            })
+            .collect();
+        let report = manifest.validate();
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "scope_limit")
+        );
+    }
+
+    #[test]
+    fn scope_depth_has_an_explicit_linear_time_limit() {
+        let mut manifest = CompositionManifest::empty("bounded");
+        manifest.scopes = (0..=MAX_SCOPE_DEPTH)
+            .map(|index| ScopeSpec {
+                id: ScopeId::new(format!("scope-{index}")),
+                parent: (index != 0).then(|| ScopeId::new(format!("scope-{}", index - 1))),
+            })
+            .collect();
+        let report = manifest.validate();
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "scope_depth_limit")
         );
     }
 

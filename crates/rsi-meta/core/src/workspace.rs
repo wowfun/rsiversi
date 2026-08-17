@@ -27,13 +27,15 @@ pub(crate) struct WorkspaceLease {
     #[allow(dead_code)]
     sidecar: File,
     #[allow(dead_code)]
-    physical: File,
+    database: File,
+    #[allow(dead_code)]
+    identity_guard: File,
 }
 
 impl WorkspaceLease {
     pub(crate) fn acquire(workspace: &CompositionWorkspace) -> Result<Self> {
         let display_path = normalize_absolute(&workspace.database_path)?;
-        let (sidecar, identity) = open_path_guard(&workspace.database_path)?;
+        let (sidecar, database, identity) = open_path_guard(&workspace.database_path)?;
         let held = HELD_WORKSPACES.get_or_init(|| Mutex::new(BTreeSet::new()));
         {
             let mut held = held.lock().expect("workspace lease registry poisoned");
@@ -43,10 +45,11 @@ impl WorkspaceLease {
         }
 
         match open_physical_guard(&identity, &display_path) {
-            Ok(physical) => Ok(Self {
+            Ok(identity_guard) => Ok(Self {
                 identity,
                 sidecar,
-                physical,
+                database,
+                identity_guard,
             }),
             Err(error) => {
                 held.lock()
@@ -56,11 +59,27 @@ impl WorkspaceLease {
             }
         }
     }
+
+    /// Confirms that `SQLite` opened the same database inode captured by this lease.
+    pub(crate) fn verify_opened_database(&self, database_path: &Path) -> Result<()> {
+        let opened = physical_workspace_identity(database_path)?;
+        if opened != self.identity {
+            return Err(HostError::OperationRejected {
+                code: "workspace_identity_changed".to_owned(),
+                message: format!(
+                    "workspace database {} changed while SQLite was opening it",
+                    database_path.display()
+                ),
+                details: std::collections::BTreeMap::new(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Drop for WorkspaceLease {
     fn drop(&mut self) {
-        let _ = flock(&self.physical, FlockOperation::Unlock);
+        let _ = flock(&self.identity_guard, FlockOperation::Unlock);
         let _ = flock(&self.sidecar, FlockOperation::Unlock);
         HELD_WORKSPACES
             .get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -105,7 +124,7 @@ pub(crate) fn installed_files(
     }
 }
 
-fn open_path_guard(database_path: &Path) -> Result<(File, PhysicalWorkspaceIdentity)> {
+fn open_path_guard(database_path: &Path) -> Result<(File, File, PhysicalWorkspaceIdentity)> {
     let lock_path = lease_path(database_path)?;
     let parent = lock_path.parent().ok_or_else(|| HostError::Io {
         path: lock_path.clone(),
@@ -140,7 +159,7 @@ fn open_path_guard(database_path: &Path) -> Result<(File, PhysicalWorkspaceIdent
             source,
         })?;
     let identity = physical_workspace_identity_from_file(&database, database_path)?;
-    Ok((sidecar, identity))
+    Ok((sidecar, database, identity))
 }
 
 #[cfg(unix)]
@@ -369,6 +388,21 @@ mod tests {
         ));
         drop(first);
         WorkspaceLease::acquire(&workspace).unwrap();
+    }
+
+    #[test]
+    fn lease_rejects_a_database_path_replaced_after_acquisition() {
+        let temp = TempDir::new().unwrap();
+        let workspace = workspace(&temp);
+        let lease = WorkspaceLease::acquire(&workspace).unwrap();
+        let replacement = temp.path().join("replacement.sqlite3");
+        File::create(&replacement).unwrap();
+        std::fs::rename(&replacement, &workspace.database_path).unwrap();
+        assert!(matches!(
+            lease.verify_opened_database(&workspace.database_path),
+            Err(HostError::OperationRejected { ref code, .. })
+                if code == "workspace_identity_changed"
+        ));
     }
 
     #[cfg(unix)]

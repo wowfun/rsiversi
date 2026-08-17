@@ -1,18 +1,20 @@
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{AuthState, ensure_private_directory};
 use crate::framing::{
-    encode_request, encode_response, ndjson_request_codec, ndjson_response_codec,
+    encode_request_bytes, encode_response_bytes, length_delimited_request_codec,
+    length_delimited_response_codec,
 };
 use crate::host::{SharedHost, submit_with_rejection};
 use crate::lifecycle::DaemonLifecycle;
@@ -20,10 +22,30 @@ use crate::protocol::{
     CommandEnvelope, CommandOutcome, CommandOutcomeEnvelope, rejected, validate_command,
     validate_outcome,
 };
-use crate::streams::{StreamRouter, WireEnvelope, cancel_envelope, decode_wire_envelope};
+use crate::streams::{
+    StreamDataLimitExceeded, StreamRouter, WireEnvelope, cancel_envelope, decode_stream_data,
+    decode_wire_envelope, encode_stream_data_bounded, is_stream_data,
+};
 
 const SOCKET_MODE: u32 = 0o600;
 const MAX_UNIX_CONNECTIONS: usize = 128;
+const UNIX_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const UNIX_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
+const UNIX_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const UNIX_CONNECTION_MAX_LIFETIME: Duration = Duration::from_hours(1);
+
+#[derive(Clone, Copy, Debug)]
+struct ConnectionDeadlines {
+    idle: Duration,
+    write: Duration,
+    lifetime: Duration,
+}
+
+const UNIX_CONNECTION_DEADLINES: ConnectionDeadlines = ConnectionDeadlines {
+    idle: UNIX_IDLE_TIMEOUT,
+    write: UNIX_WRITE_TIMEOUT,
+    lifetime: UNIX_CONNECTION_MAX_LIFETIME,
+};
 
 #[derive(Debug)]
 pub struct UnixServer {
@@ -156,21 +178,25 @@ pub async fn send_command(
 ) -> Result<CommandOutcomeEnvelope> {
     validate_socket_path(socket)?;
     let command_id = envelope.command_id.clone();
-    let stream = UnixStream::connect(socket)
+    let stream = tokio::time::timeout(UNIX_CONNECT_TIMEOUT, UnixStream::connect(socket))
         .await
+        .context("connect to daemon socket timed out")?
         .with_context(|| format!("connect to daemon socket {}", socket.display()))?;
-    let mut framed = Framed::new(stream, ndjson_response_codec());
-    framed
-        .send(encode_request(&envelope)?)
+    let mut framed = Framed::new(stream, length_delimited_response_codec());
+    tokio::time::timeout(
+        UNIX_WRITE_TIMEOUT,
+        framed.send(encode_request_bytes(&envelope)?),
+    )
+    .await
+    .context("send daemon command timed out")?
+    .context("send daemon command")?;
+    let bytes = tokio::time::timeout(UNIX_IDLE_TIMEOUT, framed.next())
         .await
-        .context("send daemon command")?;
-    let line = framed
-        .next()
-        .await
+        .context("daemon result timed out")?
         .context("daemon closed before returning a result")?
         .context("read daemon result frame")?;
     let response: CommandOutcomeEnvelope =
-        serde_json::from_str(&line).context("decode daemon result")?;
+        serde_json::from_slice(&bytes).context("decode daemon result")?;
     validate_outcome(&response)?;
     if response.command_id != command_id {
         bail!(
@@ -213,6 +239,25 @@ async fn serve_connection(
     auth: AuthState,
     lifecycle: DaemonLifecycle,
 ) -> Result<()> {
+    serve_connection_with_deadlines(
+        stream,
+        owner_uid,
+        host,
+        auth,
+        lifecycle,
+        UNIX_CONNECTION_DEADLINES,
+    )
+    .await
+}
+
+async fn serve_connection_with_deadlines(
+    stream: UnixStream,
+    owner_uid: u32,
+    host: SharedHost,
+    auth: AuthState,
+    lifecycle: DaemonLifecycle,
+    deadlines: ConnectionDeadlines,
+) -> Result<()> {
     let peer_uid = stream
         .peer_cred()
         .context("read Unix peer credentials")?
@@ -220,29 +265,58 @@ async fn serve_connection(
     if peer_uid != owner_uid {
         bail!("refusing Unix peer uid {peer_uid}; daemon uid is {owner_uid}");
     }
-    let mut framed = Framed::new(stream, ndjson_request_codec());
+    let (read, write) = stream.into_split();
+    let mut reader = FramedRead::new(read, length_delimited_request_codec());
+    let mut writer = FramedWrite::new(write, length_delimited_response_codec());
     let mut streams = StreamRouter::new(host.clone());
+    let idle = tokio::time::sleep(deadlines.idle);
+    let lifetime = tokio::time::sleep(deadlines.lifetime);
+    tokio::pin!(idle, lifetime);
 
     loop {
         enum Activity {
             Restarting,
-            Input(Option<std::result::Result<String, tokio_util::codec::LinesCodecError>>),
+            Deadline,
+            Input(Option<std::result::Result<bytes::BytesMut, std::io::Error>>),
             Stream(Option<crate::protocol::StreamEnvelope>),
         }
         let activity = tokio::select! {
-            biased;
             () = lifecycle.restarting() => Activity::Restarting,
+            () = &mut idle => Activity::Deadline,
+            () = &mut lifetime => Activity::Deadline,
             frame = streams.recv() => Activity::Stream(frame),
-            line = framed.next() => Activity::Input(line),
+            line = reader.next() => Activity::Input(line),
         };
+        idle.as_mut()
+            .reset(tokio::time::Instant::now() + deadlines.idle);
         let line = match activity {
-            Activity::Restarting | Activity::Input(None) => break,
+            Activity::Restarting | Activity::Deadline | Activity::Input(None) => break,
             Activity::Input(Some(Err(error))) => {
                 tracing::debug!(%error, "rejecting invalid Unix wire frame");
                 break;
             }
             Activity::Stream(Some(frame)) => {
-                if framed.send(encode_response(&frame)?).await.is_err() {
+                let encoded = if frame.kind == crate::protocol::StreamKind::Data {
+                    match encode_stream_data_bounded(
+                        &frame,
+                        crate::framing::MAX_WIRE_RESPONSE_BYTES,
+                    ) {
+                        Ok(encoded) => bytes::Bytes::from(encoded),
+                        Err(error) if error.downcast_ref::<StreamDataLimitExceeded>().is_some() => {
+                            bail!("outgoing Unix DATA frame exceeds the response limit");
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    frame
+                        .validate()
+                        .context("validate outgoing Unix stream frame")?;
+                    encode_response_bytes(&frame)?
+                };
+                if !matches!(
+                    tokio::time::timeout(deadlines.write, writer.send(encoded)).await,
+                    Ok(Ok(()))
+                ) {
                     break;
                 }
                 continue;
@@ -251,66 +325,111 @@ async fn serve_connection(
             Activity::Input(Some(Ok(line))) => line,
         };
 
-        let request = match decode_wire_envelope(&line) {
-            Ok(WireEnvelope::Control(request)) => request,
-            Ok(WireEnvelope::Stream(frame)) => {
-                let stream_id = frame.stream_id.clone();
-                if let Err(error) = streams.route(frame) {
-                    let response =
-                        cancel_envelope(&stream_id, "invalid_stream_frame", &format!("{error:#}"));
-                    if framed.send(encode_response(&response)?).await.is_err() {
-                        break;
-                    }
-                }
-                continue;
-            }
-            Err(error) => {
-                tracing::debug!(%error, "rejecting invalid Unix wire envelope");
-                break;
-            }
-        };
-        let command_id = request.command_id.clone();
-        if let Err(error) = validate_command(&request) {
-            let response = rejected(
-                command_id,
-                host.graph_revision(),
-                "invalid_command",
-                error.to_string(),
-            );
-            framed.send(encode_response(&response)?).await?;
-            continue;
-        }
-
-        let response = submit_with_rejection(host.as_ref(), request).await;
-        #[cfg(feature = "test-failpoints")]
-        crate::test_failpoints::gate_before_uds_ack(&response).await?;
-        if let CommandOutcome::TokenRotated { generation } = &response.payload {
-            // The durable core outcome is authoritative. Applying it after
-            // commit closes the crash window on retry: equal/older generations
-            // are idempotent and a newer one is published before its ack.
-            if let Err(error) = auth.rotate_to(*generation) {
-                // Continuing to admit authenticated clients with the old token
-                // after the durable generation advanced would violate the
-                // credential boundary. Restart so startup reconciliation can
-                // repair the lagging file before HTTP/WS admission resumes.
-                lifecycle.request_restart();
-                return Err(error).context("publish durable token generation");
-            }
-        }
-        let shutting_down = matches!(&response.payload, CommandOutcome::ShuttingDown);
-        let sent = framed.send(encode_response(&response)?).await;
-        if shutting_down {
-            // A durable shutdown owns process termination even when the peer
-            // disappears before its best-effort acknowledgement is delivered.
-            lifecycle.request_shutdown();
-        }
-        sent?;
-        if shutting_down {
+        if matches!(
+            handle_connection_input(
+                line,
+                &mut writer,
+                &mut streams,
+                &host,
+                &auth,
+                &lifecycle,
+                deadlines,
+            )
+            .await?,
+            ConnectionFlow::Break
+        ) {
             break;
         }
     }
     streams.disconnect().await;
     Ok(())
+}
+
+enum ConnectionFlow {
+    Continue,
+    Break,
+}
+
+async fn handle_connection_input(
+    line: bytes::BytesMut,
+    writer: &mut FramedWrite<tokio::net::unix::OwnedWriteHalf, LengthDelimitedCodec>,
+    streams: &mut StreamRouter,
+    host: &SharedHost,
+    auth: &AuthState,
+    lifecycle: &DaemonLifecycle,
+    deadlines: ConnectionDeadlines,
+) -> Result<ConnectionFlow> {
+    let envelope = if is_stream_data(&line) {
+        WireEnvelope::Stream(decode_stream_data(&line)?)
+    } else {
+        decode_wire_envelope(std::str::from_utf8(&line).context("Unix frame is not UTF-8")?)?
+    };
+    let request = match envelope {
+        WireEnvelope::Control(request) => request,
+        WireEnvelope::Stream(frame) => {
+            let stream_id = frame.stream_id.clone();
+            if let Err(error) = streams.route(frame) {
+                let response =
+                    cancel_envelope(&stream_id, "invalid_stream_frame", &format!("{error:#}"));
+                if !matches!(
+                    tokio::time::timeout(
+                        deadlines.write,
+                        writer.send(encode_response_bytes(&response)?),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    return Ok(ConnectionFlow::Break);
+                }
+            }
+            return Ok(ConnectionFlow::Continue);
+        }
+    };
+    let command_id = request.command_id.clone();
+    if let Err(error) = validate_command(&request) {
+        let response = rejected(
+            command_id,
+            host.graph_revision(),
+            "invalid_command",
+            error.to_string(),
+        );
+        tokio::time::timeout(
+            deadlines.write,
+            writer.send(encode_response_bytes(&response)?),
+        )
+        .await
+        .context("send command rejection timed out")??;
+        return Ok(ConnectionFlow::Continue);
+    }
+
+    let response = submit_with_rejection(host.as_ref(), request).await;
+    #[cfg(feature = "test-failpoints")]
+    crate::test_failpoints::gate_before_uds_ack(&response).await?;
+    if let CommandOutcome::TokenRotated { generation } = &response.payload
+        && let Err(error) = auth.rotate_to(*generation)
+    {
+        // Serving the old token after its durable generation advanced would
+        // violate the credential boundary. Recovery republishes it on restart.
+        lifecycle.request_restart();
+        return Err(error).context("publish durable token generation");
+    }
+    let shutting_down = matches!(&response.payload, CommandOutcome::ShuttingDown);
+    let sent = tokio::time::timeout(
+        deadlines.write,
+        writer.send(encode_response_bytes(&response)?),
+    )
+    .await
+    .context("send command outcome timed out")?;
+    if shutting_down {
+        // Durable shutdown owns termination even if its best-effort ack fails.
+        lifecycle.request_shutdown();
+    }
+    sent?;
+    Ok(if shutting_down {
+        ConnectionFlow::Break
+    } else {
+        ConnectionFlow::Continue
+    })
 }
 
 fn remove_stale_socket(path: &Path) -> Result<()> {
@@ -387,6 +506,8 @@ mod tests {
 
     struct EchoHost;
 
+    struct LargeOutcomeHost;
+
     #[derive(Debug, Default)]
     struct BlockingShutdownHost {
         started: Notify,
@@ -405,6 +526,12 @@ mod tests {
         }
     }
 
+    impl fmt::Debug for LargeOutcomeHost {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("LargeOutcomeHost")
+        }
+    }
+
     #[async_trait]
     impl HostApi for EchoHost {
         async fn submit(&self, command: CommandEnvelope) -> Result<CommandOutcomeEnvelope> {
@@ -416,6 +543,41 @@ mod tests {
                 _ => CommandOutcome::ShuttingDown,
             };
             Ok(outcome(command.command_id, GraphRevision(0), payload))
+        }
+
+        async fn subscribe(&self, _after_cursor: u64) -> Result<HostEventStream> {
+            Ok(Box::pin(futures_util::stream::pending()))
+        }
+
+        fn graph_revision(&self) -> GraphRevision {
+            GraphRevision(0)
+        }
+
+        fn token_generation(&self) -> u64 {
+            0
+        }
+
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl HostApi for LargeOutcomeHost {
+        async fn submit(&self, command: CommandEnvelope) -> Result<CommandOutcomeEnvelope> {
+            Ok(CommandOutcomeEnvelope {
+                protocol: crate::protocol::CONTROL_PROTOCOL.to_owned(),
+                version: crate::protocol::CONTROL_VERSION,
+                kind: crate::protocol::ControlEnvelopeKind::Result,
+                command_id: command.command_id,
+                graph_revision: GraphRevision(0),
+                payload: CommandOutcome::Rejected {
+                    code: "large_fixture".to_owned(),
+                    message: "x".repeat(2 * 1024 * 1024),
+                    details: std::collections::BTreeMap::new(),
+                },
+                extensions: std::collections::BTreeMap::new(),
+            })
         }
 
         async fn subscribe(&self, _after_cursor: u64) -> Result<HostEventStream> {
@@ -465,7 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trusted_peer_ndjson_request_round_trips_without_a_bearer() {
+    async fn trusted_peer_length_delimited_request_round_trips_without_a_bearer() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("run").join("daemon.sock");
         let token_file = directory.path().join("run").join("daemon.token");
@@ -486,6 +648,39 @@ mod tests {
         assert_eq!(response.payload, CommandOutcome::ShuttingDown);
 
         cancellation.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn unix_server_sends_a_legal_response_larger_than_the_request_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let auth = AuthState::initialize(directory.path().join("run/daemon.token")).unwrap();
+        let (server, client) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(serve_connection_with_deadlines(
+            server,
+            rustix::process::geteuid().as_raw(),
+            Arc::new(LargeOutcomeHost),
+            auth,
+            DaemonLifecycle::default(),
+            ConnectionDeadlines {
+                idle: Duration::from_secs(1),
+                write: Duration::from_secs(1),
+                lifetime: Duration::from_secs(1),
+            },
+        ));
+        let mut framed = Framed::new(client, length_delimited_response_codec());
+        framed
+            .send(encode_request_bytes(&CliRequest::QueryGraph.into_envelope()).unwrap())
+            .await
+            .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), framed.next())
+            .await
+            .expect("large response deadline")
+            .expect("server keeps the connection open")
+            .expect("legal large response frame");
+        assert!(response.len() > crate::framing::MAX_WIRE_REQUEST_BYTES);
+        drop(framed);
         task.await.unwrap().unwrap();
     }
 
@@ -526,6 +721,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_unix_session_is_closed_by_its_connection_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let auth = AuthState::initialize(directory.path().join("run/daemon.token")).unwrap();
+        let (server, client) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(serve_connection_with_deadlines(
+            server,
+            rustix::process::geteuid().as_raw(),
+            Arc::new(EchoHost::new()),
+            auth,
+            DaemonLifecycle::default(),
+            ConnectionDeadlines {
+                idle: Duration::from_millis(25),
+                write: Duration::from_secs(1),
+                lifetime: Duration::from_secs(1),
+            },
+        ));
+        let mut framed = Framed::new(client, length_delimited_response_codec());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), framed.next())
+                .await
+                .expect("idle deadline")
+                .is_none()
+        );
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_unix_session_cannot_outlive_its_absolute_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let auth = AuthState::initialize(directory.path().join("run/daemon.token")).unwrap();
+        let (server, client) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(serve_connection_with_deadlines(
+            server,
+            rustix::process::geteuid().as_raw(),
+            Arc::new(EchoHost::new()),
+            auth,
+            DaemonLifecycle::default(),
+            ConnectionDeadlines {
+                idle: Duration::from_secs(1),
+                write: Duration::from_secs(1),
+                lifetime: Duration::from_millis(75),
+            },
+        ));
+        let mut framed = Framed::new(client, length_delimited_response_codec());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        framed
+            .send(encode_request_bytes(&CliRequest::QueryGraph.into_envelope()).unwrap())
+            .await
+            .unwrap();
+        assert!(framed.next().await.unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), framed.next())
+                .await
+                .expect("absolute connection deadline")
+                .is_none()
+        );
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn token_rotation_keeps_the_trusted_unix_session_open() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("run").join("daemon.sock");
@@ -541,23 +796,29 @@ mod tests {
         ));
 
         let stream = UnixStream::connect(&socket).await.unwrap();
-        let mut framed = Framed::new(stream, ndjson_response_codec());
+        let mut framed = Framed::new(stream, length_delimited_response_codec());
         let rotate = CliRequest::RotateToken {
             operation_id: "rotate-token".to_owned(),
         }
         .into_envelope();
-        framed.send(encode_request(&rotate).unwrap()).await.unwrap();
+        framed
+            .send(encode_request_bytes(&rotate).unwrap())
+            .await
+            .unwrap();
         let first: CommandOutcomeEnvelope =
-            serde_json::from_str(&framed.next().await.unwrap().unwrap()).unwrap();
+            serde_json::from_slice(&framed.next().await.unwrap().unwrap()).unwrap();
         assert_eq!(
             first.payload,
             CommandOutcome::TokenRotated { generation: 1 }
         );
         let after_first = crate::auth::read_token_file(&token_file).unwrap();
 
-        framed.send(encode_request(&rotate).unwrap()).await.unwrap();
+        framed
+            .send(encode_request_bytes(&rotate).unwrap())
+            .await
+            .unwrap();
         let replay: CommandOutcomeEnvelope =
-            serde_json::from_str(&framed.next().await.unwrap().unwrap()).unwrap();
+            serde_json::from_slice(&framed.next().await.unwrap().unwrap()).unwrap();
         assert_eq!(
             replay.payload,
             CommandOutcome::TokenRotated { generation: 1 }
@@ -566,9 +827,12 @@ mod tests {
         assert_eq!(after_first.expose(), after_replay.expose());
 
         let query = CliRequest::QueryGraph.into_envelope();
-        framed.send(encode_request(&query).unwrap()).await.unwrap();
+        framed
+            .send(encode_request_bytes(&query).unwrap())
+            .await
+            .unwrap();
         let second: CommandOutcomeEnvelope =
-            serde_json::from_str(&framed.next().await.unwrap().unwrap()).unwrap();
+            serde_json::from_slice(&framed.next().await.unwrap().unwrap()).unwrap();
         assert_eq!(second.payload, CommandOutcome::ShuttingDown);
 
         cancellation.cancel();
@@ -613,10 +877,10 @@ mod tests {
             tokio::spawn(server.serve(host.clone(), auth, lifecycle.clone(), cancellation.clone()));
 
         let stream = UnixStream::connect(&socket).await.unwrap();
-        let mut framed = Framed::new(stream, ndjson_response_codec());
+        let mut framed = Framed::new(stream, length_delimited_response_codec());
         let request = CommandEnvelope::new("lost-shutdown-ack", Command::Shutdown);
         framed
-            .send(encode_request(&request).unwrap())
+            .send(encode_request_bytes(&request).unwrap())
             .await
             .unwrap();
         host.started.notified().await;

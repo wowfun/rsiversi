@@ -25,12 +25,16 @@ pub enum HostError {
     LockAlreadyExists { path: std::path::PathBuf },
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("SQLite store schema version {found} is newer than supported version {supported}")]
+    #[error(
+        "SQLite store schema version {found} is unsupported; this build requires version {supported}"
+    )]
     UnsupportedStoreSchema { found: u32, supported: u32 },
     #[error("plugin package validation failed: {0}")]
     Loader(#[from] rsi_meta_loader::LoaderError),
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("plugin frame error: {0}")]
+    PluginFrame(#[from] rsi_meta_plugin::FrameError),
     #[error("registry actor is no longer available")]
     RegistryClosed,
     #[error("registry actor dropped a command response")]
@@ -67,8 +71,27 @@ pub enum HostError {
     Unsupported(&'static str),
     #[error("event subscriber lagged by {skipped} events; resubscribe from the last cursor")]
     SubscriberLagged { skipped: u64 },
+    #[error(
+        "event cursor {requested} expired; the minimum resumable cursor is {minimum_available}"
+    )]
+    EventCursorExpired {
+        requested: u64,
+        minimum_available: u64,
+    },
+    #[error("plugin state quota {quota} exceeded: requested {requested}, maximum {maximum}")]
+    StateQuotaExceeded {
+        quota: &'static str,
+        requested: usize,
+        maximum: usize,
+    },
     #[error("native runtime for instance {instance} is closed")]
     PluginRuntimeClosed { instance: InstanceId },
+    #[error("cannot start native runtime thread for instance {instance}: {source}")]
+    PluginRuntimeStart {
+        instance: InstanceId,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("native runtime for instance {instance} is not committed")]
     PluginRuntimeNotCommitted { instance: InstanceId },
     #[error("native plugin {instance} {lane} lane is at capacity")]
@@ -93,6 +116,8 @@ pub enum HostError {
         instance: InstanceId,
         phase: &'static str,
     },
+    #[error("host terminated after durable commit because runtime publication failed: {message}")]
+    PostCommitLifecycleFailure { message: String },
     #[error("native plugin {instance} frame has {bytes} bytes, maximum is {maximum}")]
     PluginFrameTooLarge {
         instance: InstanceId,

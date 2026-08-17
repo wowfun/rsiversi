@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
-    OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_plugin::sdk::{Host, Plugin};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT,
+    OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin::{Lane, PostFrameOutcome};
 use serde_json::{Value, json};
 
@@ -108,11 +108,8 @@ impl EchoPlugin {
         self.flush_output(request_id)
     }
 
-    fn echo_data(&mut self, request_id: &str, payload: Value) -> Result<(), EchoError> {
-        validate_byte_array(&payload)?;
-        let encoded_len = serde_json::to_vec(&payload)
-            .map_err(|_| EchoError("encode data payload"))?
-            .len() as u64;
+    fn echo_data(&mut self, request_id: &str, payload: Vec<u8>) -> Result<(), EchoError> {
+        let raw_bytes = payload.len() as u64;
         let stream = self
             .streams
             .get(request_id)
@@ -120,18 +117,13 @@ impl EchoPlugin {
         if stream.input_closed {
             return Err(EchoError("stream input is closed"));
         }
-        if stream.output_credit.saturating_sub(stream.reserved_credit) < encoded_len {
+        if stream.output_credit.saturating_sub(stream.reserved_credit) < raw_bytes {
             return Err(EchoError("output credit exceeded"));
         }
         self.enqueue_output(
             request_id,
-            &Frame::service_event(
-                Some(request_id.to_owned()),
-                "fixture.echo",
-                EVENT_DATA,
-                payload,
-            ),
-            encoded_len,
+            &Frame::service_data_event(request_id, "fixture.echo", payload),
+            raw_bytes,
             false,
         )
     }
@@ -347,11 +339,17 @@ impl Plugin for EchoPlugin {
                 match operation.as_str() {
                     OP_OPEN => self.open(&request_id, &payload),
                     OP_CREDIT => self.grant_output_credit(&request_id, &payload),
-                    OP_DATA => self.echo_data(&request_id, payload),
                     OP_HALF_CLOSE => self.end(&request_id, &payload),
                     OP_CANCEL => self.cancel(&request_id, payload),
                     _ => Err(EchoError("unknown stream operation")),
                 }
+            }
+            FrameBody::ServiceDataRequest {
+                request_id,
+                service,
+                payload,
+            } if lane == Lane::Data && self.committed.is_some() && service == "fixture.echo" => {
+                self.echo_data(&request_id, payload)
             }
             FrameBody::ServiceEvent {
                 service,
@@ -367,19 +365,6 @@ impl Plugin for EchoPlugin {
             _ => Err(EchoError("frame rejected in current lifecycle state")),
         }
     }
-}
-
-fn validate_byte_array(value: &Value) -> Result<(), EchoError> {
-    let bytes = value
-        .as_array()
-        .ok_or(EchoError("data is not a byte array"))?;
-    if bytes
-        .iter()
-        .any(|byte| byte.as_u64().is_none_or(|byte| byte > u8::MAX.into()))
-    {
-        return Err(EchoError("data contains a non-byte value"));
-    }
-    Ok(())
 }
 
 rsi_meta_plugin::export_plugin!(EchoPlugin);

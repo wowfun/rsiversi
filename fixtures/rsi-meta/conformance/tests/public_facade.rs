@@ -7,69 +7,24 @@ use std::time::{Duration, Instant};
 
 use rsi_meta::{
     ApplyRequest, ApplyResult, CompositionHost, CompositionProject, CompositionWorkspace,
-    HostEventRecord, InstanceId, LockResult, OpenOptions, OperationId, RetirementPhase, ServiceKey,
-    ServiceOpenRequest, ServiceStream, StreamEnvelope, StreamKind,
-};
-use rsi_meta_frame_contract::{
-    EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame as PluginFrame, FrameBody as PluginFrameBody,
-    LifecyclePhase, OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT,
-    RUNTIME_TICK_SERVICE, STATE_EVENT_APPLIED, STATE_EVENT_VALUE, STATE_OP_COMPARE_AND_SWAP,
-    STATE_OP_GET,
+    HostEvent, InstanceId, InstanceStatus, LockResult, OpenOptions, OperationId, RetirementPhase,
+    ServiceKey, ServiceOpenRequest, ServiceStream, StreamEnvelope, StreamKind,
 };
 use rsi_meta_loader::{
     ApiVersion, BUILD_TARGET, ContentHash, ExpectedHashes, LoadedPlugin, PluginLoader,
     PluginMailbox, PluginMailboxOptions, PluginPackage,
 };
 use rsi_meta_plugin::{CallOutcome, Lane};
+use rsi_meta_plugin::{
+    EVENT_CREDIT, EVENT_END, Frame as PluginFrame, FrameBody as PluginFrameBody, LifecyclePhase,
+    OP_CREDIT, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+    STATE_EVENT_APPLIED, STATE_EVENT_VALUE, STATE_OP_COMPARE_AND_SWAP, STATE_OP_GET,
+};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
 const STREAM_DEADLINE: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Debug)]
-enum Command {
-    ApplyManifestPath {
-        manifest_path: PathBuf,
-        lock_path: PathBuf,
-    },
-    LockManifest {
-        manifest_path: PathBuf,
-        lock_path: PathBuf,
-    },
-    QueryEvents {
-        after_cursor: u64,
-        limit: u32,
-    },
-}
-
-#[derive(Clone, Debug)]
-struct CommandEnvelope {
-    command_id: String,
-    payload: Command,
-}
-
-impl CommandEnvelope {
-    fn new(command_id: impl Into<String>, payload: Command) -> Self {
-        Self {
-            command_id: command_id.into(),
-            payload,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-enum CommandOutcome {
-    Applied {},
-    LockResolved {},
-    Events { events: Vec<HostEventRecord> },
-    Rejected { code: String, _message: String },
-}
-
-#[derive(Clone, Debug)]
-struct CommandOutcomeEnvelope {
-    payload: CommandOutcome,
-}
 
 fn workspace(database: impl AsRef<Path>, cache: impl AsRef<Path>) -> CompositionWorkspace {
     let database_path = database.as_ref().to_owned();
@@ -80,6 +35,31 @@ fn workspace(database: impl AsRef<Path>, cache: impl AsRef<Path>) -> Composition
         manifest_path: root.join("composition.toml"),
         lock_path: root.join("rsi-meta.lock"),
     }
+}
+
+fn lock_project(manifest_path: PathBuf, lock_path: PathBuf) -> rsi_meta::Result<LockResult> {
+    CompositionProject {
+        manifest_path,
+        lock_path: Some(lock_path),
+    }
+    .lock()
+}
+
+async fn apply_project(
+    host: &CompositionHost,
+    operation_id: impl Into<String>,
+    manifest_path: PathBuf,
+    lock_path: PathBuf,
+) -> rsi_meta::Result<ApplyResult> {
+    host.apply(ApplyRequest {
+        operation_id: OperationId(operation_id.into()),
+        project: CompositionProject {
+            manifest_path,
+            lock_path: Some(lock_path),
+        },
+        expected_revision: None,
+    })
+    .await
 }
 
 trait TestOpenOptionsExt {
@@ -97,74 +77,10 @@ impl TestOpenOptionsExt for OpenOptions {
 }
 
 trait TestHostExt {
-    async fn submit(&self, command: CommandEnvelope) -> rsi_meta::Result<CommandOutcomeEnvelope>;
     async fn shutdown(&self, deadline: Instant) -> rsi_meta::Result<()>;
 }
 
 impl TestHostExt for CompositionHost {
-    async fn submit(&self, command: CommandEnvelope) -> rsi_meta::Result<CommandOutcomeEnvelope> {
-        let operation_id = OperationId(command.command_id);
-        let result = match command.payload {
-            Command::ApplyManifestPath {
-                manifest_path,
-                lock_path,
-            } => self
-                .apply(ApplyRequest {
-                    operation_id,
-                    project: CompositionProject {
-                        manifest_path,
-                        lock_path: Some(lock_path),
-                    },
-                    expected_revision: None,
-                })
-                .await
-                .map(|result| match result {
-                    ApplyResult::Applied { .. } | ApplyResult::Unchanged { .. } => {
-                        CommandOutcome::Applied {}
-                    }
-                    ApplyResult::RestartRequired { .. } => CommandOutcome::Rejected {
-                        code: "restart_required".to_owned(),
-                        _message: "test fixture did not expect a process-fixed candidate"
-                            .to_owned(),
-                    },
-                }),
-            Command::LockManifest {
-                manifest_path,
-                lock_path,
-            } => CompositionProject {
-                manifest_path,
-                lock_path: Some(lock_path),
-            }
-            .lock()
-            .map(|result| match result {
-                LockResult::Created { .. } | LockResult::Unchanged { .. } => {
-                    CommandOutcome::LockResolved {}
-                }
-            }),
-            Command::QueryEvents {
-                after_cursor,
-                limit,
-            } => self
-                .events_after(after_cursor, limit)
-                .await
-                .map(|page| CommandOutcome::Events {
-                    events: page.events,
-                }),
-        };
-        match result {
-            Ok(payload) => Ok(CommandOutcomeEnvelope { payload }),
-            Err(rsi_meta::HostError::OperationRejected { code, message, .. }) => {
-                Ok(CommandOutcomeEnvelope {
-                    payload: CommandOutcome::Rejected {
-                        code,
-                        _message: message,
-                    },
-                })
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     async fn shutdown(&self, deadline: Instant) -> rsi_meta::Result<()> {
         static NEXT_SHUTDOWN: AtomicU64 = AtomicU64::new(1);
         let sequence = NEXT_SHUTDOWN.fetch_add(1, Ordering::Relaxed);
@@ -509,10 +425,8 @@ fn real_echo_cdylib_uses_tick_to_finish_would_blocked_data_and_end() {
         ),
         CallOutcome::Ok
     );
-    let payload = json!([1, 2, 3]);
-    let encoded = serde_json::to_vec(&payload)
-        .expect("encode echo payload")
-        .len() as u64;
+    let payload = vec![1, 2, 3];
+    let encoded = payload.len() as u64;
     assert_eq!(
         dispatch_plugin(
             &mut plugin,
@@ -530,7 +444,7 @@ fn real_echo_cdylib_uses_tick_to_finish_would_blocked_data_and_end() {
         dispatch_plugin(
             &mut plugin,
             Lane::Data,
-            PluginFrame::service_request("echo-blocked", "fixture.echo", OP_DATA, payload.clone(),),
+            PluginFrame::service_data_request("echo-blocked", "fixture.echo", payload.clone()),
         ),
         CallOutcome::Ok,
         "the full one-slot mailbox must surface as retained WouldBlock"
@@ -561,11 +475,7 @@ fn real_echo_cdylib_uses_tick_to_finish_would_blocked_data_and_end() {
     );
     assert!(matches!(
         next_data_body(&mut mailbox),
-        PluginFrameBody::ServiceEvent {
-            event,
-            payload: actual,
-            ..
-        } if event == EVENT_DATA && actual == payload
+        PluginFrameBody::ServiceDataEvent { payload: actual, .. } if actual == payload
     ));
     assert!(mailbox.try_recv_data().is_err());
 
@@ -647,12 +557,7 @@ fn real_cas_cdylib_uses_ticks_to_finish_partial_data_end_without_client_credit()
         dispatch_plugin(
             &mut plugin,
             Lane::Data,
-            PluginFrame::service_request(
-                "counter-1",
-                "fixture.cas-counter",
-                OP_DATA,
-                json!(request),
-            ),
+            PluginFrame::service_data_request("counter-1", "fixture.cas-counter", request),
         ),
         CallOutcome::Ok
     );
@@ -732,7 +637,7 @@ fn real_cas_cdylib_uses_ticks_to_finish_partial_data_end_without_client_credit()
     );
     assert!(matches!(
         next_data_body(&mut mailbox),
-        PluginFrameBody::ServiceEvent { event, .. } if event == EVENT_DATA
+        PluginFrameBody::ServiceDataEvent { .. }
     ));
     assert!(mailbox.try_recv_data().is_err());
     assert_eq!(
@@ -1140,34 +1045,22 @@ async fn open_applied_host(root: &Path) -> (CompositionHost, PathBuf, PathBuf, P
     let host = CompositionHost::open(OpenOptions::new(workspace(&database, &cache)))
         .await
         .expect("open empty host");
-    let locked = host
-        .submit(CommandEnvelope::new(
-            "lock-public-fixtures",
-            Command::LockManifest {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        ))
-        .await
-        .expect("lock manifest");
+    let locked = lock_project(manifest.clone(), lock.clone()).expect("lock manifest");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
-    let applied = host
-        .submit(CommandEnvelope::new(
-            "apply-public-fixtures",
-            Command::ApplyManifestPath {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        ))
-        .await
-        .expect("apply manifest");
+    let applied = apply_project(
+        &host,
+        "apply-public-fixtures",
+        manifest.clone(),
+        lock.clone(),
+    )
+    .await
+    .expect("apply manifest");
     assert!(
-        matches!(applied.payload, CommandOutcome::Applied { .. }),
-        "initial apply failed: {:?}",
-        applied.payload
+        matches!(applied, ApplyResult::Applied { .. }),
+        "initial apply failed: {applied:?}",
     );
     (host, manifest, lock, database, cache)
 }
@@ -1178,19 +1071,6 @@ async fn recv_frame(stream: &mut ServiceStream) -> rsi_meta::StreamEnvelope {
         .expect("stream frame deadline")
         .expect("stream remains open")
         .expect("valid stream frame")
-}
-
-fn decode_bytes(payload: &Value) -> Vec<u8> {
-    payload
-        .as_array()
-        .expect("DATA payload is a JSON byte array")
-        .iter()
-        .map(|byte| {
-            byte.as_u64()
-                .and_then(|byte| u8::try_from(byte).ok())
-                .expect("DATA payload item is a byte")
-        })
-        .collect()
 }
 
 async fn open_counter(host: &CompositionHost, consumer: &str) -> ServiceStream {
@@ -1212,10 +1092,8 @@ async fn open_counter(host: &CompositionHost, consumer: &str) -> ServiceStream {
 async fn recv_increment(stream: &mut ServiceStream) -> Value {
     let data = recv_frame(stream).await;
     assert_eq!(data.kind, StreamKind::Data);
-    let value = serde_json::from_slice(&decode_bytes(
-        data.payload.as_ref().expect("DATA payload present"),
-    ))
-    .expect("counter DATA is JSON");
+    let value = serde_json::from_slice(data.data.as_deref().expect("DATA bytes present"))
+        .expect("counter DATA is JSON");
     assert_eq!(recv_frame(stream).await.kind, StreamKind::End);
     value
 }
@@ -1252,10 +1130,7 @@ async fn assert_tagged_probe_data(stream: &mut ServiceStream, tag: &str, input: 
     let mut expected = tag.as_bytes().to_vec();
     expected.push(0);
     expected.extend_from_slice(input);
-    assert_eq!(
-        decode_bytes(data.payload.as_ref().expect("lifecycle DATA payload")),
-        expected
-    );
+    assert_eq!(data.data.as_deref(), Some(expected.as_slice()));
 }
 
 async fn open_applied_lifecycle_host(
@@ -1272,34 +1147,22 @@ async fn open_applied_lifecycle_host(
     )))
     .await
     .expect("open lifecycle host");
-    let locked = host
-        .submit(CommandEnvelope::new(
-            "lock-lifecycle-installed",
-            Command::LockManifest {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        ))
-        .await
-        .expect("resolve lifecycle lock");
+    let locked = lock_project(manifest.clone(), lock.clone()).expect("resolve lifecycle lock");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
-    let applied = host
-        .submit(CommandEnvelope::new(
-            "apply-lifecycle-installed",
-            Command::ApplyManifestPath {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        ))
-        .await
-        .expect("apply lifecycle composition");
+    let applied = apply_project(
+        &host,
+        "apply-lifecycle-installed",
+        manifest.clone(),
+        lock.clone(),
+    )
+    .await
+    .expect("apply lifecycle composition");
     assert!(
-        matches!(applied.payload, CommandOutcome::Applied { .. }),
-        "initial lifecycle apply failed: {:?}",
-        applied.payload
+        matches!(applied, ApplyResult::Applied { .. }),
+        "initial lifecycle apply failed: {applied:?}",
     );
     (host, manifest, lock)
 }
@@ -1311,34 +1174,19 @@ async fn apply_lifecycle_candidate(
     tag: &str,
     prepare_action: &str,
     stream_fault: &str,
-) -> CommandOutcome {
+) -> ApplyResult {
     let manifest = root.join(format!("candidate-{case}.toml"));
     let lock = root.join(format!("candidate-{case}.lock"));
     write_lifecycle_composition(&manifest, false, "ack", tag, prepare_action, stream_fault);
-    let locked = host
-        .submit(CommandEnvelope::new(
-            format!("lock-lifecycle-{case}"),
-            Command::LockManifest {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        ))
-        .await
-        .expect("resolve lifecycle candidate lock");
+    let locked =
+        lock_project(manifest.clone(), lock.clone()).expect("resolve lifecycle candidate lock");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
-    host.submit(CommandEnvelope::new(
-        format!("apply-lifecycle-{case}"),
-        Command::ApplyManifestPath {
-            manifest_path: manifest,
-            lock_path: lock,
-        },
-    ))
-    .await
-    .expect("apply lifecycle candidate")
-    .payload
+    apply_project(host, format!("apply-lifecycle-{case}"), manifest, lock)
+        .await
+        .expect("apply lifecycle candidate")
 }
 
 fn sqlite_count(database: &Path, sql: &str) -> i64 {
@@ -1367,10 +1215,7 @@ async fn nested_scope_proxy_routes_public_bidi_stream_through_real_cdylibs() {
     stream.send(b"nested-e2e").await.expect("send nested DATA");
     let echoed = recv_frame(&mut stream).await;
     assert_eq!(echoed.kind, StreamKind::Data);
-    assert_eq!(
-        decode_bytes(echoed.payload.as_ref().expect("echo DATA payload")),
-        b"nested-e2e"
-    );
+    assert_eq!(echoed.data.as_deref(), Some(b"nested-e2e".as_slice()));
     stream.half_close().await.expect("half close public stream");
     assert_eq!(recv_frame(&mut stream).await.kind, StreamKind::End);
     host.shutdown(Instant::now() + Duration::from_secs(2))
@@ -1430,31 +1275,21 @@ async fn cas_streams_retry_conflicts_persist_restart_and_isolate_instance_namesp
     let other = CompositionHost::open(OpenOptions::new(workspace(&database, &cache)))
         .await
         .expect("open same SQLite for another composition");
-    let locked = other
-        .submit(CommandEnvelope::new(
-            "lock-other-composition",
-            Command::LockManifest {
-                manifest_path: other_manifest.clone(),
-                lock_path: other_lock.clone(),
-            },
-        ))
-        .await
-        .expect("lock other composition");
+    let locked =
+        lock_project(other_manifest.clone(), other_lock.clone()).expect("lock other composition");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
-    let applied = other
-        .submit(CommandEnvelope::new(
-            "apply-other-composition",
-            Command::ApplyManifestPath {
-                manifest_path: other_manifest,
-                lock_path: other_lock,
-            },
-        ))
-        .await
-        .expect("apply other composition");
-    assert!(matches!(applied.payload, CommandOutcome::Applied { .. }));
+    let applied = apply_project(
+        &other,
+        "apply-other-composition",
+        other_manifest,
+        other_lock,
+    )
+    .await
+    .expect("apply other composition");
+    assert!(matches!(applied, ApplyResult::Applied { .. }));
     let isolated_composition = increment(&other, "counter-client-a", "requests").await;
     assert_eq!(
         isolated_composition["value"], 1,
@@ -1466,7 +1301,7 @@ async fn cas_streams_retry_conflicts_persist_restart_and_isolate_instance_namesp
         .expect("shutdown other composition");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One end-to-end drift transaction keeps causality visible.
 async fn plugin_origin_drift_rebuilds_lock_and_applies_without_composition_edit() {
     let temp = tempdir().expect("test root");
@@ -1479,19 +1314,10 @@ async fn plugin_origin_drift_rebuilds_lock_and_applies_without_composition_edit(
     let bootstrap = CompositionHost::open(OpenOptions::new(workspace(&database, &cache)))
         .await
         .expect("open host");
-    let locked = bootstrap
-        .submit(CommandEnvelope::new(
-            "lock-plugin-origin-drift",
-            Command::LockManifest {
-                manifest_path: manifest.clone(),
-                lock_path: lock.clone(),
-            },
-        ))
-        .await
-        .expect("lock initial desired state");
+    let locked = lock_project(manifest.clone(), lock.clone()).expect("lock initial desired state");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
     bootstrap
         .shutdown(Instant::now() + Duration::from_secs(2))
@@ -1506,7 +1332,7 @@ async fn plugin_origin_drift_rebuilds_lock_and_applies_without_composition_edit(
     let installed_manifest = fs::read(&manifest).expect("installed composition bytes");
     let initial_lock = fs::read(&lock).expect("installed lock bytes");
 
-    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
@@ -1515,7 +1341,7 @@ async fn plugin_origin_drift_rebuilds_lock_and_applies_without_composition_edit(
     fs::write(&provider_manifest, package_bytes).expect("replace provider descriptor");
 
     for _ in 0..12 {
-        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
@@ -1562,7 +1388,7 @@ async fn plugin_origin_drift_rebuilds_lock_and_applies_without_composition_edit(
     .expect("replace only provider schema bytes");
 
     for _ in 0..12 {
-        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
@@ -1626,33 +1452,24 @@ async fn shadow_prepare_failure_preserves_installed_pair_graph_and_old_routing()
         "normal_ack",
         "none",
     );
-    let locked = host
-        .submit(CommandEnvelope::new(
-            "lock-lifecycle-failed-candidate",
-            Command::LockManifest {
-                manifest_path: candidate_manifest.clone(),
-                lock_path: candidate_lock.clone(),
-            },
-        ))
-        .await
+    let locked = lock_project(candidate_manifest.clone(), candidate_lock.clone())
         .expect("resolve failed candidate lock");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
-    let rejected = host
-        .submit(CommandEnvelope::new(
-            "apply-lifecycle-failed-candidate",
-            Command::ApplyManifestPath {
-                manifest_path: candidate_manifest,
-                lock_path: candidate_lock,
-            },
-        ))
-        .await
-        .expect("failed prepare has a durable outcome");
+    let rejected = apply_project(
+        &host,
+        "apply-lifecycle-failed-candidate",
+        candidate_manifest,
+        candidate_lock,
+    )
+    .await
+    .expect_err("failed prepare has a durable rejection");
     assert!(matches!(
-        rejected.payload,
-        CommandOutcome::Rejected { ref code, .. } if code == "plugin_prepare_failed"
+        rejected,
+        rsi_meta::HostError::OperationRejected { ref code, .. }
+            if code == "plugin_prepare_failed"
     ));
     assert_eq!(
         host.snapshot().graph,
@@ -1699,34 +1516,23 @@ async fn hold_retirement_does_not_block_cutover_and_shutdown_cancels_the_retire_
         "normal_ack",
         "none",
     );
-    let locked = host
-        .submit(CommandEnvelope::new(
-            "lock-lifecycle-new-candidate",
-            Command::LockManifest {
-                manifest_path: candidate_manifest.clone(),
-                lock_path: candidate_lock.clone(),
-            },
-        ))
-        .await
+    let locked = lock_project(candidate_manifest.clone(), candidate_lock.clone())
         .expect("resolve new lifecycle candidate");
     assert!(matches!(
-        locked.payload,
-        CommandOutcome::LockResolved { .. }
+        locked,
+        LockResult::Created { .. } | LockResult::Unchanged { .. }
     ));
-    let applied = host
-        .submit(CommandEnvelope::new(
-            "apply-lifecycle-new-candidate",
-            Command::ApplyManifestPath {
-                manifest_path: candidate_manifest,
-                lock_path: candidate_lock,
-            },
-        ))
-        .await
-        .expect("apply lifecycle candidate");
+    let applied = apply_project(
+        &host,
+        "apply-lifecycle-new-candidate",
+        candidate_manifest,
+        candidate_lock,
+    )
+    .await
+    .expect("apply lifecycle candidate");
     assert!(
-        matches!(applied.payload, CommandOutcome::Applied { .. }),
-        "retirement is not part of commit success: {:?}",
-        applied.payload
+        matches!(applied, ApplyResult::Applied { .. }),
+        "retirement is not part of commit success: {applied:?}",
     );
 
     let retirement = host
@@ -1793,7 +1599,7 @@ async fn rejected_retirement_is_stopped_and_reaped_instead_of_wedging_forever() 
         "none",
     )
     .await;
-    assert!(matches!(outcome, CommandOutcome::Applied { .. }));
+    assert!(matches!(outcome, ApplyResult::Applied { .. }));
 
     for _ in 0..128 {
         if host.snapshot().graph.retiring_instances.is_empty() {
@@ -1823,7 +1629,7 @@ async fn prepare_state_write_is_read_only_and_does_not_block_apply() {
     )
     .await;
     assert!(
-        matches!(outcome, CommandOutcome::Applied { .. }),
+        matches!(outcome, ApplyResult::Applied { .. }),
         "the read-only conflict is the expected prepare response: {outcome:?}"
     );
     assert_eq!(
@@ -1865,7 +1671,7 @@ async fn prepare_durable_and_outbound_side_effects_are_rejected_without_extra_co
         let outcome =
             apply_lifecycle_candidate(&host, temp.path(), case, case, action, "none").await;
         assert!(
-            matches!(outcome, CommandOutcome::Applied { .. }),
+            matches!(outcome, ApplyResult::Applied { .. }),
             "the host must reject the prepare side effect without losing the valid acknowledgement: {outcome:?}"
         );
         let after = host.snapshot();
@@ -1876,21 +1682,15 @@ async fn prepare_durable_and_outbound_side_effects_are_rejected_without_extra_co
             "only the explicit candidate apply may append a durable event"
         );
         let events = host
-            .submit(CommandEnvelope::new(
-                format!("query-events-after-{case}"),
-                Command::QueryEvents {
-                    after_cursor: before.cursor,
-                    limit: 10,
-                },
-            ))
+            .events_after(before.cursor, 10)
             .await
             .expect("query exact side-effect event window");
-        let CommandOutcome::Events { events } = events.payload else {
-            panic!("expected event query outcome")
-        };
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.events.len(), 1);
         assert_eq!(
-            events[0].operation_id.as_ref().map(|id| id.0.as_str()),
+            events.events[0]
+                .operation_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
             Some(format!("apply-lifecycle-{case}").as_str())
         );
         assert_eq!(after.graph.instances.len(), 2);
@@ -1918,7 +1718,7 @@ async fn prepare_durable_and_outbound_side_effects_are_rejected_without_extra_co
 }
 
 #[tokio::test]
-async fn malformed_plugin_stream_frames_end_exactly_one_public_stream_without_leaking_data() {
+async fn malformed_plugin_stream_frames_fail_at_the_narrowest_safe_boundary() {
     let temp = tempdir().expect("test root");
     let (host, _, _) = open_applied_lifecycle_host(temp.path(), "ack").await;
 
@@ -1937,8 +1737,13 @@ async fn malformed_plugin_stream_frames_end_exactly_one_public_stream_without_le
             fault,
         )
         .await;
-        assert!(matches!(outcome, CommandOutcome::Applied { .. }));
+        assert!(matches!(outcome, ApplyResult::Applied { .. }));
         let mut stream = open_probe(&host).await;
+        let before_fault_cursor = host.snapshot().cursor;
+        let mut fault_events = host
+            .subscribe(before_fault_cursor)
+            .await
+            .expect("subscribe before runtime fault");
         stream
             .send(b"must-not-escape")
             .await
@@ -1959,6 +1764,57 @@ async fn malformed_plugin_stream_frames_end_exactly_one_public_stream_without_le
                 .is_none(),
             "the stream has exactly one terminal item"
         );
+        if matches!(fault, "non_byte_data" | "malformed_json") {
+            let fault_event = tokio::time::timeout(STREAM_DEADLINE, fault_events.recv())
+                .await
+                .expect("runtime fault event deadline")
+                .expect("runtime fault event stream remains open")
+                .expect("runtime fault event is valid");
+            assert!(matches!(
+                fault_event.event,
+                HostEvent::RuntimeFaulted { ref instance_id, .. }
+                    if instance_id == &InstanceId::new("provider")
+            ));
+            let faulted = host.snapshot();
+            assert!(faulted.graph.instances.values().any(|instance| {
+                instance.id == InstanceId::new("provider")
+                    && matches!(instance.status, InstanceStatus::Faulted { .. })
+            }));
+            let events = host
+                .events_after(before_fault_cursor, 16)
+                .await
+                .expect("runtime fault event is durable");
+            assert_eq!(events.events, vec![fault_event]);
+            let repaired = host
+                .apply(ApplyRequest {
+                    operation_id: OperationId(format!("repair-stream-{fault}")),
+                    project: CompositionProject {
+                        manifest_path: temp.path().join(format!("candidate-stream-{fault}.toml")),
+                        lock_path: Some(temp.path().join(format!("candidate-stream-{fault}.lock"))),
+                    },
+                    expected_revision: None,
+                })
+                .await
+                .expect("same-hash apply repairs a faulted generation");
+            assert!(matches!(repaired, ApplyResult::Applied { .. }));
+            assert!(host.snapshot().graph.instances.values().any(|instance| {
+                instance.id == InstanceId::new("provider")
+                    && matches!(instance.status, InstanceStatus::Active)
+            }));
+        } else {
+            assert!(host.snapshot().graph.instances.values().any(|instance| {
+                instance.id == InstanceId::new("provider")
+                    && matches!(instance.status, InstanceStatus::Active)
+            }));
+            assert!(
+                host.events_after(before_fault_cursor, 16)
+                    .await
+                    .expect("stream-local protocol error event query")
+                    .events
+                    .is_empty(),
+                "a recoverable per-stream violation must not fault the whole runtime"
+            );
+        }
     }
     host.shutdown(Instant::now() + Duration::from_secs(2))
         .await

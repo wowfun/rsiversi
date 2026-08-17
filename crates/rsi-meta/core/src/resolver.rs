@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use crate::model::{
     BindingSnapshot, Diagnostic, Generation, GraphRevision, GraphSnapshot, InactiveReason,
-    InstanceId, InstanceSnapshot, InstanceSpec, InstanceStatus, PackageSource, RouteKey,
-    RouteTarget, RoutingSnapshot, ScopeId, ServiceKey, ServiceRequirement, ValidationReport,
+    InstanceId, InstanceSnapshot, InstanceSpec, InstanceStatus, MAX_COMPOSITION_REQUIREMENTS,
+    PackageSource, RouteKey, RouteTarget, RoutingSnapshot, ScopeId, ServiceKey, ServiceRequirement,
+    ValidationReport,
 };
 use crate::{HostError, Result};
 
@@ -87,10 +88,42 @@ pub(crate) fn resolve(
     reusable_generations: Option<&BTreeMap<InstanceId, Arc<Generation>>>,
     next_generation: &mut u64,
 ) -> std::result::Result<RoutingSnapshot, ValidationReport> {
+    let requirement_count = instances.iter().fold(0_usize, |total, instance| {
+        total.saturating_add(instance.requires.len())
+    });
+    if requirement_count > MAX_COMPOSITION_REQUIREMENTS {
+        return Err(ValidationReport {
+            diagnostics: vec![Diagnostic::error(
+                "requirement_limit",
+                format!(
+                    "composition contains {requirement_count} service requirements; maximum is {MAX_COMPOSITION_REQUIREMENTS}"
+                ),
+                Some("instances".to_owned()),
+            )],
+        });
+    }
     let instances_by_id: BTreeMap<_, _> = instances
         .iter()
         .map(|instance| (instance.mount.id.clone(), instance))
         .collect();
+    let mut providers = BTreeMap::<ScopeId, BTreeMap<ServiceKey, Vec<InstanceId>>>::new();
+    let mut consumers = BTreeMap::<ServiceKey, BTreeSet<InstanceId>>::new();
+    for instance in instances {
+        for service in &instance.provides {
+            providers
+                .entry(instance.mount.scope.clone())
+                .or_default()
+                .entry(service.clone())
+                .or_default()
+                .push(instance.mount.id.clone());
+        }
+        for requirement in &instance.requires {
+            consumers
+                .entry(requirement.service.clone())
+                .or_default()
+                .insert(instance.mount.id.clone());
+        }
+    }
     let explicit: BTreeMap<_, _> = instances
         .iter()
         .flat_map(|instance| {
@@ -118,69 +151,76 @@ pub(crate) fn resolve(
         inactive.insert(instance.mount.id.clone(), vec![InactiveReason::Disabled]);
     }
 
-    // Missing required services and explicit bindings to inactive providers are
-    // monotonic: removing one instance may make more consumers inactive.
-    loop {
-        let mut rejected = Vec::new();
-        for instance_id in &active {
-            let instance = instances_by_id
-                .get(instance_id)
-                .expect("validated instance id is present");
-            let mut reasons = Vec::new();
-            for requirement in &instance.requires {
-                match resolve_provider(
-                    instance_id,
-                    &instance.mount.scope,
-                    &requirement.service,
-                    &instances_by_id,
-                    &active,
-                    &explicit,
-                    scope_parents,
-                ) {
-                    ProviderResolution::Bound { .. }
-                    | ProviderResolution::HostOwned
-                    | ProviderResolution::Ambiguous(_) => {}
-                    ProviderResolution::Missing if requirement.optional => {}
-                    ProviderResolution::Missing => reasons.push(InactiveReason::MissingService {
+    // Removing a provider can only affect consumers of its services. A work
+    // queue avoids rescanning unrelated instances to reach the monotonic fixpoint.
+    let mut queued = active.clone();
+    let mut work: VecDeque<_> = active.iter().cloned().collect();
+    while let Some(instance_id) = work.pop_front() {
+        queued.remove(&instance_id);
+        if !active.contains(&instance_id) {
+            continue;
+        }
+        let instance = instances_by_id
+            .get(&instance_id)
+            .expect("validated instance id is present");
+        let mut reasons = Vec::new();
+        for requirement in &instance.requires {
+            match resolve_provider(
+                &instance_id,
+                &instance.mount.scope,
+                &requirement.service,
+                &providers,
+                &active,
+                &explicit,
+                scope_parents,
+            ) {
+                ProviderResolution::Bound { .. }
+                | ProviderResolution::HostOwned
+                | ProviderResolution::Ambiguous(_) => {}
+                ProviderResolution::Missing if requirement.optional => {}
+                ProviderResolution::Missing => reasons.push(InactiveReason::MissingService {
+                    service: requirement.service.clone(),
+                }),
+                ProviderResolution::ExplicitInactive(provider) => {
+                    reasons.push(InactiveReason::ExplicitProviderInactive {
                         service: requirement.service.clone(),
-                    }),
-                    ProviderResolution::ExplicitInactive(provider) => {
-                        reasons.push(InactiveReason::ExplicitProviderInactive {
-                            service: requirement.service.clone(),
-                            provider,
-                        });
-                    }
+                        provider,
+                    });
                 }
             }
-            if !reasons.is_empty() {
-                rejected.push((instance_id.clone(), reasons));
+        }
+        if reasons.is_empty() {
+            continue;
+        }
+        active.remove(&instance_id);
+        inactive.entry(instance_id.clone()).or_insert(reasons);
+        for service in &instance.provides {
+            for consumer in consumers.get(service).into_iter().flatten() {
+                if active.contains(consumer) && queued.insert(consumer.clone()) {
+                    work.push_back(consumer.clone());
+                }
             }
-        }
-        if rejected.is_empty() {
-            break;
-        }
-        for (instance_id, reasons) in rejected {
-            active.remove(&instance_id);
-            inactive.entry(instance_id).or_insert(reasons);
         }
     }
 
     // Ambiguity is never interpreted as absence, including optional injects.
     // It rejects the whole graph before any routing snapshot can be published.
+    let mut resolutions = BTreeMap::new();
     for instance_id in &active {
         let instance = instances_by_id
             .get(instance_id)
             .expect("validated instance id is present");
         for requirement in &instance.requires {
-            if let ProviderResolution::Ambiguous(candidates) = resolve_provider(
+            let resolution = resolve_provider(
                 instance_id,
                 &instance.mount.scope,
                 &requirement.service,
-                &instances_by_id,
+                &providers,
                 &active,
                 &explicit,
                 scope_parents,
-            ) {
+            );
+            if let ProviderResolution::Ambiguous(candidates) = &resolution {
                 diagnostics.push(Diagnostic::error(
                     "ambiguous_service",
                     format!(
@@ -196,6 +236,10 @@ pub(crate) fn resolve(
                     Some(format!("instances[{instance_id}].injects")),
                 ));
             }
+            resolutions.insert(
+                (instance_id.clone(), requirement.service.clone()),
+                resolution,
+            );
         }
     }
     if !diagnostics.is_empty() {
@@ -221,18 +265,12 @@ pub(crate) fn resolve(
             .get(instance_id)
             .expect("validated instance id is present");
         for requirement in &instance.requires {
-            if let ProviderResolution::Bound { provider, explicit } = resolve_provider(
-                instance_id,
-                &instance.mount.scope,
-                &requirement.service,
-                &instances_by_id,
-                &active,
-                &explicit,
-                scope_parents,
-            ) {
+            if let Some(ProviderResolution::Bound { provider, explicit }) =
+                resolutions.get(&(instance_id.clone(), requirement.service.clone()))
+            {
                 let generation = Arc::clone(
                     generations
-                        .get(&provider)
+                        .get(provider)
                         .expect("active provider has a generation"),
                 );
                 routes.insert(
@@ -241,8 +279,8 @@ pub(crate) fn resolve(
                         service: requirement.service.clone(),
                     },
                     RouteTarget {
-                        provider,
-                        explicit,
+                        provider: provider.clone(),
+                        explicit: *explicit,
                         generation,
                     },
                 );
@@ -401,7 +439,7 @@ fn resolve_provider(
     consumer: &InstanceId,
     consumer_scope: &ScopeId,
     service: &ServiceKey,
-    instances: &BTreeMap<InstanceId, &ResolvedInstanceSpec>,
+    providers: &BTreeMap<ScopeId, BTreeMap<ServiceKey, Vec<InstanceId>>>,
     active: &BTreeSet<InstanceId>,
     explicit: &BTreeMap<(InstanceId, ServiceKey), InstanceId>,
     scope_parents: &BTreeMap<ScopeId, Option<ScopeId>>,
@@ -422,14 +460,13 @@ fn resolve_provider(
 
     let mut scope = Some(consumer_scope);
     while let Some(current_scope) = scope {
-        let candidates: Vec<_> = instances
-            .values()
-            .filter(|instance| {
-                active.contains(&instance.mount.id)
-                    && &instance.mount.scope == current_scope
-                    && instance.provides.contains(service)
-            })
-            .map(|instance| instance.mount.id.clone())
+        let candidates: Vec<_> = providers
+            .get(current_scope)
+            .and_then(|services| services.get(service))
+            .into_iter()
+            .flatten()
+            .filter(|instance| active.contains(*instance))
+            .cloned()
             .collect();
         match candidates.as_slice() {
             [] => {}
@@ -456,6 +493,7 @@ fn is_host_service(service: &ServiceKey) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::model::PackageId;
@@ -705,6 +743,50 @@ mod tests {
                 snapshot.graph().instances[&InstanceId::new(id)].status,
                 InstanceStatus::Inactive { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn cascading_inactivity_stays_bounded_at_supported_graph_scales() {
+        for size in [100, 1_000, crate::model::MAX_COMPOSITION_INSTANCES] {
+            let mut instances = Vec::with_capacity(size);
+            for index in 0..size {
+                let mut current = instance(&format!("instance-{index}"), "root");
+                current
+                    .provides
+                    .push(ServiceKey::new(format!("service-{index}")));
+                current.requires.push(ServiceRequirement {
+                    service: if index == 0 {
+                        ServiceKey::new("missing-root")
+                    } else {
+                        ServiceKey::new(format!("service-{}", index - 1))
+                    },
+                    optional: false,
+                });
+                instances.push(current);
+            }
+            let started = Instant::now();
+            let mut next = 1;
+            let snapshot = resolve(
+                "scale",
+                &instances,
+                &scopes(),
+                GraphRevision(1),
+                None,
+                &mut next,
+            )
+            .expect("bounded cascading graph resolves");
+            assert!(
+                snapshot
+                    .graph()
+                    .instances
+                    .values()
+                    .all(|instance| matches!(instance.status, InstanceStatus::Inactive { .. }))
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{size}-instance cascading graph exceeded the debug-build budget"
+            );
         }
     }
 

@@ -6,14 +6,16 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use rsi_meta::{
     CompositionChangeSource, GraphSnapshot, InstanceId, InstanceStatus, ServiceKey,
-    ServiceOpenRequest, StreamEnvelope, StreamKind,
+    ServiceOpenRequest, StreamEnvelope, StreamId, StreamKind,
 };
 use rsi_meta_cli::protocol::{
     Command, CommandEnvelope, CommandOutcome, CommandOutcomeEnvelope, Event, EventEnvelope,
 };
+use rsi_meta_cli::{decode_stream_data, encode_stream_data};
 use rsi_meta_loader::{ApiVersion, BUILD_TARGET};
 use serde::Deserialize;
 use serde_json::json;
@@ -25,14 +27,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Request, header};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use tokio_util::codec::{Framed, LinesCodec};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const IO_DEADLINE: Duration = Duration::from_secs(20);
 const MAX_WIRE_BYTES: usize = 1024 * 1024;
 const FAILPOINT_ENV: &str = "RSI_META_TEST_ACK_GATE";
 const CRASH_COMMAND_ID: &str = "release-demo-commit-before-ack";
 
-type UnixControl = Framed<UnixStream, LinesCodec>;
+type UnixControl = Framed<UnixStream, LengthDelimitedCodec>;
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Debug)]
@@ -383,7 +385,9 @@ async fn open_unix(socket: &Path) -> Result<UnixControl> {
         .context("Unix client connection timed out")??;
     Ok(Framed::new(
         stream,
-        LinesCodec::new_with_max_length(MAX_WIRE_BYTES),
+        LengthDelimitedCodec::builder()
+            .max_frame_length(MAX_WIRE_BYTES)
+            .new_codec(),
     ))
 }
 
@@ -392,14 +396,14 @@ async fn send_command(
     command: &CommandEnvelope,
 ) -> Result<CommandOutcomeEnvelope> {
     connection
-        .send(serde_json::to_string(command)?)
+        .send(Bytes::from(serde_json::to_vec(command)?))
         .await
         .context("send control command")?;
     let line = timeout(IO_DEADLINE, connection.next())
         .await
         .context("control outcome timed out")?
         .context("daemon closed before outcome")??;
-    serde_json::from_str(&line).context("decode control outcome")
+    serde_json::from_slice(&line).context("decode control outcome")
 }
 
 #[derive(Debug, Deserialize)]
@@ -459,13 +463,42 @@ async fn next_event(socket: &mut ClientWebSocket) -> Result<EventEnvelope> {
 
 async fn next_stream(socket: &mut ClientWebSocket, stream_id: &str) -> Result<StreamEnvelope> {
     loop {
-        let value = next_text(socket).await?;
-        if value.get("protocol").and_then(serde_json::Value::as_str)
-            == Some(rsi_meta::STREAM_PROTOCOL)
-            && value.get("stream_id").and_then(serde_json::Value::as_str) == Some(stream_id)
-        {
-            return serde_json::from_value(value).context("decode service stream frame");
+        let message = timeout(IO_DEADLINE, socket.next())
+            .await
+            .context("WebSocket stream receive timed out")?
+            .context("WebSocket closed unexpectedly")??;
+        let frame = match message {
+            Message::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(text.as_str())?;
+                if value.get("protocol").and_then(serde_json::Value::as_str)
+                    != Some(rsi_meta::STREAM_PROTOCOL)
+                {
+                    continue;
+                }
+                serde_json::from_value(value).context("decode service stream frame")?
+            }
+            Message::Binary(bytes) => decode_stream_data(&bytes)?,
+            Message::Ping(bytes) => {
+                socket.send(Message::Pong(bytes)).await?;
+                continue;
+            }
+            Message::Close(frame) => bail!("WebSocket closed unexpectedly: {frame:?}"),
+            Message::Pong(_) | Message::Frame(_) => continue,
+        };
+        if frame.stream_id.as_str() == stream_id {
+            return Ok(frame);
         }
+    }
+}
+
+async fn send_stream(socket: &mut ClientWebSocket, frame: &StreamEnvelope) -> Result<()> {
+    if frame.kind == StreamKind::Data {
+        socket
+            .send(Message::Binary(encode_stream_data(frame)?.into()))
+            .await
+            .context("send WebSocket DATA")
+    } else {
+        send_ws(socket, frame).await
     }
 }
 
@@ -517,7 +550,7 @@ async fn apply(
 }
 
 fn open_frame(stream_id: &str) -> Result<StreamEnvelope> {
-    let mut frame = StreamEnvelope::new(stream_id, StreamKind::Open);
+    let mut frame = StreamEnvelope::new(StreamId::new(stream_id)?, StreamKind::Open);
     frame.payload = Some(serde_json::to_value(ServiceOpenRequest {
         consumer: InstanceId::new("consumer"),
         service: ServiceKey::new("fixture.lifecycle-probe"),
@@ -526,7 +559,7 @@ fn open_frame(stream_id: &str) -> Result<StreamEnvelope> {
 }
 
 async fn open_stream(socket: &mut ClientWebSocket, stream_id: &str) -> Result<()> {
-    send_ws(socket, &open_frame(stream_id)?).await?;
+    send_stream(socket, &open_frame(stream_id)?).await?;
     let opened = next_stream(socket, stream_id).await?;
     ensure!(opened.kind == StreamKind::Open);
     let credit = next_stream(socket, stream_id).await?;
@@ -545,25 +578,26 @@ async fn exchange(
     let mut expected = tag.as_bytes().to_vec();
     expected.push(0);
     expected.extend_from_slice(input);
-    let encoded_credit = u64::try_from(serde_json::to_vec(&json!(expected))?.len())?;
-    let mut credit = StreamEnvelope::new(stream_id, StreamKind::Credit);
+    let encoded_credit = u64::try_from(expected.len())?;
+    let id = StreamId::new(stream_id)?;
+    let mut credit = StreamEnvelope::new(id.clone(), StreamKind::Credit);
     credit.credit_bytes = Some(encoded_credit);
-    send_ws(socket, &credit).await?;
+    send_stream(socket, &credit).await?;
 
-    let mut data = StreamEnvelope::new(stream_id, StreamKind::Data);
+    let mut data = StreamEnvelope::new(id, StreamKind::Data);
     data.sequence = Some(sequence);
-    data.payload = Some(json!(input));
-    send_ws(socket, &data).await?;
+    data.data = Some(input.to_vec());
+    send_stream(socket, &data).await?;
     let echoed = next_stream(socket, stream_id).await?;
     ensure!(echoed.kind == StreamKind::Data);
-    ensure!(echoed.payload == Some(json!(expected)));
+    ensure!(echoed.data == Some(expected));
     Ok(())
 }
 
 async fn end_stream(socket: &mut ClientWebSocket, stream_id: &str) -> Result<()> {
-    send_ws(
+    send_stream(
         socket,
-        &StreamEnvelope::new(stream_id, StreamKind::HalfClose),
+        &StreamEnvelope::new(StreamId::new(stream_id)?, StreamKind::HalfClose),
     )
     .await?;
     ensure!(next_stream(socket, stream_id).await?.kind == StreamKind::End);
@@ -663,7 +697,8 @@ async fn run_release_gate(binary: &Path, failpoint_binary: &Path, artifact: &Pat
             lock_path: files.crash_lock.clone(),
         },
     );
-    unix.send(serde_json::to_string(&crash_command)?).await?;
+    unix.send(Bytes::from(serde_json::to_vec(&crash_command)?))
+        .await?;
     tokio::select! {
         biased;
         accepted = timeout(IO_DEADLINE, gate.accept()) => {
@@ -679,7 +714,7 @@ async fn run_release_gate(binary: &Path, failpoint_binary: &Path, artifact: &Pat
         }
         outcome = unix.next() => {
             let detail = match outcome {
-                Some(Ok(line)) => format!("daemon emitted response bytes: {line}"),
+                Some(Ok(frame)) => format!("daemon emitted response bytes: {frame:?}"),
                 Some(Err(error)) => format!("transport failed before failpoint gate: {error}"),
                 None => "daemon closed without notifying the failpoint gate".to_owned(),
             };

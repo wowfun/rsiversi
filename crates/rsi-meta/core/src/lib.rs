@@ -38,7 +38,9 @@ pub use model::{
     RetirementPhase, RetiringInstanceSnapshot, ScopeId, ScopeSpec, ServiceKey, ServiceRequirement,
     ValidationReport,
 };
-pub use protocol::{STREAM_PROTOCOL, STREAM_VERSION, StreamEnvelope, StreamKind};
+pub use protocol::{
+    MAX_WIRE_ID_BYTES, STREAM_PROTOCOL, STREAM_VERSION, StreamEnvelope, StreamId, StreamKind,
+};
 pub use rsi_meta_loader::ContentHash;
 
 /// Link marker used only by explicit process-crash conformance builds.

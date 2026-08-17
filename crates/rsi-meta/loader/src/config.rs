@@ -6,7 +6,6 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use jsonschema::{Retrieve, Uri};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
@@ -18,6 +17,10 @@ use super::{
 const DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAX_SECRET_FILE_BYTES: usize = 1024 * 1024;
 const MAX_KEYRING_IDENTIFIER_BYTES: usize = 255;
+
+mod schema;
+pub use schema::PreparedConfigSchema;
+use schema::{compile_validator, validate_compiled};
 
 /// A validated plugin configuration whose secrets exist only in memory.
 pub struct PreparedConfig {
@@ -129,20 +132,29 @@ pub fn prepare_config_with_schema(
     schema_bytes: Option<&[u8]>,
     instance_config: Value,
 ) -> Result<PreparedConfig, ConfigPrepareError> {
+    let schema = compile_config_schema(package, schema_bytes)?;
+    prepare_config_with_compiled_schema(&schema, instance_config)
+}
+
+/// Parses and compiles the package schema once. External retrieval remains
+/// disabled in both validators.
+///
+/// # Errors
+///
+/// Returns a schema contract or compilation error.
+#[doc(hidden)]
+pub fn compile_config_schema(
+    package: &PluginPackage,
+    schema_bytes: Option<&[u8]>,
+) -> Result<PreparedConfigSchema, ConfigPrepareError> {
     let Some(schema_relative) = package.manifest().config_schema.as_deref() else {
-        if schema_bytes.is_some()
-            || !instance_config
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty)
-        {
+        if schema_bytes.is_some() {
             return Err(ConfigPrepareError::MissingSchema);
         }
-        let audit_bytes = serde_json::to_vec(&canonicalize(&instance_config))
-            .map_err(|_| ConfigPrepareError::CanonicalEncoding)?;
-        return Ok(PreparedConfig {
-            resolved: instance_config.clone(),
-            redacted: instance_config,
-            audit_hash: ContentHash::digest(audit_bytes),
+        return Ok(PreparedConfigSchema {
+            schema: None,
+            unresolved: None,
+            resolved: None,
         });
     };
     validate_relative_path("config_schema", schema_relative)
@@ -157,13 +169,49 @@ pub fn prepare_config_with_schema(
     }
 
     let reference_schema = reference_validation_schema(&schema);
-    validate(&reference_schema, &instance_config)?;
+    let unresolved = compile_validator(&reference_schema)?;
+    let resolved = compile_validator(&schema)?;
+    Ok(PreparedConfigSchema {
+        schema: Some(schema),
+        unresolved: Some(unresolved),
+        resolved: Some(resolved),
+    })
+}
+
+/// Validates and resolves one instance with a package-level compiled schema.
+///
+/// # Errors
+///
+/// Returns an invalid configuration, secret-source, or encoding error.
+#[doc(hidden)]
+pub fn prepare_config_with_compiled_schema(
+    schema: &PreparedConfigSchema,
+    instance_config: Value,
+) -> Result<PreparedConfig, ConfigPrepareError> {
+    let (Some(unresolved), Some(resolved_validator)) = (&schema.unresolved, &schema.resolved)
+    else {
+        if !instance_config
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            return Err(ConfigPrepareError::MissingSchema);
+        }
+        let audit_bytes = serde_json::to_vec(&canonicalize(&instance_config))
+            .map_err(|_| ConfigPrepareError::CanonicalEncoding)?;
+        return Ok(PreparedConfig {
+            resolved: instance_config.clone(),
+            redacted: instance_config,
+            audit_hash: ContentHash::digest(audit_bytes),
+        });
+    };
+
+    validate_compiled(unresolved, &instance_config)?;
 
     let audit_bytes = serde_json::to_vec(&canonicalize(&instance_config))
         .map_err(|_| ConfigPrepareError::CanonicalEncoding)?;
     let audit_hash = ContentHash::digest(audit_bytes);
     let (resolved, redacted) = resolve_value(instance_config, "")?;
-    validate(&schema, &resolved)?;
+    validate_compiled(resolved_validator, &resolved)?;
 
     Ok(PreparedConfig {
         resolved,
@@ -198,31 +246,6 @@ fn read_package_schema(
         LoaderError::UnsafeInputFile { .. } => ConfigPrepareError::UnsafeSchemaPath,
         _ => ConfigPrepareError::SchemaRead,
     })
-}
-
-fn validate(schema: &Value, instance: &Value) -> Result<(), ConfigPrepareError> {
-    let validator = jsonschema::draft202012::options()
-        .with_retriever(RejectExternalSchemas)
-        .should_validate_formats(true)
-        .build(schema)
-        .map_err(|_| ConfigPrepareError::InvalidSchema)?;
-    validator
-        .validate(instance)
-        .map_err(|error| ConfigPrepareError::InvalidConfig {
-            instance_path: error.instance_path.to_string(),
-        })
-}
-
-#[derive(Debug)]
-struct RejectExternalSchemas;
-
-impl Retrieve for RejectExternalSchemas {
-    fn retrieve(
-        &self,
-        _uri: &Uri<String>,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        Err("external JSON Schema references are disabled".into())
-    }
 }
 
 fn reference_validation_schema(schema: &Value) -> Value {

@@ -179,6 +179,10 @@ impl HostApi for CompositionHostAdapter {
         self.host.snapshot().token_generation
     }
 
+    fn event_cursor(&self) -> u64 {
+        self.host.snapshot().cursor
+    }
+
     fn open_service(&self, request: ServiceOpenRequest) -> Result<BoxHostServiceStream> {
         self.host
             .open_service(request)
@@ -222,6 +226,8 @@ impl HostApi for CompositionHostAdapter {
 mod tests {
     use std::fs;
 
+    use rusqlite::Connection;
+
     use super::*;
 
     #[tokio::test]
@@ -247,5 +253,36 @@ mod tests {
             project.lock().unwrap(),
             LockResult::Unchanged { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn unknown_command_is_rejected_without_a_durable_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(directory.path());
+        let host = CompositionHost::open(OpenOptions::new(workspace.clone()))
+            .await
+            .expect("open empty host");
+        let adapter = CompositionHostAdapter { host };
+        let response = adapter
+            .submit(CommandEnvelope::new(
+                "future-command",
+                Command::Unknown {
+                    command_type: "future_command".to_owned(),
+                    payload: serde_json::Map::new(),
+                },
+            ))
+            .await
+            .expect("reject unknown command");
+        assert!(matches!(
+            response.payload,
+            CommandOutcome::Rejected { ref code, .. } if code == "unsupported_command"
+        ));
+
+        let operation_count: i64 = Connection::open(&workspace.database_path)
+            .expect("open state database")
+            .query_row("SELECT COUNT(*) FROM command_outcome", [], |row| row.get(0))
+            .expect("count durable operations");
+        assert_eq!(operation_count, 0);
+        adapter.shutdown().await.expect("shutdown test host");
     }
 }

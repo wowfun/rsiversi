@@ -7,7 +7,6 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
-rsi-meta-frame-contract = { path = "../../../plugins/rsi-meta/frame-contract" }
 rsi-meta-plugin = { path = "../../../crates/rsi-meta/plugin" }
 thiserror = "2.0"
 

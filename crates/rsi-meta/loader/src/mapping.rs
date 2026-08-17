@@ -19,7 +19,7 @@ pub(super) unsafe fn open_now(path: &Path, reported_path: &Path) -> Result<Libra
         .map(Into::into)
         .map_err(|source| LoaderError::DynamicLoad {
             path: reported_path.to_owned(),
-            source,
+            source: std::sync::Arc::new(source),
         })
 }
 
@@ -33,6 +33,6 @@ pub(super) unsafe fn open_now(path: &Path, reported_path: &Path) -> Result<Libra
     // SAFETY: Forwarded unchanged from this function's caller contract.
     unsafe { Library::new(path) }.map_err(|source| LoaderError::DynamicLoad {
         path: reported_path.to_owned(),
-        source,
+        source: std::sync::Arc::new(source),
     })
 }

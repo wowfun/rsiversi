@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use rsi_meta_fixture_lifecycle_probe::rsi_meta_plugin_entry_v0;
-use rsi_meta_frame_contract::{
+use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
     DurableCommand, EVENT_CANCEL, Frame, FrameBody, LifecyclePhase, OP_OPEN, RUNTIME_TICK_EVENT,
     RUNTIME_TICK_SERVICE, STATE_EVENT_APPLIED, STATE_EVENT_CONFLICT, STATE_EVENT_VALUE,
     STATE_OP_COMPARE_AND_SWAP, STATE_OP_GET,
 };
-use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
 use rsi_meta_plugin_testkit::{CapturedFrame, PluginHarness};
 use serde_json::{Value, json};
 

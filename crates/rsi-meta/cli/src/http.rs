@@ -29,9 +29,12 @@ use crate::framing::{MAX_WIRE_REQUEST_BYTES, MAX_WIRE_RESPONSE_BYTES};
 use crate::host::{SharedHost, submit_with_rejection};
 use crate::lifecycle::DaemonLifecycle;
 use crate::protocol::{
-    CONTROL_PROTOCOL, CONTROL_VERSION, CommandOutcome, rejected, validate_command,
+    CONTROL_PROTOCOL, CONTROL_VERSION, CommandOutcome, StreamKind, rejected, validate_command,
 };
-use crate::streams::{StreamRouter, WireEnvelope, cancel_envelope, decode_wire_envelope};
+use crate::streams::{
+    StreamDataLimitExceeded, StreamRouter, WireEnvelope, cancel_envelope, decode_stream_data,
+    decode_wire_envelope, encode_stream_data_bounded,
+};
 
 const WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -399,7 +402,6 @@ async fn serve_websocket(
 
     loop {
         tokio::select! {
-            biased;
             () = state.lifecycle.restarting() => {
                 let (code, reason) = if state.lifecycle.is_restarting() {
                     (close_code::RESTART, "code=daemon_restarting")
@@ -424,9 +426,25 @@ async fn serve_websocket(
                     Some(Ok(event)) => event,
                     Some(Err(error)) => {
                         tracing::warn!(%error, last_cursor, "WebSocket event stream interrupted");
-                        let reason =
-                            format!("code=event_stream_interrupted last_cursor={last_cursor}");
-                        let _ = close(&mut sender, close_code::AGAIN, reason).await;
+                        let (code, reason) = match error.downcast_ref::<rsi_meta::HostError>() {
+                            Some(rsi_meta::HostError::EventCursorExpired {
+                                requested,
+                                minimum_available,
+                            }) => (
+                                close_code::POLICY,
+                                format!(
+                                    "code=cursor_expired requested={requested} minimum_available={minimum_available} resync_cursor={}",
+                                    state.host.event_cursor(),
+                                ),
+                            ),
+                            _ => (
+                                close_code::AGAIN,
+                                format!(
+                                    "code=event_stream_interrupted last_cursor={last_cursor}"
+                                ),
+                            ),
+                        };
+                        let _ = close(&mut sender, code, reason).await;
                         break;
                     }
                     None => {
@@ -451,7 +469,7 @@ async fn serve_websocket(
             }
             frame = streams.recv() => {
                 let Some(frame) = frame else { continue };
-                if let Err(error) = send_text(&mut sender, &frame).await {
+                if let Err(error) = send_stream(&mut sender, &frame).await {
                     close_after_send_error(&mut sender, &error).await;
                     break;
                 }
@@ -562,15 +580,57 @@ async fn serve_websocket(
                     }
                     Message::Pong(_) => {}
                     Message::Close(_) => break,
-                    Message::Binary(_) => {
-                        let _ = close(&mut sender, close_code::UNSUPPORTED, "code=text_required").await;
-                        break;
+                    Message::Binary(bytes) => {
+                        let frame = match decode_stream_data(&bytes) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                tracing::debug!(%error, "rejected invalid WebSocket DATA frame");
+                                let _ = close(&mut sender, close_code::INVALID, "code=invalid_binary_data").await;
+                                break;
+                            }
+                        };
+                        let stream_id = frame.stream_id.clone();
+                        if let Err(error) = streams.route(frame) {
+                            let response = cancel_envelope(
+                                &stream_id,
+                                "invalid_stream_frame",
+                                &format!("{error:#}"),
+                            );
+                            if let Err(error) = send_stream(&mut sender, &response).await {
+                                close_after_send_error(&mut sender, &error).await;
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
     }
     streams.disconnect().await;
+}
+
+async fn send_stream(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    frame: &crate::protocol::StreamEnvelope,
+) -> Result<()> {
+    if frame.kind != StreamKind::Data {
+        frame.validate().context("validate outgoing stream frame")?;
+        return send_text(sender, frame).await;
+    }
+    let encoded = match encode_stream_data_bounded(frame, MAX_WIRE_RESPONSE_BYTES) {
+        Ok(encoded) => encoded,
+        Err(error) if error.downcast_ref::<StreamDataLimitExceeded>().is_some() => {
+            return Err(OutgoingMessageTooLarge.into());
+        }
+        Err(error) => return Err(error),
+    };
+    tokio::time::timeout(
+        WEBSOCKET_SEND_TIMEOUT,
+        sender.send(Message::Binary(encoded.into())),
+    )
+    .await
+    .context("WebSocket DATA send timed out")??;
+    Ok(())
 }
 
 async fn send_text(
@@ -682,6 +742,9 @@ mod tests {
 
     #[derive(Debug)]
     struct ExhaustedEventHost;
+
+    #[derive(Debug)]
+    struct ExpiredEventCursorHost;
 
     #[derive(Debug)]
     struct InspectOutcomeHost {
@@ -810,6 +873,43 @@ mod tests {
 
         fn token_generation(&self) -> u64 {
             0
+        }
+
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl HostApi for ExpiredEventCursorHost {
+        async fn submit(&self, command: CommandEnvelope) -> Result<CommandOutcomeEnvelope> {
+            Ok(outcome(
+                command.command_id,
+                GraphRevision(3),
+                CommandOutcome::ShuttingDown,
+            ))
+        }
+
+        async fn subscribe(&self, after_cursor: u64) -> Result<HostEventStream> {
+            Ok(Box::pin(futures_util::stream::iter([Err(
+                rsi_meta::HostError::EventCursorExpired {
+                    requested: after_cursor,
+                    minimum_available: 42,
+                }
+                .into(),
+            )])))
+        }
+
+        fn graph_revision(&self) -> GraphRevision {
+            GraphRevision(3)
+        }
+
+        fn token_generation(&self) -> u64 {
+            0
+        }
+
+        fn event_cursor(&self) -> u64 {
+            99
         }
 
         async fn shutdown(&self) -> Result<()> {
@@ -1359,6 +1459,42 @@ mod tests {
         assert_eq!(frame.code, CloseCode::Again);
         assert!(frame.reason.contains("code=event_stream_interrupted"));
         assert!(frame.reason.contains("last_cursor=73"));
+
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_websocket_cursor_returns_the_resync_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_file = directory.path().join("run/daemon.token");
+        let auth = AuthState::initialize(&token_file).unwrap();
+        let token = read_token_file(&token_file).unwrap();
+        let server = HttpServer::bind(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Arc::new(ExpiredEventCursorHost),
+            auth,
+            DaemonLifecycle::default(),
+            [],
+        )
+        .await
+        .unwrap();
+        let address = server.local_addr();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(server.serve(cancellation.clone()));
+
+        let (mut websocket, _) = connect_async(authenticated_request(address, 7, &token))
+            .await
+            .unwrap();
+        let closed = websocket.next().await.unwrap().unwrap();
+        let ClientMessage::Close(Some(frame)) = closed else {
+            panic!("expected a cursor-expired close frame, got {closed:?}");
+        };
+        assert_eq!(frame.code, CloseCode::Policy);
+        assert!(frame.reason.contains("code=cursor_expired"));
+        assert!(frame.reason.contains("requested=7"));
+        assert!(frame.reason.contains("minimum_available=42"));
+        assert!(frame.reason.contains("resync_cursor=99"));
 
         cancellation.cancel();
         task.await.unwrap().unwrap();

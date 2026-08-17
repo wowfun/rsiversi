@@ -18,6 +18,7 @@ test-failpoints = []
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 hex.workspace = true

@@ -30,7 +30,8 @@
         "wrong_service",
         "unknown_event",
         "non_byte_data",
-        "malformed_json"
+        "malformed_json",
+        "malformed_json_burst"
       ],
       "default": "none"
     }

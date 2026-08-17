@@ -3,13 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rsi_meta_frame_contract::{
-    DurableCommand, EVENT_CANCEL, EVENT_DATA, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
-    OP_CREDIT, OP_OPEN,
-};
 use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
+    DurableCommand, EVENT_CANCEL, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT, OP_OPEN,
+};
 use rsi_meta_plugin_hmr_consumer::rsi_meta_plugin_entry_v0;
-use rsi_meta_plugin_testkit::PluginHarness;
+use rsi_meta_plugin_testkit::{CapturedFrame, PluginHarness};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -151,6 +150,121 @@ fn prepare_and_commit(plugin: &mut PluginHarness, tree: &PackageTree, generation
     );
 }
 
+#[test]
+fn prepared_ack_is_retried_after_control_backpressure() {
+    let tree = package_tree();
+    let mut plugin = PluginHarness::start(rsi_meta_plugin_entry_v0).unwrap();
+    plugin.set_post_outcomes([PostFrameOutcome::WouldBlock, PostFrameOutcome::Accepted]);
+
+    assert_eq!(
+        plugin
+            .send(
+                Lane::Control,
+                &Frame::lifecycle(
+                    LifecyclePhase::Prepare,
+                    41,
+                    Some(json!({
+                        "manifest_path": tree.manifest,
+                        "lock_path": tree.lock,
+                        "watch_request_id": "hmr-backpressure",
+                    })),
+                ),
+            )
+            .unwrap(),
+        CallOutcome::Ok
+    );
+
+    let prepared = plugin.recv(Duration::from_secs(1)).unwrap();
+    assert_eq!(prepared.lane, Lane::Control);
+    assert_eq!(
+        prepared.frame.body,
+        FrameBody::Lifecycle {
+            phase: LifecyclePhase::Prepared,
+            generation: 41,
+            config: None,
+        }
+    );
+}
+
+#[test]
+fn prepare_failed_ack_is_retried_after_control_backpressure() {
+    let tree = package_tree();
+    fs::remove_file(&tree.lock).unwrap();
+    let mut plugin = PluginHarness::start(rsi_meta_plugin_entry_v0).unwrap();
+    plugin.set_post_outcomes([PostFrameOutcome::WouldBlock, PostFrameOutcome::Accepted]);
+
+    assert_eq!(
+        plugin
+            .send(
+                Lane::Control,
+                &Frame::lifecycle(
+                    LifecyclePhase::Prepare,
+                    42,
+                    Some(json!({
+                        "manifest_path": tree.manifest,
+                        "lock_path": tree.lock,
+                        "watch_request_id": "hmr-failed-backpressure",
+                    })),
+                ),
+            )
+            .unwrap(),
+        CallOutcome::Ok
+    );
+
+    expect_prepare_failed(&plugin, 42);
+}
+
+fn expect_prepare_failed(plugin: &PluginHarness, generation: u64) {
+    let failed = plugin.recv(Duration::from_secs(5)).unwrap();
+    assert_eq!(failed.lane, Lane::Control);
+    assert!(matches!(
+        failed.frame.body,
+        FrameBody::Lifecycle {
+            phase: LifecyclePhase::PrepareFailed,
+            generation: actual,
+            config: Some(_),
+        } if actual == generation
+    ));
+}
+
+fn recv_after_tick(plugin: &mut PluginHarness, tick: u64) -> CapturedFrame {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert_eq!(
+            plugin
+                .send(
+                    Lane::Data,
+                    &Frame::service_event(None, "runtime.tick", "tick", json!({"tick": tick}),),
+                )
+                .unwrap(),
+            CallOutcome::Ok
+        );
+        if let Some(frame) = plugin.try_recv().unwrap() {
+            return frame;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker result timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn drive_worker(plugin: &mut PluginHarness, tick: u64) {
+    for _ in 0..20 {
+        assert_eq!(
+            plugin
+                .send(
+                    Lane::Data,
+                    &Frame::service_event(None, "runtime.tick", "tick", json!({"tick": tick}),),
+                )
+                .unwrap(),
+            CallOutcome::Ok
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn watch_path(body: FrameBody) -> (String, PathBuf) {
     let FrameBody::ServiceRequest {
         request_id,
@@ -188,12 +302,7 @@ fn assert_credit(body: FrameBody, request_id: &str) {
 #[allow(clippy::needless_pass_by_value)] // Test call sites construct one-shot event values inline.
 fn data_event(request_id: &str, event: serde_json::Value) -> Frame {
     let bytes = serde_json::to_vec(&event).unwrap();
-    Frame::service_event(
-        Some(request_id.to_owned()),
-        "fs.watch",
-        EVENT_DATA,
-        serde_json::Value::Array(bytes.into_iter().map(serde_json::Value::from).collect()),
-    )
+    Frame::service_data_event(request_id, "fs.watch", bytes)
 }
 
 fn ready_watches(
@@ -293,8 +402,9 @@ path = "target/macos/provider.dylib"
                 ),
             )
             .unwrap(),
-        CallOutcome::Failed
+        CallOutcome::Ok
     );
+    expect_prepare_failed(&missing, 23);
 
     fs::write(
         &tree.plugin_manifest,
@@ -327,8 +437,9 @@ path = "target/linux/provider.so"
                 ),
             )
             .unwrap(),
-        CallOutcome::Failed
+        CallOutcome::Ok
     );
+    expect_prepare_failed(&duplicate, 24);
 }
 
 #[test]
@@ -354,9 +465,10 @@ fn prepare_rejects_an_oversized_watch_plan_document() {
                 ),
             )
             .unwrap(),
-        CallOutcome::Failed,
+        CallOutcome::Ok,
         "watch-plan TOML must be bounded before it is buffered"
     );
+    expect_prepare_failed(&plugin, 29);
 }
 
 #[test]
@@ -382,9 +494,10 @@ fn prepare_applies_the_loader_bound_to_a_package_manifest() {
                 ),
             )
             .unwrap(),
-        CallOutcome::Failed,
+        CallOutcome::Ok,
         "HMR must not buffer a package manifest the loader will reject"
     );
+    expect_prepare_failed(&plugin, 32);
 }
 
 #[test]
@@ -413,9 +526,10 @@ fn prepare_rejects_an_oversized_watched_artifact_before_reading_it() {
                 ),
             )
             .unwrap(),
-        CallOutcome::Failed,
+        CallOutcome::Ok,
         "HMR content identity must not synchronously read an unbounded artifact"
     );
+    expect_prepare_failed(&plugin, 33);
 }
 
 #[cfg(unix)]
@@ -486,9 +600,10 @@ fn prepare_does_not_follow_a_locked_package_manifest_symlink() {
                 ),
             )
             .unwrap(),
-        CallOutcome::Failed,
+        CallOutcome::Ok,
         "package inputs retain the loader's no-follow contract"
     );
+    expect_prepare_failed(&plugin, 31);
 }
 
 #[test]
@@ -534,18 +649,23 @@ path = "missing-provider-v2.dylib"
             .unwrap(),
         CallOutcome::Ok
     );
+    let first_cancel = recv_after_tick(&mut plugin, 0);
     let removed = BTreeSet::from([
         tree.plugin_manifest.clone(),
         tree.schema.clone(),
         tree.linux_artifact.clone(),
     ]);
-    for _ in 0..removed.len() {
+    let mut cancellations = vec![first_cancel];
+    for _ in 1..removed.len() {
+        cancellations.push(plugin.recv(Duration::from_secs(1)).unwrap());
+    }
+    for cancellation in cancellations {
         let FrameBody::ServiceRequest {
             request_id,
             service,
             operation,
             ..
-        } = plugin.recv(Duration::from_secs(1)).unwrap().frame.body
+        } = cancellation.frame.body
         else {
             panic!("expected stale watch cancellation")
         };
@@ -565,11 +685,6 @@ path = "missing-provider-v2.dylib"
         new_watches.keys().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from([manifest_v2, schema_v2, artifact_v2.clone()])
     );
-    assert!(
-        plugin.try_recv().unwrap().is_none(),
-        "stable composition and lock subscriptions retain their request ids"
-    );
-
     let tick_one = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1}));
     assert_eq!(plugin.send(Lane::Data, &tick_one).unwrap(), CallOutcome::Ok);
     let before_artifact_change = assert_apply_command(
@@ -589,10 +704,8 @@ path = "missing-provider-v2.dylib"
             .unwrap(),
         CallOutcome::Ok
     );
-    let tick_two = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 2}));
-    assert_eq!(plugin.send(Lane::Data, &tick_two).unwrap(), CallOutcome::Ok);
     let after_artifact_change = assert_apply_command(
-        plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut plugin, 2).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -639,6 +752,7 @@ fn stale_cancel_ack_keeps_the_replacement_subscription_mapped() {
             .unwrap(),
         CallOutcome::Ok
     );
+    drive_worker(&mut plugin, 0);
     write_package_manifest(&tree.plugin_manifest, "target/linux/provider.so");
     assert_eq!(
         plugin
@@ -649,6 +763,7 @@ fn stale_cancel_ack_keeps_the_replacement_subscription_mapped() {
             .unwrap(),
         CallOutcome::Ok
     );
+    drive_worker(&mut plugin, 0);
     assert!(plugin.try_recv().unwrap().is_none());
 
     plugin.set_post_outcome(PostFrameOutcome::Accepted);
@@ -724,10 +839,8 @@ fn content_derived_command_id_is_stable_across_restart_and_changes_with_desired_
                 .unwrap(),
             CallOutcome::Ok
         );
-        let tick = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1}));
-        assert_eq!(plugin.send(Lane::Data, &tick).unwrap(), CallOutcome::Ok);
         assert_apply_command(
-            plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+            recv_after_tick(&mut plugin, 1).frame.body,
             &tree.manifest,
             &tree.lock,
         )
@@ -745,13 +858,8 @@ fn content_derived_command_id_is_stable_across_restart_and_changes_with_desired_
             .unwrap(),
         CallOutcome::Ok
     );
-    let first_tick = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1}));
-    assert_eq!(
-        restarted.send(Lane::Data, &first_tick).unwrap(),
-        CallOutcome::Ok
-    );
     let replay_id = assert_apply_command(
-        restarted.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut restarted, 1).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -768,13 +876,8 @@ fn content_derived_command_id_is_stable_across_restart_and_changes_with_desired_
             .unwrap(),
         CallOutcome::Ok
     );
-    let second_tick = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 2}));
-    assert_eq!(
-        restarted.send(Lane::Data, &second_tick).unwrap(),
-        CallOutcome::Ok
-    );
     let changed_id = assert_apply_command(
-        restarted.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut restarted, 2).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -800,17 +903,11 @@ fn durable_control_backpressure_keeps_dirty_state_for_same_tick_retry() {
             .unwrap(),
         CallOutcome::Ok
     );
-    let tick = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 9}));
     plugin.set_post_outcome(PostFrameOutcome::WouldBlock);
-    assert_eq!(
-        plugin.send(Lane::Data, &tick).unwrap(),
-        CallOutcome::Ok,
-        "control backpressure is retryable, not a plugin callback failure"
-    );
+    drive_worker(&mut plugin, 9);
     plugin.set_post_outcome(PostFrameOutcome::Accepted);
-    assert_eq!(plugin.send(Lane::Data, &tick).unwrap(), CallOutcome::Ok);
     let command_id = assert_apply_command(
-        plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut plugin, 9).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -834,17 +931,8 @@ fn older_rejection_does_not_clear_a_newer_dirty_content_identity() {
             .unwrap(),
         CallOutcome::Ok
     );
-    assert_eq!(
-        plugin
-            .send(
-                Lane::Data,
-                &Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1})),
-            )
-            .unwrap(),
-        CallOutcome::Ok
-    );
     let first_id = assert_apply_command(
-        plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut plugin, 1).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -873,18 +961,8 @@ fn older_rejection_does_not_clear_a_newer_dirty_content_identity() {
             .unwrap(),
         CallOutcome::Ok
     );
-    assert_eq!(
-        plugin
-            .send(
-                Lane::Data,
-                &Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 2})),
-            )
-            .unwrap(),
-        CallOutcome::Ok
-    );
-
     let second_id = assert_apply_command(
-        plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut plugin, 2).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -1002,10 +1080,8 @@ fn changed_burst_is_coalesced_once_per_runtime_tick() {
         "file changes only mark the apply dirty before a tick"
     );
 
-    let tick_one = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1}));
-    assert_eq!(plugin.send(Lane::Data, &tick_one).unwrap(), CallOutcome::Ok);
     let first_command_id = assert_apply_command(
-        plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut plugin, 1).frame.body,
         &tree.manifest,
         &tree.lock,
     );
@@ -1023,16 +1099,15 @@ fn changed_burst_is_coalesced_once_per_runtime_tick() {
             .unwrap(),
         CallOutcome::Ok
     );
+    let tick_one = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 1}));
     assert_eq!(plugin.send(Lane::Data, &tick_one).unwrap(), CallOutcome::Ok);
     assert!(
         plugin.try_recv().unwrap().is_none(),
         "a duplicate tick cannot flush a second command"
     );
 
-    let tick_two = Frame::service_event(None, "runtime.tick", "tick", json!({"tick": 2}));
-    assert_eq!(plugin.send(Lane::Data, &tick_two).unwrap(), CallOutcome::Ok);
     let second_command_id = assert_apply_command(
-        plugin.recv(Duration::from_secs(1)).unwrap().frame.body,
+        recv_after_tick(&mut plugin, 2).frame.body,
         &tree.manifest,
         &tree.lock,
     );

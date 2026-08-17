@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
+use bytes::Bytes;
 use serde::Serialize;
-use tokio_util::codec::LinesCodec;
+use tokio_util::codec::LengthDelimitedCodec;
 
 use crate::protocol::MAX_CONTROL_RESPONSE_BYTES;
 
@@ -10,12 +11,16 @@ use crate::protocol::CommandEnvelope;
 pub const MAX_WIRE_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_WIRE_RESPONSE_BYTES: usize = MAX_CONTROL_RESPONSE_BYTES;
 
-pub fn ndjson_request_codec() -> LinesCodec {
-    LinesCodec::new_with_max_length(MAX_WIRE_REQUEST_BYTES)
+pub fn length_delimited_request_codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .max_frame_length(MAX_WIRE_REQUEST_BYTES)
+        .new_codec()
 }
 
-pub fn ndjson_response_codec() -> LinesCodec {
-    LinesCodec::new_with_max_length(MAX_WIRE_RESPONSE_BYTES)
+pub fn length_delimited_response_codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .max_frame_length(MAX_WIRE_RESPONSE_BYTES)
+        .new_codec()
 }
 
 #[cfg(test)]
@@ -31,10 +36,18 @@ pub fn encode_response(envelope: &impl Serialize) -> Result<String> {
     encode_envelope(envelope, MAX_WIRE_RESPONSE_BYTES, "response")
 }
 
+pub fn encode_request_bytes(envelope: &impl Serialize) -> Result<Bytes> {
+    encode_request(envelope).map(Bytes::from)
+}
+
+pub fn encode_response_bytes(envelope: &impl Serialize) -> Result<Bytes> {
+    encode_response(envelope).map(Bytes::from)
+}
+
 fn encode_envelope(envelope: &impl Serialize, limit: usize, direction: &str) -> Result<String> {
     let encoded = serde_json::to_string(envelope).context("encode wire envelope")?;
     if encoded.len() > limit {
-        bail!("wire {direction} exceeds the configured NDJSON frame limit");
+        bail!("wire {direction} exceeds the configured frame limit");
     }
     Ok(encoded)
 }
@@ -48,10 +61,10 @@ mod tests {
     use crate::protocol::{CliRequest, Command};
 
     #[tokio::test]
-    async fn ndjson_preserves_exact_frame_boundaries() {
+    async fn length_prefix_preserves_exact_frame_boundaries() {
         let (left, right) = tokio::io::duplex(4096);
-        let mut writer = Framed::new(left, ndjson_request_codec());
-        let mut reader = Framed::new(right, ndjson_request_codec());
+        let mut writer = Framed::new(left, length_delimited_request_codec());
+        let mut reader = Framed::new(right, length_delimited_request_codec());
         let first = CliRequest::QueryGraph.into_envelope();
         let second = CliRequest::QueryEvents {
             after: 9,
@@ -60,16 +73,18 @@ mod tests {
         .into_envelope();
 
         writer
-            .send(serde_json::to_string(&first).unwrap())
+            .send(encode_request_bytes(&first).unwrap())
             .await
             .unwrap();
         writer
-            .send(serde_json::to_string(&second).unwrap())
+            .send(encode_request_bytes(&second).unwrap())
             .await
             .unwrap();
 
-        let decoded_first = decode_envelope(&reader.next().await.unwrap().unwrap()).unwrap();
-        let decoded_second = decode_envelope(&reader.next().await.unwrap().unwrap()).unwrap();
+        let first_bytes = reader.next().await.unwrap().unwrap();
+        let second_bytes = reader.next().await.unwrap().unwrap();
+        let decoded_first = decode_envelope(std::str::from_utf8(&first_bytes).unwrap()).unwrap();
+        let decoded_second = decode_envelope(std::str::from_utf8(&second_bytes).unwrap()).unwrap();
         assert_eq!(decoded_first.payload, Command::QueryGraph);
         assert_eq!(
             decoded_second.payload,
@@ -83,9 +98,9 @@ mod tests {
     #[tokio::test]
     async fn oversized_frame_is_rejected() {
         let (left, right) = tokio::io::duplex(MAX_WIRE_REQUEST_BYTES + 16);
-        let mut writer = Framed::new(left, LinesCodec::new());
-        let mut reader = Framed::new(right, ndjson_request_codec());
-        let oversized = "x".repeat(MAX_WIRE_REQUEST_BYTES + 1);
+        let mut writer = Framed::new(left, LengthDelimitedCodec::new());
+        let mut reader = Framed::new(right, length_delimited_request_codec());
+        let oversized = Bytes::from(vec![b'x'; MAX_WIRE_REQUEST_BYTES + 1]);
 
         let write = tokio::spawn(async move { writer.send(oversized).await });
         assert!(reader.next().await.unwrap().is_err());
@@ -120,10 +135,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ndjson_client_decodes_a_legal_large_control_response() {
+    async fn client_decodes_a_legal_large_length_delimited_control_response() {
         let (left, right) = tokio::io::duplex(64 * 1024);
-        let mut writer = Framed::new(left, LinesCodec::new());
-        let mut reader = Framed::new(right, ndjson_response_codec());
+        let mut writer = Framed::new(left, LengthDelimitedCodec::new());
+        let mut reader = Framed::new(right, length_delimited_response_codec());
         let value = serde_json::json!({
             "payload": {
                 "type": "plugin",
@@ -136,7 +151,7 @@ mod tests {
         });
         let encoded = encode_response(&value).unwrap();
         let expected = encoded.len();
-        let write = tokio::spawn(async move { writer.send(encoded).await });
+        let write = tokio::spawn(async move { writer.send(Bytes::from(encoded)).await });
 
         let decoded = reader.next().await.unwrap().unwrap();
         assert_eq!(decoded.len(), expected);

@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use rsi_meta_fixture_nested_scope_consumer::rsi_meta_plugin_entry_v0;
-use rsi_meta_frame_contract::{
-    EVENT_CANCEL, EVENT_CREDIT, EVENT_DATA, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL,
-    OP_CREDIT, OP_DATA, OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
-};
 use rsi_meta_plugin::{CallOutcome, Lane, PostFrameOutcome};
+use rsi_meta_plugin::{
+    EVENT_CANCEL, EVENT_CREDIT, EVENT_END, Frame, FrameBody, LifecyclePhase, OP_CANCEL, OP_CREDIT,
+    OP_HALF_CLOSE, OP_OPEN, RUNTIME_TICK_EVENT, RUNTIME_TICK_SERVICE,
+};
 use rsi_meta_plugin_testkit::PluginHarness;
 use serde_json::json;
 
@@ -188,12 +188,7 @@ fn outer_data_would_block_retains_input_credit_and_request() {
     ));
 
     plugin.set_post_outcome(PostFrameOutcome::WouldBlock);
-    let data = Frame::service_request(
-        "outer-data",
-        "fixture.nested-consumer",
-        OP_DATA,
-        json!([1, 2]),
-    );
+    let data = Frame::service_data_request("outer-data", "fixture.nested-consumer", vec![1, 2]);
     assert_eq!(
         plugin.send(Lane::Data, &data).unwrap(),
         CallOutcome::Ok,
@@ -208,8 +203,7 @@ fn outer_data_would_block_retains_input_credit_and_request() {
     );
     assert!(matches!(
         recv_body(&plugin),
-        FrameBody::ServiceRequest { operation, payload, .. }
-            if operation == OP_DATA && payload == json!([1, 2])
+        FrameBody::ServiceDataRequest { payload, .. } if payload == vec![1, 2]
     ));
     assert!(plugin.try_recv().unwrap().is_none());
 }
@@ -218,8 +212,8 @@ fn outer_data_would_block_retains_input_credit_and_request() {
 fn inner_data_would_block_retains_output_credit_and_event() {
     let mut plugin = committed_consumer();
     let inner_id = open_proxy(&mut plugin, "inner-data");
-    let payload = json!([3, 4]);
-    let encoded = serde_json::to_vec(&payload).unwrap().len() as u64;
+    let payload = vec![3, 4];
+    let encoded = payload.len() as u64;
     let credit = Frame::service_request(
         "inner-data",
         "fixture.nested-consumer",
@@ -233,8 +227,7 @@ fn inner_data_would_block_retains_output_credit_and_event() {
     ));
 
     plugin.set_post_outcome(PostFrameOutcome::WouldBlock);
-    let inner_data =
-        Frame::service_event(Some(inner_id), "fixture.echo", EVENT_DATA, payload.clone());
+    let inner_data = Frame::service_data_event(inner_id, "fixture.echo", payload.clone());
     assert_eq!(
         plugin.send(Lane::Data, &inner_data).unwrap(),
         CallOutcome::Ok,
@@ -249,8 +242,7 @@ fn inner_data_would_block_retains_output_credit_and_event() {
     );
     assert!(matches!(
         recv_body(&plugin),
-        FrameBody::ServiceEvent { event, payload: actual, .. }
-            if event == EVENT_DATA && actual == payload
+        FrameBody::ServiceDataEvent { payload: actual, .. } if actual == payload
     ));
     assert!(plugin.try_recv().unwrap().is_none());
 }
@@ -414,39 +406,32 @@ fn public_stream_proxies_credit_data_and_end_through_a_distinct_inner_id() {
         }
     );
 
-    let bytes = json!([110, 101, 115, 116, 101, 100]);
+    let bytes = b"nested".to_vec();
     let outer_data =
-        Frame::service_request("outer-1", "fixture.nested-consumer", OP_DATA, bytes.clone());
+        Frame::service_data_request("outer-1", "fixture.nested-consumer", bytes.clone());
     assert_eq!(
         plugin.send(Lane::Data, &outer_data).unwrap(),
         CallOutcome::Ok
     );
     assert_eq!(
         recv_body(&plugin),
-        FrameBody::ServiceRequest {
+        FrameBody::ServiceDataRequest {
             request_id: "nested-9/outer-1".to_owned(),
             service: "fixture.echo".to_owned(),
-            operation: OP_DATA.to_owned(),
             payload: bytes.clone(),
         }
     );
 
-    let inner_data = Frame::service_event(
-        Some("nested-9/outer-1".to_owned()),
-        "fixture.echo",
-        EVENT_DATA,
-        bytes.clone(),
-    );
+    let inner_data = Frame::service_data_event("nested-9/outer-1", "fixture.echo", bytes.clone());
     assert_eq!(
         plugin.send(Lane::Data, &inner_data).unwrap(),
         CallOutcome::Ok
     );
     assert_eq!(
         recv_body(&plugin),
-        FrameBody::ServiceEvent {
-            request_id: Some("outer-1".to_owned()),
+        FrameBody::ServiceDataEvent {
+            request_id: "outer-1".to_owned(),
             service: "fixture.nested-consumer".to_owned(),
-            event: EVENT_DATA.to_owned(),
             payload: bytes,
         }
     );
