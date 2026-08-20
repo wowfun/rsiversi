@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-ai.invalid/v0/language-request.schema.json",
+  "title": "rsi-ai language request v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["messages", "tools", "tool_choice", "hosted_tools", "response_format", "settings", "extensions"],
+  "properties": {
+    "messages": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/message"}},
+    "tools": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/tool"}},
+    "tool_choice": {"$ref": "#/$defs/tool_choice"},
+    "hosted_tools": {"type": "array", "items": {"$ref": "#/$defs/hosted_tool"}},
+    "response_format": {"$ref": "#/$defs/response_format"},
+    "settings": {"$ref": "#/$defs/settings"},
+    "extensions": {"type": "array", "items": {"$ref": "#/$defs/extension"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[!-~]+$"},
+    "tool_name": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "mime_type", "byte_len", "sha256", "width", "height", "duration_ms"],
+      "properties": {
+        "kind": {"const": "image"},
+        "mime_type": {"type": "string", "pattern": "^image/[A-Za-z0-9.+-]+$", "maxLength": 127},
+        "byte_len": {"type": "integer", "minimum": 1, "maximum": 33554432},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "width": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
+        "height": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
+        "duration_ms": {"type": "null"}
+      }
+    },
+    "audio": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "mime_type", "byte_len", "sha256", "width", "height", "duration_ms"],
+      "properties": {
+        "kind": {"const": "audio"},
+        "mime_type": {"type": "string", "pattern": "^audio/[A-Za-z0-9.+-]+$", "maxLength": 127},
+        "byte_len": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "width": {"type": "null"},
+        "height": {"type": "null"},
+        "duration_ms": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "extension": {
+      "type": "object", "additionalProperties": false,
+      "required": ["namespace", "version", "value"],
+      "properties": {
+        "namespace": {"$ref": "#/$defs/id"},
+        "version": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "value": true
+      }
+    },
+    "content": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "text"}, "content": {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 16777216}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "image"}, "content": {"$ref": "#/$defs/image"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "audio"}, "content": {"$ref": "#/$defs/audio"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "reasoning"}, "content": {"type": "object", "additionalProperties": false, "required": ["text", "evidence"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 16777216}, "evidence": {"anyOf": [{"$ref": "#/$defs/extension"}, {"type": "null"}]}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "tool_call"}, "content": {"type": "object", "additionalProperties": false, "required": ["id", "name", "arguments"], "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"$ref": "#/$defs/tool_name"}, "arguments": {"type": "string", "maxLength": 16777216}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "tool_result"}, "content": {"type": "object", "additionalProperties": false, "required": ["call_id", "content", "is_error"], "properties": {"call_id": {"$ref": "#/$defs/id"}, "content": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"oneOf": [{"$ref": "#/$defs/text_content"}, {"$ref": "#/$defs/image_content"}, {"$ref": "#/$defs/audio_content"}]}}, "is_error": {"type": "boolean"}}}}}
+      ]
+    },
+    "text_content": {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "text"}, "content": {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 16777216}}}}},
+    "image_content": {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "image"}, "content": {"$ref": "#/$defs/image"}}},
+    "audio_content": {"type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {"type": {"const": "audio"}, "content": {"$ref": "#/$defs/audio"}}},
+    "message": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": {"enum": ["system", "developer", "user", "assistant", "tool"]},
+        "content": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/content"}}
+      }
+    },
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "description", "input_schema"],
+      "properties": {
+        "name": {"$ref": "#/$defs/tool_name"},
+        "description": {"type": "string", "maxLength": 4096},
+        "input_schema": {"type": ["object", "boolean"]}
+      }
+    },
+    "tool_choice": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"enum": ["auto", "none", "required"]}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "name"], "properties": {"type": {"const": "specific"}, "name": {"$ref": "#/$defs/tool_name"}}}
+      ]
+    },
+    "hosted_tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "max_uses"],
+      "properties": {"type": {"const": "web_search"}, "max_uses": {"type": ["integer", "null"], "minimum": 1, "maximum": 16}}
+    },
+    "response_format": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "text"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "name", "description", "schema", "strict"], "properties": {"type": {"const": "json_schema"}, "name": {"$ref": "#/$defs/tool_name"}, "description": {"type": ["string", "null"], "maxLength": 4096}, "schema": {"type": ["object", "boolean"]}, "strict": {"const": true}}}
+      ]
+    },
+    "settings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_output_tokens", "temperature", "top_p", "seed", "stop", "reasoning_effort"],
+      "properties": {
+        "max_output_tokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 1000000},
+        "temperature": {"type": ["number", "null"], "minimum": 0, "maximum": 2},
+        "top_p": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "seed": {"type": ["integer", "null"], "minimum": -9223372036854775808, "maximum": 9223372036854775807},
+        "stop": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "reasoning_effort": {"type": ["string", "null"], "enum": ["minimal", "low", "medium", "high", "xhigh", null]}
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-ai.invalid/v0/realtime-request.schema.json",
+  "title": "rsi-ai Realtime request v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["voice", "instructions", "input_format", "output_format"],
+  "properties": {
+    "voice": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[!-~]+$"},
+    "instructions": {"type": ["string", "null"], "minLength": 1, "maxLength": 16777216},
+    "input_format": {"const": "pcm16"},
+    "output_format": {"const": "pcm16"}
+  }
+}

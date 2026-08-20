@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-ai.invalid/plugins/openai-compatible-chat-config-v0.json",
+  "type": "object",
+  "properties": {
+    "deployment_id": { "type": "string", "default": "openai-compatible", "minLength": 1, "maxLength": 255 },
+    "endpoint": { "type": "string", "format": "uri" },
+    "path": { "type": "string", "default": "/v1/chat/completions", "minLength": 1, "maxLength": 1024 },
+    "allow_image_input": { "type": "boolean", "default": true },
+    "api_key": { "type": "string", "minLength": 1, "maxLength": 65536, "x-rsi-meta-secret": true }
+  },
+  "required": ["endpoint", "api_key"],
+  "additionalProperties": false
+}
+

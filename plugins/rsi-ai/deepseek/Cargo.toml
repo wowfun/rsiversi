@@ -1,0 +1,27 @@
+[package]
+name = "rsi-ai-plugin-deepseek"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rsi-ai.workspace = true
+rsi-ai-deepseek.workspace = true
+rsi-ai-meta.workspace = true
+rsi-ai-provider.workspace = true
+rsi-ai-transport.workspace = true
+rsi-meta-plugin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-ai-protocol.workspace = true
+rsi-meta-plugin-testkit.workspace = true
+
+[lints]
+workspace = true

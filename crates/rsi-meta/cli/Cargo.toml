@@ -43,7 +43,7 @@ uuid.workspace = true
 [dev-dependencies]
 rsi-meta-loader = { path = "../loader" }
 rusqlite.workspace = true
-tokio-tungstenite = "0.29"
+tokio-tungstenite.workspace = true
 
 [lints]
 workspace = true

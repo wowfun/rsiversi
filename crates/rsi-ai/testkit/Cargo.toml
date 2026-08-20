@@ -1,0 +1,20 @@
+[package]
+name = "rsi-ai-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-ai-provider = { path = "../provider" }
+rsi-ai-protocol = { path = "../protocol" }
+
+[lints]
+workspace = true

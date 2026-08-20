@@ -1,0 +1,21 @@
+[package]
+name = "rsi-ai-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+keyring.workspace = true
+rsi-ai-protocol = { path = "../protocol" }
+serde.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

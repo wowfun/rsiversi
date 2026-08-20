@@ -42,6 +42,7 @@ pub use protocol::{
     MAX_WIRE_ID_BYTES, STREAM_PROTOCOL, STREAM_VERSION, StreamEnvelope, StreamId, StreamKind,
 };
 pub use rsi_meta_loader::ContentHash;
+pub use rsi_meta_plugin::STREAM_BYTE_BUDGET;
 
 /// Link marker used only by explicit process-crash conformance builds.
 #[cfg(feature = "test-failpoints")]

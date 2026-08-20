@@ -20,13 +20,12 @@ use crate::model::{GenerationLease, InstanceId, ServiceKey};
 use crate::protocol::{
     Command, CommandEnvelope, CommandOutcomeEnvelope, StreamEnvelope, StreamId, StreamKind,
 };
-use crate::{HostError, Result};
+use crate::{HostError, Result, STREAM_BYTE_BUDGET};
 
 const DATA_QUEUE_CAPACITY: usize = 128;
 const LIFECYCLE_QUEUE_CAPACITY: usize = 4;
 const STREAM_EVENT_CAPACITY: usize = 64;
 const MAX_STREAMS_PER_GENERATION: usize = 128;
-const STREAM_BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 pub(crate) const RUNTIME_TICK_INTERVAL: Duration = Duration::from_millis(250);
 const PLUGIN_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(30);
 

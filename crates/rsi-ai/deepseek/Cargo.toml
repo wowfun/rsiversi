@@ -1,0 +1,26 @@
+[package]
+name = "rsi-ai-deepseek"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rsi-ai-openai-compatible = { path = "../openai-compatible" }
+rsi-ai-protocol = { path = "../protocol" }
+rsi-ai-provider = { path = "../provider" }
+rsi-ai-transport = { path = "../transport" }
+
+[dev-dependencies]
+axum.workspace = true
+rsi-ai = { path = "../core" }
+rsi-ai-auth = { path = "../auth" }
+tokio.workspace = true
+
+[lints]
+workspace = true

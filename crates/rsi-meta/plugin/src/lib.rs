@@ -43,6 +43,11 @@ const fn supports_minor(available: u32, minimum: u32) -> bool {
 pub const LANE_CONTROL: u32 = 0;
 /// Data-plane frame lane.
 pub const LANE_DATA: u32 = 1;
+/// Maximum outstanding DATA bytes in either direction of one service stream.
+///
+/// This is part of the shared host/plugin wire contract rather than a host
+/// implementation detail, so both sides must enforce the same value.
+pub const STREAM_BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 
 /// The host accepted and copied the frame.
 pub const POST_FRAME_ACCEPTED: u32 = 0;

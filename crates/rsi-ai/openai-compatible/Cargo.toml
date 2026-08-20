@@ -1,0 +1,32 @@
+[package]
+name = "rsi-ai-openai-compatible"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+async-stream.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+http.workspace = true
+rsi-ai-protocol = { path = "../protocol" }
+rsi-ai-provider = { path = "../provider" }
+rsi-ai-transport = { path = "../transport" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+rsi-ai = { path = "../core" }
+rsi-ai-auth = { path = "../auth" }
+rsi-ai-testkit = { path = "../testkit" }
+tokio.workspace = true
+
+[lints]
+workspace = true
