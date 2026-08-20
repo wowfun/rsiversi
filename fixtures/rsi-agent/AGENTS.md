@@ -1,0 +1,3 @@
+- These fixtures provide black-box evidence for [`rsi-agent`](../../crates/rsi-agent/README.md). They may depend on the public `rsi-agent`, `rsi-agent-protocol`, and `rsi-meta` surfaces, but not on private loop or store internals.
+- Keep the scripted providers deterministic, keyless, and free of user-state dependencies. They are protocol witnesses, not general model or tool implementations.
+- The product fixture subtree is one workspace with one lockfile and one target directory. The xtask gate builds native packages before the assembled runner; the runner must never invoke Cargo recursively.

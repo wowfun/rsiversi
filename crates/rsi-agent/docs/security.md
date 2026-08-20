@@ -1,0 +1,25 @@
+# rsi-agent security boundary
+
+## Native provider trust
+
+Model and tool providers are native plugins loaded into the `rsi-meta` host process. They can access process memory and operating-system capabilities, corrupt state, abort, or bypass host handles. Composition capabilities constrain cooperative service routing; they are not a sandbox or an isolation boundary. Only fully trusted provider packages belong in this runtime.
+
+The v0 conformance tool is a deterministic, side-effect-free echo implementation. The product does not yet expose shell, filesystem, network, approval, or self-modification tools. Adding an effectful tool requires a separate authority and policy decision; transcript ordering alone cannot make arbitrary effects safe or reversible.
+
+## Durable state and replay
+
+The agent workspace contains model-visible prompts, responses, tool arguments, tool results, provider identities, AI-operation state, media artifacts, and terminal failures. It must be protected as user data. `AgentHost` takes an exclusive workspace lease, validates store identity and strict schema version 4 on open, repairs unfinished sessions and direct AI operations, and refuses every other version without migration. Closed transcripts are validated lazily when their session is read or replayed; open does not trust them, but it also does not load all terminal history. It identifies an empty or current-version database before enabling WAL or applying any other mutable SQLite setting. One bounded query checks sequence, row count, per-row length, and cumulative payload bytes before materializing durable event text in the same read snapshot.
+
+The runtime is explicitly Unix-only. Before creating product files it resolves the workspace through its nearest existing ancestor, then pins every writer and cold-reader path to that canonical root; later changes to a caller-supplied intermediate symlink cannot redirect accepted storage work. The resulting workspace must be owner-owned and owner-only, and the database is opened as an owner-only regular file without following a final symlink. Before any store configuration, the SQLite connection is checked against the leased inode and SQLite's actual open handle. Writer transactions repeat the actual-handle check before beginning, before commit, and after commit but before returning a receipt; cold reads check before and after replay. One `Arc`-owned lease is held by the writer and cloned into every accepted cold-read job. Each connection closes before its clone can release the lease, preventing another host from entering while accepted storage work remains. Non-Unix builds fail instead of silently degrading to a process-local lock.
+
+Replay reads the recorded outcome. It never repeats model calls or tool effects. A dispatch marker is committed before invocation, so recovery can distinguish definitely unstarted work from work whose outcome is unknown; neither category is automatically invoked after restart.
+
+`rsi-meta` owns its own composition database and lifecycle recovery. `rsi-agent` uses a separate SQLite database and does not couple the two products' transactions. A provider may therefore complete an effect before a result can be recorded; `OutcomeUnknown` preserves that uncertainty instead of claiming exactly-once execution.
+
+## Input and resource boundaries
+
+Caller identifiers and prompts, durable rows, provider envelopes, catalog schemas, tool arguments, and results are untrusted until their owning boundary validates syntax and limits. JSON schemas are closed, and provider-neutral messages reject duplicate fields, lossy numeric materialization, unknown versions, and unknown kinds. Tool arguments retain their raw model text in the audit log; values that would change through the schema engine's `f64` numeric view are rejected before dispatch, and a provider receives only the canonical semantic value that passed schema validation. The [architecture](architecture.md#bounds) owns exact limits.
+
+The coordinator bounds admitted and active sessions; each session task serializes its tool calls, enforces host-wide per-operation and provider-turn deadlines, and bounds transcript growth. Timeout closure is durable work and may outlive the provider deadline. One dedicated writer thread and at most four bounded blocking cold reads keep SQLite off asynchronous executor workers. A dropped caller future does not silently cancel accepted work. Transport errors and malformed provider behavior close the affected run rather than allowing partial history to become model-visible.
+
+Failure containment follows what can still be attributed safely. Corruption found while decoding one selected terminal transcript is returned as `CorruptSession` for that identifier, and read-only SQLite busy or locked errors remain retryable persistence failures; neither changes global health. Store identity or schema damage, nonlocal database failure, uncertain commit durability, and worker or task loss invalidate host-wide assumptions and poison the shared health latch until reopen.

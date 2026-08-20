@@ -27,4 +27,4 @@ Use the [echo example](../../examples/rsi-meta/echo/README.md) for a complete bu
 - [Configuration](docs/subsystems/configuration.md) defines composition, package, lock, and secret ownership.
 - [Security](docs/security.md), [development](docs/development.md), and [testing](docs/testing.md) own their respective product contracts.
 
-The v0 product stops at this platform boundary. A future agent product is intentionally layered above it, as described by the repository [architecture](../../docs/architecture.md).
+The v0 product stops at this platform boundary. The separate [`rsi-agent`](../rsi-agent/README.md) product is intentionally layered above it, as described by the repository [architecture](../../docs/architecture.md).

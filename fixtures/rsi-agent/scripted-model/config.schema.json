@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-agent.invalid/fixtures/scripted-model-config-v0.json",
+  "title": "Scripted model fixture configuration",
+  "type": "object",
+  "additionalProperties": false
+}

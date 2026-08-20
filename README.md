@@ -7,6 +7,8 @@ RSIversi is a pre-release monorepo for independently usable runtime products.
 | Product | Purpose | Documentation |
 |---|---|---|
 | `rsi-meta` | Trusted native plugin composition platform | [Product overview](crates/rsi-meta/README.md) |
+| `rsi-ai` | Five-capability provider-neutral AI SDK and native provider integration | [Product overview](crates/rsi-ai/README.md) |
+| `rsi-agent` | Durable, replayable agent-turn runtime over composed AI and tool services | [Product overview](crates/rsi-agent/README.md) |
 
 ## Repository map
 

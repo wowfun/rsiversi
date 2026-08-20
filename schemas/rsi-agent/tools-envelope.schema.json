@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsi-agent.invalid/schemas/tools-envelope-v0.json",
+  "title": "rsi-agent tools envelope v0",
+  "$comment": "This schema bounds closed shape, characters, and collections. Protocol decode additionally enforces aggregate encoded bytes, recursive JSON complexity, and lossless decimal-number materialization.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["protocol", "version", "request_id", "kind"],
+      "properties": {
+        "protocol": { "const": "rsi.agent.tools" },
+        "version": { "const": 0 },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "kind": { "const": "catalog_request" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["protocol", "version", "request_id", "kind", "tools"],
+      "properties": {
+        "protocol": { "const": "rsi.agent.tools" },
+        "version": { "const": 0 },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "kind": { "const": "catalog_response" },
+        "tools": { "$ref": "#/$defs/catalog" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["protocol", "version", "request_id", "kind", "call_id", "name", "arguments"],
+      "properties": {
+        "protocol": { "const": "rsi.agent.tools" },
+        "version": { "const": 0 },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "kind": { "const": "invoke_request" },
+        "call_id": { "$ref": "#/$defs/identifier" },
+        "name": { "$ref": "#/$defs/toolName" },
+        "arguments": { "type": "string", "minLength": 1, "maxLength": 65536, "pattern": "^[^\\u0000\\u007F]*$" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["protocol", "version", "request_id", "kind", "call_id", "result"],
+      "properties": {
+        "protocol": { "const": "rsi.agent.tools" },
+        "version": { "const": 0 },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "kind": { "const": "invoke_response" },
+        "call_id": { "$ref": "#/$defs/identifier" },
+        "result": { "$ref": "#/$defs/toolResult" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["protocol", "version", "request_id", "kind", "error"],
+      "properties": {
+        "protocol": { "const": "rsi.agent.tools" },
+        "version": { "const": 0 },
+        "request_id": { "$ref": "#/$defs/identifier" },
+        "kind": { "const": "error" },
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[!-~]+$"
+    },
+    "toolName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "errorCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\u007F]*$" }
+      },
+      "additionalProperties": false
+    },
+    "toolResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "ok" },
+            "value": {}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["status", "code", "message"],
+          "properties": {
+            "status": { "const": "error" },
+            "code": { "$ref": "#/$defs/errorCode" },
+            "message": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\u007F]*$" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "toolDefinition": {
+      "type": "object",
+      "required": ["name", "description", "input_schema"],
+      "properties": {
+        "name": { "$ref": "#/$defs/toolName" },
+        "description": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\u007F]*$" },
+        "input_schema": { "type": ["object", "boolean"] }
+      },
+      "additionalProperties": false
+    },
+    "catalog": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/toolDefinition" }
+    }
+  }
+}
