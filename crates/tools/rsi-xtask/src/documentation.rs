@@ -495,7 +495,10 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
             Component::Normal(second),
             Component::Normal(_),
         ] if *first == OsStr::new("crates")
-            && (*second == OsStr::new("rsi-meta") || *second == OsStr::new("tools")) =>
+            && (*second == OsStr::new("rsi-agent")
+                || *second == OsStr::new("rsi-ai")
+                || *second == OsStr::new("rsi-meta")
+                || *second == OsStr::new("tools")) =>
         {
             true
         }
@@ -504,7 +507,9 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
             Component::Normal(second),
             Component::Normal(_),
         ] if (*first == OsStr::new("plugins") || *first == OsStr::new("fixtures"))
-            && *second == OsStr::new("rsi-meta") =>
+            && (*second == OsStr::new("rsi-agent")
+                || *second == OsStr::new("rsi-ai")
+                || *second == OsStr::new("rsi-meta")) =>
         {
             true
         }
@@ -1018,8 +1023,9 @@ fn display_path(repository: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentInstructionBudgetOverride, Diagnostic, github_slug, heading_anchors, parse_markdown,
-        resolve_relative, validate_agent_instruction_budgets_with_overrides,
+        AgentInstructionBudgetOverride, Diagnostic, github_slug, heading_anchors,
+        is_recognized_package_path, parse_markdown, resolve_relative,
+        validate_agent_instruction_budgets_with_overrides,
     };
     use std::fs;
     use std::path::Path;
@@ -1079,6 +1085,35 @@ mod tests {
         let document = parse_markdown("Title\n-----\n\n```md\n## Not a heading\n```\n");
         assert_eq!(document.headings.len(), 1);
         assert_eq!(document.headings[0].title, "Title");
+    }
+
+    #[test]
+    fn rsi_agent_packages_use_the_product_and_fixture_documentation_classes() {
+        let repository = Path::new("/repo");
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/crates/rsi-agent/core")
+        ));
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/crates/rsi-agent/protocol")
+        ));
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/fixtures/rsi-agent/scripted-model")
+        ));
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/crates/rsi-ai/core")
+        ));
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/plugins/rsi-ai/openai")
+        ));
+        assert!(!is_recognized_package_path(
+            repository,
+            Path::new("/repo/plugins/unowned/sample")
+        ));
     }
 
     #[test]

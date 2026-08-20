@@ -2,25 +2,14 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+
+use crate::cargo_step::{self, CargoStep, NativeTarget as HostTarget};
+use crate::repository_root;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     Conformance,
     ReleaseDemo,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostTarget {
-    LinuxX86_64,
-    MacOsAarch64,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct CargoStep {
-    label: String,
-    arguments: Vec<OsString>,
-    environment: Vec<(OsString, OsString)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -34,17 +23,8 @@ enum Step {
 }
 
 pub fn run(repository: &Path, command: Command) -> Result<(), String> {
-    if !repository.join("Cargo.toml").is_file()
-        || !repository
-            .join("crates/tools/rsi-xtask/Cargo.toml")
-            .is_file()
-    {
-        return Err(format!(
-            "rsi-meta {} must run from the repository root",
-            command.name()
-        ));
-    }
-    let target = detect_host_target(repository)?;
+    repository_root::require(repository, &format!("rsi-meta {}", command.name()))?;
+    let target = cargo_step::detect_native_target(repository)?;
     let steps = match command {
         Command::Conformance => {
             let workspaces = discover_standalone_workspaces(repository)?;
@@ -98,50 +78,6 @@ fn discover_plugin_packages(repository: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
-fn parse_host_target(version: &str) -> Result<HostTarget, String> {
-    let target = version
-        .lines()
-        .find_map(|line| line.strip_prefix("host:").map(str::trim))
-        .ok_or_else(|| "rustc -vV did not report a host target".to_owned())?;
-    match target {
-        "x86_64-unknown-linux-gnu" => Ok(HostTarget::LinuxX86_64),
-        "aarch64-apple-darwin" => Ok(HostTarget::MacOsAarch64),
-        _ => Err(format!(
-            "rsi-meta conformance is not verified for target {target}"
-        )),
-    }
-}
-
-fn detect_host_target(repository: &Path) -> Result<HostTarget, String> {
-    let output = ProcessCommand::new("rustc")
-        .arg("-vV")
-        .current_dir(repository)
-        .output()
-        .map_err(|error| format!("could not run `rustc -vV`: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("`rustc -vV` failed with {}", output.status));
-    }
-    let version = String::from_utf8(output.stdout)
-        .map_err(|error| format!("`rustc -vV` returned non-UTF-8 output: {error}"))?;
-    parse_host_target(&version)
-}
-
-impl HostTarget {
-    const fn triple(self) -> &'static str {
-        match self {
-            Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
-            Self::MacOsAarch64 => "aarch64-apple-darwin",
-        }
-    }
-
-    const fn dynamic_library_extension(self) -> &'static str {
-        match self {
-            Self::LinuxX86_64 => "so",
-            Self::MacOsAarch64 => "dylib",
-        }
-    }
-}
-
 fn lifecycle_probe_artifact(repository: &Path, target: HostTarget) -> PathBuf {
     repository
         .join("fixtures/rsi-meta/lifecycle-probe/target")
@@ -163,7 +99,7 @@ fn conformance_plan(
     // Integration tests load these exact native outputs. Build them before
     // test execution so a test process never recursively invokes Cargo.
     for package in plugin_packages {
-        let relative = display_relative(repository, package);
+        let relative = cargo_step::display_relative(repository, package);
         steps.push(cargo_step(
             format!("build release plugin {relative}"),
             [
@@ -183,7 +119,7 @@ fn conformance_plan(
         let package = manifest
             .parent()
             .expect("workspace manifests have a package directory");
-        let relative = display_relative(repository, package);
+        let relative = cargo_step::display_relative(repository, package);
         steps.push(cargo_step(
             format!("format {relative}"),
             [
@@ -336,7 +272,7 @@ fn release_demo_plan(repository: &Path, target: HostTarget) -> Vec<Step> {
 }
 
 fn cargo_step(label: impl Into<String>, arguments: impl IntoIterator<Item = OsString>) -> Step {
-    cargo_step_with_env(label, arguments, [])
+    Step::Cargo(CargoStep::new(label, arguments))
 }
 
 fn cargo_step_with_env(
@@ -344,18 +280,7 @@ fn cargo_step_with_env(
     arguments: impl IntoIterator<Item = OsString>,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Step {
-    Step::Cargo(CargoStep {
-        label: label.into(),
-        arguments: arguments.into_iter().collect(),
-        environment: environment.into_iter().collect(),
-    })
-}
-
-fn display_relative(repository: &Path, path: &Path) -> String {
-    path.strip_prefix(repository)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    Step::Cargo(CargoStep::with_env(label, arguments, environment))
 }
 
 impl Step {
@@ -371,17 +296,7 @@ fn execute(repository: &Path, steps: &[Step]) -> Result<(), String> {
     for (index, step) in steps.iter().enumerate() {
         eprintln!("[{}/{}] {}", index + 1, steps.len(), step.label());
         match step {
-            Step::Cargo(step) => {
-                let status = ProcessCommand::new("cargo")
-                    .args(&step.arguments)
-                    .envs(step.environment.iter().cloned())
-                    .current_dir(repository)
-                    .status()
-                    .map_err(|error| format!("{}: could not run cargo: {error}", step.label))?;
-                if !status.success() {
-                    return Err(format!("{} failed with {status}", step.label));
-                }
-            }
+            Step::Cargo(step) => step.run(repository)?,
             Step::VerifyMarkers {
                 default_binary,
                 failpoint_binary,
@@ -504,15 +419,18 @@ mod tests {
 
     #[test]
     fn rustc_host_selects_the_supported_artifact_contract() {
-        let linux = parse_host_target("rustc 1.97.0\nhost: x86_64-unknown-linux-gnu\n").unwrap();
+        let linux =
+            cargo_step::parse_native_target("rustc 1.97.0\nhost: x86_64-unknown-linux-gnu\n")
+                .unwrap();
         assert_eq!(linux.triple(), "x86_64-unknown-linux-gnu");
         assert_eq!(linux.dynamic_library_extension(), "so");
 
-        let mac = parse_host_target("host: aarch64-apple-darwin\n").unwrap();
+        let mac = cargo_step::parse_native_target("host: aarch64-apple-darwin\n").unwrap();
         assert_eq!(mac.triple(), "aarch64-apple-darwin");
         assert_eq!(mac.dynamic_library_extension(), "dylib");
 
-        let unsupported = parse_host_target("host: x86_64-pc-windows-msvc\n").unwrap_err();
+        let unsupported =
+            cargo_step::parse_native_target("host: x86_64-pc-windows-msvc\n").unwrap_err();
         assert!(unsupported.contains("not verified"));
     }
 
