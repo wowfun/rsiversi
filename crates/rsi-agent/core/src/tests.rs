@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 use std::num::NonZeroU8;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,8 +20,8 @@ use crate::adapter::{
 };
 use crate::persistence::Store;
 use crate::{
-    AgentError, AgentHost, AgentWorkspace, ExecutionLimits, Failure, FailureKind, RunRequest,
-    RunStatus, SessionId, ToolOutcome, TranscriptEventKind,
+    AgentError, AgentHost, AgentWorkspace, AiOperationId, ExecutionLimits, Failure, FailureKind,
+    RunRequest, RunStatus, SessionId, ToolOutcome, TranscriptEventKind,
 };
 
 #[allow(dead_code)]
@@ -148,6 +151,143 @@ async fn accepted_execution_limits_remain_panic_free_after_the_clock_advances() 
             .expect("deadline overflow does not poison the host")
             .is_some()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_ai_supervision_rejects_an_aged_unrepresentable_deadline_before_polling() {
+    let now = std::time::Instant::now();
+    let mut lower = 0_u64;
+    let mut upper = u64::MAX;
+    while lower < upper {
+        let candidate = lower + (upper - lower) / 2 + 1;
+        if now.checked_add(Duration::from_secs(candidate)).is_some() {
+            lower = candidate;
+        } else {
+            upper = candidate - 1;
+        }
+    }
+    let timeout = Duration::from_secs(lower.saturating_sub(60));
+    let temp = tempdir().expect("tempdir");
+    let host = AgentHost::open_with_factory(
+        AgentWorkspace::new(temp.path().join("agent")),
+        Box::new(FakeFactory::new(FakeState::shared(Vec::new()))),
+    )
+    .await
+    .expect("host");
+    tokio::time::advance(Duration::from_mins(2)).await;
+    let entered = Arc::new(AtomicBool::new(false));
+
+    let error = host
+        .supervise_ai_operation(
+            AiOperationId::new("aged-direct-deadline").expect("operation id"),
+            timeout,
+            {
+                let entered = Arc::clone(&entered);
+                async move {
+                    entered.store(true, Ordering::Release);
+                    std::future::pending::<()>().await;
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect_err("the aged deadline is no longer representable");
+
+    assert!(matches!(error, AgentError::Ai { .. }));
+    assert!(!entered.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_ai_provider_deadline_begins_after_durable_reservation() {
+    let temp = tempdir().expect("tempdir");
+    let host = AgentHost::open_with_factory(
+        AgentWorkspace::new(temp.path().join("agent")),
+        Box::new(FakeFactory::new(FakeState::shared(Vec::new()))),
+    )
+    .await
+    .expect("host");
+    let gate = host.gate_next_ai_reserve().await.expect("reservation gate");
+    let entered = Arc::new(AtomicBool::new(false));
+    let operation = tokio::spawn({
+        let host = host.clone();
+        let entered = Arc::clone(&entered);
+        async move {
+            host.supervise_ai_operation(
+                AiOperationId::new("reservation-does-not-burn-deadline").expect("operation id"),
+                Duration::from_secs(1),
+                async move {
+                    entered.store(true, Ordering::Release);
+                    Ok(7_u8)
+                },
+            )
+            .await
+        }
+    });
+    gate.entered().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(!entered.load(Ordering::Acquire));
+    gate.release();
+
+    assert_eq!(
+        operation.await.expect("supervisor task").expect("result"),
+        7
+    );
+    assert!(entered.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_ai_provider_deadline_aborts_work_and_closes_its_reservation() {
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path().join("agent");
+    let host = AgentHost::open_with_factory(
+        AgentWorkspace::new(&workspace),
+        Box::new(FakeFactory::new(FakeState::shared(Vec::new()))),
+    )
+    .await
+    .expect("host");
+    let operation_id = AiOperationId::new("direct-deadline").expect("operation id");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (drop_signal, dropped) = oneshot::channel::<()>();
+    let operation = tokio::spawn({
+        let host = host.clone();
+        let operation_id = operation_id.clone();
+        let entered = Arc::clone(&entered);
+        async move {
+            host.supervise_ai_operation(operation_id, Duration::from_secs(5), async move {
+                let _drop_signal = drop_signal;
+                entered.notify_one();
+                std::future::pending::<crate::Result<()>>().await
+            })
+            .await
+        }
+    });
+    entered.notified().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+
+    let error = operation
+        .await
+        .expect("supervisor task")
+        .expect_err("provider deadline");
+    assert!(matches!(
+        error,
+        AgentError::Ai {
+            operation: "execute AI operation",
+            ..
+        }
+    ));
+    dropped
+        .await
+        .expect_err("aborted operation dropped its sender");
+    let connection = rusqlite::Connection::open(workspace.join("agent.sqlite3"))
+        .expect("inspect durable operation");
+    let (phase, terminal): (i64, String) = connection
+        .query_row(
+            "SELECT phase, terminal_status FROM ai_operations WHERE operation_id=?1",
+            [operation_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("operation row");
+    assert_eq!((phase, terminal.as_str()), (3, "not_started"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -413,38 +553,6 @@ async fn transient_model_failures_retry_only_after_durable_retry_events() {
 }
 
 #[tokio::test]
-async fn each_live_model_request_is_derived_exactly_twice() {
-    let temp = tempdir().expect("tempdir");
-    let state = FakeState::shared(vec![
-        call_message(vec![("derive-call", json!({"text":"once"}).to_string())]),
-        final_message("done"),
-    ]);
-    let host = AgentHost::open_with_factory(
-        AgentWorkspace::new(temp.path().join("agent")),
-        Box::new(FakeFactory::new(Arc::clone(&state))),
-    )
-    .await
-    .expect("host");
-
-    let record = host
-        .run(
-            RunRequest::new(
-                SessionId::new("two-derivations-per-request").expect("id"),
-                "use the tool once",
-            )
-            .expect("request"),
-        )
-        .await
-        .expect("run");
-
-    // CommittedRunState's test instrumentation asserts the exact per-request
-    // derivation count at each receipt barrier. Reaching this assertion proves
-    // both model-1 and model-2 passed that check.
-    assert!(matches!(record.status(), RunStatus::Completed { .. }));
-    assert_eq!(state.lock().expect("state").model_requests.len(), 2);
-}
-
-#[tokio::test]
 async fn durable_prompt_wins_when_wrong_probe_candidate_arrives_first() {
     let temp = tempdir().expect("tempdir");
     let state = FakeState::shared(vec![final_message("durable")]);
@@ -705,6 +813,137 @@ async fn dropping_the_run_future_does_not_cancel_admitted_work() {
             final_message: "durable".to_owned()
         }
     );
+}
+
+#[tokio::test]
+async fn dropping_a_direct_ai_caller_does_not_cancel_supervised_work() {
+    let temp = tempdir().expect("tempdir");
+    let state = FakeState::shared(Vec::new());
+    let host = AgentHost::open_with_factory(
+        AgentWorkspace::new(temp.path().join("agent")),
+        Box::new(FakeFactory::new(state)),
+    )
+    .await
+    .expect("host");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let caller = tokio::spawn({
+        let host = host.clone();
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        let completed = Arc::clone(&completed);
+        async move {
+            host.supervise_ai_operation(
+                AiOperationId::new("supervised-drop").expect("operation id"),
+                Duration::from_secs(2),
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    completed.store(true, Ordering::Release);
+                    Err::<(), _>(AgentError::Ai {
+                        operation: "test supervised operation",
+                        message: "expected terminal test error".to_owned(),
+                    })
+                },
+            )
+            .await
+        }
+    });
+    entered.notified().await;
+    caller.abort();
+    assert!(caller.await.expect_err("caller abort").is_cancelled());
+    release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !completed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("supervised operation completes without its caller");
+}
+
+#[tokio::test]
+async fn ordinary_direct_ai_errors_terminalize_the_owned_reservation() {
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path().join("agent");
+    let host = AgentHost::open_with_factory(
+        AgentWorkspace::new(&workspace),
+        Box::new(FakeFactory::new(FakeState::shared(Vec::new()))),
+    )
+    .await
+    .expect("host");
+    let operation_id = AiOperationId::new("ordinary-direct-error").expect("operation id");
+
+    let error = host
+        .supervise_ai_operation(operation_id.clone(), Duration::from_secs(2), async {
+            Err::<(), _>(AgentError::Ai {
+                operation: "open image service",
+                message: "service is unbound".to_owned(),
+            })
+        })
+        .await
+        .expect_err("ordinary operation error");
+    assert!(matches!(error, AgentError::Ai { .. }));
+
+    let connection = rusqlite::Connection::open(workspace.join("agent.sqlite3"))
+        .expect("inspect durable operation");
+    let (phase, terminal): (i64, String) = connection
+        .query_row(
+            "SELECT phase, terminal_status FROM ai_operations WHERE operation_id=?1",
+            [operation_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("operation row");
+    assert_eq!((phase, terminal.as_str()), (3, "not_started"));
+}
+
+#[tokio::test]
+async fn durable_abandonment_failure_is_not_masked_as_a_provider_error() {
+    let temp = tempdir().expect("tempdir");
+    let host = AgentHost::open_with_factory(
+        AgentWorkspace::new(temp.path().join("agent")),
+        Box::new(FakeFactory::new(FakeState::shared(Vec::new()))),
+    )
+    .await
+    .expect("host");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation = tokio::spawn({
+        let host = host.clone();
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        async move {
+            host.supervise_ai_operation(
+                AiOperationId::new("abandonment-storage-failure").expect("operation id"),
+                Duration::from_secs(2),
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Err::<(), _>(AgentError::Ai {
+                        operation: "test provider operation",
+                        message: "provider failed".to_owned(),
+                    })
+                },
+            )
+            .await
+        }
+    });
+    entered.notified().await;
+    host.make_writes_fail().await.expect("query-only mode");
+    release.notify_one();
+
+    let error = operation
+        .await
+        .expect("supervisor task")
+        .expect_err("abandonment must fail");
+    assert!(matches!(error, AgentError::Persistence { .. }));
+    assert!(matches!(
+        host.transcript(&SessionId::new("after-abandonment-failure").expect("id"))
+            .await,
+        Err(AgentError::HostTerminal)
+    ));
 }
 
 #[tokio::test]

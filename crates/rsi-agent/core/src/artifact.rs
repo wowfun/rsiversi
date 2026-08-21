@@ -13,9 +13,13 @@ use std::{
 use crate::{AgentError, Result, digest::sha256_hex, workspace::WorkspaceLease};
 use rsi_ai_protocol::{MediaDescriptor, MediaKind};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
 const MAX_ARTIFACTS: usize = 4_096;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const ARTIFACT_IO_CONCURRENCY: usize = 4;
+const ZERO_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 /// Durable content-addressed media identity. The locator never leaves the Agent workspace.
@@ -25,11 +29,35 @@ pub struct ArtifactRef {
     descriptor: MediaDescriptor,
 }
 
+pub(crate) struct VerifiedArtifact {
+    descriptor: MediaDescriptor,
+    bytes: Vec<u8>,
+}
+
+impl VerifiedArtifact {
+    pub(crate) fn new(descriptor: MediaDescriptor, bytes: Vec<u8>) -> Result<Self> {
+        descriptor.validate().map_err(|error| AgentError::Ai {
+            operation: "verify media",
+            message: error.to_string(),
+        })?;
+        if u64::try_from(bytes.len()).ok() != Some(descriptor.byte_len())
+            || sha256_hex(&bytes) != descriptor.sha256()
+        {
+            return Err(AgentError::Ai {
+                operation: "verify media",
+                message: "media does not match its declared descriptor".to_owned(),
+            });
+        }
+        Ok(Self { descriptor, bytes })
+    }
+}
+
 impl ArtifactRef {
     pub const fn descriptor(&self) -> &MediaDescriptor {
         &self.descriptor
     }
 
+    /// Returns the artifact's lowercase SHA-256 content identifier.
     pub fn id(&self) -> &str {
         self.descriptor.sha256()
     }
@@ -40,6 +68,7 @@ impl ArtifactRef {
 pub struct ArtifactStore {
     root: Arc<PathBuf>,
     usage: Arc<SharedArtifactUsage>,
+    io_slots: Arc<Semaphore>,
     _lease: Arc<WorkspaceLease>,
 }
 
@@ -65,7 +94,17 @@ struct ArtifactReservation {
 }
 
 impl ArtifactStore {
-    pub(crate) fn open(workspace_root: &Path, lease: Arc<WorkspaceLease>) -> Result<Self> {
+    pub(crate) async fn open(workspace_root: &Path, lease: Arc<WorkspaceLease>) -> Result<Self> {
+        let workspace_root = workspace_root.to_owned();
+        tokio::task::spawn_blocking(move || Self::open_blocking(&workspace_root, lease))
+            .await
+            .map_err(|error| AgentError::Ai {
+                operation: "join artifact store open",
+                message: error.to_string(),
+            })?
+    }
+
+    fn open_blocking(workspace_root: &Path, lease: Arc<WorkspaceLease>) -> Result<Self> {
         let root = workspace_root.join("artifacts");
         let mut builder = DirBuilder::new();
         #[cfg(unix)]
@@ -85,8 +124,7 @@ impl ArtifactStore {
             })
             .map_err(|error| AgentError::io("create artifact store", error))?;
         validate_root(&root)?;
-        clean_temporary_files(&root)?;
-        let (count, bytes) = store_usage(&root)?;
+        let (count, bytes) = scan_store(&root)?;
         Ok(Self {
             root: Arc::new(root),
             usage: Arc::new(SharedArtifactUsage {
@@ -99,6 +137,7 @@ impl ArtifactStore {
                 }),
                 changed: Condvar::new(),
             }),
+            io_slots: Arc::new(Semaphore::new(ARTIFACT_IO_CONCURRENCY)),
             _lease: lease,
         })
     }
@@ -116,12 +155,43 @@ impl ArtifactStore {
     ) -> Result<ArtifactRef> {
         let store = self.clone();
         let mime_type = mime_type.into();
-        tokio::task::spawn_blocking(move || store.ingest_blocking(kind, mime_type, &bytes))
-            .await
-            .map_err(|error| AgentError::Ai {
-                operation: "join artifact commit",
-                message: error.to_string(),
-            })?
+        MediaDescriptor::new(
+            kind,
+            mime_type.clone(),
+            u64::try_from(bytes.len()).map_err(|_| AgentError::Ai {
+                operation: "validate artifact",
+                message: "artifact length exceeds u64".to_owned(),
+            })?,
+            ZERO_DIGEST,
+        )
+        .map_err(|error| AgentError::Ai {
+            operation: "validate artifact",
+            message: error.to_string(),
+        })?;
+        let slot = self.acquire_io_slot().await;
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            store.ingest_blocking(kind, mime_type, &bytes)
+        })
+        .await
+        .map_err(|error| AgentError::Ai {
+            operation: "join artifact commit",
+            message: error.to_string(),
+        })?
+    }
+
+    pub(crate) async fn ingest_verified(&self, artifact: VerifiedArtifact) -> Result<ArtifactRef> {
+        let slot = self.acquire_io_slot().await;
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            store.ingest_verified_blocking(artifact.descriptor, &artifact.bytes)
+        })
+        .await
+        .map_err(|error| AgentError::Ai {
+            operation: "join verified artifact commit",
+            message: error.to_string(),
+        })?
     }
 
     /// Resolves and re-verifies a durable artifact without exposing a filesystem locator.
@@ -132,12 +202,16 @@ impl ArtifactStore {
     pub async fn read(&self, artifact: &ArtifactRef) -> Result<Vec<u8>> {
         let store = self.clone();
         let artifact = artifact.clone();
-        tokio::task::spawn_blocking(move || store.read_blocking(&artifact))
-            .await
-            .map_err(|error| AgentError::Ai {
-                operation: "join artifact read",
-                message: error.to_string(),
-            })?
+        let slot = self.acquire_io_slot().await;
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            store.read_blocking(&artifact)
+        })
+        .await
+        .map_err(|error| AgentError::Ai {
+            operation: "join artifact read",
+            message: error.to_string(),
+        })?
     }
 
     pub(crate) async fn read_descriptor(&self, descriptor: &MediaDescriptor) -> Result<Vec<u8>> {
@@ -147,13 +221,19 @@ impl ArtifactStore {
         .await
     }
 
+    async fn acquire_io_slot(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.io_slots)
+            .acquire_owned()
+            .await
+            .expect("the private artifact I/O semaphore is never closed")
+    }
+
     fn ingest_blocking(
         &self,
         kind: MediaKind,
         mime_type: String,
         bytes: &[u8],
     ) -> Result<ArtifactRef> {
-        validate_root(&self.root)?;
         let digest = sha256_hex(bytes);
         let descriptor = MediaDescriptor::new(
             kind,
@@ -168,6 +248,16 @@ impl ArtifactStore {
             operation: "validate artifact",
             message: error.to_string(),
         })?;
+        self.ingest_verified_blocking(descriptor, bytes)
+    }
+
+    fn ingest_verified_blocking(
+        &self,
+        descriptor: MediaDescriptor,
+        bytes: &[u8],
+    ) -> Result<ArtifactRef> {
+        validate_root(&self.root)?;
+        let digest = descriptor.sha256().to_owned();
         let destination = self.root.join(&digest);
         let Some(mut reservation) = self.reserve(&digest, descriptor.byte_len(), &destination)?
         else {
@@ -365,13 +455,24 @@ fn lock_error() -> AgentError {
     }
 }
 
-fn clean_temporary_files(root: &Path) -> Result<()> {
+fn scan_store(root: &Path) -> Result<(usize, u64)> {
+    let mut count = 0_usize;
+    let mut temporary_count = 0_usize;
+    let mut total = 0_u64;
     for entry in
         std::fs::read_dir(root).map_err(|error| AgentError::io("scan artifact store", error))?
     {
         let entry = entry.map_err(|error| AgentError::io("scan artifact entry", error))?;
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with(".tmp-") {
+        let name = name.to_string_lossy();
+        if name.starts_with(".tmp-") {
+            temporary_count = temporary_count.saturating_add(1);
+            if temporary_count > MAX_ARTIFACTS {
+                return Err(AgentError::Ai {
+                    operation: "scan artifact store",
+                    message: "artifact store contains too many temporary entries".to_owned(),
+                });
+            }
             let metadata = std::fs::symlink_metadata(entry.path())
                 .map_err(|error| AgentError::io("inspect artifact temporary file", error))?;
             if !metadata.file_type().is_file() {
@@ -382,9 +483,42 @@ fn clean_temporary_files(root: &Path) -> Result<()> {
             }
             std::fs::remove_file(entry.path())
                 .map_err(|error| AgentError::io("clean artifact temporary file", error))?;
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|error| AgentError::io("inspect artifact entry", error))?;
+        if !metadata.file_type().is_file()
+            || name.len() != 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(AgentError::Ai {
+                operation: "scan artifact store",
+                message: "artifact store contains an invalid entry".to_owned(),
+            });
+        }
+        count = count.saturating_add(1);
+        if count > MAX_ARTIFACTS {
+            return Err(AgentError::Ai {
+                operation: "scan artifact store",
+                message: "artifact store count exceeds its quota".to_owned(),
+            });
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| AgentError::Ai {
+                operation: "scan artifact store",
+                message: "artifact store byte count overflowed".to_owned(),
+            })?;
+        if total > MAX_ARTIFACT_BYTES {
+            return Err(AgentError::Ai {
+                operation: "scan artifact store",
+                message: "artifact store bytes exceed its quota".to_owned(),
+            });
         }
     }
-    Ok(())
+    Ok((count, total))
 }
 
 impl fmt::Debug for ArtifactStore {
@@ -419,42 +553,6 @@ fn validate_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn store_usage(root: &Path) -> Result<(usize, u64)> {
-    let mut count = 0_usize;
-    let mut total = 0_u64;
-    for entry in
-        std::fs::read_dir(root).map_err(|error| AgentError::io("scan artifact store", error))?
-    {
-        let entry = entry.map_err(|error| AgentError::io("scan artifact entry", error))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(".tmp-") {
-            continue;
-        }
-        let metadata = std::fs::symlink_metadata(entry.path())
-            .map_err(|error| AgentError::io("inspect artifact entry", error))?;
-        if !metadata.file_type().is_file()
-            || name.len() != 64
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(AgentError::Ai {
-                operation: "scan artifact store",
-                message: "artifact store contains an invalid entry".to_owned(),
-            });
-        }
-        count = count.saturating_add(1);
-        total = total
-            .checked_add(metadata.len())
-            .ok_or_else(|| AgentError::Ai {
-                operation: "scan artifact store",
-                message: "artifact store byte count overflowed".to_owned(),
-            })?;
-    }
-    Ok((count, total))
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -462,13 +560,58 @@ mod tests {
     use super::*;
     use crate::AgentWorkspace;
 
+    #[test]
+    fn verified_artifact_rejects_descriptor_length_and_digest_mismatches() {
+        let bytes = b"verified media".to_vec();
+        let descriptor = MediaDescriptor::new(
+            MediaKind::Audio,
+            "audio/wav",
+            u64::try_from(bytes.len()).expect("length"),
+            sha256_hex(&bytes),
+        )
+        .expect("descriptor");
+        VerifiedArtifact::new(descriptor.clone(), bytes.clone()).expect("matching artifact");
+
+        let wrong_length = MediaDescriptor::new(
+            MediaKind::Audio,
+            "audio/wav",
+            descriptor.byte_len() + 1,
+            descriptor.sha256(),
+        )
+        .expect("bounded descriptor");
+        assert!(matches!(
+            VerifiedArtifact::new(wrong_length, bytes.clone()),
+            Err(AgentError::Ai {
+                operation: "verify media",
+                ..
+            })
+        ));
+
+        let wrong_digest = MediaDescriptor::new(
+            MediaKind::Audio,
+            "audio/wav",
+            descriptor.byte_len(),
+            ZERO_DIGEST,
+        )
+        .expect("bounded descriptor");
+        assert!(matches!(
+            VerifiedArtifact::new(wrong_digest, bytes),
+            Err(AgentError::Ai {
+                operation: "verify media",
+                ..
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn commits_deduplicates_and_reverifies_artifacts() {
         let temp = tempdir().expect("temporary workspace");
         let root = temp.path().join("agent");
         let workspace = AgentWorkspace::new(&root);
         let lease = Arc::new(WorkspaceLease::acquire(&workspace).expect("lease"));
-        let store = ArtifactStore::open(&root, lease).expect("artifact store");
+        let store = ArtifactStore::open(&root, lease)
+            .await
+            .expect("artifact store");
         let first = store
             .ingest(MediaKind::Image, "image/png", b"png bytes".to_vec())
             .await
@@ -490,7 +633,9 @@ mod tests {
         let root = temp.path().join("agent");
         let workspace = AgentWorkspace::new(&root);
         let lease = Arc::new(WorkspaceLease::acquire(&workspace).expect("lease"));
-        let store = ArtifactStore::open(&root, lease).expect("artifact store");
+        let store = ArtifactStore::open(&root, lease)
+            .await
+            .expect("artifact store");
         let first_store = store.clone();
         let second_store = store.clone();
         let bytes = vec![b'x'; 2 * 1024 * 1024];
@@ -513,7 +658,9 @@ mod tests {
         let root = temp.path().join("agent");
         let workspace = AgentWorkspace::new(&root);
         let lease = Arc::new(WorkspaceLease::acquire(&workspace).expect("lease"));
-        let store = ArtifactStore::open(&root, lease).expect("artifact store");
+        let store = ArtifactStore::open(&root, lease)
+            .await
+            .expect("artifact store");
         let error = store
             .ingest(MediaKind::Audio, "image/png", b"wrong kind".to_vec())
             .await
@@ -521,13 +668,42 @@ mod tests {
         assert!(matches!(error, AgentError::Ai { .. }));
     }
 
-    #[test]
-    fn cloned_artifact_store_keeps_the_workspace_lease() {
+    #[tokio::test]
+    async fn opening_an_over_quota_artifact_directory_fails_fast() {
         let temp = tempdir().expect("temporary workspace");
         let root = temp.path().join("agent");
         let workspace = AgentWorkspace::new(&root);
         let lease = Arc::new(WorkspaceLease::acquire(&workspace).expect("lease"));
-        let store = ArtifactStore::open(&root, Arc::clone(&lease)).expect("artifact store");
+        let artifacts = root.join("artifacts");
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&artifacts).expect("artifact directory");
+        for index in 0..=MAX_ARTIFACTS {
+            std::fs::write(artifacts.join(format!("{index:064x}")), []).expect("artifact fixture");
+        }
+
+        assert!(matches!(
+            ArtifactStore::open(&root, lease).await,
+            Err(AgentError::Ai {
+                operation: "scan artifact store",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cloned_artifact_store_keeps_the_workspace_lease() {
+        let temp = tempdir().expect("temporary workspace");
+        let root = temp.path().join("agent");
+        let workspace = AgentWorkspace::new(&root);
+        let lease = Arc::new(WorkspaceLease::acquire(&workspace).expect("lease"));
+        let store = ArtifactStore::open(&root, Arc::clone(&lease))
+            .await
+            .expect("artifact store");
         let clone = store.clone();
         drop(lease);
         drop(store);

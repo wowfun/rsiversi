@@ -1055,6 +1055,22 @@ fn validate_context(
     prepared: Option<BTreeMap<String, PreparedTool>>,
     trust: PayloadTrust,
 ) -> Result<BTreeMap<String, PreparedTool>> {
+    validate_context_versions(
+        context,
+        prepared,
+        trust,
+        rsi_ai_meta::AiService::Language.version(),
+        rsi_agent_protocol::WIRE_VERSION,
+    )
+}
+
+fn validate_context_versions(
+    context: &ContextSnapshot,
+    prepared: Option<BTreeMap<String, PreparedTool>>,
+    trust: PayloadTrust,
+    model_protocol_version: u32,
+    tools_protocol_version: u32,
+) -> Result<BTreeMap<String, PreparedTool>> {
     if context.system_prompt.is_empty()
         || context.system_prompt.chars().count() > crate::MAX_SYSTEM_PROMPT_CHARS
         || context
@@ -1064,8 +1080,8 @@ fn validate_context(
         || !is_wire_identifier(&context.model_provider)
         || !is_wire_identifier(&context.model)
         || !is_wire_identifier(&context.tools_provider)
-        || context.model_protocol_version != rsi_agent_protocol::WIRE_VERSION
-        || context.tools_protocol_version != rsi_agent_protocol::WIRE_VERSION
+        || context.model_protocol_version != model_protocol_version
+        || context.tools_protocol_version != tools_protocol_version
     {
         return Err(corrupt(
             "context snapshot has invalid identity or system prompt",
@@ -1189,6 +1205,38 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn model_and_tool_protocol_versions_evolve_independently() {
+        let context = ContextSnapshot {
+            system_prompt: "system".to_owned(),
+            model: "model".to_owned(),
+            model_provider: "provider".to_owned(),
+            model_protocol_version: 7,
+            tools_provider: "tools".to_owned(),
+            tools_protocol_version: 0,
+            tools: Vec::new(),
+        };
+
+        validate_context_versions(
+            &context,
+            Some(BTreeMap::new()),
+            PayloadTrust::ValidatedLive,
+            7,
+            0,
+        )
+        .expect("one service version can advance without changing the other");
+        assert!(
+            validate_context_versions(
+                &context,
+                Some(BTreeMap::new()),
+                PayloadTrust::ValidatedLive,
+                0,
+                0,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn oversized_projection_releases_retained_model_messages() {

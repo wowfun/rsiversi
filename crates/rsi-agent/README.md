@@ -23,7 +23,7 @@ SQLite, request derivation, stream adapters, recovery, admission coordination, a
 
 `OpenOptions` configures the nonzero concurrent-session limit and a host-wide `ExecutionLimits` policy. The latter bounds handshakes, model responses, tool responses, and the provider-facing portion of a turn; durable failure closure is still allowed to complete after a provider deadline so timeout handling cannot strand an open transcript.
 
-Image generation, transcription, and speech are independent typed operations. Realtime is a live non-replayable session. Each direct operation has a caller-owned `AiOperationId` and durable Prepare/Start/terminal barriers; image and audio bytes are committed as digest-addressed artifacts. The current release has no user interface, multi-turn continuation, public language-stream API, cancellation API, parallel tool execution, compaction, workflow engine, self-modification, or shell/file tool.
+Image generation, transcription, and speech are independent typed operations. Realtime is a live non-replayable session. Each direct operation has a caller-owned `AiOperationId` and durable Reserved/Prepared/Started/terminal barriers; reservation occurs before provider work or input-media reads. Image and audio bytes are committed as digest-addressed artifacts. The current release has no user interface, multi-turn continuation, public language-stream API, cancellation API, parallel tool execution, compaction, workflow engine, self-modification, or shell/file tool.
 
 ## Documentation
 

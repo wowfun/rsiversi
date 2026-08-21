@@ -10,69 +10,93 @@ use rsi_ai_protocol::{
     ImageRequest, MAX_BINARY_CHUNK_BYTES, MediaDescriptor, RealtimeCloseReason, RealtimeRequest,
     SpeechRequest, TokenUsage, TranscriptionAssembler, TranscriptionOutput, TranscriptionRequest,
 };
-use serde_json::json;
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 
+use crate::artifact::VerifiedArtifact;
 use crate::host::AiRuntime;
-use crate::persistence::{WriterHandle, preflight_ai_terminal};
+use crate::persistence::{AiTerminalStatus, WriterHandle};
 use crate::{AgentError, AiOperationId, ArtifactRef, ArtifactStore, Result};
 
 /// Durable artifact references returned by one image operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentImageOutput {
+    /// Content-addressed images in provider output order.
     pub images: Vec<ArtifactRef>,
+    /// Provider usage totals, when reported.
     pub usage: Option<TokenUsage>,
+    /// Redacted immutable snapshot of the prepared provider call.
     pub prepared: PreparedCallSnapshot,
 }
 
 /// Durable audio reference returned by one speech operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentSpeechOutput {
+    /// Content-addressed synthesized audio.
     pub audio: ArtifactRef,
+    /// Provider usage totals, when reported.
     pub usage: Option<TokenUsage>,
+    /// Redacted immutable snapshot of the prepared provider call.
     pub prepared: PreparedCallSnapshot,
 }
 
 /// A transcription and the redacted provider snapshot that produced it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentTranscriptionOutput {
+    /// Normalized complete transcription.
     pub transcription: TranscriptionOutput,
+    /// Redacted immutable snapshot of the prepared provider call.
     pub prepared: PreparedCallSnapshot,
 }
 
 /// One normalized event from the non-replayable Realtime plane.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentRealtimeEvent {
+    /// Provider voice activity began for an input item.
     InputSpeechStarted {
+        /// Provider or caller item identifier.
         item_id: String,
     },
+    /// Incremental transcription for an input item.
     InputTranscriptDelta {
+        /// Input item being transcribed.
         item_id: String,
+        /// Ordered transcript fragment.
         text: String,
     },
+    /// Final transcription for an input item.
     InputTranscriptFinished {
+        /// Input item that completed.
         item_id: String,
+        /// Complete or final transcript fragment.
         text: String,
     },
+    /// Incremental text from one response.
     OutputTextDelta {
+        /// Provider-assigned response identifier.
         response_id: String,
+        /// Ordered text fragment.
         text: String,
     },
+    /// Durable audio frame from one response.
     OutputAudio {
+        /// Provider-assigned response identifier.
         response_id: String,
+        /// Monotonic audio-frame sequence number.
         sequence: u32,
+        /// Verified content-addressed audio fragment.
         artifact: ArtifactRef,
     },
+    /// Provider requested host-level handoff for an input item.
     HandoffRequested {
+        /// Item that triggered handoff.
         item_id: String,
+        /// Recognized text supplied to the handoff target.
         text: String,
     },
-    RecoverableError {
-        error: rsi_ai_protocol::AiError,
-    },
-    Closed {
-        reason: RealtimeCloseReason,
-    },
+    /// Recoverable provider failure that does not close the session.
+    RecoverableError { error: rsi_ai_protocol::AiError },
+    /// Terminal realtime session event.
+    Closed { reason: RealtimeCloseReason },
 }
 
 #[derive(Debug, Default)]
@@ -102,17 +126,14 @@ impl IncomingBlob {
         Ok(())
     }
 
-    fn finish(self, descriptor: &MediaDescriptor) -> Result<Vec<u8>> {
-        if !self.final_seen
-            || u64::try_from(self.bytes.len()).ok() != Some(descriptor.byte_len())
-            || crate::digest::sha256_hex(&self.bytes) != descriptor.sha256()
-        {
+    fn finish(self, descriptor: MediaDescriptor) -> Result<VerifiedArtifact> {
+        if !self.final_seen {
             return Err(ai_error(
                 "verify media",
-                "output blob does not match its declared descriptor",
+                "output blob ended before its final chunk",
             ));
         }
-        Ok(self.bytes)
+        VerifiedArtifact::new(descriptor, self.bytes)
     }
 }
 
@@ -141,95 +162,95 @@ pub(crate) async fn generate_image(
         })
         .await
         .map_err(meta_error("prepare image"))?;
-    let prepared = receive_prepared(&mut stream, call_id).await?;
+    let prepared = deadline(
+        runtime.execution_limits.handshake_timeout(),
+        "prepare image",
+        receive_prepared(&mut stream, call_id),
+    )
+    .await?;
     writer
         .ai_prepared(operation_id.clone(), prepared.clone())
         .await?;
     writer.ai_started(operation_id.clone()).await?;
     writer.check_health()?;
-    let result = async {
-        stream
-            .send_control(&ClientControl::Start {
-                call_id: call_id.to_owned(),
+    let result = deadline(
+        runtime.execution_limits.model_response_timeout(),
+        "generate image response",
+        async {
+            stream
+                .send_control(&ClientControl::Start {
+                    call_id: call_id.to_owned(),
+                })
+                .await
+                .map_err(meta_error("start image"))?;
+            let mut open_blobs = BTreeMap::<String, IncomingBlob>::new();
+            let mut images = BTreeMap::<u32, ArtifactRef>::new();
+            let usage = loop {
+                match receive_for_call(&mut stream, "receive image", call_id).await? {
+                    MetaIncoming::Control(ServerControl::ImageOutputStarted {
+                        blob_id, ..
+                    }) => {
+                        if open_blobs
+                            .insert(blob_id, IncomingBlob::default())
+                            .is_some()
+                        {
+                            return Err(ai_error("receive image", "duplicate image blob"));
+                        }
+                    }
+                    MetaIncoming::BlobChunk {
+                        blob_id,
+                        sequence,
+                        final_chunk,
+                        bytes,
+                        ..
+                    } => {
+                        open_blobs
+                            .get_mut(&blob_id)
+                            .ok_or_else(|| ai_error("receive image", "undeclared image blob"))?
+                            .push(sequence, &bytes, final_chunk)?;
+                    }
+                    MetaIncoming::Control(ServerControl::ImageOutputFinished {
+                        index,
+                        blob_id,
+                        descriptor,
+                        ..
+                    }) => {
+                        let artifact = open_blobs
+                            .remove(&blob_id)
+                            .ok_or_else(|| ai_error("receive image", "missing image blob"))?
+                            .finish(descriptor.clone())?;
+                        let artifact = artifacts.ingest_verified(artifact).await?;
+                        if images.insert(index, artifact).is_some() {
+                            return Err(ai_error("commit image", "duplicate image index"));
+                        }
+                    }
+                    MetaIncoming::Control(ServerControl::ImageFinished { usage, .. }) => {
+                        break usage;
+                    }
+                    MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
+                        return Err(ai_error("generate image", error.to_string()));
+                    }
+                    _ => return Err(ai_error("receive image", "unexpected image service frame")),
+                }
+            };
+            finish(&mut stream).await?;
+            Ok(AgentImageOutput {
+                images: images.into_values().collect(),
+                usage,
+                prepared,
             })
-            .await
-            .map_err(meta_error("start image"))?;
-        let mut open_blobs = BTreeMap::<String, IncomingBlob>::new();
-        let mut images = BTreeMap::<u32, ArtifactRef>::new();
-        let usage = loop {
-            match receive_for_call(&mut stream, "receive image", call_id).await? {
-                MetaIncoming::Control(ServerControl::ImageOutputStarted { blob_id, .. }) => {
-                    if open_blobs
-                        .insert(blob_id, IncomingBlob::default())
-                        .is_some()
-                    {
-                        return Err(ai_error("receive image", "duplicate image blob"));
-                    }
-                }
-                MetaIncoming::BlobChunk {
-                    blob_id,
-                    sequence,
-                    final_chunk,
-                    bytes,
-                    ..
-                } => {
-                    open_blobs
-                        .get_mut(&blob_id)
-                        .ok_or_else(|| ai_error("receive image", "undeclared image blob"))?
-                        .push(sequence, &bytes, final_chunk)?;
-                }
-                MetaIncoming::Control(ServerControl::ImageOutputFinished {
-                    index,
-                    blob_id,
-                    descriptor,
-                    ..
-                }) => {
-                    let bytes = open_blobs
-                        .remove(&blob_id)
-                        .ok_or_else(|| ai_error("receive image", "missing image blob"))?
-                        .finish(&descriptor)?;
-                    let artifact = artifacts
-                        .ingest(descriptor.kind(), descriptor.mime_type(), bytes)
-                        .await?;
-                    if artifact.descriptor() != &descriptor
-                        || images.insert(index, artifact).is_some()
-                    {
-                        return Err(ai_error(
-                            "commit image",
-                            "image descriptor or index mismatch",
-                        ));
-                    }
-                }
-                MetaIncoming::Control(ServerControl::ImageFinished { usage, .. }) => break usage,
-                MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
-                    return Err(ai_error("generate image", error.to_string()));
-                }
-                _ => return Err(ai_error("receive image", "unexpected image service frame")),
-            }
-        };
-        finish(&mut stream).await?;
-        Ok(AgentImageOutput {
-            images: images.into_values().collect(),
-            usage,
-            prepared,
-        })
-    }
+        },
+    )
     .await;
     match result {
         Ok(output) => {
             writer
-                .ai_terminal(
-                    operation_id,
-                    json!({
-                        "status": "succeeded",
-                        "result": {"images": output.images, "usage": output.usage}
-                    }),
-                )
+                .ai_terminal(operation_id, AiTerminalStatus::Succeeded)
                 .await?;
             Ok(output)
         }
         Err(error) => {
-            record_failure(writer, operation_id, &error).await?;
+            record_failure(writer, operation_id).await?;
             Err(error)
         }
     }
@@ -254,63 +275,68 @@ pub(crate) async fn transcribe(
         })
         .await
         .map_err(meta_error("prepare transcription"))?;
-    let prepared = receive_prepared(&mut stream, call_id).await?;
+    let prepared = deadline(
+        runtime.execution_limits.handshake_timeout(),
+        "prepare transcription",
+        receive_prepared(&mut stream, call_id),
+    )
+    .await?;
     writer
         .ai_prepared(operation_id.clone(), prepared.clone())
         .await?;
     writer.ai_started(operation_id.clone()).await?;
     writer.check_health()?;
-    let result = async {
-        stream
-            .send_control(&ClientControl::Start {
-                call_id: call_id.to_owned(),
-            })
-            .await
-            .map_err(meta_error("start transcription"))?;
-        let mut assembler = TranscriptionAssembler::new();
-        loop {
-            match receive_for_call(&mut stream, "receive transcription", call_id).await? {
-                MetaIncoming::Control(ServerControl::TranscriptionEvent { event, .. }) => {
-                    let terminal =
-                        matches!(event, rsi_ai_protocol::TranscriptionEvent::Finished { .. });
-                    assembler
-                        .push(&event)
-                        .map_err(|error| ai_error("assemble transcription", error.to_string()))?;
-                    if terminal {
-                        break;
+    let result = deadline(
+        runtime.execution_limits.model_response_timeout(),
+        "receive transcription response",
+        async {
+            stream
+                .send_control(&ClientControl::Start {
+                    call_id: call_id.to_owned(),
+                })
+                .await
+                .map_err(meta_error("start transcription"))?;
+            let mut assembler = TranscriptionAssembler::new();
+            loop {
+                match receive_for_call(&mut stream, "receive transcription", call_id).await? {
+                    MetaIncoming::Control(ServerControl::TranscriptionEvent { event, .. }) => {
+                        let terminal =
+                            matches!(event, rsi_ai_protocol::TranscriptionEvent::Finished { .. });
+                        assembler.push(&event).map_err(|error| {
+                            ai_error("assemble transcription", error.to_string())
+                        })?;
+                        if terminal {
+                            break;
+                        }
+                    }
+                    MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
+                        return Err(ai_error("transcribe", error.to_string()));
+                    }
+                    _ => {
+                        return Err(ai_error(
+                            "receive transcription",
+                            "unexpected transcription service frame",
+                        ));
                     }
                 }
-                MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
-                    return Err(ai_error("transcribe", error.to_string()));
-                }
-                _ => {
-                    return Err(ai_error(
-                        "receive transcription",
-                        "unexpected transcription service frame",
-                    ));
-                }
             }
-        }
-        let output = assembler
-            .finish()
-            .map_err(|error| ai_error("assemble transcription", error.to_string()))?;
-        finish(&mut stream).await?;
-        Ok((output, prepared))
-    }
+            let output = assembler
+                .finish()
+                .map_err(|error| ai_error("assemble transcription", error.to_string()))?;
+            finish(&mut stream).await?;
+            Ok((output, prepared))
+        },
+    )
     .await;
     match result {
         Ok((output, prepared)) => {
-            let terminal = json!({"status":"succeeded", "result":{"transcription": output}});
-            if let Err(error) = preflight_ai_terminal(&terminal) {
-                let error = ai_error("commit transcription", error.to_string());
-                record_failure(writer, operation_id, &error).await?;
-                return Err(error);
-            }
-            writer.ai_terminal(operation_id, terminal).await?;
+            writer
+                .ai_terminal(operation_id, AiTerminalStatus::Succeeded)
+                .await?;
             Ok((output, prepared))
         }
         Err(error) => {
-            record_failure(writer, operation_id, &error).await?;
+            record_failure(writer, operation_id).await?;
             Err(error)
         }
     }
@@ -335,99 +361,107 @@ pub(crate) async fn synthesize(
         })
         .await
         .map_err(meta_error("prepare speech"))?;
-    let prepared = receive_prepared(&mut stream, call_id).await?;
+    let prepared = deadline(
+        runtime.execution_limits.handshake_timeout(),
+        "prepare speech",
+        receive_prepared(&mut stream, call_id),
+    )
+    .await?;
     writer
         .ai_prepared(operation_id.clone(), prepared.clone())
         .await?;
     writer.ai_started(operation_id.clone()).await?;
     writer.check_health()?;
-    let result = async {
-        stream
-            .send_control(&ClientControl::Start {
-                call_id: call_id.to_owned(),
+    let result = deadline(
+        runtime.execution_limits.model_response_timeout(),
+        "receive speech response",
+        async {
+            stream
+                .send_control(&ClientControl::Start {
+                    call_id: call_id.to_owned(),
+                })
+                .await
+                .map_err(meta_error("start speech"))?;
+            let mut blob = None::<(String, IncomingBlob)>;
+            let mut audio = None;
+            let usage = loop {
+                match receive_for_call(&mut stream, "receive speech", call_id).await? {
+                    MetaIncoming::Control(ServerControl::SpeechOutputStarted {
+                        blob_id, ..
+                    }) => {
+                        if blob.replace((blob_id, IncomingBlob::default())).is_some() {
+                            return Err(ai_error("receive speech", "duplicate speech blob"));
+                        }
+                    }
+                    MetaIncoming::BlobChunk {
+                        blob_id,
+                        sequence,
+                        final_chunk,
+                        bytes,
+                        ..
+                    } => {
+                        let (expected, incoming) = blob
+                            .as_mut()
+                            .ok_or_else(|| ai_error("receive speech", "undeclared speech blob"))?;
+                        if expected != &blob_id {
+                            return Err(ai_error(
+                                "receive speech",
+                                "speech blob identity mismatch",
+                            ));
+                        }
+                        incoming.push(sequence, &bytes, final_chunk)?;
+                    }
+                    MetaIncoming::Control(ServerControl::SpeechOutputFinished {
+                        blob_id,
+                        descriptor,
+                        ..
+                    }) => {
+                        let (expected, incoming) = blob
+                            .take()
+                            .ok_or_else(|| ai_error("receive speech", "missing speech blob"))?;
+                        if expected != blob_id {
+                            return Err(ai_error(
+                                "receive speech",
+                                "speech blob identity mismatch",
+                            ));
+                        }
+                        let artifact = incoming.finish(descriptor.clone())?;
+                        audio = Some(artifacts.ingest_verified(artifact).await?);
+                    }
+                    MetaIncoming::Control(ServerControl::SpeechFinished { usage, .. }) => {
+                        break usage;
+                    }
+                    MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
+                        return Err(ai_error("synthesize speech", error.to_string()));
+                    }
+                    _ => {
+                        return Err(ai_error(
+                            "receive speech",
+                            "unexpected speech service frame",
+                        ));
+                    }
+                }
+            };
+            finish(&mut stream).await?;
+            Ok(AgentSpeechOutput {
+                audio: audio.ok_or_else(|| {
+                    ai_error("synthesize speech", "speech completed without audio")
+                })?,
+                usage,
+                prepared,
             })
-            .await
-            .map_err(meta_error("start speech"))?;
-        let mut blob = None::<(String, IncomingBlob)>;
-        let mut audio = None;
-        let usage = loop {
-            match receive_for_call(&mut stream, "receive speech", call_id).await? {
-                MetaIncoming::Control(ServerControl::SpeechOutputStarted { blob_id, .. }) => {
-                    if blob.replace((blob_id, IncomingBlob::default())).is_some() {
-                        return Err(ai_error("receive speech", "duplicate speech blob"));
-                    }
-                }
-                MetaIncoming::BlobChunk {
-                    blob_id,
-                    sequence,
-                    final_chunk,
-                    bytes,
-                    ..
-                } => {
-                    let (expected, incoming) = blob
-                        .as_mut()
-                        .ok_or_else(|| ai_error("receive speech", "undeclared speech blob"))?;
-                    if expected != &blob_id {
-                        return Err(ai_error("receive speech", "speech blob identity mismatch"));
-                    }
-                    incoming.push(sequence, &bytes, final_chunk)?;
-                }
-                MetaIncoming::Control(ServerControl::SpeechOutputFinished {
-                    blob_id,
-                    descriptor,
-                    ..
-                }) => {
-                    let (expected, incoming) = blob
-                        .take()
-                        .ok_or_else(|| ai_error("receive speech", "missing speech blob"))?;
-                    if expected != blob_id {
-                        return Err(ai_error("receive speech", "speech blob identity mismatch"));
-                    }
-                    let bytes = incoming.finish(&descriptor)?;
-                    let artifact = artifacts
-                        .ingest(descriptor.kind(), descriptor.mime_type(), bytes)
-                        .await?;
-                    if artifact.descriptor() != &descriptor {
-                        return Err(ai_error("commit speech", "speech descriptor mismatch"));
-                    }
-                    audio = Some(artifact);
-                }
-                MetaIncoming::Control(ServerControl::SpeechFinished { usage, .. }) => break usage,
-                MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
-                    return Err(ai_error("synthesize speech", error.to_string()));
-                }
-                _ => {
-                    return Err(ai_error(
-                        "receive speech",
-                        "unexpected speech service frame",
-                    ));
-                }
-            }
-        };
-        finish(&mut stream).await?;
-        Ok(AgentSpeechOutput {
-            audio: audio
-                .ok_or_else(|| ai_error("synthesize speech", "speech completed without audio"))?,
-            usage,
-            prepared,
-        })
-    }
+        },
+    )
     .await;
     match result {
         Ok(output) => {
             writer
-                .ai_terminal(
-                    operation_id,
-                    json!({
-                        "status":"succeeded",
-                        "result":{"audio": output.audio, "usage": output.usage}
-                    }),
-                )
+                .ai_terminal(operation_id, AiTerminalStatus::Succeeded)
                 .await?;
             Ok(output)
         }
         Err(error) => {
-            record_failure(writer, operation_id, &error).await?;
+            record_failure(writer, operation_id).await?;
             Err(error)
         }
     }
@@ -442,15 +476,43 @@ pub struct AgentRealtimeSession {
     call_id: String,
     session_id: String,
     prepared: PreparedCallSnapshot,
-    close_timeout: Duration,
+    handshake_timeout: Duration,
     closed: bool,
+    terminal: Option<DurableAiTerminal>,
+    pending_close_reason: Option<RealtimeCloseReason>,
     permit: Option<OwnedSemaphorePermit>,
+    abandon_on_drop: Option<oneshot::Sender<()>>,
+}
+
+struct DurableAiTerminal {
+    task: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+impl DurableAiTerminal {
+    fn spawn(writer: WriterHandle, operation_id: AiOperationId, status: AiTerminalStatus) -> Self {
+        Self {
+            task: Some(tokio::spawn(async move {
+                writer.ai_terminal(operation_id, status).await
+            })),
+        }
+    }
+
+    async fn wait(&mut self) -> Result<()> {
+        let Some(task) = self.task.as_mut() else {
+            return Ok(());
+        };
+        let result = task.await.map_err(|_| AgentError::WorkerStopped)?;
+        self.task.take();
+        result
+    }
 }
 
 impl AgentRealtimeSession {
+    /// Returns the provider-assigned live session identifier.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
+    /// Returns the immutable redacted preparation snapshot.
     pub const fn prepared(&self) -> &PreparedCallSnapshot {
         &self.prepared
     }
@@ -461,14 +523,22 @@ impl AgentRealtimeSession {
     ///
     /// Returns an error when verification, framing, or stream delivery fails.
     pub async fn append_audio(&mut self, sequence: u32, artifact: &ArtifactRef) -> Result<()> {
-        let result = async {
-            let bytes = self.artifacts.read(artifact).await?;
-            if bytes.len() > MAX_BINARY_CHUNK_BYTES {
-                return Err(ai_error(
+        if let Err(error) = self.ensure_open("append Realtime audio").await {
+            return self.fail(error).await;
+        }
+        if artifact.descriptor().byte_len() > MAX_BINARY_CHUNK_BYTES as u64 {
+            return self
+                .fail(ai_error(
                     "append Realtime audio",
                     "one Realtime frame exceeds the binary chunk bound",
-                ));
-            }
+                ))
+                .await;
+        }
+        let bytes = match self.artifacts.read(artifact).await {
+            Ok(bytes) => bytes,
+            Err(error) => return self.fail(error).await,
+        };
+        let result = deadline(self.handshake_timeout, "append Realtime audio", async {
             let blob_id = format!("{}.input.{sequence}", self.call_id);
             self.stream
                 .send_control(&ClientControl::RealtimeAppendAudio {
@@ -483,7 +553,7 @@ impl AgentRealtimeSession {
                 .send_blob_chunk(self.call_id.clone(), blob_id, 1, true, bytes)
                 .await
                 .map_err(meta_error("send Realtime audio"))
-        }
+        })
         .await;
         match result {
             Ok(()) => Ok(()),
@@ -540,17 +610,14 @@ impl AgentRealtimeSession {
     }
 
     async fn send(&mut self, control: ClientControl) -> Result<()> {
-        if self.closed {
-            return Err(ai_error(
-                "send Realtime command",
-                "Realtime session is closed",
-            ));
-        }
-        let result = self
-            .stream
-            .send_control(&control)
-            .await
-            .map_err(meta_error("send Realtime command"));
+        self.ensure_open("send Realtime command").await?;
+        let result = deadline(self.handshake_timeout, "send Realtime command", async {
+            self.stream
+                .send_control(&control)
+                .await
+                .map_err(meta_error("send Realtime command"))
+        })
+        .await;
         match result {
             Ok(()) => Ok(()),
             Err(error) => self.fail(error).await,
@@ -563,6 +630,9 @@ impl AgentRealtimeSession {
     ///
     /// Returns an error for provider failure, invalid framing, or artifact failure.
     pub async fn next_event(&mut self) -> Result<Option<AgentRealtimeEvent>> {
+        if self.closed {
+            return self.closed_event().await;
+        }
         let result = self.next_event_inner().await;
         match result {
             Ok(event) => Ok(event),
@@ -571,9 +641,6 @@ impl AgentRealtimeSession {
     }
 
     async fn next_event_inner(&mut self) -> Result<Option<AgentRealtimeEvent>> {
-        if self.closed {
-            return Ok(None);
-        }
         let event =
             match receive_for_call(&mut self.stream, "receive Realtime event", &self.call_id)
                 .await?
@@ -627,11 +694,8 @@ impl AgentRealtimeSession {
                     }
                     let mut incoming = IncomingBlob::default();
                     incoming.push(wire_sequence, &bytes, final_chunk)?;
-                    let bytes = incoming.finish(&descriptor)?;
-                    let artifact = self
-                        .artifacts
-                        .ingest(descriptor.kind(), descriptor.mime_type(), bytes)
-                        .await?;
+                    let artifact = incoming.finish(descriptor)?;
+                    let artifact = self.artifacts.ingest_verified(artifact).await?;
                     AgentRealtimeEvent::OutputAudio {
                         response_id,
                         sequence,
@@ -647,15 +711,8 @@ impl AgentRealtimeSession {
                     error, ..
                 }) => AgentRealtimeEvent::RecoverableError { error },
                 MetaIncoming::Control(ServerControl::RealtimeClosed { reason, .. }) => {
-                    self.writer
-                        .ai_terminal(
-                            self.operation_id.clone(),
-                            json!({"status":"succeeded", "result":{"closed": reason}}),
-                        )
-                        .await?;
-                    self.closed = true;
-                    self.permit.take();
-                    AgentRealtimeEvent::Closed { reason }
+                    self.begin_terminal(AiTerminalStatus::Succeeded, Some(reason));
+                    return self.closed_event().await;
                 }
                 MetaIncoming::Control(ServerControl::Failed { error, .. }) => {
                     return Err(ai_error("Realtime session", error.to_string()));
@@ -672,11 +729,52 @@ impl AgentRealtimeSession {
 
     async fn fail<T>(&mut self, error: AgentError) -> Result<T> {
         if !self.closed {
-            record_failure(&self.writer, self.operation_id.clone(), &error).await?;
-            self.closed = true;
-            self.permit.take();
+            self.begin_terminal(AiTerminalStatus::Failed, None);
         }
+        self.wait_terminal().await?;
         Err(error)
+    }
+
+    fn begin_terminal(
+        &mut self,
+        status: AiTerminalStatus,
+        close_reason: Option<RealtimeCloseReason>,
+    ) {
+        debug_assert!(!self.closed, "Realtime terminalization begins once");
+        self.closed = true;
+        self.pending_close_reason = close_reason;
+        self.abandon_on_drop.take();
+        self.permit.take();
+        self.terminal = Some(DurableAiTerminal::spawn(
+            self.writer.clone(),
+            self.operation_id.clone(),
+            status,
+        ));
+    }
+
+    async fn wait_terminal(&mut self) -> Result<()> {
+        let result = match self.terminal.as_mut() {
+            Some(terminal) => terminal.wait().await,
+            None => Ok(()),
+        };
+        self.terminal.take();
+        result
+    }
+
+    async fn closed_event(&mut self) -> Result<Option<AgentRealtimeEvent>> {
+        self.wait_terminal().await?;
+        Ok(self
+            .pending_close_reason
+            .take()
+            .map(|reason| AgentRealtimeEvent::Closed { reason }))
+    }
+
+    async fn ensure_open(&mut self, operation: &'static str) -> Result<()> {
+        if self.closed {
+            self.wait_terminal().await?;
+            return Err(ai_error(operation, "Realtime session is closed"));
+        }
+        Ok(())
     }
 
     /// Closes the live session and drains its semantic terminal event.
@@ -685,8 +783,11 @@ impl AgentRealtimeSession {
     ///
     /// Returns an error when close delivery, terminal draining, or shutdown fails.
     pub async fn close(&mut self) -> Result<()> {
-        let result = tokio::time::timeout(self.close_timeout, async {
-            if !self.closed {
+        let result = deadline(self.handshake_timeout, "close Realtime session", async {
+            if self.closed {
+                self.wait_terminal().await?;
+                self.pending_close_reason.take();
+            } else {
                 self.send(ClientControl::RealtimeClose {
                     call_id: self.call_id.clone(),
                 })
@@ -699,14 +800,8 @@ impl AgentRealtimeSession {
         })
         .await;
         match result {
-            Ok(result) => result,
-            Err(_) => {
-                self.fail(ai_error(
-                    "close Realtime session",
-                    "Realtime close deadline elapsed",
-                ))
-                .await
-            }
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error).await,
         }
     }
 }
@@ -718,6 +813,17 @@ impl std::fmt::Debug for AgentRealtimeSession {
             .field("session_id", &self.session_id)
             .field("closed", &self.closed)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for AgentRealtimeSession {
+    fn drop(&mut self) {
+        if !self.closed
+            && let Some(abandon) = self.abandon_on_drop.take()
+        {
+            let _ = abandon.send(());
+        }
+        self.permit.take();
     }
 }
 
@@ -740,37 +846,54 @@ pub(crate) async fn open_realtime(
         })
         .await
         .map_err(meta_error("prepare Realtime"))?;
-    let prepared = receive_prepared(&mut stream, &call_id).await?;
+    let prepared = deadline(
+        runtime.execution_limits.handshake_timeout(),
+        "prepare Realtime",
+        receive_prepared(&mut stream, &call_id),
+    )
+    .await?;
     writer
         .ai_prepared(operation_id.clone(), prepared.clone())
         .await?;
     writer.ai_started(operation_id.clone()).await?;
     writer.check_health()?;
-    let session_id = match async {
-        stream
-            .send_control(&ClientControl::Start {
-                call_id: call_id.clone(),
-            })
-            .await
-            .map_err(meta_error("start Realtime"))?;
-        let MetaIncoming::Control(ServerControl::RealtimeSessionStarted { session_id, .. }) =
-            receive_for_call(&mut stream, "start Realtime", &call_id).await?
-        else {
-            return Err(ai_error(
-                "start Realtime",
-                "Realtime provider did not start a session",
-            ));
-        };
-        Ok(session_id)
-    }
+    let session_id = match deadline(
+        runtime.execution_limits.handshake_timeout(),
+        "start Realtime",
+        async {
+            stream
+                .send_control(&ClientControl::Start {
+                    call_id: call_id.clone(),
+                })
+                .await
+                .map_err(meta_error("start Realtime"))?;
+            let MetaIncoming::Control(ServerControl::RealtimeSessionStarted { session_id, .. }) =
+                receive_for_call(&mut stream, "start Realtime", &call_id).await?
+            else {
+                return Err(ai_error(
+                    "start Realtime",
+                    "Realtime provider did not start a session",
+                ));
+            };
+            Ok(session_id)
+        },
+    )
     .await
     {
         Ok(session_id) => session_id,
         Err(error) => {
-            record_failure(&writer, operation_id, &error).await?;
+            record_failure(&writer, operation_id).await?;
             return Err(error);
         }
     };
+    let (abandon_on_drop, abandoned) = oneshot::channel();
+    let abandonment_writer = writer.clone();
+    let abandonment_operation = operation_id.clone();
+    tokio::spawn(async move {
+        if abandoned.await.is_ok() {
+            let _ = abandonment_writer.ai_abandon(abandonment_operation).await;
+        }
+    });
     Ok(AgentRealtimeSession {
         stream,
         artifacts,
@@ -779,16 +902,36 @@ pub(crate) async fn open_realtime(
         call_id,
         session_id,
         prepared,
-        close_timeout: runtime.execution_limits.handshake_timeout(),
+        handshake_timeout: runtime.execution_limits.handshake_timeout(),
         closed: false,
+        terminal: None,
+        pending_close_reason: None,
         permit: Some(permit),
+        abandon_on_drop: Some(abandon_on_drop),
     })
 }
 
 async fn open(runtime: &AiRuntime, service: AiService) -> Result<MetaServiceStream> {
-    MetaServiceStream::open(&runtime.composition, runtime.consumer.clone(), service)
+    deadline(
+        runtime.execution_limits.handshake_timeout(),
+        "open AI service",
+        async {
+            MetaServiceStream::open(&runtime.composition, runtime.consumer.clone(), service)
+                .await
+                .map_err(meta_error("open AI service"))
+        },
+    )
+    .await
+}
+
+async fn deadline<T>(
+    timeout: Duration,
+    operation: &'static str,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(timeout, future)
         .await
-        .map_err(meta_error("open AI service"))
+        .map_err(|_| ai_error(operation, "AI operation deadline elapsed"))?
 }
 
 async fn upload(
@@ -807,15 +950,15 @@ async fn upload(
         })
         .await
         .map_err(meta_error("declare input artifact"))?;
-    let chunks = bytes.chunks(MAX_BINARY_CHUNK_BYTES).collect::<Vec<_>>();
-    for (index, chunk) in chunks.iter().enumerate() {
+    let chunk_count = bytes.len().div_ceil(MAX_BINARY_CHUNK_BYTES);
+    for (index, chunk) in bytes.chunks(MAX_BINARY_CHUNK_BYTES).enumerate() {
         stream
             .send_blob_chunk(
                 call_id.to_owned(),
                 blob_id.clone(),
                 u32::try_from(index + 1)
                     .map_err(|_| ai_error("upload artifact", "too many artifact chunks"))?,
-                index + 1 == chunks.len(),
+                index + 1 == chunk_count,
                 chunk.to_vec(),
             )
             .await
@@ -891,19 +1034,87 @@ fn ai_error(operation: &'static str, message: impl Into<String>) -> AgentError {
     }
 }
 
-async fn record_failure(
-    writer: &WriterHandle,
-    operation_id: AiOperationId,
-    error: &AgentError,
-) -> Result<()> {
+async fn record_failure(writer: &WriterHandle, operation_id: AiOperationId) -> Result<()> {
     writer
-        .ai_terminal(
-            operation_id,
-            json!({"status":"failed", "error": error.to_string()}),
-        )
+        .ai_terminal(operation_id, AiTerminalStatus::Failed)
         .await
 }
 
 fn meta_error(operation: &'static str) -> impl FnOnce(rsi_ai_meta::MetaStreamError) -> AgentError {
     move |error| ai_error(operation, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU8;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::AgentWorkspace;
+    use crate::persistence::HealthLatch;
+
+    #[tokio::test]
+    async fn durable_terminalization_survives_waiter_cancellation_after_commit() {
+        let temp = tempdir().expect("tempdir");
+        let health = HealthLatch::new();
+        let (writer, _reader) = WriterHandle::open(
+            AgentWorkspace::new(temp.path().join("agent")),
+            health.clone(),
+            NonZeroU8::new(1).expect("nonzero"),
+        )
+        .await
+        .expect("writer");
+        let operation_id = AiOperationId::new("cancel-terminal-wait").expect("operation id");
+        writer
+            .ai_reserve(operation_id.clone())
+            .await
+            .expect("reserve");
+        writer
+            .ai_prepared(
+                operation_id.clone(),
+                prepared_snapshot(operation_id.as_str()),
+            )
+            .await
+            .expect("prepared");
+        writer
+            .ai_started(operation_id.clone())
+            .await
+            .expect("started");
+        let gate = writer.gate_next_ai_terminal().await.expect("terminal gate");
+        let mut terminal =
+            DurableAiTerminal::spawn(writer.clone(), operation_id, AiTerminalStatus::Succeeded);
+        gate.entered().await;
+
+        {
+            let first_wait = terminal.wait();
+            tokio::pin!(first_wait);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut first_wait)
+                    .await
+                    .is_err()
+            );
+        }
+        gate.release();
+
+        terminal.wait().await.expect("detached terminal ack");
+        assert!(health.is_healthy());
+    }
+
+    fn prepared_snapshot(call_id: &str) -> PreparedCallSnapshot {
+        PreparedCallSnapshot {
+            call_id: call_id.to_owned(),
+            deployment_id: "fixture".to_owned(),
+            provider_family: "fixture".to_owned(),
+            capability: rsi_ai_meta::Capability::Realtime,
+            model: "fixture-model".to_owned(),
+            protocol: "fixture".to_owned(),
+            transport: "memory".to_owned(),
+            endpoint_fingerprint: "fixture".to_owned(),
+            config_generation: 1,
+            credential_source: None,
+            retry_policy: rsi_ai_meta::RetryPolicy::default(),
+            request_sha256: "a".repeat(64),
+        }
+    }
 }

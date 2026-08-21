@@ -20,7 +20,7 @@ use crate::error::{StoreErrorClass, corrupt};
 use crate::{AgentError, Result};
 use crate::{AgentWorkspace, workspace::WorkspaceLease};
 
-const STORE_SCHEMA_VERSION: u32 = 4;
+const STORE_SCHEMA_VERSION: u32 = 7;
 const SESSION_PAGE_SIZE: usize = 128;
 const MAX_DATABASE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_EVENT_PAYLOAD_BYTES: usize = 2 * rsi_agent_protocol::MAX_DATA_BYTES + 64 * 1024;
@@ -31,8 +31,8 @@ const MAX_STORE_META_KEY_BYTES: usize = 32;
 const MAX_SCHEMA_SQL_BYTES: usize = 4 * 1024;
 const STORE_QUEUE_CAPACITY: usize = 64;
 const MAX_AI_OPERATIONS: usize = 4_096;
+const MAX_RETAINED_AI_OPERATIONS: usize = 4_096;
 const MAX_PREPARED_SNAPSHOT_BYTES: usize = 256 * 1024;
-const MAX_AI_OPERATION_TERMINAL_BYTES: usize = 16 * 1024 * 1024;
 
 const STORE_META_SQL: &str =
     "CREATE TABLE store_meta(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL) STRICT";
@@ -54,21 +54,38 @@ const OPEN_INDEX_SQL: &str =
     "CREATE INDEX open_sessions_by_id ON sessions(session_id) WHERE terminal=0";
 const AI_OPERATIONS_SQL: &str = "CREATE TABLE ai_operations(
     operation_id TEXT PRIMARY KEY NOT NULL,
-    prepared_json TEXT NOT NULL
-        CHECK(length(CAST(prepared_json AS BLOB)) BETWEEN 2 AND 262144),
-    phase INTEGER NOT NULL CHECK(phase IN (0,1,2)),
-    terminal_json TEXT
-        CHECK(terminal_json IS NULL OR length(CAST(terminal_json AS BLOB)) BETWEEN 2 AND 16777216),
-    CHECK((phase=2 AND terminal_json IS NOT NULL) OR (phase IN (0,1) AND terminal_json IS NULL))
+    prepared_json TEXT
+        CHECK(prepared_json IS NULL OR length(CAST(prepared_json AS BLOB)) BETWEEN 2 AND 262144),
+    phase INTEGER NOT NULL CHECK(phase IN (0,1,2,3)),
+    terminal_status TEXT
+        CHECK(terminal_status IS NULL OR terminal_status IN ('succeeded','failed','not_started','outcome_unknown')),
+    completed_order INTEGER CHECK(completed_order IS NULL OR completed_order >= 1),
+    CHECK((phase=0 AND prepared_json IS NULL AND terminal_status IS NULL AND completed_order IS NULL)
+       OR (phase IN (1,2) AND prepared_json IS NOT NULL AND terminal_status IS NULL AND completed_order IS NULL)
+       OR (phase=3 AND prepared_json IS NULL AND terminal_status IS NOT NULL AND completed_order IS NOT NULL))
 ) STRICT";
 const COUNT_OPEN_AI_OPERATIONS_SQL: &str =
-    "SELECT count(*) FROM ai_operations WHERE phase IN (0,1)";
-const SCHEMA_OBJECTS: [(&str, &str, &str); 5] = [
+    "SELECT count(*) FROM ai_operations WHERE phase IN (0,1,2)";
+const OPEN_AI_OPERATIONS_INDEX_SQL: &str =
+    "CREATE INDEX open_ai_operations_by_id ON ai_operations(operation_id) WHERE phase IN (0,1,2)";
+const TERMINAL_AI_OPERATIONS_INDEX_SQL: &str = "CREATE INDEX terminal_ai_operations_by_completion
+    ON ai_operations(completed_order DESC) WHERE phase=3";
+const SCHEMA_OBJECTS: [(&str, &str, &str); 7] = [
     ("store_meta", "table", STORE_META_SQL),
     ("sessions", "table", SESSIONS_SQL),
     ("events", "table", EVENTS_SQL),
     ("ai_operations", "table", AI_OPERATIONS_SQL),
     ("open_sessions_by_id", "index", OPEN_INDEX_SQL),
+    (
+        "open_ai_operations_by_id",
+        "index",
+        OPEN_AI_OPERATIONS_INDEX_SQL,
+    ),
+    (
+        "terminal_ai_operations_by_completion",
+        "index",
+        TERMINAL_AI_OPERATIONS_INDEX_SQL,
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,9 +94,29 @@ enum SchemaState {
     Current,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AiTerminalStatus {
+    Succeeded,
+    Failed,
+    NotStarted,
+    OutcomeUnknown,
+}
+
+impl AiTerminalStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::NotStarted => "not_started",
+            Self::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Store {
     connection: Connection,
+    terminal_ai_operations: usize,
 }
 
 #[cfg(test)]
@@ -100,6 +137,27 @@ pub(crate) enum CreateSession {
 pub(crate) struct CommitCursor {
     pub(crate) next_seq: u64,
     pub(crate) payload_bytes: usize,
+}
+
+pub(crate) struct EncodedAppendedEvents {
+    payloads: Vec<String>,
+    existing_payload_bytes: usize,
+    event_count: usize,
+    projected_payload_bytes: usize,
+}
+
+enum AppendedEvents {
+    Typed(Vec<TranscriptEventKind>),
+    Encoded(EncodedAppendedEvents),
+}
+
+impl AppendedEvents {
+    fn len(&self) -> usize {
+        match self {
+            Self::Typed(events) => events.len(),
+            Self::Encoded(events) => events.event_count,
+        }
+    }
 }
 
 impl CommitCursor {
@@ -160,7 +218,11 @@ impl Store {
             bootstrap_schema(&connection)?;
         }
 
-        let store = Self { connection };
+        let terminal_ai_operations = count_terminal_ai_operations(&connection)?;
+        let store = Self {
+            connection,
+            terminal_ai_operations,
+        };
 
         #[cfg(unix)]
         {
@@ -204,7 +266,10 @@ impl Store {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| AgentError::sqlite_read("set reader busy timeout", error))?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            terminal_ai_operations: 0,
+        })
     }
 }
 
@@ -345,7 +410,7 @@ fn validate_current_schema(connection: &Connection) -> Result<()> {
         if row.0 != object_type || normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql)
         {
             return Err(corrupt(format!(
-                "store schema object {name} does not match version 4"
+                "store schema object {name} does not match version {STORE_SCHEMA_VERSION}"
             )));
         }
     }
@@ -430,6 +495,8 @@ fn bootstrap_schema(connection: &Connection) -> Result<()> {
          {OPEN_INDEX_SQL};
          {EVENTS_SQL};
          {AI_OPERATIONS_SQL};
+         {OPEN_AI_OPERATIONS_INDEX_SQL};
+         {TERMINAL_AI_OPERATIONS_INDEX_SQL};
          COMMIT;"
     );
     connection
@@ -647,7 +714,7 @@ impl Store {
                         CASE WHEN length(CAST(prepared_json AS BLOB)) <= ?2
                              THEN CAST(prepared_json AS BLOB) END,
                         phase
-                 FROM ai_operations WHERE phase IN (0,1)
+                 FROM ai_operations WHERE phase IN (0,1,2)
                  ORDER BY operation_id LIMIT ?3",
             )
             .map_err(|error| AgentError::sqlite_read("prepare AI operation recovery", error))?;
@@ -662,7 +729,7 @@ impl Store {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<Vec<u8>>>(3)?,
                         row.get::<_, i64>(4)?,
                     ))
@@ -679,24 +746,8 @@ impl Store {
                 id,
                 MAX_SESSION_ID_BYTES,
             )?)?;
-            let snapshot = decode_bounded_stored_text(
-                "AI prepared snapshot",
-                snapshot_bytes,
-                snapshot,
-                MAX_PREPARED_SNAPSHOT_BYTES,
-            )?;
-            let snapshot: rsi_ai_meta::PreparedCallSnapshot = serde_json::from_str(&snapshot)
-                .map_err(|error| {
-                    corrupt(format!(
-                        "AI operation {operation_id} has an invalid prepared snapshot: {error}"
-                    ))
-                })?;
-            snapshot.validate().map_err(|error| {
-                corrupt(format!(
-                    "AI operation {operation_id} has an invalid prepared snapshot: {error}"
-                ))
-            })?;
-            if !matches!(phase, 0 | 1) {
+            validate_recovered_ai_snapshot(&operation_id, phase, snapshot_bytes, snapshot)?;
+            if !matches!(phase, 0..=2) {
                 return Err(corrupt(format!(
                     "AI operation {operation_id} has an invalid open phase"
                 )));
@@ -706,17 +757,22 @@ impl Store {
         drop(statement);
 
         for (operation_id, phase) in open {
-            let terminal = if phase == 0 {
-                r#"{"status":"not_started"}"#
+            let terminal = if phase < 2 {
+                AiTerminalStatus::NotStarted
             } else {
-                r#"{"status":"outcome_unknown"}"#
+                AiTerminalStatus::OutcomeUnknown
             };
             let changed = self
                 .connection
                 .execute(
-                    "UPDATE ai_operations SET phase=2,terminal_json=?2
-                     WHERE operation_id=?1 AND phase=?3 AND terminal_json IS NULL",
-                    params![operation_id.as_str(), terminal, phase],
+                    "UPDATE ai_operations
+                     SET prepared_json=NULL,phase=3,terminal_status=?2,
+                         completed_order=(
+                             SELECT COALESCE(MAX(completed_order),0)+1
+                             FROM ai_operations WHERE phase=3
+                         )
+                     WHERE operation_id=?1 AND phase=?3 AND terminal_status IS NULL",
+                    params![operation_id.as_str(), terminal.as_str(), phase],
                 )
                 .map_err(|error| AgentError::sqlite("recover AI operation", error))?;
             if changed != 1 {
@@ -725,7 +781,48 @@ impl Store {
                 )));
             }
         }
+        prune_terminal_ai_operations(&self.connection)?;
+        self.terminal_ai_operations = count_terminal_ai_operations(&self.connection)?;
         Ok(())
+    }
+
+    fn reserve_ai_operation(&mut self, operation_id: &AiOperationId) -> Result<()> {
+        self.verify_connection_not_moved()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| AgentError::sqlite("begin AI operation reservation", error))?;
+        let total = transaction
+            .query_row(COUNT_OPEN_AI_OPERATIONS_SQL, [], |row| row.get::<_, i64>(0))
+            .map_err(|error| AgentError::sqlite("count AI operations", error))?;
+        if usize::try_from(total)
+            .ok()
+            .is_none_or(|count| count >= MAX_AI_OPERATIONS)
+        {
+            return Err(AgentError::Ai {
+                operation: "reserve AI operation",
+                message: "AI operation journal quota exceeded".to_owned(),
+            });
+        }
+        let inserted = transaction
+            .execute(
+                "INSERT INTO ai_operations(
+                    operation_id,prepared_json,phase,terminal_status,completed_order
+                 ) VALUES (?1,NULL,0,NULL,NULL)
+                 ON CONFLICT(operation_id) DO NOTHING",
+                [operation_id.as_str()],
+            )
+            .map_err(|error| AgentError::sqlite("insert AI operation reservation", error))?;
+        if inserted != 1 {
+            return Err(AgentError::AiOperationConflict {
+                operation_id: operation_id.clone(),
+            });
+        }
+        verify_database_handle_not_moved(&transaction)?;
+        transaction.commit().map_err(|error| {
+            AgentError::commit_outcome_unknown("commit AI operation reservation", error)
+        })?;
+        self.verify_connection_not_moved()
     }
 
     fn record_ai_prepared(
@@ -752,29 +849,18 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| AgentError::sqlite("begin prepared AI operation", error))?;
-        let total = transaction
-            .query_row(COUNT_OPEN_AI_OPERATIONS_SQL, [], |row| row.get::<_, i64>(0))
-            .map_err(|error| AgentError::sqlite("count AI operations", error))?;
-        if usize::try_from(total)
-            .ok()
-            .is_none_or(|count| count >= MAX_AI_OPERATIONS)
-        {
-            return Err(AgentError::Persistence {
-                operation: "commit prepared AI operation",
-                message: "AI operation journal quota exceeded".to_owned(),
-            });
-        }
-        let inserted = transaction
+        let changed = transaction
             .execute(
-                "INSERT INTO ai_operations(operation_id,prepared_json,phase,terminal_json)
-                 VALUES (?1,?2,0,NULL) ON CONFLICT(operation_id) DO NOTHING",
+                "UPDATE ai_operations SET prepared_json=?2,phase=1
+                 WHERE operation_id=?1 AND phase=0
+                   AND prepared_json IS NULL AND terminal_status IS NULL",
                 params![operation_id.as_str(), encoded],
             )
-            .map_err(|error| AgentError::sqlite("insert prepared AI operation", error))?;
-        if inserted != 1 {
-            return Err(AgentError::AiOperationConflict {
-                operation_id: operation_id.clone(),
-            });
+            .map_err(|error| AgentError::sqlite("commit prepared AI operation", error))?;
+        if changed != 1 {
+            return Err(corrupt(format!(
+                "AI operation {operation_id} is not durably reserved"
+            )));
         }
         verify_database_handle_not_moved(&transaction)?;
         transaction.commit().map_err(|error| {
@@ -784,22 +870,71 @@ impl Store {
     }
 
     fn record_ai_started(&mut self, operation_id: &AiOperationId) -> Result<()> {
-        self.update_ai_operation(operation_id, 0, 1, None, "commit started AI operation")
+        self.update_ai_operation(operation_id, 1, 2, None, "commit started AI operation")
     }
 
     fn record_ai_terminal(
         &mut self,
         operation_id: &AiOperationId,
-        terminal: &serde_json::Value,
+        terminal: AiTerminalStatus,
     ) -> Result<()> {
-        let encoded = encode_ai_terminal(terminal)?;
         self.update_ai_operation(
             operation_id,
-            1,
             2,
-            Some(&encoded),
+            3,
+            Some(terminal),
             "commit terminal AI operation",
         )
+    }
+
+    fn abandon_ai_operation(&mut self, operation_id: &AiOperationId) -> Result<()> {
+        self.verify_connection_not_moved()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| AgentError::sqlite("begin abandoned AI operation", error))?;
+        let phase = transaction
+            .query_row(
+                "SELECT phase FROM ai_operations WHERE operation_id=?1",
+                [operation_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| AgentError::sqlite("read abandoned AI operation", error))?;
+        let Some(phase @ (0..=2)) = phase else {
+            // The schema admits no phase outside 0..=3; phase 3 and a missing
+            // row are both already terminal from abandonment's perspective.
+            return Ok(());
+        };
+        let terminal = if phase < 2 {
+            AiTerminalStatus::NotStarted
+        } else {
+            AiTerminalStatus::OutcomeUnknown
+        };
+        let changed = transaction
+            .execute(
+                "UPDATE ai_operations
+                 SET prepared_json=NULL,phase=3,terminal_status=?2,
+                     completed_order=(
+                         SELECT COALESCE(MAX(completed_order),0)+1
+                         FROM ai_operations WHERE phase=3
+                     )
+                 WHERE operation_id=?1 AND phase=?3 AND terminal_status IS NULL",
+                params![operation_id.as_str(), terminal.as_str(), phase],
+            )
+            .map_err(|error| AgentError::sqlite("commit abandoned AI operation", error))?;
+        if changed != 1 {
+            return Err(corrupt(format!(
+                "AI operation {operation_id} changed while being abandoned"
+            )));
+        }
+        let retained = retain_new_terminal_ai_operation(&transaction, self.terminal_ai_operations)?;
+        verify_database_handle_not_moved(&transaction)?;
+        transaction.commit().map_err(|error| {
+            AgentError::commit_outcome_unknown("commit abandoned AI operation", error)
+        })?;
+        self.terminal_ai_operations = retained;
+        self.verify_connection_not_moved()
     }
 
     fn update_ai_operation(
@@ -807,7 +942,7 @@ impl Store {
         operation_id: &AiOperationId,
         expected_phase: i64,
         next_phase: i64,
-        terminal: Option<&str>,
+        terminal: Option<AiTerminalStatus>,
         operation: &'static str,
     ) -> Result<()> {
         self.verify_connection_not_moved()?;
@@ -817,9 +952,20 @@ impl Store {
             .map_err(|error| AgentError::sqlite(operation, error))?;
         let changed = transaction
             .execute(
-                "UPDATE ai_operations SET phase=?2,terminal_json=?3
-                 WHERE operation_id=?1 AND phase=?4 AND terminal_json IS NULL",
-                params![operation_id.as_str(), next_phase, terminal, expected_phase],
+                "UPDATE ai_operations
+                 SET prepared_json=CASE WHEN ?2=3 THEN NULL ELSE prepared_json END,
+                     phase=?2,terminal_status=?3,
+                     completed_order=CASE WHEN ?2=3 THEN (
+                         SELECT COALESCE(MAX(completed_order),0)+1
+                         FROM ai_operations WHERE phase=3
+                     ) ELSE NULL END
+                 WHERE operation_id=?1 AND phase=?4 AND terminal_status IS NULL",
+                params![
+                    operation_id.as_str(),
+                    next_phase,
+                    terminal.map(AiTerminalStatus::as_str),
+                    expected_phase
+                ],
             )
             .map_err(|error| AgentError::sqlite(operation, error))?;
         if changed != 1 {
@@ -827,10 +973,21 @@ impl Store {
                 "AI operation {operation_id} is not in durable phase {expected_phase}"
             )));
         }
+        let retained = if next_phase == 3 {
+            Some(retain_new_terminal_ai_operation(
+                &transaction,
+                self.terminal_ai_operations,
+            )?)
+        } else {
+            None
+        };
         verify_database_handle_not_moved(&transaction)?;
         transaction
             .commit()
             .map_err(|error| AgentError::commit_outcome_unknown(operation, error))?;
+        if let Some(retained) = retained {
+            self.terminal_ai_operations = retained;
+        }
         self.verify_connection_not_moved()
     }
 
@@ -934,11 +1091,13 @@ impl Store {
         if inserted == 0 {
             return Ok(CreateSession::Exists);
         }
+        let initial_payloads =
+            encode_appended_events(session_id, CommitCursor::INITIAL.payload_bytes, &initial)?;
         let cursor = append_events_tx(
             &transaction,
             session_id,
             CommitCursor::INITIAL,
-            &initial,
+            AppendedEvents::Encoded(initial_payloads),
             false,
         )?;
         verify_database_handle_not_moved(&transaction)?;
@@ -964,7 +1123,13 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| AgentError::sqlite("begin append transaction", error))?;
         let expected = read_commit_cursor(&transaction, session_id)?;
-        let cursor = append_events_tx(&transaction, session_id, expected, events, false)?;
+        let cursor = append_events_tx(
+            &transaction,
+            session_id,
+            expected,
+            AppendedEvents::Typed(events.to_vec()),
+            false,
+        )?;
         verify_database_handle_not_moved(&transaction)?;
         transaction.commit().map_err(|error| {
             AgentError::commit_outcome_unknown("commit transcript events", error)
@@ -1012,7 +1177,13 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| AgentError::sqlite("begin terminal transaction", error))?;
-        let cursor = append_events_tx(&transaction, session_id, expected, events, true)?;
+        let cursor = append_events_tx(
+            &transaction,
+            session_id,
+            expected,
+            AppendedEvents::Typed(events.to_vec()),
+            true,
+        )?;
         verify_database_handle_not_moved(&transaction)?;
         transaction.commit().map_err(|error| {
             AgentError::commit_outcome_unknown("commit terminal session", error)
@@ -1107,7 +1278,7 @@ impl Store {
         &mut self,
         session_id: &SessionId,
         expected: CommitCursor,
-        events: &[TranscriptEventKind],
+        events: AppendedEvents,
         terminal: Option<RunStatus>,
     ) -> Result<(CommitCursor, Option<RunRecord>)> {
         self.verify_connection_not_moved()?;
@@ -1150,31 +1321,103 @@ impl Store {
     }
 }
 
-fn encode_ai_terminal(terminal: &serde_json::Value) -> Result<String> {
-    let encoded = serde_json::to_string(terminal).map_err(|error| AgentError::Ai {
-        operation: "encode terminal AI operation",
-        message: error.to_string(),
-    })?;
-    if encoded.len() < 2 || encoded.len() > MAX_AI_OPERATION_TERMINAL_BYTES {
-        return Err(AgentError::Ai {
-            operation: "encode terminal AI operation",
-            message: "terminal AI operation exceeds its durable bound".to_owned(),
-        });
+fn validate_recovered_ai_snapshot(
+    operation_id: &AiOperationId,
+    phase: i64,
+    snapshot_bytes: Option<i64>,
+    snapshot: Option<Vec<u8>>,
+) -> Result<()> {
+    if phase == 0 {
+        if snapshot_bytes.is_some() || snapshot.is_some() {
+            return Err(corrupt(format!(
+                "reserved AI operation {operation_id} unexpectedly has a prepared snapshot"
+            )));
+        }
+        return Ok(());
     }
-    Ok(encoded)
+    let snapshot = decode_bounded_stored_text(
+        "AI prepared snapshot",
+        snapshot_bytes.ok_or_else(|| {
+            corrupt(format!(
+                "AI operation {operation_id} has no prepared snapshot length"
+            ))
+        })?,
+        snapshot,
+        MAX_PREPARED_SNAPSHOT_BYTES,
+    )?;
+    let snapshot: rsi_ai_meta::PreparedCallSnapshot =
+        serde_json::from_str(&snapshot).map_err(|error| {
+            corrupt(format!(
+                "AI operation {operation_id} has an invalid prepared snapshot: {error}"
+            ))
+        })?;
+    snapshot.validate().map_err(|error| {
+        corrupt(format!(
+            "AI operation {operation_id} has an invalid prepared snapshot: {error}"
+        ))
+    })
 }
 
-pub(crate) fn preflight_ai_terminal(terminal: &serde_json::Value) -> Result<()> {
-    encode_ai_terminal(terminal).map(|_| ())
+fn prune_terminal_ai_operations(connection: &Connection) -> Result<()> {
+    connection
+        .execute(
+            "DELETE FROM ai_operations
+             WHERE operation_id IN (
+                 SELECT operation_id FROM ai_operations WHERE phase=3
+                 ORDER BY completed_order DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            [i64::try_from(MAX_RETAINED_AI_OPERATIONS)
+                .expect("AI operation retention bound fits i64")],
+        )
+        .map_err(|error| AgentError::sqlite("prune terminal AI operations", error))?;
+    Ok(())
+}
+
+fn count_terminal_ai_operations(connection: &Connection) -> Result<usize> {
+    let count = connection
+        .query_row(
+            "SELECT count(*) FROM ai_operations WHERE phase=3",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| AgentError::sqlite_read("count terminal AI operations", error))?;
+    usize::try_from(count).map_err(|_| corrupt("terminal AI operation count is invalid"))
+}
+
+fn retain_new_terminal_ai_operation(
+    transaction: &Transaction<'_>,
+    retained_before: usize,
+) -> Result<usize> {
+    if retained_before < MAX_RETAINED_AI_OPERATIONS {
+        return Ok(retained_before + 1);
+    }
+    let deleted = transaction
+        .execute(
+            "DELETE FROM ai_operations WHERE operation_id=(
+                 SELECT operation_id FROM ai_operations WHERE phase=3
+                 ORDER BY completed_order ASC LIMIT 1
+             )",
+            [],
+        )
+        .map_err(|error| AgentError::sqlite("evict terminal AI operation", error))?;
+    if deleted != 1 {
+        return Err(corrupt(
+            "terminal AI operation retention lost its oldest row",
+        ));
+    }
+    Ok(MAX_RETAINED_AI_OPERATIONS)
 }
 
 #[allow(unsafe_code)] // Required for SQLite's actual-open-handle identity query.
 fn verify_database_handle_not_moved(connection: &Connection) -> Result<()> {
     let mut moved = 0_i32;
     // SAFETY: `connection` owns a live `sqlite3` handle for this call; `main` is
-    // a static NUL-terminated database name; `moved` is a valid writable int;
-    // and every connection in this module is confined to the current thread,
-    // so the raw handle cannot be used concurrently while file_control runs.
+    // a static NUL-terminated database name; and `moved` is a valid writable
+    // int. The writer connection has one dedicated thread. A cold-reader Store
+    // is removed from its mutex-protected pool and exclusively owned by one
+    // blocking job until this call completes, so neither handle can be used
+    // concurrently while file_control runs.
     let result = unsafe {
         rusqlite::ffi::sqlite3_file_control(
             connection.handle(),
@@ -1466,10 +1709,11 @@ fn append_events_tx(
     transaction: &Transaction<'_>,
     session_id: &SessionId,
     expected: CommitCursor,
-    events: &[TranscriptEventKind],
+    events: AppendedEvents,
     terminal: bool,
 ) -> Result<CommitCursor> {
-    if events.is_empty() {
+    let event_count = events.len();
+    if event_count == 0 {
         return Err(AgentError::CorruptStore {
             message: "event append must not be empty".to_owned(),
         });
@@ -1479,7 +1723,7 @@ fn append_events_tx(
     }
     let projected = expected
         .next_seq
-        .checked_add(u64::try_from(events.len()).expect("event count fits u64"))
+        .checked_add(u64::try_from(event_count).expect("event count fits u64"))
         .and_then(|value| value.checked_sub(1))
         .ok_or_else(|| AgentError::CorruptStore {
             message: "event sequence exhausted".to_owned(),
@@ -1494,12 +1738,25 @@ fn append_events_tx(
         });
     }
 
-    let (encoded, projected_payload_bytes) =
-        encode_appended_events(session_id, expected.payload_bytes, events)?;
+    let encoded = match events {
+        AppendedEvents::Encoded(encoded)
+            if encoded.existing_payload_bytes == expected.payload_bytes =>
+        {
+            encoded
+        }
+        AppendedEvents::Encoded(_) => {
+            return Err(AgentError::SessionCommitConflict {
+                session_id: session_id.clone(),
+            });
+        }
+        AppendedEvents::Typed(events) => {
+            encode_appended_events(session_id, expected.payload_bytes, &events)?
+        }
+    };
 
     let next_cursor = CommitCursor {
         next_seq: projected + 1,
-        payload_bytes: projected_payload_bytes,
+        payload_bytes: encoded.projected_payload_bytes,
     };
     let changed = transaction
         .execute(
@@ -1516,12 +1773,12 @@ fn append_events_tx(
         )
         .map_err(|error| AgentError::sqlite("advance event commit cursor", error))?;
     if changed != 1 {
-        return Err(AgentError::CorruptStore {
-            message: format!("session {session_id} commit cursor is stale"),
+        return Err(AgentError::SessionCommitConflict {
+            session_id: session_id.clone(),
         });
     }
 
-    for (offset, payload) in encoded.into_iter().enumerate() {
+    for (offset, payload) in encoded.payloads.into_iter().enumerate() {
         let seq = expected.next_seq + u64::try_from(offset).expect("event offset fits u64");
         transaction
             .execute(
@@ -1541,7 +1798,7 @@ fn encode_appended_events(
     session_id: &SessionId,
     existing_payload_bytes: usize,
     events: &[TranscriptEventKind],
-) -> Result<(Vec<String>, usize)> {
+) -> Result<EncodedAppendedEvents> {
     if existing_payload_bytes > MAX_SESSION_PAYLOAD_BYTES {
         return Err(AgentError::CorruptStore {
             message: format!(
@@ -1584,14 +1841,19 @@ fn encode_appended_events(
             Ok(payload)
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok((encoded, projected_payload_bytes))
+    Ok(EncodedAppendedEvents {
+        payloads: encoded,
+        existing_payload_bytes,
+        event_count: events.len(),
+        projected_payload_bytes,
+    })
 }
 
 pub(crate) fn preflight_appended_events(
     session_id: &SessionId,
     cursor: CommitCursor,
     events: &[TranscriptEventKind],
-) -> Result<()> {
+) -> Result<EncodedAppendedEvents> {
     let projected = cursor
         .next_seq
         .checked_add(u64::try_from(events.len()).expect("event count fits u64"))
@@ -1609,7 +1871,7 @@ pub(crate) fn preflight_appended_events(
             ),
         });
     }
-    encode_appended_events(session_id, cursor.payload_bytes, events).map(|_| ())
+    encode_appended_events(session_id, cursor.payload_bytes, events)
 }
 
 #[derive(Clone, Debug)]
@@ -1661,9 +1923,15 @@ enum WriterCommand {
     Commit {
         session_id: SessionId,
         expected: CommitCursor,
-        events: Vec<TranscriptEventKind>,
+        events: AppendedEvents,
         terminal: Option<RunStatus>,
+        #[cfg(test)]
+        is_dispatch: bool,
         response: oneshot::Sender<Result<CommitReceipt>>,
+    },
+    AiReserve {
+        operation_id: AiOperationId,
+        response: oneshot::Sender<Result<()>>,
     },
     AiPrepared {
         operation_id: AiOperationId,
@@ -1676,7 +1944,11 @@ enum WriterCommand {
     },
     AiTerminal {
         operation_id: AiOperationId,
-        terminal: serde_json::Value,
+        terminal: AiTerminalStatus,
+        response: oneshot::Sender<Result<()>>,
+    },
+    AiAbandon {
+        operation_id: AiOperationId,
         response: oneshot::Sender<Result<()>>,
     },
     #[cfg(test)]
@@ -1685,6 +1957,16 @@ enum WriterCommand {
     },
     #[cfg(test)]
     GateNextDispatchCommit {
+        gate: ThreadGate,
+        response: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    GateNextAiReserve {
+        gate: ThreadGate,
+        response: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    GateNextAiTerminal {
         gate: ThreadGate,
         response: oneshot::Sender<()>,
     },
@@ -1742,6 +2024,10 @@ impl WriterHandle {
                 #[cfg(test)]
                 let mut next_dispatch_gate = None::<ThreadGate>;
                 #[cfg(test)]
+                let mut next_ai_reserve_gate = None::<ThreadGate>;
+                #[cfg(test)]
+                let mut next_ai_terminal_gate = None::<ThreadGate>;
+                #[cfg(test)]
                 let mut fail_next_dispatch_commit_uncertain = false;
                 while let Some(command) = receiver.blocking_recv() {
                     match command {
@@ -1768,16 +2054,14 @@ impl WriterHandle {
                             expected,
                             events,
                             terminal,
+                            #[cfg(test)]
+                            is_dispatch,
                             response,
                         } => {
-                            #[cfg(test)]
-                            let is_dispatch = events.iter().any(|event| {
-                                matches!(event, TranscriptEventKind::ToolDispatchStarted { .. })
-                            });
                             let result = if thread_health.is_healthy() {
                                 worker
                                     .store
-                                    .commit_expected(&session_id, expected, &events, terminal)
+                                    .commit_expected(&session_id, expected, events, terminal)
                                     .map(|(cursor, record)| CommitReceipt { cursor, record })
                             } else {
                                 Err(AgentError::HostTerminal)
@@ -1825,6 +2109,24 @@ impl WriterHandle {
                             poison_on_store_error(&thread_health, &result);
                             let _ = response.send(result);
                         }
+                        WriterCommand::AiReserve {
+                            operation_id,
+                            response,
+                        } => {
+                            let result = if thread_health.is_healthy() {
+                                worker.store.reserve_ai_operation(&operation_id)
+                            } else {
+                                Err(AgentError::HostTerminal)
+                            };
+                            #[cfg(test)]
+                            if result.is_ok()
+                                && let Some(gate) = next_ai_reserve_gate.take()
+                            {
+                                gate.block_thread();
+                            }
+                            poison_on_store_error(&thread_health, &result);
+                            let _ = response.send(result);
+                        }
                         WriterCommand::AiStarted {
                             operation_id,
                             response,
@@ -1843,7 +2145,25 @@ impl WriterHandle {
                             response,
                         } => {
                             let result = if thread_health.is_healthy() {
-                                worker.store.record_ai_terminal(&operation_id, &terminal)
+                                worker.store.record_ai_terminal(&operation_id, terminal)
+                            } else {
+                                Err(AgentError::HostTerminal)
+                            };
+                            #[cfg(test)]
+                            if result.is_ok()
+                                && let Some(gate) = next_ai_terminal_gate.take()
+                            {
+                                gate.block_thread();
+                            }
+                            poison_on_store_error(&thread_health, &result);
+                            let _ = response.send(result);
+                        }
+                        WriterCommand::AiAbandon {
+                            operation_id,
+                            response,
+                        } => {
+                            let result = if thread_health.is_healthy() {
+                                worker.store.abandon_ai_operation(&operation_id)
                             } else {
                                 Err(AgentError::HostTerminal)
                             };
@@ -1858,6 +2178,16 @@ impl WriterHandle {
                         #[cfg(test)]
                         WriterCommand::GateNextDispatchCommit { gate, response } => {
                             next_dispatch_gate = Some(gate);
+                            let _ = response.send(());
+                        }
+                        #[cfg(test)]
+                        WriterCommand::GateNextAiReserve { gate, response } => {
+                            next_ai_reserve_gate = Some(gate);
+                            let _ = response.send(());
+                        }
+                        #[cfg(test)]
+                        WriterCommand::GateNextAiTerminal { gate, response } => {
+                            next_ai_terminal_gate = Some(gate);
                             let _ = response.send(());
                         }
                         #[cfg(test)]
@@ -1901,6 +2231,7 @@ impl WriterHandle {
         receiver.await.map_err(|_| self.worker_stopped())?
     }
 
+    #[cfg(test)]
     pub(crate) async fn commit(
         &self,
         session_id: SessionId,
@@ -1908,7 +2239,32 @@ impl WriterHandle {
         events: Vec<TranscriptEventKind>,
         terminal: Option<RunStatus>,
     ) -> Result<CommitReceipt> {
+        self.commit_encoded(session_id, expected, events, terminal, None)
+            .await
+    }
+
+    pub(crate) async fn commit_encoded(
+        &self,
+        session_id: SessionId,
+        expected: CommitCursor,
+        events: Vec<TranscriptEventKind>,
+        terminal: Option<RunStatus>,
+        encoded: Option<EncodedAppendedEvents>,
+    ) -> Result<CommitReceipt> {
         self.health.check()?;
+        #[cfg(test)]
+        let is_dispatch = events
+            .iter()
+            .any(|event| matches!(event, TranscriptEventKind::ToolDispatchStarted { .. }));
+        let events = match encoded {
+            Some(encoded) if encoded.event_count == events.len() => {
+                AppendedEvents::Encoded(encoded)
+            }
+            Some(_) => {
+                return Err(AgentError::SessionCommitConflict { session_id });
+            }
+            None => AppendedEvents::Typed(events),
+        };
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(WriterCommand::Commit {
@@ -1916,6 +2272,21 @@ impl WriterHandle {
                 expected,
                 events,
                 terminal,
+                #[cfg(test)]
+                is_dispatch,
+                response,
+            })
+            .await
+            .map_err(|_| self.worker_stopped())?;
+        receiver.await.map_err(|_| self.worker_stopped())?
+    }
+
+    pub(crate) async fn ai_reserve(&self, operation_id: AiOperationId) -> Result<()> {
+        self.health.check()?;
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(WriterCommand::AiReserve {
+                operation_id,
                 response,
             })
             .await
@@ -1957,7 +2328,7 @@ impl WriterHandle {
     pub(crate) async fn ai_terminal(
         &self,
         operation_id: AiOperationId,
-        terminal: serde_json::Value,
+        terminal: AiTerminalStatus,
     ) -> Result<()> {
         self.health.check()?;
         let (response, receiver) = oneshot::channel();
@@ -1965,6 +2336,19 @@ impl WriterHandle {
             .send(WriterCommand::AiTerminal {
                 operation_id,
                 terminal,
+                response,
+            })
+            .await
+            .map_err(|_| self.worker_stopped())?;
+        receiver.await.map_err(|_| self.worker_stopped())?
+    }
+
+    pub(crate) async fn ai_abandon(&self, operation_id: AiOperationId) -> Result<()> {
+        self.health.check()?;
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(WriterCommand::AiAbandon {
+                operation_id,
                 response,
             })
             .await
@@ -1997,6 +2381,36 @@ impl WriterHandle {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(WriterCommand::GateNextDispatchCommit {
+                gate: gate.clone(),
+                response,
+            })
+            .await
+            .map_err(|_| self.worker_stopped())?;
+        receiver.await.map_err(|_| self.worker_stopped())?;
+        Ok(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn gate_next_ai_reserve(&self) -> Result<ThreadGate> {
+        let gate = ThreadGate::new();
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(WriterCommand::GateNextAiReserve {
+                gate: gate.clone(),
+                response,
+            })
+            .await
+            .map_err(|_| self.worker_stopped())?;
+        receiver.await.map_err(|_| self.worker_stopped())?;
+        Ok(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn gate_next_ai_terminal(&self) -> Result<ThreadGate> {
+        let gate = ThreadGate::new();
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(WriterCommand::GateNextAiTerminal {
                 gate: gate.clone(),
                 response,
             })
@@ -2058,14 +2472,23 @@ impl ThreadGate {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ColdReader {
+    pool: Arc<ColdReadPool>,
     path: Arc<PathBuf>,
-    lease: Arc<WorkspaceLease>,
     slots: Arc<Semaphore>,
     health: HealthLatch,
     #[cfg(test)]
+    opened_connections: Arc<AtomicUsize>,
+    #[cfg(test)]
     next_probe_gate: Arc<std::sync::Mutex<Option<ThreadGate>>>,
+}
+
+struct ColdReadPool {
+    // Rust drops fields in declaration order; close SQLite handles before the
+    // workspace lease that protects their database identity.
+    stores: std::sync::Mutex<Vec<Store>>,
+    lease: Arc<WorkspaceLease>,
 }
 
 impl ColdReader {
@@ -2076,10 +2499,15 @@ impl ColdReader {
         max_cold_reads: NonZeroU8,
     ) -> Self {
         Self {
+            pool: Arc::new(ColdReadPool {
+                stores: std::sync::Mutex::new(Vec::new()),
+                lease,
+            }),
             path: Arc::new(path),
-            lease,
             slots: Arc::new(Semaphore::new(usize::from(max_cold_reads.get()))),
             health,
+            #[cfg(test)]
+            opened_connections: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             next_probe_gate: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -2093,7 +2521,7 @@ impl ColdReader {
     }
 
     pub(crate) fn workspace_lease(&self) -> Arc<WorkspaceLease> {
-        Arc::clone(&self.lease)
+        Arc::clone(&self.pool.lease)
     }
 
     pub(crate) async fn probe(&self, session_id: SessionId) -> Result<ProbeSession> {
@@ -2104,8 +2532,10 @@ impl ColdReader {
             .map_err(|_| self.worker_stopped())?;
         self.health.check()?;
         let path = Arc::clone(&self.path);
-        let lease = Arc::clone(&self.lease);
+        let pool = Arc::clone(&self.pool);
         let health = self.health.clone();
+        #[cfg(test)]
+        let opened_connections = Arc::clone(&self.opened_connections);
         #[cfg(test)]
         let gate = self
             .next_probe_gate
@@ -2114,16 +2544,26 @@ impl ColdReader {
             .take();
         let result = tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            let lease = lease;
             health.check()?;
-            let store = Store::open_read_only_guarded(path.as_ref(), &lease)?;
+            let store =
+                if let Some(store) = pool.stores.lock().expect("cold-reader pool lock").pop() {
+                    store
+                } else {
+                    #[cfg(test)]
+                    opened_connections.fetch_add(1, Ordering::Relaxed);
+                    Store::open_read_only_guarded(path.as_ref(), &pool.lease)?
+                };
             let result = store.probe_session(&session_id);
             #[cfg(test)]
             if let Some(gate) = gate {
                 gate.block_thread();
             }
             store.verify_connection_not_moved()?;
-            lease.verify_database(path.as_ref())?;
+            pool.lease.verify_database(path.as_ref())?;
+            pool.stores
+                .lock()
+                .expect("cold-reader pool lock")
+                .push(store);
             result.map_err(|error| localize_session_corruption(&session_id, error))
         })
         .await
@@ -2139,16 +2579,28 @@ impl ColdReader {
             .map_err(|_| self.worker_stopped())?;
         self.health.check()?;
         let path = Arc::clone(&self.path);
-        let lease = Arc::clone(&self.lease);
+        let pool = Arc::clone(&self.pool);
         let health = self.health.clone();
+        #[cfg(test)]
+        let opened_connections = Arc::clone(&self.opened_connections);
         let result = tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            let lease = lease;
             health.check()?;
-            let store = Store::open_read_only_guarded(path.as_ref(), &lease)?;
+            let store =
+                if let Some(store) = pool.stores.lock().expect("cold-reader pool lock").pop() {
+                    store
+                } else {
+                    #[cfg(test)]
+                    opened_connections.fetch_add(1, Ordering::Relaxed);
+                    Store::open_read_only_guarded(path.as_ref(), &pool.lease)?
+                };
             let result = store.transcript(&session_id);
             store.verify_connection_not_moved()?;
-            lease.verify_database(path.as_ref())?;
+            pool.lease.verify_database(path.as_ref())?;
+            pool.stores
+                .lock()
+                .expect("cold-reader pool lock")
+                .push(store);
             result.map_err(|error| localize_session_corruption(&session_id, error))
         })
         .await
@@ -2171,6 +2623,11 @@ impl ColdReader {
             });
         }
         Ok(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn opened_connection_count(&self) -> usize {
+        self.opened_connections.load(Ordering::Relaxed)
     }
 
     fn finish<T>(&self, result: Result<T>) -> Result<T> {
@@ -2290,7 +2747,7 @@ mod tests {
         store
             .connection
             .query_row(
-                "SELECT phase,terminal_json FROM ai_operations WHERE operation_id=?1",
+                "SELECT phase,terminal_status FROM ai_operations WHERE operation_id=?1",
                 [operation_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -2302,33 +2759,73 @@ mod tests {
         let (_temp, mut store) = store();
         let id = AiOperationId::new("image-one").expect("operation id");
         store
-            .record_ai_prepared(&id, &ai_snapshot("provider-call-1"))
-            .expect("prepared barrier");
+            .reserve_ai_operation(&id)
+            .expect("reservation barrier");
         assert_eq!(ai_phase(&store, &id), (0, None));
         assert!(matches!(
-            store.record_ai_prepared(&id, &ai_snapshot("provider-call-2")),
+            store.reserve_ai_operation(&id),
             Err(AgentError::AiOperationConflict { .. })
         ));
 
-        store.record_ai_started(&id).expect("started barrier");
-        assert_eq!(ai_phase(&store, &id), (1, None));
         store
-            .record_ai_terminal(&id, &serde_json::json!({"status":"succeeded"}))
+            .record_ai_prepared(&id, &ai_snapshot("provider-call-1"))
+            .expect("prepared barrier");
+        assert_eq!(ai_phase(&store, &id), (1, None));
+        store.record_ai_started(&id).expect("started barrier");
+        assert_eq!(ai_phase(&store, &id), (2, None));
+        store
+            .record_ai_terminal(&id, AiTerminalStatus::Succeeded)
             .expect("terminal barrier");
+        assert_eq!(ai_phase(&store, &id), (3, Some("succeeded".to_owned())));
+    }
+
+    #[test]
+    fn abandoning_an_ai_operation_closes_whichever_open_phase_is_durable() {
+        let (_temp, mut store) = store();
+        let prepared = AiOperationId::new("abandon-prepared").expect("operation id");
+        store.reserve_ai_operation(&prepared).expect("reserve");
+        store
+            .record_ai_prepared(&prepared, &ai_snapshot("provider-call-1"))
+            .expect("prepared");
+        store
+            .abandon_ai_operation(&prepared)
+            .expect("abandon prepared");
         assert_eq!(
-            ai_phase(&store, &id),
-            (2, Some(r#"{"status":"succeeded"}"#.to_owned()))
+            ai_phase(&store, &prepared),
+            (3, Some("not_started".to_owned()))
         );
+
+        let started = AiOperationId::new("abandon-started").expect("operation id");
+        store.reserve_ai_operation(&started).expect("reserve");
+        store
+            .record_ai_prepared(&started, &ai_snapshot("provider-call-2"))
+            .expect("prepared");
+        store.record_ai_started(&started).expect("started");
+        store
+            .abandon_ai_operation(&started)
+            .expect("abandon started");
+        assert_eq!(
+            ai_phase(&store, &started),
+            (3, Some("outcome_unknown".to_owned()))
+        );
+
+        store
+            .abandon_ai_operation(&started)
+            .expect("terminal abandon is idempotent");
     }
 
     #[test]
     fn recovery_never_replays_unfinished_ai_operations() {
         let (_temp, mut store) = store();
+        let reserved = AiOperationId::new("reserved-only").expect("operation id");
         let prepared = AiOperationId::new("prepared-only").expect("operation id");
         let started = AiOperationId::new("started-only").expect("operation id");
+        store.reserve_ai_operation(&reserved).expect("reserve");
+        store.reserve_ai_operation(&prepared).expect("reserve");
         store
             .record_ai_prepared(&prepared, &ai_snapshot("provider-call-1"))
             .expect("prepared");
+        store.reserve_ai_operation(&started).expect("reserve");
         store
             .record_ai_prepared(&started, &ai_snapshot("provider-call-2"))
             .expect("prepared");
@@ -2336,26 +2833,35 @@ mod tests {
 
         store.recover_ai_operations().expect("recovery");
         assert_eq!(
+            ai_phase(&store, &reserved),
+            (3, Some("not_started".to_owned()))
+        );
+        assert_eq!(
             ai_phase(&store, &prepared),
-            (2, Some(r#"{"status":"not_started"}"#.to_owned()))
+            (3, Some("not_started".to_owned()))
         );
         assert_eq!(
             ai_phase(&store, &started),
-            (2, Some(r#"{"status":"outcome_unknown"}"#.to_owned()))
+            (3, Some("outcome_unknown".to_owned()))
         );
     }
 
     #[test]
     fn completed_ai_operations_do_not_consume_the_open_operation_quota() {
         let (_temp, mut store) = store();
-        let snapshot = serde_json::to_string(&ai_snapshot("historical-call")).expect("snapshot");
         let transaction = store.connection.transaction().expect("transaction");
         for index in 0..MAX_AI_OPERATIONS {
+            let operation_id = if index == 0 {
+                "zz-oldest-terminal".to_owned()
+            } else {
+                format!("retained-{index:04}")
+            };
             transaction
                 .execute(
-                    "INSERT INTO ai_operations(operation_id,prepared_json,phase,terminal_json)
-                     VALUES (?1,?2,2,'{\"status\":\"succeeded\"}')",
-                    rusqlite::params![format!("historical-{index}"), snapshot],
+                    "INSERT INTO ai_operations(
+                        operation_id,prepared_json,phase,terminal_status,completed_order
+                     ) VALUES (?1,NULL,3,'succeeded',?2)",
+                    rusqlite::params![operation_id, index + 1],
                 )
                 .expect("historical terminal row");
         }
@@ -2365,19 +2871,74 @@ mod tests {
             .recover_ai_operations()
             .expect("terminal history is valid");
         let next = AiOperationId::new("next-open-operation").expect("operation id");
+        store.reserve_ai_operation(&next).expect("reserve");
         store
             .record_ai_prepared(&next, &ai_snapshot("next-provider-call"))
             .expect("open-operation quota excludes terminal history");
+        store.record_ai_started(&next).expect("started");
+        store
+            .record_ai_terminal(&next, AiTerminalStatus::Succeeded)
+            .expect("terminal retention");
+        let retained: usize = store
+            .connection
+            .query_row("SELECT count(*) FROM ai_operations", [], |row| row.get(0))
+            .expect("retained terminal rows");
+        assert_eq!(retained, MAX_RETAINED_AI_OPERATIONS);
+
+        let oldest = AiOperationId::new("zz-oldest-terminal").expect("oldest operation id");
+        store
+            .reserve_ai_operation(&oldest)
+            .expect("the oldest completion is reusable after retention eviction");
+        assert!(matches!(
+            store.reserve_ai_operation(&next),
+            Err(AgentError::AiOperationConflict { .. })
+        ));
     }
 
     #[test]
-    fn terminal_ai_operation_is_preflighted_before_the_store_transition() {
-        let oversized = serde_json::json!({
-            "status":"succeeded",
-            "result":{"transcription":"\"".repeat(9 * 1024 * 1024)}
-        });
-        assert!(preflight_ai_terminal(&oversized).is_err());
-        assert!(preflight_ai_terminal(&serde_json::json!({"status":"failed"})).is_ok());
+    fn startup_recovery_prunes_excess_terminal_ai_operations_and_resets_the_cache() {
+        let (_temp, mut store) = store();
+        let excess = 3;
+        let transaction = store.connection.transaction().expect("transaction");
+        for index in 0..(MAX_RETAINED_AI_OPERATIONS + excess) {
+            transaction
+                .execute(
+                    "INSERT INTO ai_operations(
+                        operation_id,prepared_json,phase,terminal_status,completed_order
+                     ) VALUES (?1,NULL,3,'succeeded',?2)",
+                    rusqlite::params![format!("history-{index:05}"), index + 1],
+                )
+                .expect("historical terminal row");
+        }
+        transaction.commit().expect("commit history");
+
+        store.recover_ai_operations().expect("startup recovery");
+        let retained: usize = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM ai_operations WHERE phase=3",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained terminal rows");
+        assert_eq!(retained, MAX_RETAINED_AI_OPERATIONS);
+        assert_eq!(store.terminal_ai_operations, MAX_RETAINED_AI_OPERATIONS);
+        assert!(!ai_operation_exists(&store, "history-00000"));
+        assert!(ai_operation_exists(
+            &store,
+            &format!("history-{:05}", MAX_RETAINED_AI_OPERATIONS + excess - 1)
+        ));
+    }
+
+    fn ai_operation_exists(store: &Store, operation_id: &str) -> bool {
+        store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_operations WHERE operation_id=?1)",
+                [operation_id],
+                |row| row.get(0),
+            )
+            .expect("AI operation existence")
     }
 
     struct ClosedSession {
@@ -2467,6 +3028,28 @@ mod tests {
             blocked.await.expect("blocked task").expect("blocked probe"),
             ProbeSession::Missing
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sequential_cold_reads_reuse_one_validated_sqlite_connection() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = AgentWorkspace::new(temp.path().join("agent"));
+        let health = HealthLatch::new();
+        let (_writer, reader) =
+            WriterHandle::open(workspace, health, NonZeroU8::new(4).expect("nonzero"))
+                .await
+                .expect("store workers");
+
+        for id in ["first-missing", "second-missing"] {
+            assert!(matches!(
+                reader
+                    .probe(SessionId::new(id).expect("id"))
+                    .await
+                    .expect("probe"),
+                ProbeSession::Missing
+            ));
+        }
+        assert_eq!(reader.opened_connection_count(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2561,10 +3144,14 @@ mod tests {
             )
             .expect("corrupt selected session");
 
-        assert!(matches!(
-            session.reader.transcript(session.id.clone()).await,
-            Err(AgentError::CorruptSession { session_id, .. }) if session_id == session.id
-        ));
+        let result = session.reader.transcript(session.id.clone()).await;
+        assert!(
+            matches!(
+                result,
+                Err(AgentError::CorruptSession { ref session_id, .. }) if session_id == &session.id
+            ),
+            "unexpected localized corruption result: {result:?}"
+        );
         session
             .health
             .check()
@@ -2761,6 +3348,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stale_writer_commit_does_not_poison_unrelated_work() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = AgentWorkspace::new(temp.path().join("agent"));
+        let health = HealthLatch::new();
+        let (writer, _reader) = WriterHandle::open(
+            workspace,
+            health.clone(),
+            NonZeroU8::new(1).expect("nonzero"),
+        )
+        .await
+        .expect("store workers");
+        let id = SessionId::new("stale-writer-commit").expect("id");
+        let CreateSession::Created { cursor, .. } = writer
+            .create(id.clone(), "default".to_owned(), "hello".to_owned())
+            .await
+            .expect("create")
+        else {
+            panic!("new session expected")
+        };
+        let event = || TranscriptEventKind::UserMessage {
+            content: "message".to_owned(),
+        };
+        writer
+            .commit(id.clone(), cursor, vec![event()], None)
+            .await
+            .expect("first commit");
+
+        assert!(matches!(
+            writer.commit(id.clone(), cursor, vec![event()], None).await,
+            Err(AgentError::SessionCommitConflict { session_id }) if session_id == id
+        ));
+        health.check().expect("stale session commit is local");
+        assert!(matches!(
+            writer
+                .create(
+                    SessionId::new("unrelated-after-stale").expect("id"),
+                    "default".to_owned(),
+                    "hello".to_owned(),
+                )
+                .await
+                .expect("unrelated create"),
+            CreateSession::Created { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn shared_schema_corruption_poisons_the_store_health_latch() {
         let temp = tempdir().expect("tempdir");
         let workspace = AgentWorkspace::new(temp.path().join("agent"));
@@ -2928,7 +3561,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v4_has_only_the_recovery_index_and_rejects_schema_drift() {
+    fn schema_v7_has_only_the_recovery_indexes_and_rejects_schema_drift() {
         let malformed = tempdir().expect("tempdir");
         let malformed_path = malformed.path().join("agent.sqlite3");
         let connection = Connection::open(&malformed_path).expect("connection");
@@ -2936,12 +3569,12 @@ mod tests {
         connection
             .execute_batch(&format!(
                 "{STORE_META_SQL};
-                 INSERT INTO store_meta(key,value) VALUES ('schema_version','4');
+                 INSERT INTO store_meta(key,value) VALUES ('schema_version','7');
                  {non_strict_sessions};
                  {OPEN_INDEX_SQL};
                  {EVENTS_SQL};"
             ))
-            .expect("malformed v4 schema");
+            .expect("malformed v6 schema");
         drop(connection);
         assert!(matches!(
             Store::open(&malformed_path),
@@ -2980,12 +3613,19 @@ mod tests {
                     .collect::<std::result::Result<Vec<_>, _>>()
             })
             .expect("indexes");
-        assert_eq!(indexes, ["open_sessions_by_id"]);
+        assert_eq!(
+            indexes,
+            [
+                "open_ai_operations_by_id",
+                "open_sessions_by_id",
+                "terminal_ai_operations_by_completion"
+            ]
+        );
     }
 
     #[test]
-    fn schema_v1_through_v3_are_rejected_without_migration() {
-        for version in [1_u32, 2, 3] {
+    fn schema_v1_through_v6_are_rejected_without_migration() {
+        for version in [1_u32, 2, 3, 4, 5, 6] {
             let temp = tempdir().expect("tempdir");
             let path = temp.path().join("agent.sqlite3");
             drop(Store::open(&path).expect("store"));
@@ -3095,6 +3735,28 @@ mod tests {
                 detail.contains("SEARCH sessions USING COVERING INDEX open_sessions_by_id")
                     && detail.contains("session_id>?")
             }),
+            "unexpected query plan: {details:?}"
+        );
+    }
+
+    #[test]
+    fn open_ai_operation_count_uses_the_partial_index() {
+        let (_temp, store) = store();
+        let details = store
+            .connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {COUNT_OPEN_AI_OPERATIONS_SQL}"
+            ))
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(3))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .expect("query plan");
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("open_ai_operations_by_id")),
             "unexpected query plan: {details:?}"
         );
     }
@@ -3238,9 +3900,9 @@ mod tests {
             .commit_expected(
                 &id,
                 cursor,
-                &[TranscriptEventKind::UserMessage {
+                AppendedEvents::Typed(vec![TranscriptEventKind::UserMessage {
                     content: "first".to_owned(),
-                }],
+                }]),
                 None,
             )
             .expect("first commit");
@@ -3248,14 +3910,37 @@ mod tests {
             store.commit_expected(
                 &id,
                 cursor,
-                &[TranscriptEventKind::UserMessage {
+                AppendedEvents::Typed(vec![TranscriptEventKind::UserMessage {
                     content: "stale".to_owned(),
-                }],
+                }]),
                 None,
             ),
-            Err(AgentError::CorruptStore { .. })
+            Err(AgentError::SessionCommitConflict { session_id }) if session_id == id
         ));
         assert_eq!(event_row_count(&store, &id), 5);
+    }
+
+    #[test]
+    fn open_ai_operation_quota_is_a_local_resource_error() {
+        let (_temp, mut store) = store();
+        let transaction = store.connection.transaction().expect("transaction");
+        for index in 0..MAX_AI_OPERATIONS {
+            transaction
+                .execute(
+                    "INSERT INTO ai_operations(
+                        operation_id,prepared_json,phase,terminal_status,completed_order
+                     ) VALUES (?1,NULL,0,NULL,NULL)",
+                    [format!("open-{index:04}")],
+                )
+                .expect("open row");
+        }
+        transaction.commit().expect("commit rows");
+
+        let error = store
+            .reserve_ai_operation(&AiOperationId::new("over-quota").expect("id"))
+            .expect_err("quota must reject the reservation");
+        assert!(matches!(error, AgentError::Ai { .. }));
+        assert_eq!(error.store_error_class(), StoreErrorClass::NotStoreRelated);
     }
 
     #[test]

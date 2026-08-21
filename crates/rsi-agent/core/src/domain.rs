@@ -31,6 +31,7 @@ impl AgentWorkspace {
 
 macro_rules! numeric_id {
     ($name:ident) => {
+        /// Monotonic numeric identity assigned by the durable agent store.
         #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
         pub struct $name(u64);
 
@@ -183,6 +184,7 @@ impl<'de> Deserialize<'de> for CallId {
     }
 }
 
+/// Immutable request to run or resume one durable agent session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunRequest {
     session_id: SessionId,
@@ -255,6 +257,7 @@ impl RunRequest {
     }
 }
 
+/// Durable outcome and transcript boundary returned by a run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunRecord(Arc<RunRecordInner>);
 
@@ -270,6 +273,7 @@ impl RunRecord {
         &self.0.session_id
     }
 
+    /// Returns the last transcript event committed by this run.
     pub fn transcript_through(&self) -> EventSeq {
         self.0.transcript_through
     }
@@ -291,18 +295,25 @@ impl RunRecord {
     }
 }
 
+/// Durable terminal state of an agent run.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunStatus {
+    /// Model completed the turn with a final user-visible message.
     Completed { final_message: String },
+    /// Run terminated with a classified failure.
     Failed { failure: Failure },
+    /// Process stopped before a terminal semantic outcome was committed.
     Interrupted,
 }
 
+/// Bounded durable failure recorded in a transcript.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Failure {
+    /// Stable failure classification used by recovery and callers.
     pub kind: FailureKind,
+    /// Bounded human-readable failure summary.
     pub message: String,
 }
 
@@ -315,70 +326,121 @@ impl Failure {
     }
 }
 
+/// Stable durable classification of a failed agent run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
+    /// Language provider could not be selected or reached.
     ModelUnavailable,
+    /// Language provider violated the semantic protocol.
     ModelProtocol,
+    /// Tool provider or requested tool was unavailable.
     ToolUnavailable,
+    /// Tool provider violated the semantic protocol.
     ToolProtocol,
+    /// Run exhausted its configured reasoning-step budget.
     StepLimitExceeded,
+    /// Run exhausted its configured tool-call budget.
     CallLimitExceeded,
+    /// Model context exceeded its configured or provider limit.
     ContextLimitExceeded,
+    /// A bounded execution phase exceeded its deadline.
     TimedOut,
 }
 
+/// Immutable provider and tool context committed before model execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSnapshot {
+    /// Exact system prompt supplied to the model.
     pub system_prompt: String,
+    /// Exact selected model identifier.
     pub model: String,
+    /// Generation-pinned language provider instance.
     pub model_provider: String,
+    /// Language service protocol version.
     pub model_protocol_version: u32,
+    /// Generation-pinned tools provider instance.
     pub tools_provider: String,
+    /// Tools service protocol version.
     pub tools_protocol_version: u32,
+    /// Canonical tool catalog exposed to the model.
     pub tools: Vec<ToolDefinition>,
 }
 
+/// Normalized complete assistant response committed to the transcript.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssistantMessage {
+    /// User-visible assistant text, when emitted.
     pub content: Option<String>,
+    /// Provider reasoning text, when exposed.
     pub reasoning: Option<String>,
+    /// Tool calls requested by the model in provider order.
     pub tool_calls: Vec<ToolCall>,
+    /// Normalized reason generation stopped.
     pub finish_reason: rsi_ai_protocol::FinishReason,
+    /// Provider token usage totals, when reported.
     pub usage: Option<rsi_ai_protocol::TokenUsage>,
+    /// Opaque validated provider state required for a later replay turn.
     pub replay: Option<rsi_ai_protocol::ProviderExtension>,
+    /// Non-fatal normalized provider warnings.
     pub warnings: Vec<rsi_ai_protocol::Warning>,
+    /// Source citations returned by hosted provider tools.
     pub sources: Vec<rsi_ai_protocol::Source>,
 }
 
+/// One validated tool invocation requested by the model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    /// Model-supplied correlation identity.
     pub id: CallId,
+    /// Exact callable name from the committed catalog.
     pub name: String,
     /// Original JSON text emitted by the model.
     pub arguments: String,
 }
 
+/// Durable outcome of crossing the external tool-effect boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolOutcome {
-    Succeeded { value: serde_json::Value },
-    Failed { code: String, message: String },
-    NotStarted { reason: String },
+    /// Tool completed with a validated JSON value.
+    Succeeded {
+        /// Bounded semantic tool result.
+        value: serde_json::Value,
+    },
+    /// Tool completed with a known semantic failure.
+    Failed {
+        /// Machine-readable tool failure code.
+        code: String,
+        /// Bounded human-readable failure summary.
+        message: String,
+    },
+    /// Tool effect was proven not to have started.
+    NotStarted {
+        /// Bounded explanation of why dispatch did not begin.
+        reason: String,
+    },
+    /// Dispatch may have started, so automatic replay is unsafe.
     OutcomeUnknown,
 }
 
+/// Canonical language request committed before provider preparation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRequestSnapshot {
+    /// Durable identifier correlating preparation and retries.
     pub request_id: String,
+    /// Exact selected model identifier.
     pub model: String,
+    /// Transcript boundary from which the request was derived.
     pub source_through: EventSeq,
+    /// Canonical serialized semantic request.
     #[serde(with = "arc_str")]
     pub canonical_json: Arc<str>,
+    /// Lowercase SHA-256 digest of `canonical_json` bytes.
     pub sha256: String,
 }
 
@@ -405,15 +467,21 @@ mod arc_str {
     }
 }
 
+/// Durable result of one model or tool boundary within a step or turn.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BoundaryOutcome {
+    /// Execution may continue to the next boundary.
     Continued,
+    /// Agent reached a successful terminal answer.
     Completed,
+    /// Boundary terminated with a classified failure.
     Failed { failure: Failure },
+    /// Execution stopped before a safe terminal outcome was known.
     Interrupted,
 }
 
+/// Ordered durable transcript and current terminal session status.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Transcript {
     session_id: SessionId,
@@ -426,6 +494,7 @@ impl Transcript {
         &self.session_id
     }
 
+    /// Returns events in strictly increasing durable sequence order.
     pub fn events(&self) -> &[TranscriptEvent] {
         &self.events
     }
@@ -447,6 +516,7 @@ impl Transcript {
     }
 }
 
+/// One sequenced semantic event in a durable transcript.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptEvent {
     seq: EventSeq,
@@ -454,6 +524,7 @@ pub struct TranscriptEvent {
 }
 
 impl TranscriptEvent {
+    /// Returns the event's monotonic durable sequence number.
     pub const fn seq(&self) -> EventSeq {
         self.seq
     }
@@ -467,54 +538,73 @@ impl TranscriptEvent {
     }
 }
 
+/// Closed semantic event grammar persisted for session recovery and inspection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEventKind {
+    /// Binds a new session identity to immutable model and prompt inputs.
     SessionStarted {
+        /// Exact selected model identifier.
         model: String,
+        /// Lowercase SHA-256 digest of the original prompt bytes.
         prompt_sha256: String,
     },
+    /// Marks the beginning of a caller-visible agent turn.
     TurnStarted,
+    /// Marks the beginning of one bounded reasoning step.
     StepStarted {
+        /// Monotonic step identity within the session.
         step: StepId,
     },
+    /// Records the exact caller message for this turn.
     UserMessage {
+        /// Validated user message text.
         content: String,
     },
-    ContextSnapshot {
-        context: ContextSnapshot,
-    },
-    ModelRequestPrepared {
-        request: ModelRequestSnapshot,
-    },
+    /// Freezes provider identities and the tool catalog for the step.
+    ContextSnapshot { context: ContextSnapshot },
+    /// Commits a canonical semantic model request before provider preparation.
+    ModelRequestPrepared { request: ModelRequestSnapshot },
+    /// Commits provider resolution and preparation before starting model I/O.
     ModelCallPrepared {
+        /// Durable request identifier.
         request_id: String,
+        /// Redacted generation-pinned provider snapshot.
         snapshot: PreparedCallSnapshot,
     },
+    /// Records a safe automatic retry after a known failed attempt.
     ModelRetryScheduled {
+        /// Durable request identifier shared by all attempts.
         request_id: String,
+        /// One-based attempt number that failed.
         failed_attempt: u8,
+        /// Typed provider failure that justified retry.
         error: rsi_ai_protocol::AiError,
+        /// Scheduled delay before the next attempt, in milliseconds.
         delay_ms: u64,
     },
-    AssistantMessage {
-        message: AssistantMessage,
-    },
-    ToolCallPrepared {
-        call: ToolCall,
-    },
-    ToolDispatchStarted {
-        call_id: CallId,
-    },
+    /// Records one complete normalized assistant response.
+    AssistantMessage { message: AssistantMessage },
+    /// Commits a validated tool call before crossing its effect boundary.
+    ToolCallPrepared { call: ToolCall },
+    /// Marks the point after which tool outcome may be unknown on interruption.
+    ToolDispatchStarted { call_id: CallId },
+    /// Records the durable semantic outcome of a tool call.
     ToolResult {
+        /// Correlated tool call identity.
         call_id: CallId,
+        /// Known or unknown dispatch outcome.
         outcome: ToolOutcome,
     },
+    /// Closes one reasoning step with its boundary outcome.
     StepEnded {
         step: StepId,
+        /// Whether execution continues or terminates.
         outcome: BoundaryOutcome,
     },
+    /// Closes the caller-visible turn.
     TurnEnded {
+        /// Terminal or interrupted turn outcome.
         outcome: BoundaryOutcome,
     },
 }

@@ -16,8 +16,8 @@ use crate::domain::{
     TranscriptEventKind,
 };
 use crate::persistence::{
-    ColdReader, CommitCursor, CommitReceipt, CreateSession, ProbeSession, WriterHandle,
-    preflight_appended_events,
+    ColdReader, CommitCursor, CommitReceipt, CreateSession, EncodedAppendedEvents, ProbeSession,
+    WriterHandle, preflight_appended_events,
 };
 use crate::tool_validation::{ArgumentError, PreparedTool, prepare_catalog, validate_arguments};
 use crate::transcript::{AssistantAssessment, SessionMachine};
@@ -81,7 +81,9 @@ pub(crate) async fn run_new(
     run_loop(&writer, factory.as_ref(), &mut state, execution_limits)
         .await
         .map_err(|error| match error {
-            AgentError::SessionConflict { .. } | AgentError::RecoveryRequired { .. } => error,
+            AgentError::SessionConflict { .. }
+            | AgentError::SessionCommitConflict { .. }
+            | AgentError::RecoveryRequired { .. } => error,
             error => recovery(&session_id, error),
         })
 }
@@ -137,7 +139,7 @@ async fn run_loop(
         system_prompt: SYSTEM_PROMPT.to_owned(),
         model: state.model.to_string(),
         model_provider: ports.model.provider().to_owned(),
-        model_protocol_version: rsi_agent_protocol::WIRE_VERSION,
+        model_protocol_version: rsi_ai_meta::AiService::Language.version(),
         tools_provider: ports.tools.provider().to_owned(),
         tools_protocol_version: rsi_agent_protocol::WIRE_VERSION,
         tools: definitions,
@@ -202,21 +204,23 @@ async fn run_loop(
                 .cloned()
                 .map(|call| TranscriptEventKind::ToolCallPrepared { call }),
         );
-        if let Err(error) =
-            preflight_appended_events(&state.session_id, state.cursor, &response_events)
-        {
-            return close_failure(
-                writer,
-                state,
-                step,
-                Failure::new(
-                    FailureKind::ContextLimitExceeded,
-                    format!("assistant response cannot be committed: {error}"),
-                ),
-            )
-            .await;
-        }
-        commit_events(writer, state, response_events).await?;
+        let encoded =
+            match preflight_appended_events(&state.session_id, state.cursor, &response_events) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    return close_failure(
+                        writer,
+                        state,
+                        step,
+                        Failure::new(
+                            FailureKind::ContextLimitExceeded,
+                            format!("assistant response cannot be committed: {error}"),
+                        ),
+                    )
+                    .await;
+                }
+            };
+        commit_transition(writer, state, response_events, None, None, Some(encoded)).await?;
         failpoint("after_tool_prepared");
 
         if calls.is_empty() {
@@ -910,7 +914,7 @@ async fn commit_events(
     state: &mut CommittedRunState,
     events: Vec<TranscriptEventKind>,
 ) -> Result<()> {
-    commit_transition(writer, state, events, None, None).await?;
+    commit_transition(writer, state, events, None, None, None).await?;
     Ok(())
 }
 
@@ -920,7 +924,7 @@ async fn terminal(
     events: Vec<TranscriptEventKind>,
     status: RunStatus,
 ) -> Result<RunRecord> {
-    let record = commit_transition(writer, state, events, None, Some(status))
+    let record = commit_transition(writer, state, events, None, Some(status), None)
         .await?
         .ok_or_else(|| AgentError::CorruptStore {
             message: "terminal commit returned no run record".to_owned(),
@@ -978,7 +982,7 @@ async fn commit_request(
     events.push(TranscriptEventKind::ModelRequestPrepared {
         request: prepared.clone(),
     });
-    commit_transition(writer, state, events, catalog, None).await?;
+    commit_transition(writer, state, events, catalog, None, None).await?;
     state.verify_committed_request(&prepared)
 }
 
@@ -988,7 +992,7 @@ async fn commit_events_with_catalog(
     events: Vec<TranscriptEventKind>,
     catalog: std::collections::BTreeMap<String, PreparedTool>,
 ) -> Result<()> {
-    commit_transition(writer, state, events, Some(catalog), None).await?;
+    commit_transition(writer, state, events, Some(catalog), None, None).await?;
     Ok(())
 }
 
@@ -998,6 +1002,7 @@ async fn commit_transition(
     events: Vec<TranscriptEventKind>,
     catalog: Option<std::collections::BTreeMap<String, PreparedTool>>,
     terminal_status: Option<RunStatus>,
+    encoded: Option<EncodedAppendedEvents>,
 ) -> Result<Option<RunRecord>> {
     let session_id = state.session_id.clone();
     let mut pending = state.transaction()?.prepare(CommitIntent {
@@ -1007,7 +1012,7 @@ async fn commit_transition(
     })?;
     let (write_session, cursor, events, terminal_status) = pending.take_write();
     let receipt = writer
-        .commit(write_session, cursor, events, terminal_status)
+        .commit_encoded(write_session, cursor, events, terminal_status, encoded)
         .await
         .map_err(|error| recovery(&session_id, error))?;
     Ok(pending.install(receipt).into_record())
@@ -1045,7 +1050,9 @@ fn convert_assistant(message: ValidatedAssistantMessage) -> AssistantMessage {
 
 fn recovery(session_id: &SessionId, error: AgentError) -> AgentError {
     match error {
-        error @ AgentError::SessionConflict { .. } => error,
+        error @ (AgentError::SessionConflict { .. } | AgentError::SessionCommitConflict { .. }) => {
+            error
+        }
         AgentError::RecoveryRequired { message, .. } => AgentError::RecoveryRequired {
             session_id: session_id.clone(),
             message,

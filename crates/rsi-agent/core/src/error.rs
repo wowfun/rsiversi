@@ -19,6 +19,7 @@ pub(crate) enum StoreErrorClass {
     NotStoreRelated,
 }
 
+/// Typed failure returned by the agent facade and durable boundaries.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("invalid {field}: {message}")]
@@ -28,57 +29,72 @@ pub enum AgentError {
     },
 
     #[error("session {session_id} is already bound to a different model or prompt")]
+    /// Existing session identity is bound to different immutable inputs.
     SessionConflict { session_id: SessionId },
+
+    #[error("session {session_id} changed before its durable commit")]
+    /// Optimistic session commit preconditions no longer match durable state.
+    SessionCommitConflict { session_id: SessionId },
 
     #[error("AI operation {operation_id} already exists")]
     AiOperationConflict { operation_id: AiOperationId },
 
     #[error("agent workspace is already open: {path}")]
+    /// Another live host holds the exclusive workspace lease.
     WorkspaceOccupied { path: PathBuf },
 
     #[error("unsupported agent store version {found}; expected {expected}")]
     UnsupportedStoreVersion { found: u32, expected: u32 },
 
     #[error("agent store is corrupt: {message}")]
+    /// Workspace-wide durable invariants are inconsistent.
     CorruptStore { message: String },
 
     #[error("session {session_id} is corrupt: {message}")]
+    /// One session's durable state is inconsistent.
     CorruptSession {
         session_id: SessionId,
         message: String,
     },
 
     #[error("agent persistence failed during {operation}: {message}")]
+    /// A durable read or write failed definitively.
     Persistence {
         operation: &'static str,
         message: String,
     },
 
     #[error("agent persistence was temporarily unavailable during {operation}: {message}")]
+    /// A durable read was temporarily blocked or unavailable.
     ReadUnavailable {
         operation: &'static str,
         message: String,
     },
 
     #[error("agent persistence commit outcome is unknown during {operation}: {message}")]
+    /// A failed commit may or may not have reached durable storage.
     CommitOutcomeUnknown {
         operation: &'static str,
         message: String,
     },
 
     #[error("session {session_id} requires workspace recovery: {message}")]
+    /// Session cannot safely proceed until workspace recovery completes.
     RecoveryRequired {
         session_id: SessionId,
         message: String,
     },
 
     #[error("agent host is terminal; drop and reopen it")]
+    /// Host entered a fail-closed terminal state after a fatal durable failure.
     HostTerminal,
 
     #[error("agent worker stopped unexpectedly")]
+    /// Background persistence worker stopped before completing an operation.
     WorkerStopped,
 
     #[error("AI operation failed during {operation}: {message}")]
+    /// Provider or AI orchestration failed at a named operation seam.
     Ai {
         operation: &'static str,
         message: String,
@@ -133,6 +149,7 @@ impl AgentError {
             | Self::WorkerStopped => StoreErrorClass::FatalStore,
             Self::InvalidInput { .. }
             | Self::SessionConflict { .. }
+            | Self::SessionCommitConflict { .. }
             | Self::AiOperationConflict { .. }
             | Self::WorkspaceOccupied { .. }
             | Self::RecoveryRequired { .. }

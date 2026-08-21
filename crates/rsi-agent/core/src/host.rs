@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,6 +11,7 @@ use tokio::task::{Id as TaskId, JoinSet};
 
 use crate::adapter::{CompositionPortFactory, PortFactory};
 use crate::ai_operations;
+use crate::error::StoreErrorClass;
 use crate::persistence::{ColdReader, HealthLatch, ProbeSession, WriterHandle};
 use crate::{
     AgentError, AgentImageOutput, AgentRealtimeSession, AgentSpeechOutput,
@@ -86,17 +88,16 @@ impl ExecutionLimits {
         Ok(limits)
     }
 
-    /// Returns the deadline for opening or normally closing either provider stream.
+    /// Returns the deadline for provider stream handshakes and individual
+    /// Realtime command delivery. Local artifact I/O is outside this deadline.
     pub const fn handshake_timeout(self) -> Duration {
         self.handshake
     }
 
-    /// Returns the deadline for one complete model response.
     pub const fn model_response_timeout(self) -> Duration {
         self.model_response
     }
 
-    /// Returns the deadline for one catalog or tool response.
     pub const fn tool_response_timeout(self) -> Duration {
         self.tool_response
     }
@@ -131,6 +132,7 @@ pub struct OpenOptions {
 }
 
 impl OpenOptions {
+    /// Creates host options with bounded default concurrency and execution limits.
     pub fn new(
         workspace: AgentWorkspace,
         composition: CompositionHost,
@@ -235,7 +237,8 @@ impl AgentHost {
             .expect("a nonzero execution limit has a nonzero cold-read limit");
         let (writer, reader) =
             WriterHandle::open(workspace, health.clone(), max_cold_reads).await?;
-        let artifacts = ArtifactStore::open(&reader.workspace_root(), reader.workspace_lease())?;
+        let artifacts =
+            ArtifactStore::open(&reader.workspace_root(), reader.workspace_lease()).await?;
         let admitted = usize::from(max_concurrent_runs.get()) * ADMITTED_RUN_FACTOR;
         let admissions = Arc::new(Semaphore::new(admitted));
         let execution_slots = Arc::new(Semaphore::new(usize::from(max_concurrent_runs.get())));
@@ -324,17 +327,24 @@ impl AgentHost {
         request: ImageRequest,
     ) -> Result<AgentImageOutput> {
         let (runtime, permit) = self.ai_operation().await?;
-        let output = ai_operations::generate_image(
-            &runtime,
-            &self.inner.writer,
-            &self.inner.artifacts,
-            operation_id,
-            model.into(),
-            request,
-        )
-        .await;
-        drop(permit);
-        output
+        let writer = self.inner.writer.clone();
+        let artifacts = self.inner.artifacts.clone();
+        let model = model.into();
+        let supervised_id = operation_id.clone();
+        let deadline = runtime.execution_limits.provider_turn_timeout();
+        self.supervise_ai_operation(supervised_id, deadline, async move {
+            let _permit = permit;
+            ai_operations::generate_image(
+                &runtime,
+                &writer,
+                &artifacts,
+                operation_id,
+                model,
+                request,
+            )
+            .await
+        })
+        .await
     }
 
     /// Transcribes a previously committed audio artifact.
@@ -349,21 +359,21 @@ impl AgentHost {
         request: TranscriptionRequest,
     ) -> Result<AgentTranscriptionOutput> {
         let (runtime, permit) = self.ai_operation().await?;
-        let output = ai_operations::transcribe(
-            &runtime,
-            &self.inner.writer,
-            &self.inner.artifacts,
-            operation_id,
-            model.into(),
-            request,
-        )
+        let writer = self.inner.writer.clone();
+        let artifacts = self.inner.artifacts.clone();
+        let model = model.into();
+        let supervised_id = operation_id.clone();
+        let deadline = runtime.execution_limits.provider_turn_timeout();
+        self.supervise_ai_operation(supervised_id, deadline, async move {
+            let _permit = permit;
+            ai_operations::transcribe(&runtime, &writer, &artifacts, operation_id, model, request)
+                .await
+                .map(|(transcription, prepared)| AgentTranscriptionOutput {
+                    transcription,
+                    prepared,
+                })
+        })
         .await
-        .map(|(transcription, prepared)| AgentTranscriptionOutput {
-            transcription,
-            prepared,
-        });
-        drop(permit);
-        output
     }
 
     /// Synthesizes speech and commits the returned audio to the workspace CAS.
@@ -378,17 +388,17 @@ impl AgentHost {
         request: SpeechRequest,
     ) -> Result<AgentSpeechOutput> {
         let (runtime, permit) = self.ai_operation().await?;
-        let output = ai_operations::synthesize(
-            &runtime,
-            &self.inner.writer,
-            &self.inner.artifacts,
-            operation_id,
-            model.into(),
-            request,
-        )
-        .await;
-        drop(permit);
-        output
+        let writer = self.inner.writer.clone();
+        let artifacts = self.inner.artifacts.clone();
+        let model = model.into();
+        let supervised_id = operation_id.clone();
+        let deadline = runtime.execution_limits.provider_turn_timeout();
+        self.supervise_ai_operation(supervised_id, deadline, async move {
+            let _permit = permit;
+            ai_operations::synthesize(&runtime, &writer, &artifacts, operation_id, model, request)
+                .await
+        })
+        .await
     }
 
     /// Opens a live, non-replayable Realtime session. Its execution permit is
@@ -404,15 +414,23 @@ impl AgentHost {
         request: RealtimeRequest,
     ) -> Result<AgentRealtimeSession> {
         let (runtime, permit) = self.ai_operation().await?;
-        ai_operations::open_realtime(
-            &runtime,
-            self.inner.writer.clone(),
-            self.inner.artifacts.clone(),
-            operation_id,
-            model.into(),
-            request,
-            permit,
-        )
+        let writer = self.inner.writer.clone();
+        let artifacts = self.inner.artifacts.clone();
+        let model = model.into();
+        let supervised_id = operation_id.clone();
+        let deadline = runtime.execution_limits.provider_turn_timeout();
+        self.supervise_ai_operation(supervised_id, deadline, async move {
+            ai_operations::open_realtime(
+                &runtime,
+                writer,
+                artifacts,
+                operation_id,
+                model,
+                request,
+                permit,
+            )
+            .await
+        })
         .await
     }
 
@@ -428,6 +446,66 @@ impl AgentHost {
             .map_err(|_| self.worker_stopped())?;
         self.inner.health.check()?;
         Ok((runtime, permit))
+    }
+
+    pub(crate) async fn supervise_ai_operation<T>(
+        &self,
+        operation_id: AiOperationId,
+        timeout: Duration,
+        operation: impl Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        if tokio::time::Instant::now().checked_add(timeout).is_none() {
+            return Err(AgentError::Ai {
+                operation: "execute AI operation",
+                message: "AI operation deadline is no longer representable".to_owned(),
+            });
+        }
+        let writer = self.inner.writer.clone();
+        let supervisor = tokio::spawn(async move {
+            writer.ai_reserve(operation_id.clone()).await?;
+            let Some(deadline) = tokio::time::Instant::now().checked_add(timeout) else {
+                let error = AgentError::Ai {
+                    operation: "execute AI operation",
+                    message: "AI operation deadline is no longer representable".to_owned(),
+                };
+                return abandon_after_error(&writer, operation_id, error).await;
+            };
+            let mut operation = tokio::spawn(operation);
+            // Poll the operation first when completion and the deadline become
+            // ready together, so a durably completed result is never discarded.
+            let completed = tokio::select! {
+                biased;
+                result = &mut operation => Some(result),
+                () = tokio::time::sleep_until(deadline) => None,
+            };
+            match completed {
+                Some(Ok(Ok(result))) => Ok(result),
+                Some(Ok(Err(error))) => abandon_after_error(&writer, operation_id, error).await,
+                Some(Err(error)) => {
+                    let error = AgentError::Ai {
+                        operation: "execute AI operation",
+                        message: format!("AI operation task failed: {error}"),
+                    };
+                    abandon_after_error(&writer, operation_id, error).await
+                }
+                None => {
+                    operation.abort();
+                    let _ = operation.await;
+                    let error = AgentError::Ai {
+                        operation: "execute AI operation",
+                        message: "AI operation deadline elapsed".to_owned(),
+                    };
+                    abandon_after_error(&writer, operation_id, error).await
+                }
+            }
+        });
+        supervisor.await.map_err(|error| AgentError::Ai {
+            operation: "supervise AI operation",
+            message: format!("AI operation supervisor failed: {error}"),
+        })?
     }
 
     /// Reads one closed transcript after durable revalidation. A read of an
@@ -534,6 +612,11 @@ impl AgentHost {
     }
 
     #[cfg(test)]
+    pub(crate) async fn gate_next_ai_reserve(&self) -> Result<crate::persistence::ThreadGate> {
+        self.inner.writer.gate_next_ai_reserve().await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn fail_next_dispatch_commit_uncertain(&self) -> Result<()> {
         self.inner
             .writer
@@ -627,6 +710,30 @@ impl PromptGroups {
             .expect("the first accepted request remains grouped");
         let (model, prompt) = self.first;
         (model, prompt, waiters, self.by_request)
+    }
+}
+
+async fn abandon_after_error<T>(
+    writer: &WriterHandle,
+    operation_id: AiOperationId,
+    original: AgentError,
+) -> Result<T> {
+    match writer.ai_abandon(operation_id).await {
+        Ok(()) => Err(original),
+        Err(abandonment)
+            if matches!(
+                abandonment.store_error_class(),
+                StoreErrorClass::FatalStore | StoreErrorClass::CommitOutcomeUnknown
+            ) || matches!(abandonment, AgentError::HostTerminal) =>
+        {
+            Err(abandonment)
+        }
+        Err(abandonment) => Err(AgentError::Ai {
+            operation: "terminalize failed AI operation",
+            message: format!(
+                "operation failed: {original}; durable abandonment also failed: {abandonment}"
+            ),
+        }),
     }
 }
 

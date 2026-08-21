@@ -38,8 +38,9 @@ contain only a model identifier.
 
 `rsi-agent` owns durable policy. Language retries require a committed retry
 event and stop after visible output. Direct media and Realtime operations have
-caller-owned identities and commit Prepared, Started, and terminal database
-states. Recovery records NotStarted or OutcomeUnknown and never replays an
+caller-owned identities and commit Reserved, Prepared, Started, and terminal
+database states. Reservation precedes provider stream opening and input media
+reads. Recovery records NotStarted or OutcomeUnknown and never replays an
 effect. Media bytes live in an owner-only, quota-bounded SHA-256 CAS; durable
 records contain references. Realtime frames are intentionally live-only.
 

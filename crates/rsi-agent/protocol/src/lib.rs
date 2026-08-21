@@ -13,15 +13,10 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Number, Value, value::RawValue};
 use thiserror::Error;
 
-/// Canonical `rsi-meta` service contract for tool discovery and invocation.
 pub const TOOLS_SERVICE_KEY: &str = "rsi.agent.tools";
-/// Protocol identity carried by every tools envelope.
 pub const TOOLS_PROTOCOL: &str = TOOLS_SERVICE_KEY;
-/// Only supported semantic wire version.
 pub const WIRE_VERSION: u32 = 0;
-/// Maximum encoded size of one semantic DATA envelope.
 pub const MAX_DATA_BYTES: usize = 768 * 1024;
-/// Maximum size of a request or tool-call identifier.
 pub const MAX_ID_BYTES: usize = 255;
 
 /// Returns whether a value satisfies the shared durable and service identifier grammar.
@@ -31,30 +26,25 @@ pub fn is_wire_identifier(value: &str) -> bool {
         && value.len() <= MAX_ID_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
-/// Maximum number of tools in one catalog.
 pub const MAX_TOOLS: usize = 64;
-/// Maximum encoded size of one canonical tool catalog.
 pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
-/// Maximum Unicode scalar values in one content or raw-arguments field.
 pub const MAX_CONTENT_CHARS: usize = 64 * 1024;
-/// Maximum nesting accepted in arbitrary JSON values.
 pub const MAX_JSON_DEPTH: usize = 64;
-/// Maximum scalar, array, and object nodes accepted in arbitrary JSON values.
 pub const MAX_JSON_NODES: usize = 65_536;
 
-/// Maximum Unicode scalar values in one tool description.
 pub const MAX_DESCRIPTION_CHARS: usize = 4 * 1024;
-/// Maximum size of a service or tool error code.
 pub const MAX_ERROR_CODE_BYTES: usize = 64;
-/// Maximum Unicode scalar values in one service or tool error message.
 pub const MAX_ERROR_MESSAGE_CHARS: usize = 4 * 1024;
 
 /// Provider-neutral declaration of one callable tool.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolDefinition {
+    /// Stable callable name within the catalog.
     pub name: String,
+    /// Model-facing explanation of the operation.
     pub description: String,
+    /// JSON Schema for the tool's argument object.
     pub input_schema: Value,
 }
 
@@ -82,8 +72,18 @@ impl ToolDefinition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolResult {
-    Ok { value: Value },
-    Error { code: String, message: String },
+    /// Successful JSON result.
+    Ok {
+        /// Arbitrary bounded JSON returned by the tool.
+        value: Value,
+    },
+    /// Stable tool-level failure presented to the model and transcript.
+    Error {
+        /// Machine-readable failure code.
+        code: String,
+        /// Bounded human-readable failure summary.
+        message: String,
+    },
 }
 
 impl ToolResult {
@@ -121,7 +121,9 @@ impl ToolResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireError {
+    /// Machine-readable service failure code.
     pub code: String,
+    /// Bounded human-readable failure summary.
     pub message: String,
 }
 
@@ -141,6 +143,7 @@ impl WireError {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsCatalogResponse {
+    /// Canonically ordered callable tool declarations.
     pub tools: Vec<ToolDefinition>,
 }
 
@@ -160,8 +163,11 @@ impl ToolsCatalogResponse {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsInvokeRequest {
+    /// Call identifier correlated with the model's tool request.
     pub call_id: String,
+    /// Exact tool name from the current catalog.
     pub name: String,
+    /// Raw JSON argument text supplied by the model.
     pub arguments: String,
 }
 
@@ -177,7 +183,9 @@ impl ToolsInvokeRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsInvokeResponse {
+    /// Call identifier from the corresponding invocation request.
     pub call_id: String,
+    /// Durable semantic tool result.
     pub result: ToolResult,
 }
 
@@ -202,31 +210,40 @@ pub enum ToolsBody {
 /// A closed, versioned tools-service envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolsEnvelope {
+    /// Exact protocol identity; must equal [`TOOLS_PROTOCOL`].
     pub protocol: String,
+    /// Exact semantic wire version; only [`WIRE_VERSION`] is accepted.
     #[serde(deserialize_with = "deserialize_wire_version")]
     pub version: u32,
+    /// Caller-assigned envelope correlation identifier.
     pub request_id: String,
+    /// Kind-specific request or response payload.
     #[serde(flatten)]
     pub body: ToolsBody,
 }
 
 impl ToolsEnvelope {
+    /// Constructs a catalog request with the current protocol header.
     pub fn catalog_request(request_id: impl Into<String>) -> Self {
         Self::new(request_id, ToolsBody::CatalogRequest {})
     }
 
+    /// Constructs a catalog response with the current protocol header.
     pub fn catalog_response(request_id: impl Into<String>, response: ToolsCatalogResponse) -> Self {
         Self::new(request_id, ToolsBody::CatalogResponse(response))
     }
 
+    /// Constructs an invocation request with the current protocol header.
     pub fn invoke_request(request_id: impl Into<String>, request: ToolsInvokeRequest) -> Self {
         Self::new(request_id, ToolsBody::InvokeRequest(request))
     }
 
+    /// Constructs an invocation response with the current protocol header.
     pub fn invoke_response(request_id: impl Into<String>, response: ToolsInvokeResponse) -> Self {
         Self::new(request_id, ToolsBody::InvokeResponse(response))
     }
 
+    /// Constructs a service error response with the current protocol header.
     pub fn error(request_id: impl Into<String>, error: WireError) -> Self {
         Self::new(request_id, ToolsBody::Error { error })
     }
