@@ -31,6 +31,14 @@ jobs:
         env:
           RSI_AGENT_NOTES_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: cargo xtask verify-docs
+      - name: Build public Rust documentation
+        timeout-minutes: 15
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --lib --no-deps
+      - name: Exercise Rust documentation examples
+        timeout-minutes: 15
+        run: cargo test --locked --workspace --doc
 
   conformance:
     strategy:
@@ -65,7 +73,17 @@ jobs:
         timeout-minutes: 10
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
         timeout-minutes: 30
-      - run: cargo test --locked --workspace --all-targets
+      - name: Exercise the root workspace
+        if: runner.os == 'Linux'
+        run: cargo test --locked --workspace --all-targets
+        timeout-minutes: 30
+      - name: Exercise the root workspace except the FD-intensive agent store
+        if: runner.os != 'Linux'
+        run: cargo test --locked --workspace --all-targets --exclude rsi-agent
+        timeout-minutes: 30
+      - name: Exercise the agent store under the macOS file-descriptor budget
+        if: runner.os != 'Linux'
+        run: cargo test --locked -p rsi-agent --all-targets -- --test-threads=4
         timeout-minutes: 30
       - name: Exercise agent protocol feature-unification boundary
         if: runner.os == 'Linux'
@@ -75,6 +93,13 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 20
         run: cargo test --locked -p rsi-agent --all-targets --features 'test-failpoints,serde_json/arbitrary_precision'
+      - name: Exercise agent persistence under a low file-descriptor limit
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          ulimit -n 64
+          cargo test --locked -p rsi-agent --all-targets --features 'test-failpoints,serde_json/arbitrary_precision' -- --test-threads=4
       - name: Exercise core crash-recovery boundaries
         timeout-minutes: 20
         run: cargo test --locked -p rsi-meta --all-targets --features test-failpoints
@@ -87,7 +112,7 @@ jobs:
       - name: Exercise agent transcript recovery boundaries
         if: runner.os != 'Linux'
         timeout-minutes: 20
-        run: cargo test --locked -p rsi-agent --all-targets --features test-failpoints
+        run: cargo test --locked -p rsi-agent --all-targets --features test-failpoints -- --test-threads=4
 
   native-conformance:
     strategy:
@@ -147,3 +172,24 @@ jobs:
           while IFS= read -r lockfile; do
             cargo audit --no-fetch --file "$lockfile"
           done < <(find . -name Cargo.lock -not -path '*/target/*' ! -path './Cargo.lock' -print | sort)
+
+  ci-required:
+    if: always()
+    needs:
+      - documentation
+      - conformance
+      - native-conformance
+      - dependency-audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every CI contract
+        env:
+          DOCUMENTATION: ${{ needs.documentation.result }}
+          CONFORMANCE: ${{ needs.conformance.result }}
+          NATIVE_CONFORMANCE: ${{ needs.native-conformance.result }}
+          DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
+        run: |
+          test "$DOCUMENTATION" = success
+          test "$CONFORMANCE" = success
+          test "$NATIVE_CONFORMANCE" = success
+          test "$DEPENDENCY_AUDIT" = success
