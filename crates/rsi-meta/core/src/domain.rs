@@ -11,9 +11,13 @@ use crate::model::{
 /// Files and durable state owned by one composition host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompositionWorkspace {
+    /// Private `SQLite` control-plane database.
     pub database_path: PathBuf,
+    /// Root for verified package generations and loader artifacts.
     pub cache_root: PathBuf,
+    /// Active composition manifest path.
     pub manifest_path: PathBuf,
+    /// Active composition lock path.
     pub lock_path: PathBuf,
 }
 
@@ -21,6 +25,7 @@ pub struct CompositionWorkspace {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompositionProject {
     pub manifest_path: PathBuf,
+    /// Optional pre-resolved lock; absence requests resolution.
     pub lock_path: Option<PathBuf>,
 }
 
@@ -85,125 +90,181 @@ mod tests {
 /// Stable identity of one canonical manifest/lock pair.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CompositionDigest {
+    /// Stable composition identity declared by the manifest.
     pub composition_id: String,
+    /// Lowercase SHA-256 digest of canonical manifest bytes.
     pub manifest_sha256: String,
+    /// Lowercase SHA-256 digest of canonical lock bytes.
     pub lock_sha256: String,
 }
 
+/// Request to atomically apply a candidate composition to a live host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplyRequest {
+    /// Caller-owned idempotency identity.
     pub operation_id: OperationId,
     pub project: CompositionProject,
+    /// Optional optimistic-concurrency precondition.
     pub expected_revision: Option<GraphRevision>,
 }
 
+/// Request to resolve and install a composition without starting a host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallRequest {
+    /// Caller-owned idempotency identity.
     pub operation_id: OperationId,
+    /// Workspace receiving durable state and cached generations.
     pub workspace: CompositionWorkspace,
     pub project: CompositionProject,
 }
 
+/// Result of applying a candidate composition to a live host.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApplyResult {
-    Applied {
-        snapshot: HostSnapshot,
-    },
-    Unchanged {
-        snapshot: HostSnapshot,
-    },
+    /// Candidate produced and committed a new active graph.
+    Applied { snapshot: HostSnapshot },
+    /// Candidate exactly matched the already active composition.
+    Unchanged { snapshot: HostSnapshot },
+    /// Process-fixed changes require a new host process.
     RestartRequired {
+        /// Currently active composition, if any.
         current: Option<CompositionDigest>,
+        /// Validated candidate composition.
         candidate: CompositionDigest,
+        /// Packages whose process-fixed state prevents live replacement.
         packages: Vec<PackageId>,
     },
 }
 
+/// Result of resolving and installing a composition workspace.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstallResult {
+    /// Candidate state was newly installed.
     Installed { candidate: CompositionDigest },
+    /// Workspace already contained the exact candidate state.
     Unchanged { candidate: CompositionDigest },
 }
 
+/// Result of resolving a composition lock.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LockResult {
+    /// A new canonical lock was produced.
     Created { lock: CompositionLock },
+    /// Existing lock already matched resolution.
     Unchanged { lock: CompositionLock },
 }
 
+/// Receipt returned after rotating host-issued tokens.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenRotation {
+    /// New monotonic token generation.
     pub generation: u64,
 }
 
+/// Receipt proving an idempotent shutdown operation was accepted.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShutdownReceipt {
     pub operation_id: OperationId,
 }
 
+/// Current committed host graph and durable event position.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostSnapshot {
+    /// Immutable active graph snapshot.
     pub graph: GraphSnapshot,
+    /// Last durable host-event cursor.
     pub cursor: u64,
+    /// Current token generation.
     pub token_generation: u64,
+    /// Canonical active composition, if the host has one.
     pub active: Option<CompositionDigest>,
 }
 
+/// Operation that committed an active composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositionChangeSource {
+    /// Host startup or reopen.
     Open,
+    /// Explicit host apply operation.
     Apply,
+    /// Plugin-requested apply operation.
     PluginApply,
 }
 
+/// Durable host lifecycle and runtime event.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostEvent {
+    /// A composition graph was atomically committed.
     CompositionCommitted {
+        /// Operation that initiated the commit.
         source: CompositionChangeSource,
+        /// Stable composition identity.
         composition_id: String,
+        /// Canonical manifest digest.
         manifest_sha256: String,
+        /// Canonical lock digest.
         lock_sha256: String,
+        /// Number of active instances after commit.
         active_instances: u32,
+        /// Number of inactive instances after commit.
         inactive_instances: u32,
     },
+    /// A mounted runtime instance entered a faulted state.
     RuntimeFaulted {
+        /// Faulted instance identity.
         instance_id: InstanceId,
+        /// Bounded fault summary.
         reason: String,
     },
+    /// Host began its terminal shutdown sequence.
     HostShuttingDown,
+    /// Forward-compatible event not understood by this binary.
     Unknown {
+        /// Stable external event discriminator.
         event_type: String,
+        /// Preserved event fields excluding the discriminator.
         payload: serde_json::Map<String, serde_json::Value>,
     },
 }
 
+/// One durable host event with ordering and graph correlation metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostEventRecord {
+    /// Monotonic durable event cursor.
     pub cursor: u64,
+    /// Caller operation that caused the event, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<OperationId>,
+    /// Graph revision in effect when the event was committed.
     pub graph_revision: GraphRevision,
     pub event: HostEvent,
 }
 
+/// Ordered page of durable host events.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventPage {
+    /// Records ordered by increasing cursor.
     pub events: Vec<HostEventRecord>,
 }
 
 /// Descriptor-oriented inspect result for one mounted plugin instance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginInspection {
+    /// Current mounted instance snapshot.
     pub instance: InstanceSnapshot,
+    /// Whether changing this package requires process restart.
     pub process_fixed: bool,
+    /// Declared plugin capability names.
     pub capabilities: Vec<String>,
+    /// Verified package-relative configuration schema path, when declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema_path: Option<PathBuf>,
+    /// Parsed configuration schema, when declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<serde_json::Value>,
 }

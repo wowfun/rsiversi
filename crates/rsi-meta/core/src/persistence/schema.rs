@@ -49,8 +49,6 @@ CREATE TABLE apply_journal (
     operation_kind TEXT NOT NULL CHECK (operation_kind IN ('apply', 'install')),
     installed_manifest_path TEXT NOT NULL,
     installed_lock_path TEXT NOT NULL,
-    candidate_manifest_path TEXT NOT NULL,
-    candidate_lock_path TEXT NOT NULL,
     candidate_manifest_hash TEXT NOT NULL,
     candidate_lock_hash TEXT NOT NULL,
     previous_manifest_bytes BLOB,
@@ -66,5 +64,5 @@ CREATE TABLE apply_journal (
 CREATE INDEX control_event_created ON control_event(created_at, cursor);
 CREATE INDEX command_outcome_retention
     ON command_outcome(status, completed_at, command_id);
-INSERT INTO store_meta(key, value) VALUES ('schema_version', '2');
+INSERT INTO store_meta(key, value) VALUES ('schema_version', '3');
 "#;

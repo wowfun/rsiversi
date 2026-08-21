@@ -896,6 +896,33 @@ fn write_lifecycle_composition(
     prepare_action: &str,
     stream_fault: &str,
 ) {
+    write_lifecycle_composition_with_signal(
+        path,
+        fail_prepare,
+        retire_mode,
+        tag,
+        prepare_action,
+        stream_fault,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_lifecycle_composition_with_signal(
+    path: &Path,
+    fail_prepare: bool,
+    retire_mode: &str,
+    tag: &str,
+    prepare_action: &str,
+    stream_fault: &str,
+    prepare_signal_path: Option<&Path>,
+) {
+    let prepare_signal = prepare_signal_path.map_or_else(String::new, |signal| {
+        format!(
+            ", prepare_signal_path = {}",
+            serde_json::to_string(&signal.to_string_lossy()).expect("encode signal path")
+        )
+    });
     fs::write(
         path,
         format!(
@@ -912,7 +939,7 @@ id = "root"
 id = "provider"
 package = "lifecycle-provider/plugin.toml"
 scope = "root"
-config = {{ fail_prepare = {fail_prepare}, retire_mode = "{retire_mode}", tag = "{tag}", prepare_action = "{prepare_action}", stream_fault = "{stream_fault}" }}
+config = {{ fail_prepare = {fail_prepare}, retire_mode = "{retire_mode}", tag = "{tag}", prepare_action = "{prepare_action}", stream_fault = "{stream_fault}"{prepare_signal} }}
 
 [[instances]]
 id = "client"
@@ -1500,6 +1527,114 @@ async fn shadow_prepare_failure_preserves_installed_pair_graph_and_old_routing()
 }
 
 #[tokio::test]
+async fn slow_native_prepare_does_not_block_replay_subscription_or_inspection() {
+    let temp = tempdir().expect("test root");
+    let (host, _, _) = open_applied_lifecycle_host(temp.path(), "ack").await;
+    let armed = apply_lifecycle_candidate(
+        &host,
+        temp.path(),
+        "fairness-fault-source",
+        "fault-source",
+        "normal_ack",
+        "malformed_json",
+    )
+    .await;
+    assert!(matches!(armed, ApplyResult::Applied { .. }));
+    let mut faulting_stream = open_probe(&host).await;
+    let before_fault_cursor = host.snapshot().cursor;
+    let mut fault_events = host
+        .subscribe(before_fault_cursor)
+        .await
+        .expect("subscribe before concurrent runtime fault");
+    let candidate_manifest = temp.path().join("candidate-held.toml");
+    let candidate_lock = temp.path().join("candidate-held.lock");
+    let prepare_signal = temp.path().join("held-prepare-entered");
+    write_lifecycle_composition_with_signal(
+        &candidate_manifest,
+        false,
+        "ack",
+        "held",
+        "hold",
+        "none",
+        Some(&prepare_signal),
+    );
+    lock_project(candidate_manifest.clone(), candidate_lock.clone())
+        .expect("resolve held candidate lock");
+
+    let applying_host = host.clone();
+    let applying = tokio::spawn(async move {
+        apply_project(
+            &applying_host,
+            "apply-lifecycle-held-candidate",
+            candidate_manifest,
+            candidate_lock,
+        )
+        .await
+    });
+    tokio::time::timeout(STREAM_DEADLINE, async {
+        while !prepare_signal.exists() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("fixture did not signal entry into native Prepare");
+    assert!(
+        !applying.is_finished(),
+        "fixture must still be holding Prepare"
+    );
+
+    let query_deadline = STREAM_DEADLINE;
+    let cursor = host.snapshot().cursor;
+    let (events, subscription, inspection) = tokio::time::timeout(query_deadline, async {
+        tokio::join!(
+            host.events_after(0, 1),
+            host.subscribe(cursor),
+            host.inspect_plugin(InstanceId::new("provider")),
+        )
+    })
+    .await
+    .expect("slow native Prepare blocked the independent registry query lane");
+    events.expect("replay page during Prepare");
+    drop(subscription.expect("subscription during Prepare"));
+    assert!(
+        inspection.expect("inspection during Prepare").is_some(),
+        "the committed provider remains inspectable while its replacement prepares"
+    );
+
+    faulting_stream
+        .send(b"fault-during-held-prepare")
+        .await
+        .expect("trigger active-generation runtime fault");
+    let terminal = tokio::time::timeout(query_deadline, faulting_stream.recv())
+        .await
+        .expect("stream fault terminal was blocked by held Prepare")
+        .expect("faulting stream emits one terminal result");
+    assert_protocol_fault_cancel(terminal, "malformed_json");
+    let fault_event = tokio::time::timeout(query_deadline, fault_events.recv())
+        .await
+        .expect("runtime-fault delivery was blocked by held Prepare")
+        .expect("runtime fault event stream remains open")
+        .expect("runtime fault event is valid");
+    assert!(matches!(
+        fault_event.event,
+        HostEvent::RuntimeFaulted { ref instance_id, .. }
+            if instance_id == &InstanceId::new("provider")
+    ));
+
+    let error = applying
+        .await
+        .expect("apply task")
+        .expect_err("held Prepare must reach its lifecycle deadline");
+    assert!(matches!(
+        error,
+        rsi_meta::HostError::PluginLifecycleTimeout { .. }
+    ));
+    host.shutdown(Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("shutdown after held Prepare");
+}
+
+#[tokio::test]
 async fn hold_retirement_does_not_block_cutover_and_shutdown_cancels_the_retire_wait() {
     let temp = tempdir().expect("test root");
     let (host, _, _) = open_applied_lifecycle_host(temp.path(), "hold").await;
@@ -1601,16 +1736,16 @@ async fn rejected_retirement_is_stopped_and_reaped_instead_of_wedging_forever() 
     .await;
     assert!(matches!(outcome, ApplyResult::Applied { .. }));
 
-    for _ in 0..128 {
-        if host.snapshot().graph.retiring_instances.is_empty() {
-            host.shutdown(Instant::now() + Duration::from_secs(2))
-                .await
-                .expect("shutdown after rejected retirement");
-            return;
+    tokio::time::timeout(STREAM_DEADLINE, async {
+        while !host.snapshot().graph.retiring_instances.is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        tokio::task::yield_now().await;
-    }
-    panic!("a rejected Retire callback left the generation permanently Retiring");
+    })
+    .await
+    .expect("a rejected Retire callback left the generation permanently Retiring");
+    host.shutdown(Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("shutdown after rejected retirement");
 }
 
 #[tokio::test]

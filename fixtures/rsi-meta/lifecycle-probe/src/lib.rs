@@ -31,6 +31,8 @@ struct ProbeConfig {
     retire_mode: RetireMode,
     tag: String,
     #[serde(default)]
+    prepare_signal_path: Option<String>,
+    #[serde(default)]
     prepare_action: PrepareAction,
     #[serde(default)]
     stream_fault: StreamFault,
@@ -46,6 +48,7 @@ enum PrepareAction {
     NormalAck,
     DurableThenAck,
     OutboundOpenThenAck,
+    Hold,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -138,6 +141,10 @@ impl LifecycleProbe {
         let config = config.ok_or(ProbeError("prepare config missing"))?;
         let config: ProbeConfig =
             serde_json::from_value(config).map_err(|_| ProbeError("invalid prepare config"))?;
+        if let Some(path) = &config.prepare_signal_path {
+            std::fs::write(path, generation.to_string())
+                .map_err(|_| ProbeError("prepare signal write failed"))?;
+        }
         if config.fail_prepare {
             return self.post(
                 Lane::Control,
@@ -265,6 +272,7 @@ impl LifecycleProbe {
                         ),
                     )
                 }),
+            PrepareAction::Hold => Ok(()),
         };
         if let Err(error) = result {
             self.candidate = None;
@@ -367,7 +375,8 @@ impl LifecycleProbe {
             }
             PrepareAction::NormalAck
             | PrepareAction::DurableThenAck
-            | PrepareAction::OutboundOpenThenAck => {
+            | PrepareAction::OutboundOpenThenAck
+            | PrepareAction::Hold => {
                 return Err(ProbeError("unexpected prepare state response"));
             }
         };

@@ -13,6 +13,11 @@
     "tag": {
       "type": "string"
     },
+    "prepare_signal_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
     "prepare_action": {
       "enum": [
         "state_get_then_ack",
@@ -20,7 +25,8 @@
         "malformed_state_then_fail",
         "normal_ack",
         "durable_then_ack",
-        "outbound_open_then_ack"
+        "outbound_open_then_ack",
+        "hold"
       ],
       "default": "state_get_then_ack"
     },

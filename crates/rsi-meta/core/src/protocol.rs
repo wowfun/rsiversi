@@ -640,46 +640,64 @@ impl<'de> Deserialize<'de> for Event {
     }
 }
 
+/// Operation responsible for a composition graph commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositionChangeSource {
+    /// Host startup or reopen.
     Open,
+    /// Explicit host apply request.
     Apply,
+    /// Plugin-requested apply operation.
     PluginApply,
 }
 
+/// Closed transport-neutral service-stream frame kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamKind {
+    /// Opens a new logical stream.
     Open,
+    /// Carries ordered application bytes.
     Data,
+    /// Grants additional send capacity in bytes.
     Credit,
+    /// Declares one direction will send no more data.
     HalfClose,
+    /// Aborts the stream with an optional reason.
     Cancel,
+    /// Completes the stream normally.
     End,
 }
 
 /// Transport-neutral stream frame. Flow control is expressed in bytes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StreamEnvelope {
+    /// Exact protocol identity; must equal [`STREAM_PROTOCOL`].
     pub protocol: String,
+    /// Exact stream protocol version; must equal [`STREAM_VERSION`].
     pub version: u32,
     pub kind: StreamKind,
     pub stream_id: StreamId,
+    /// Monotonic data sequence, present only where required by the kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
+    /// Byte credit granted by a credit frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_bytes: Option<u64>,
+    /// Kind-specific bounded JSON metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
     /// Raw DATA bytes. Transports encode this out of band rather than as JSON.
     #[serde(skip)]
     pub data: Option<Vec<u8>>,
+    /// Preserved forward-compatible envelope fields.
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 impl StreamEnvelope {
+    /// Creates an empty envelope with the current protocol header.
     pub fn new(stream_id: StreamId, kind: StreamKind) -> Self {
         Self {
             protocol: STREAM_PROTOCOL.to_owned(),

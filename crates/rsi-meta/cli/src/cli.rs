@@ -148,9 +148,11 @@ pub(crate) trait HostOpener: Send + Sync {
     async fn install(&self, request: rsi_meta::InstallRequest) -> Result<rsi_meta::InstallResult>;
 }
 
+/// Process-level completion requested by a CLI operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CliExit {
     Success,
+    /// Daemon requests a supervised restart to cross process-fixed state.
     DaemonRestart,
 }
 

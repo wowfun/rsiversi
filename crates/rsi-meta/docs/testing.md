@@ -25,6 +25,7 @@ Concurrency tests use explicit gates, channels, or a fake tick source; they do n
 | C ABI, SDK, plugin frames, manifests, or lifecycle lanes | Plugin tests plus `cargo xtask rsi-meta conformance` |
 | CLI parsing or transport internals | CLI tests; add `cargo test --locked -p rsi-meta-cli --all-targets --features test-failpoints` for durable-before-ack or restart behavior |
 | Schema, wire serialization, or protocol docs | Owning DTO/schema tests plus the conformance schema-contract tests |
+| Public Rust interface or rustdoc | Package checks, the workspace library rustdoc build with warnings denied, and workspace doctests |
 | One standalone plugin or fixture | Its manifest-scoped format, Clippy, and tests; use full conformance for shared contracts or package-list changes |
 | Toolchain, CI, dependencies, product-wide validation, or a release claim | The complete development checks, dependency audit, conformance xtask, and release demonstration |
 

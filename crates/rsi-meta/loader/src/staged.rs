@@ -9,7 +9,6 @@ use super::{ArtifactManifest, ContentHash, PluginManifest, PluginPackage};
 pub struct StagedPlugin {
     pub(super) package: PluginPackage,
     pub(super) artifact: ArtifactManifest,
-    pub(super) source_artifact_path: PathBuf,
     pub(super) cached_artifact_path: PathBuf,
     pub(super) artifact_hash: ContentHash,
     pub(super) cache_pin: Arc<CachePin>,
@@ -26,10 +25,6 @@ impl StagedPlugin {
 
     pub const fn artifact(&self) -> &ArtifactManifest {
         &self.artifact
-    }
-
-    pub fn source_artifact_path(&self) -> &Path {
-        &self.source_artifact_path
     }
 
     pub fn cached_artifact_path(&self) -> &Path {

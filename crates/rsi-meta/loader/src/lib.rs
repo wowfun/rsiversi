@@ -54,9 +54,7 @@ use resident::ResidentArtifact;
 use resident::{ResidentArtifactKey, ResidentArtifactRegistry};
 pub use staged::StagedPlugin;
 
-/// Target triple for which this loader was compiled.
 pub const BUILD_TARGET: &str = env!("RSI_META_BUILD_TARGET");
-/// Package manifest version accepted by this loader.
 pub const MANIFEST_FORMAT_VERSION: u32 = 0;
 
 const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -68,13 +66,9 @@ pub(crate) const MAX_CONFIG_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 /// a source file that grows while it is being copied.
 #[doc(hidden)]
 pub const MAX_PLUGIN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
-/// Maximum unique native artifacts retained by one daemon process.
 pub const MAX_RESIDENT_ARTIFACTS: usize = 128;
-/// Maximum aggregate bytes reserved for process-resident native mappings.
 pub const MAX_RESIDENT_MAPPED_BYTES: usize = 1024 * 1024 * 1024;
-/// Maximum immutable artifacts retained in one local cache.
 pub const MAX_CACHE_ENTRIES: usize = 512;
-/// Maximum aggregate artifact bytes retained in one local cache.
 pub const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 // Bound recovery work while leaving room to inspect crash-orphaned hash directories.
 const MAX_CACHE_SCAN_ENTRIES: usize = MAX_CACHE_ENTRIES * 8;
@@ -84,12 +78,10 @@ const MAX_CACHE_SCAN_ENTRIES: usize = MAX_CACHE_ENTRIES * 8;
 pub struct ContentHash([u8; 32]);
 
 impl ContentHash {
-    /// Hashes an in-memory byte sequence.
     pub fn digest(bytes: impl AsRef<[u8]>) -> Self {
         Self(Sha256::digest(bytes.as_ref()).into())
     }
 
-    /// Returns the binary digest.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -160,7 +152,9 @@ pub struct InvalidContentHash;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiVersion {
+    /// ABI-breaking major version.
     pub major: u32,
+    /// Backward-compatible feature minor version.
     pub minor: u32,
 }
 
@@ -176,8 +170,10 @@ impl ApiVersion {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackageIdentity {
+    /// Stable package identity, distinct from any mount identity.
     pub id: String,
     pub version: String,
+    /// Whether changing this package requires a new host process.
     #[serde(default)]
     pub process_fixed: bool,
 }
@@ -186,7 +182,9 @@ pub struct PackageIdentity {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostApiRequirement {
+    /// Required ABI major version.
     pub major: u32,
+    /// Minimum compatible ABI minor version.
     pub minimum_minor: u32,
 }
 
@@ -201,6 +199,7 @@ impl HostApiRequirement {
 #[serde(deny_unknown_fields)]
 pub struct ArtifactManifest {
     pub target: String,
+    /// Package-relative native library path.
     pub path: PathBuf,
 }
 
@@ -208,7 +207,9 @@ pub struct ArtifactManifest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InjectionManifest {
+    /// Canonical service contract requested by the package.
     pub contract: String,
+    /// Whether absence makes the instance inactive.
     #[serde(default = "required_by_default")]
     pub required: bool,
 }
@@ -221,16 +222,21 @@ const fn required_by_default() -> bool {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
+    /// Exact plugin manifest format version.
     pub format_version: u32,
     pub package: PackageIdentity,
+    /// Minimum compatible host ABI.
     pub host_api: HostApiRequirement,
     pub artifacts: Vec<ArtifactManifest>,
+    /// Canonical services implemented by the package.
     #[serde(default)]
     pub provides: Vec<String>,
+    /// Canonical services injected by the host.
     #[serde(default)]
     pub injects: Vec<InjectionManifest>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Optional package-relative Draft 2020-12 configuration schema.
     #[serde(default)]
     pub config_schema: Option<PathBuf>,
 }
@@ -303,10 +309,12 @@ impl PluginPackage {
         })
     }
 
+    /// Returns the manifest path supplied to [`Self::open`].
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
     }
 
+    /// Returns the digest of exact manifest bytes.
     pub const fn manifest_hash(&self) -> ContentHash {
         self.manifest_hash
     }
@@ -617,7 +625,6 @@ impl PluginLoader {
         Ok(StagedPlugin {
             package,
             artifact,
-            source_artifact_path,
             cached_artifact_path,
             artifact_hash,
             cache_pin,

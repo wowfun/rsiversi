@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -644,43 +644,40 @@ impl Drop for StreamPort {
 #[derive(Debug)]
 struct ByteCredit {
     permits: Arc<Semaphore>,
-    available: AtomicU64,
-    closed: AtomicBool,
 }
 
 impl ByteCredit {
     fn new() -> Self {
         Self {
             permits: Arc::new(Semaphore::new(0)),
-            available: AtomicU64::new(0),
-            closed: AtomicBool::new(false),
         }
     }
 
     fn add(&self, bytes: u64) -> Result<()> {
-        if self.closed.load(Ordering::Acquire) {
+        // Only the generation actor calls `add`, so read-check-add is one serialized
+        // state transition. `consume` may run concurrently, but can only lower the
+        // observed permit count and therefore cannot exceed the byte-credit ceiling.
+        if self.permits.is_closed() {
             return Err(HostError::StreamClosed {
                 stream_id: "closed".to_owned(),
             });
         }
-        let previous = self
-            .available
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
-                available
-                    .checked_add(bytes)
-                    .filter(|sum| *sum <= STREAM_BYTE_BUDGET)
-            })
-            .map_err(|available| HostError::StreamByteBudgetExceeded {
-                stream_id: "plugin_credit".to_owned(),
-                requested: bytes,
-                available: STREAM_BYTE_BUDGET.saturating_sub(available),
-            })?;
-        let _ = previous;
         let permits = usize::try_from(bytes).map_err(|_| HostError::StreamByteBudgetExceeded {
             stream_id: "plugin_credit".to_owned(),
             requested: bytes,
             available: STREAM_BYTE_BUDGET,
         })?;
+        let available = u64::try_from(self.permits.available_permits()).unwrap_or(u64::MAX);
+        if available
+            .checked_add(bytes)
+            .is_none_or(|total| total > STREAM_BYTE_BUDGET)
+        {
+            return Err(HostError::StreamByteBudgetExceeded {
+                stream_id: "plugin_credit".to_owned(),
+                requested: bytes,
+                available: STREAM_BYTE_BUDGET.saturating_sub(available),
+            });
+        }
         self.permits.add_permits(permits);
         Ok(())
     }
@@ -698,12 +695,10 @@ impl ByteCredit {
                 stream_id: "send".to_owned(),
             })?;
         permit.forget();
-        self.available.fetch_sub(bytes, Ordering::AcqRel);
         Ok(())
     }
 
     fn close(&self) {
-        self.closed.store(true, Ordering::Release);
         self.permits.close();
     }
 }
@@ -825,6 +820,7 @@ impl fmt::Debug for PreparedRuntimeInstance {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RuntimeLaunchContext {
     pub plugin_commands: mpsc::Sender<PluginCommandRequest>,
     pub host_services: mpsc::Sender<HostServiceCall>,
@@ -935,6 +931,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn consumed_permits_are_immediately_available_for_new_credit() {
+        let credit = ByteCredit::new();
+        credit
+            .add(STREAM_BYTE_BUDGET)
+            .expect("grant the complete stream budget");
+
+        let consumed = Arc::clone(&credit.permits)
+            .acquire_owned()
+            .await
+            .expect("consume one byte");
+        consumed.forget();
+
+        credit
+            .add(1)
+            .expect("the consumed byte must be available immediately");
+    }
 
     #[test]
     fn durable_command_outside_committed_phase_gets_an_explicit_failure() {

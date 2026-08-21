@@ -1121,6 +1121,8 @@ scope = "root"
         },
         expected_revision: None,
     };
+    fs::remove_dir_all(&cache).expect("remove cache after the active generation is loaded");
+    fs::write(&cache, b"process-fixed preflight must not stage").expect("block cache access");
     let before = host.snapshot();
     let installed_manifest_before = fs::read(&workspace.manifest_path).expect("installed manifest");
     let installed_lock_before = fs::read(&workspace.lock_path).expect("installed lock");
@@ -1808,7 +1810,7 @@ async fn legacy_v4_store_is_rejected_without_mutation() {
         error,
         rsi_meta::HostError::UnsupportedStoreSchema {
             found: 4,
-            supported: 2
+            supported: 3
         }
     ));
     let connection = Connection::open(&database).expect("legacy database remains readable");
@@ -1820,6 +1822,38 @@ async fn legacy_v4_store_is_rejected_without_mutation() {
         )
         .expect("legacy schema version remains");
     assert_eq!(version, "4", "opening must not partially migrate the store");
+}
+
+#[tokio::test]
+async fn legacy_v2_store_is_rejected_without_mutation() {
+    let temp = tempdir().expect("tempdir");
+    let database = temp.path().join("legacy-v2.sqlite3");
+    let connection = Connection::open(&database).expect("legacy database");
+    connection
+        .execute_batch(
+            "CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO store_meta VALUES ('schema_version', '2');
+             CREATE TABLE legacy_v2_sentinel (value TEXT NOT NULL);
+             INSERT INTO legacy_v2_sentinel VALUES ('unchanged');",
+        )
+        .expect("legacy v2 marker");
+    drop(connection);
+
+    let error = CompositionHost::open(open_options(&database, temp.path().join("cache")))
+        .await
+        .expect_err("pre-release store accepts only schema version 3");
+    assert!(matches!(
+        error,
+        rsi_meta::HostError::UnsupportedStoreSchema {
+            found: 2,
+            supported: 3
+        }
+    ));
+    let connection = Connection::open(&database).expect("legacy database remains readable");
+    let sentinel: String = connection
+        .query_row("SELECT value FROM legacy_v2_sentinel", [], |row| row.get(0))
+        .expect("legacy sentinel remains");
+    assert_eq!(sentinel, "unchanged", "opening must not mutate legacy v2");
 }
 
 #[tokio::test]
@@ -2191,7 +2225,7 @@ async fn legacy_v0_store_is_rejected_without_mutation() {
         error,
         rsi_meta::HostError::UnsupportedStoreSchema {
             found: 0,
-            supported: 2
+            supported: 3
         }
     ));
     let connection = Connection::open(&database).expect("legacy database remains readable");
@@ -2234,7 +2268,7 @@ async fn future_store_schema_is_rejected_without_mutation() {
         error,
         rsi_meta::HostError::UnsupportedStoreSchema {
             found: 999,
-            supported: 2
+            supported: 3
         }
     ));
     assert_eq!(
@@ -2410,25 +2444,16 @@ async fn mixed_pair_pending_recovery_restores_both_previous_files() {
         .execute(
             "INSERT INTO apply_journal(
                command_id,composition_id,installed_manifest_path,installed_lock_path,
-               candidate_manifest_path,candidate_lock_path,
                candidate_manifest_hash,candidate_lock_hash,
                previous_manifest_bytes,previous_lock_bytes,
                previous_manifest_hash,previous_lock_hash,
                terminal_graph_revision,terminal_event_json,
                terminal_outcome_json,terminal_desired_json,operation_kind
-             ) VALUES (?1,'',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13,?14,'apply')",
+             ) VALUES (?1,'',?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12,'apply')",
             rusqlite::params![
                 command_id,
                 installed_manifest.to_str().expect("manifest path"),
                 installed_lock.to_str().expect("lock path"),
-                temp.path()
-                    .join("candidate.toml")
-                    .to_str()
-                    .expect("candidate path"),
-                temp.path()
-                    .join("candidate.lock")
-                    .to_str()
-                    .expect("candidate lock path"),
                 ContentHash::digest(&candidate_manifest).to_string(),
                 ContentHash::digest(&candidate_lock).to_string(),
                 previous_manifest,

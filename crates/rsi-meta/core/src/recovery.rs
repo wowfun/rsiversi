@@ -131,8 +131,6 @@ pub(crate) fn install_offline(request: &InstallRequest) -> Result<InstallResult>
         &prepared.manifest.composition.id,
         &installed.manifest_path,
         &installed.lock_path,
-        &project_files.manifest_path,
-        &project_files.lock_path,
         &prepared.manifest_hash.to_string(),
         &prepared.lock_hash.to_string(),
         graph_revision,

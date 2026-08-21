@@ -2,6 +2,7 @@ use super::plugin_control::{
     command_hash, plugin_candidate_lock_path, plugin_effect_command_id,
     plugin_provenance_command_id, validate_plugin_command_admission, write_plugin_candidate_lock,
 };
+mod fairness;
 mod retirement;
 mod state;
 use super::{
@@ -9,14 +10,15 @@ use super::{
     CommandOutcomeEnvelope, CompositionChangeSource, CompositionDigest, CompositionFiles,
     CompositionMode, ContentHash, DesiredState, Event, EventEnvelope, GraphRevision, HostError,
     HostServiceCall, InstanceFingerprint, InstanceId, Persistence, PluginCommandRequest,
-    PluginFrame, PluginInspection, PluginLoader, RegistryMessage, Result, RetirementRegistry,
-    RoutingSnapshot, RuntimeFault, RuntimeLaunchContext, StdMutex, StoredCommand,
-    SubscriptionStart, abort_prepared_reverse, affected_instances, broadcast, build_inspections,
+    PluginFrame, PluginInspection, PluginLoader, RegistryMessage, RegistryQuery, Result,
+    RetirementRegistry, RoutingSnapshot, RuntimeFault, RuntimeLaunchContext, StdMutex,
+    StoredCommand, abort_prepared_reverse, affected_instances, broadcast, build_inspections,
     build_lock, composition_event, dependency_waves, include_affected_dependents, install_pair,
-    instance_fingerprints, launch_and_prepare_pumping_services, mpsc,
-    normalize_prepared_for_install, prepare_pair, publish_routing_cutover, read_optional_bytes,
-    remove_file_and_sync_parent, resolve_prepared, restore_previous_pair,
+    instance_fingerprints, mpsc, normalize_prepared_for_install, prepare_pair,
+    publish_routing_cutover, read_optional_bytes, remove_file_and_sync_parent, resolve_prepared,
+    restore_previous_pair,
 };
+use crate::runtime::launch_and_prepare;
 use retirement::register_retirement_waves;
 use state::{validate_state_key, validate_state_value};
 
@@ -35,6 +37,7 @@ pub(super) struct RegistryActor {
     pub(super) plugin_command_receiver: mpsc::Receiver<PluginCommandRequest>,
     pub(super) host_service_receiver: mpsc::Receiver<HostServiceCall>,
     pub(super) runtime_fault_receiver: mpsc::Receiver<RuntimeFault>,
+    pub(super) query_receiver: mpsc::Receiver<RegistryQuery>,
     pub(super) retirements: RetirementRegistry,
     pub(super) current_mode: CompositionMode,
     pub(super) fatal: bool,
@@ -50,32 +53,6 @@ impl RegistryActor {
                         break;
                     };
                     match message {
-                        RegistryMessage::Subscribe { reply } => {
-                            let live = self.events.subscribe();
-                            let result = self.persistence.latest_cursor().map(|through_cursor| {
-                                SubscriptionStart {
-                                    live,
-                                    through_cursor,
-                                }
-                            });
-                            let _ = reply.send(result);
-                        }
-                        RegistryMessage::ReplayEvents {
-                            after_cursor,
-                            through_cursor,
-                            limit,
-                            reply,
-                        } => {
-                            let result = self.persistence.query_events_through(
-                                after_cursor,
-                                through_cursor,
-                                limit,
-                            );
-                            let _ = reply.send(result);
-                        }
-                        RegistryMessage::InspectPlugin { instance_id, reply } => {
-                            let _ = reply.send(self.plugin_inspections.get(&instance_id).cloned());
-                        }
                         RegistryMessage::Submit { command, reply } => {
                             let (result, stop) = self.handle_command(command).await;
                             let _ = reply.send(result);
@@ -90,6 +67,7 @@ impl RegistryActor {
                         }
                     }
                 }
+                Some(query) = self.query_receiver.recv() => self.handle_query(query),
                 Some(mut command) = self.plugin_command_receiver.recv() => {
                     let reply = command.reply.take();
                     let (result, stop) = self.handle_plugin_command(command).await;
@@ -432,17 +410,30 @@ impl RegistryActor {
         files: &CompositionFiles,
         source: CompositionChangeSource,
     ) -> Result<CommandOutcomeEnvelope> {
-        let requested_desired = DesiredState {
-            manifest_sha256: read_optional_bytes(&files.manifest_path)?
-                .map(ContentHash::digest)
-                .map(|hash| hash.to_string()),
-            lock_sha256: read_optional_bytes(&files.lock_path)?
-                .map(ContentHash::digest)
-                .map(|hash| hash.to_string()),
-            applied: false,
-            last_rejection_code: None,
-            plugin_restart_requested: false,
+        let desired_files = files.clone();
+        let requested_desired = self
+            .await_while_serving(tokio::task::spawn_blocking(move || {
+                Ok::<_, HostError>(DesiredState {
+                    manifest_sha256: read_optional_bytes(&desired_files.manifest_path)?
+                        .map(ContentHash::digest)
+                        .map(|hash| hash.to_string()),
+                    lock_sha256: read_optional_bytes(&desired_files.lock_path)?
+                        .map(ContentHash::digest)
+                        .map(|hash| hash.to_string()),
+                    applied: false,
+                    last_rejection_code: None,
+                    plugin_restart_requested: false,
+                })
+            }))
+            .await;
+        let Ok(requested_desired) = requested_desired else {
+            self.fail_stop_admission();
+            return Err(HostError::RegistryClosed);
         };
+        let requested_desired = requested_desired?;
+        if self.fatal {
+            return Err(HostError::RegistryClosed);
+        }
         self.persistence.reserve_apply(
             self.routing.load().graph().composition_id.as_str(),
             command_id,
@@ -450,7 +441,23 @@ impl RegistryActor {
             &requested_desired,
             self.routing.load().revision(),
         )?;
-        let mut prepared = match prepare_pair(files, &self.loader, false) {
+        let prepare_files = files.clone();
+        let prepare_loader = self.loader.clone();
+        let preparation = self
+            .await_while_serving(tokio::task::spawn_blocking(move || {
+                let mut prepared = prepare_pair(&prepare_files, &prepare_loader, false)?;
+                normalize_prepared_for_install(&mut prepared)?;
+                Ok::<_, HostError>(prepared)
+            }))
+            .await;
+        let Ok(preparation) = preparation else {
+            self.fail_stop_admission();
+            return Err(HostError::RegistryClosed);
+        };
+        if self.fatal {
+            return Err(HostError::RegistryClosed);
+        }
+        let mut prepared = match preparation {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self.finish_reserved_rejection(
@@ -460,13 +467,6 @@ impl RegistryActor {
                 );
             }
         };
-        if let Err(error) = normalize_prepared_for_install(&mut prepared) {
-            return self.finish_reserved_rejection(
-                command_id,
-                "apply_prepare_failed",
-                error.to_string(),
-            );
-        }
         let current_runtimes_healthy = self
             .routing
             .load()
@@ -592,17 +592,29 @@ impl RegistryActor {
         let preflight_manifest_hash = prepared.manifest_hash;
         let preflight_lock_hash = prepared.lock_hash;
         let preflight_fingerprints = prepared.fingerprints.clone();
-        let mut staged = match prepare_pair(files, &self.loader, true) {
-            Ok(prepared) => prepared,
+        let stage_files = files.clone();
+        let stage_loader = self.loader.clone();
+        let staging = self
+            .await_while_serving(tokio::task::spawn_blocking(move || {
+                let mut staged = prepare_pair(&stage_files, &stage_loader, true)?;
+                normalize_prepared_for_install(&mut staged)?;
+                Ok::<_, HostError>(staged)
+            }))
+            .await;
+        let Ok(staging) = staging else {
+            self.fail_stop_admission();
+            return Err(HostError::RegistryClosed);
+        };
+        if self.fatal {
+            return Err(HostError::RegistryClosed);
+        }
+        let staged = match staging {
+            Ok(staged) => staged,
             Err(error) => {
                 self.persistence.abandon_uncommitted_operation(command_id)?;
                 return Err(error);
             }
         };
-        if let Err(error) = normalize_prepared_for_install(&mut staged) {
-            self.persistence.abandon_uncommitted_operation(command_id)?;
-            return Err(error);
-        }
         if staged.manifest_hash != preflight_manifest_hash
             || staged.lock_hash != preflight_lock_hash
             || staged.fingerprints != preflight_fingerprints
@@ -625,17 +637,18 @@ impl RegistryActor {
                 );
             }
         };
-        let prepared_runtimes = match launch_and_prepare_pumping_services(
-            &self.loader,
-            &prepared.manifest.composition.id,
-            &routing,
-            &prepared.runtimes,
-            &waves,
-            &self.launch_context,
-            &mut self.host_service_receiver,
-            &mut self.persistence,
-        )
-        .await
+        let launch_loader = self.loader.clone();
+        let launch_context = self.launch_context.clone();
+        let prepared_runtimes = match self
+            .await_while_serving(launch_and_prepare(
+                &launch_loader,
+                &prepared.manifest.composition.id,
+                &routing,
+                &prepared.runtimes,
+                &waves,
+                &launch_context,
+            ))
+            .await
         {
             Ok(runtimes) => runtimes,
             Err(error) => {
@@ -656,6 +669,19 @@ impl RegistryActor {
                 );
             }
         };
+        if self.fatal {
+            abort_prepared_reverse(&prepared_runtimes).await;
+            return Err(HostError::RegistryClosed);
+        }
+        if let Some(faulted) = routing
+            .generations()
+            .find(|generation| !generation.has_healthy_runtime())
+        {
+            let instance = faulted.instance.clone();
+            abort_prepared_reverse(&prepared_runtimes).await;
+            self.persistence.abandon_uncommitted_operation(command_id)?;
+            return Err(HostError::PluginRuntimeClosed { instance });
+        }
         #[cfg(feature = "test-failpoints")]
         crate::test_failpoints::gate(
             command_id,
@@ -675,8 +701,6 @@ impl RegistryActor {
             &prepared.manifest.composition.id,
             &installed_files.manifest_path,
             &installed_files.lock_path,
-            &files.manifest_path,
-            &files.lock_path,
             &prepared.manifest_hash.to_string(),
             &prepared.lock_hash.to_string(),
             revision,

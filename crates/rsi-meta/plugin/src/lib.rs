@@ -98,9 +98,13 @@ pub type HostPostFrameFn = unsafe extern "C" fn(
 pub struct HostApi {
     pub abi_major: u32,
     pub abi_minor: u32,
+    /// Bytes available in this table, enabling compatible suffix growth.
     pub struct_size: u32,
+    /// Must be zero in the current ABI.
     pub reserved: u32,
+    /// Opaque host-owned callback context.
     pub host_handle: *mut c_void,
+    /// Synchronous frame-copy callback.
     pub host_post_frame: Option<HostPostFrameFn>,
 }
 
@@ -163,11 +167,17 @@ pub type PluginDestroyFn = unsafe extern "C" fn(plugin_handle: *mut c_void) -> u
 pub struct PluginApi {
     pub abi_major: u32,
     pub abi_minor: u32,
+    /// Bytes initialized in this table, enabling compatible suffix growth.
     pub struct_size: u32,
+    /// Must be zero in the current ABI.
     pub reserved: u32,
+    /// Opaque plugin-owned instance context.
     pub plugin_handle: *mut c_void,
+    /// Serialized host-to-plugin frame callback.
     pub on_frame: Option<PluginOnFrameFn>,
+    /// Optional graceful shutdown callback.
     pub shutdown: Option<PluginShutdownFn>,
+    /// Mandatory at-most-once destruction callback.
     pub destroy: Option<PluginDestroyFn>,
 }
 
@@ -210,7 +220,9 @@ pub type PluginEntryFn = unsafe extern "C" fn(
 /// A validated frame lane for safe Rust plugin code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lane {
+    /// Lifecycle, durable command, and bounded control messages.
     Control,
+    /// Higher-throughput service data messages.
     Data,
 }
 
@@ -234,13 +246,18 @@ impl Lane {
 /// Backpressure result returned by `host_post_frame`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PostFrameOutcome {
+    /// Host synchronously copied and accepted the frame.
     Accepted,
+    /// Bounded lane is full; the plugin may retry later.
     WouldBlock,
+    /// Host mailbox is terminal and will accept no frames.
     Closed,
+    /// Forward ABI result unknown to this SDK.
     Unknown(u32),
 }
 
 impl PostFrameOutcome {
+    /// Decodes a host callback status without losing unknown values.
     pub const fn from_raw(raw: u32) -> Self {
         match raw {
             POST_FRAME_ACCEPTED => Self::Accepted,
@@ -254,15 +271,22 @@ impl PostFrameOutcome {
 /// Result of a host-to-plugin callback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CallOutcome {
+    /// Callback completed successfully.
     Ok,
+    /// Host supplied an invalid pointer, lane, or frame.
     InvalidArgument,
+    /// Plugin instance is terminal.
     Closed,
+    /// Plugin returned an application failure.
     Failed,
+    /// SDK caught a panic at the FFI trampoline.
     Panicked,
+    /// Forward ABI result unknown to this host.
     Unknown(u32),
 }
 
 impl CallOutcome {
+    /// Decodes a plugin callback status without losing unknown values.
     pub const fn from_raw(raw: u32) -> Self {
         match raw {
             CALL_OK => Self::Ok,
@@ -313,7 +337,9 @@ const DATA_HEADER_BYTES: usize = DATA_FRAME_MAGIC.len() + 1 + 2 + 2 + 4;
 /// Canonical validated host/plugin wire frame.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Frame {
+    /// Exact protocol identity; must equal [`FRAME_PROTOCOL`].
     pub protocol: String,
+    /// Exact frame version; must equal [`FRAME_VERSION`].
     pub version: u32,
     #[serde(flatten)]
     pub body: FrameBody,
@@ -452,41 +478,63 @@ impl Frame {
     }
 }
 
+/// Closed host/plugin frame payload grammar.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FrameBody {
+    /// Drives one generation through prepare, commit, abort, and retirement.
     Lifecycle {
         phase: LifecyclePhase,
+        /// Nonzero private host generation identity.
         generation: u64,
+        /// Resolved configuration or failure payload where required by the phase.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<Value>,
     },
+    /// Requests one bounded JSON service operation.
     ServiceRequest {
+        /// Host-assigned request correlation identifier.
         request_id: String,
+        /// Canonical service name.
         service: String,
+        /// Service-defined operation name.
         operation: String,
+        /// Service-defined bounded JSON payload.
         payload: Value,
     },
+    /// Reports one bounded JSON service event.
     ServiceEvent {
+        /// Correlated request, or `None` for an unsolicited event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        /// Canonical service name.
         service: String,
+        /// Service-defined event name.
         event: String,
+        /// Service-defined bounded JSON payload.
         payload: Value,
     },
+    /// Requests one service operation carrying raw bytes on the data lane.
     #[serde(skip)]
     ServiceDataRequest {
+        /// Host-assigned request correlation identifier.
         request_id: String,
+        /// Canonical service name.
         service: String,
         payload: Vec<u8>,
     },
+    /// Reports one raw service event on the data lane.
     #[serde(skip)]
     ServiceDataEvent {
+        /// Correlated request identifier.
         request_id: String,
+        /// Canonical service name.
         service: String,
         payload: Vec<u8>,
     },
+    /// Requests one host-owned durable mutation.
     DurableCommand {
+        /// Caller-owned idempotency identifier.
         command_id: String,
         command: DurableCommand,
     },
@@ -710,27 +758,40 @@ fn invalid_frame(message: impl Into<String>) -> FrameError {
     FrameError::InvalidEnvelope(message.into())
 }
 
+/// Closed generation lifecycle transition vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecyclePhase {
+    /// Construct and validate generation state without external provider I/O.
     Prepare,
+    /// Plugin acknowledges successful preparation.
     Prepared,
+    /// Plugin reports a typed preparation rejection.
     PrepareFailed,
+    /// Discard an uncommitted prepared generation.
     Abort,
+    /// Publish the prepared generation for calls.
     Committed,
+    /// Stop admission and release generation-owned resources.
     Retire,
+    /// Plugin acknowledges retirement completion.
     Retired,
 }
 
+/// Closed set of plugin-requested host durable mutations.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DurableCommand {
+    /// Validates and applies an exact manifest/lock pair from disk.
     ApplyManifestPath {
+        /// Manifest path within the host's authorized workspace boundary.
         manifest_path: PathBuf,
+        /// Matching lock path within the same boundary.
         lock_path: PathBuf,
     },
 }
 
+/// Failure to encode, decode, or validate a host/plugin frame.
 #[derive(Debug, Error)]
 pub enum FrameError {
     #[error("invalid plugin JSON frame: {0}")]
@@ -831,6 +892,7 @@ pub mod sdk {
 
     /// Safe plugin interface exported by [`crate::export_plugin!`].
     pub trait Plugin: Send + 'static {
+        /// Plugin-defined construction or callback error.
         type Error: fmt::Display;
 
         /// Creates one plugin instance from a validated host table.

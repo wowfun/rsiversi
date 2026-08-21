@@ -16,11 +16,13 @@ pub const MAX_COMPOSITION_INSTANCES: usize = 1_024;
 pub const MAX_COMPOSITION_BINDINGS: usize = 16_384;
 pub const MAX_COMPOSITION_REQUIREMENTS: usize = 65_536;
 
+/// Package identity declared by a validated plugin manifest.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PackageId(pub String);
 
 impl PackageId {
+    /// Wraps a package identity; composition validation enforces its grammar.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -38,6 +40,7 @@ impl fmt::Display for PackageId {
 pub struct InstanceId(pub String);
 
 impl InstanceId {
+    /// Wraps a mount identity; composition validation enforces its grammar.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -49,11 +52,13 @@ impl fmt::Display for InstanceId {
     }
 }
 
+/// Identity of one lexical scope in a composition.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ScopeId(pub String);
 
 impl ScopeId {
+    /// Wraps a scope identity; composition validation enforces its grammar.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -71,6 +76,7 @@ impl fmt::Display for ScopeId {
 pub struct ServiceKey(pub String);
 
 impl ServiceKey {
+    /// Wraps a service name; package and composition validation enforce its grammar.
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
@@ -86,32 +92,41 @@ impl fmt::Display for ServiceKey {
     }
 }
 
+/// Monotonic revision of an atomically published composition graph.
 #[derive(
     Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
 )]
 #[serde(transparent)]
 pub struct GraphRevision(pub u64);
 
+/// Composition policy mode affecting validation and runtime trust decisions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositionMode {
+    /// Development defaults with local iteration allowances.
     #[default]
     Development,
+    /// Production policy with deployment-oriented restrictions.
     Production,
 }
 
+/// Identity and policy metadata for a composition manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositionMetadata {
+    /// Stable composition identity.
     pub id: String,
+    /// Validation and runtime policy mode; defaults to development.
     #[serde(default)]
     pub mode: CompositionMode,
 }
 
+/// One lexical scope and its optional parent relationship.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeSpec {
     pub id: ScopeId,
+    /// Parent scope, or `None` for a root scope.
     #[serde(default)]
     pub parent: Option<ScopeId>,
 }
@@ -125,13 +140,19 @@ fn default_enabled() -> bool {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceSpec {
+    /// Stable mount identity, distinct from package identity.
     pub id: InstanceId,
+    /// Package directory resolved relative to the composition manifest.
     pub package: PathBuf,
+    /// Lexical scope controlling implicit service resolution.
     pub scope: ScopeId,
+    /// Whether the instance participates in the active graph.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Package-owned configuration validated by its declared schema.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Explicit service-to-provider choices overriding scope resolution.
     #[serde(default)]
     pub bindings: BTreeMap<ServiceKey, InstanceId>,
 }
@@ -142,16 +163,22 @@ impl InstanceSpec {
     }
 }
 
+/// Complete versioned composition manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositionManifest {
+    /// Exact manifest format version.
     pub format_version: u32,
+    /// Composition identity and policy mode.
     pub composition: CompositionMetadata,
+    /// Bounded lexical scope declarations.
     pub scopes: Vec<ScopeSpec>,
+    /// Bounded plugin mount declarations.
     pub instances: Vec<InstanceSpec>,
 }
 
 impl CompositionManifest {
+    /// Creates an empty development composition at the current format version.
     pub fn empty(composition_id: impl Into<String>) -> Self {
         Self {
             format_version: COMPOSITION_FORMAT_VERSION,
@@ -165,6 +192,7 @@ impl CompositionManifest {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// Validates all manifest bounds, identities, scopes, instances, and bindings.
     pub fn validate(&self) -> ValidationReport {
         let mut diagnostics = Vec::new();
         if self.format_version != COMPOSITION_FORMAT_VERSION {
@@ -457,21 +485,32 @@ fn valid_service_name(value: &str) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockedPackage {
+    /// Package identity declared by `plugin.toml`.
     pub id: PackageId,
+    /// Package version declared by `plugin.toml`.
     pub version: String,
+    /// Canonical absolute package directory.
     pub path: PathBuf,
+    /// Digest of the package manifest bytes.
     pub manifest_sha256: ContentHash,
+    /// Digest of the target artifact bytes.
     pub artifact_sha256: ContentHash,
+    /// Digest of declared configuration schema bytes, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema_sha256: Option<ContentHash>,
 }
 
+/// Canonical target-specific resolution of a composition manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositionLock {
+    /// Exact lock format version.
     pub format_version: u32,
+    /// Rust target triple for all locked artifacts.
     pub target: String,
+    /// Digest of the composition manifest bytes this lock resolves.
     pub manifest_sha256: ContentHash,
+    /// Locked packages in canonical order.
     #[serde(default)]
     pub packages: Vec<LockedPackage>,
 }
@@ -531,36 +570,51 @@ impl CompositionLock {
     }
 }
 
+/// Verified package provenance retained in an active graph snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PackageSource {
     pub package_id: PackageId,
     pub version: String,
+    /// Canonical package manifest path.
     pub manifest_path: PathBuf,
+    /// Selected target triple.
     pub target: String,
+    /// Verified package manifest digest.
     pub manifest_sha256: ContentHash,
+    /// Verified target artifact digest.
     pub artifact_sha256: ContentHash,
+    /// Verified configuration schema digest, when declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema_sha256: Option<ContentHash>,
 }
 
+/// One package-declared service dependency.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServiceRequirement {
+    /// Required canonical service name.
     pub service: ServiceKey,
+    /// Whether absence leaves the instance active.
     pub optional: bool,
 }
 
+/// Severity of one composition validation diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
+    /// Invalid input that prevents graph construction.
     Error,
+    /// Non-fatal condition callers should surface.
     Warning,
 }
 
+/// One stable composition validation finding.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
+    /// Stable machine-readable finding code.
     pub code: String,
     pub message: String,
+    /// Optional dotted path to the offending manifest value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
@@ -580,8 +634,10 @@ impl Diagnostic {
     }
 }
 
+/// Complete deterministic result of composition validation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ValidationReport {
+    /// Findings in deterministic validation order.
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -594,25 +650,36 @@ impl ValidationReport {
     }
 }
 
+/// Reason an enabled or disabled instance is absent from active routing.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InactiveReason {
+    /// Manifest explicitly disabled the instance.
     Disabled,
-    MissingService {
-        service: ServiceKey,
-    },
+    /// No provider resolved for a required service.
+    MissingService { service: ServiceKey },
+    /// Explicitly selected provider is itself inactive.
     ExplicitProviderInactive {
         service: ServiceKey,
         provider: InstanceId,
     },
 }
 
+/// Current routing state of one mounted instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum InstanceStatus {
     Active,
-    Faulted { reason: String },
-    Inactive { reasons: Vec<InactiveReason> },
+    /// Runtime fault removed the instance from routing.
+    Faulted {
+        /// Bounded runtime fault summary.
+        reason: String,
+    },
+    /// Static graph resolution kept the instance inactive.
+    Inactive {
+        /// Deterministic reasons preventing activation.
+        reasons: Vec<InactiveReason>,
+    },
 }
 
 impl InstanceStatus {
@@ -621,29 +688,41 @@ impl InstanceStatus {
     }
 }
 
+/// Immutable graph view of one mounted plugin instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstanceSnapshot {
     pub id: InstanceId,
     pub package: PackageSource,
     pub scope: ScopeId,
+    /// Current activation or fault state.
     pub status: InstanceStatus,
+    /// Canonical services provided by this package.
     pub provides: Vec<ServiceKey>,
+    /// Canonical package-declared service requirements.
     pub requires: Vec<ServiceRequirement>,
 }
 
+/// Resolved consumer-service-provider edge in a graph snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BindingSnapshot {
     pub consumer: InstanceId,
     pub service: ServiceKey,
+    /// Generation-pinned provider selected by the graph.
     pub provider: InstanceId,
+    /// Whether the manifest selected this edge explicitly.
     pub explicit: bool,
 }
 
+/// Immutable atomically published composition routing graph.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GraphSnapshot {
+    /// Monotonic committed graph revision.
     pub revision: GraphRevision,
+    /// Stable active composition identity.
     pub composition_id: String,
+    /// Instance snapshots keyed by mount identity.
     pub instances: BTreeMap<InstanceId, InstanceSnapshot>,
+    /// Resolved service edges in deterministic order.
     pub bindings: Vec<BindingSnapshot>,
     /// Transient runtime disposal state. It is not part of a durable graph
     /// revision and is refreshed on every snapshot/query.
@@ -651,21 +730,28 @@ pub struct GraphSnapshot {
     pub retiring_instances: Vec<RetiringInstanceSnapshot>,
 }
 
+/// Transient disposal phase of a removed private generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetirementPhase {
+    /// New calls are excluded while existing generation leases drain.
     Draining,
+    /// Leases drained and runtime retirement is in progress.
     Retiring,
+    /// Runtime stop acknowledgement is in progress.
     Stopping,
 }
 
+/// Public aggregate of private generations retiring for one instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RetiringInstanceSnapshot {
     pub instance_id: InstanceId,
     /// Number of private generations represented by this instance aggregate.
     /// Generation identifiers remain host-internal.
     pub generation_count: usize,
+    /// Total outstanding leases across private generations.
     pub lease_count: usize,
+    /// Least advanced disposal phase represented by the aggregate.
     pub phase: RetirementPhase,
 }
 
@@ -673,11 +759,15 @@ pub struct RetiringInstanceSnapshot {
 /// Resolved configuration and secret material never enter this DTO.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DesiredState {
+    /// Digest of the most recently requested manifest, when readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
+    /// Digest of the most recently requested lock, when readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_sha256: Option<String>,
+    /// Whether the requested pair is currently active.
     pub applied: bool,
+    /// Stable rejection code for the last failed request, when any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rejection_code: Option<String>,
     /// True only while a durable process-fixed restart requested by an
@@ -694,12 +784,11 @@ pub(crate) struct Generation {
     admission_guard: std::sync::Mutex<()>,
     admitting: AtomicBool,
     leases: AtomicUsize,
-    lease_changes: tokio::sync::watch::Sender<usize>,
+    lease_drained: tokio::sync::Notify,
 }
 
 impl Generation {
     pub(crate) fn new(id: u64, instance: InstanceId) -> Self {
-        let (lease_changes, _receiver) = tokio::sync::watch::channel(0);
         Self {
             id,
             instance,
@@ -707,7 +796,7 @@ impl Generation {
             admission_guard: std::sync::Mutex::new(()),
             admitting: AtomicBool::new(false),
             leases: AtomicUsize::new(0),
-            lease_changes,
+            lease_drained: tokio::sync::Notify::new(),
         }
     }
 
@@ -780,22 +869,21 @@ impl Generation {
     }
 
     fn new_lease(self: &Arc<Self>) -> GenerationLease {
-        let count = self.leases.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-        self.lease_changes.send_replace(count);
+        self.leases.fetch_add(1, Ordering::AcqRel);
         GenerationLease {
             generation: Arc::clone(self),
         }
     }
 
     pub(crate) async fn wait_for_lease_drain(&self) {
-        let mut changes = self.lease_changes.subscribe();
         loop {
+            let drained = self.lease_drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
             if self.leases.load(Ordering::Acquire) == 0 {
                 return;
             }
-            if changes.changed().await.is_err() {
-                return;
-            }
+            drained.await;
         }
     }
 
@@ -813,9 +901,9 @@ impl Drop for GenerationLease {
     fn drop(&mut self) {
         let previous = self.generation.leases.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "generation lease underflow");
-        self.generation
-            .lease_changes
-            .send_replace(previous.saturating_sub(1));
+        if previous == 1 {
+            self.generation.lease_drained.notify_waiters();
+        }
     }
 }
 
@@ -903,6 +991,11 @@ impl RoutingSnapshot {
             .lock()
             .expect("routing admission mutex poisoned");
         self.admission.admitting.store(false, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_admitting(&self) -> bool {
+        self.admission.admitting.load(Ordering::Acquire)
     }
 
     pub(crate) fn try_admit_route_lease(&self, key: &RouteKey) -> Option<GenerationLease> {
@@ -1111,6 +1204,23 @@ mod tests {
 
         drop(admitted);
         assert_eq!(generation.lease_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn lease_drain_waiter_converges_without_per_lease_notifications() {
+        let generation = Arc::new(Generation::new(7, InstanceId::new("provider")));
+        generation.mark_admitting();
+        let lease = generation.try_admit_lease().expect("lease");
+        let waiting = Arc::clone(&generation);
+        let waiter = tokio::spawn(async move { waiting.wait_for_lease_drain().await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(lease);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("drain notification")
+            .expect("waiter task");
     }
 
     #[test]

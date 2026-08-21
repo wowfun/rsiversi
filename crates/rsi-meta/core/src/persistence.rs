@@ -19,7 +19,7 @@ use schema::STORE_SCHEMA_SQL;
 pub(crate) use state::{CasResult, PluginStateValue};
 use state::{enforce_state_quotas, read_plugin_state};
 
-pub(crate) const STORE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const STORE_SCHEMA_VERSION: u32 = 3;
 pub(crate) const OPERATION_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub(crate) const MAX_RETAINED_OPERATION_RESULTS: usize = 100_000;
 pub(crate) const EVENT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -74,10 +74,6 @@ pub(crate) struct PendingApply {
     pub composition_id: String,
     pub installed_manifest_path: std::path::PathBuf,
     pub installed_lock_path: std::path::PathBuf,
-    #[allow(dead_code)] // retained as durable provenance; recovery trusts installed hashes only
-    pub candidate_manifest_path: std::path::PathBuf,
-    #[allow(dead_code)] // retained as durable provenance; recovery trusts installed hashes only
-    pub candidate_lock_path: std::path::PathBuf,
     pub candidate_manifest_hash: String,
     pub candidate_lock_hash: String,
     pub previous_manifest_bytes: Option<Vec<u8>>,
@@ -626,8 +622,6 @@ impl Persistence {
         composition_id: &str,
         installed_manifest_path: &Path,
         installed_lock_path: &Path,
-        candidate_manifest_path: &Path,
-        candidate_lock_path: &Path,
         candidate_manifest_hash: &str,
         candidate_lock_hash: &str,
         terminal_graph_revision: GraphRevision,
@@ -637,8 +631,6 @@ impl Persistence {
     ) -> Result<()> {
         let manifest_path = utf8_path(installed_manifest_path)?;
         let lock_path = utf8_path(installed_lock_path)?;
-        let candidate_manifest_path = utf8_path(candidate_manifest_path)?;
-        let candidate_lock_path = utf8_path(candidate_lock_path)?;
         let previous_manifest_bytes = read_optional(installed_manifest_path)?;
         let previous_lock_bytes = read_optional(installed_lock_path)?;
         let previous_manifest_hash = previous_manifest_bytes
@@ -655,23 +647,20 @@ impl Persistence {
         transaction.execute(
             "INSERT INTO apply_journal(
                command_id, composition_id, installed_manifest_path, installed_lock_path,
-               candidate_manifest_path, candidate_lock_path,
                candidate_manifest_hash, candidate_lock_hash,
                previous_manifest_bytes, previous_lock_bytes,
                previous_manifest_hash, previous_lock_hash,
                terminal_graph_revision, terminal_event_json,
                terminal_outcome_json, terminal_desired_json, operation_kind
              ) VALUES (
-               ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-               ?13, ?14, ?15, ?16, ?17
+               ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+               ?11, ?12, ?13, ?14, ?15
              )",
             params![
                 command_id,
                 composition_id,
                 manifest_path,
                 lock_path,
-                candidate_manifest_path,
-                candidate_lock_path,
                 candidate_manifest_hash,
                 candidate_lock_hash,
                 previous_manifest_bytes,
@@ -842,7 +831,6 @@ impl Persistence {
         let mut statement = self.connection.prepare(
             "SELECT j.command_id, j.composition_id,
                     j.installed_manifest_path, j.installed_lock_path,
-                    j.candidate_manifest_path, j.candidate_lock_path,
                     j.candidate_manifest_hash, j.candidate_lock_hash,
                     j.previous_manifest_bytes, j.previous_lock_bytes,
                     j.previous_manifest_hash, j.previous_lock_hash,
@@ -860,22 +848,38 @@ impl Persistence {
                 composition_id: row.get(1)?,
                 installed_manifest_path: std::path::PathBuf::from(row.get::<_, String>(2)?),
                 installed_lock_path: std::path::PathBuf::from(row.get::<_, String>(3)?),
-                candidate_manifest_path: std::path::PathBuf::from(row.get::<_, String>(4)?),
-                candidate_lock_path: std::path::PathBuf::from(row.get::<_, String>(5)?),
-                candidate_manifest_hash: row.get(6)?,
-                candidate_lock_hash: row.get(7)?,
-                previous_manifest_bytes: row.get(8)?,
-                previous_lock_bytes: row.get(9)?,
-                previous_manifest_hash: row.get(10)?,
-                previous_lock_hash: row.get(11)?,
+                candidate_manifest_hash: row.get(4)?,
+                candidate_lock_hash: row.get(5)?,
+                previous_manifest_bytes: row.get(6)?,
+                previous_lock_bytes: row.get(7)?,
+                previous_manifest_hash: row.get(8)?,
+                previous_lock_hash: row.get(9)?,
                 terminal_graph_revision: {
-                    let revision = row.get::<_, i64>(12)?;
+                    let revision = row.get::<_, i64>(10)?;
                     GraphRevision(
                         u64::try_from(revision)
-                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(12, revision))?,
+                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(10, revision))?,
                     )
                 },
-                terminal_event: serde_json::from_str(&row.get::<_, String>(13)?).map_err(
+                terminal_event: serde_json::from_str(&row.get::<_, String>(11)?).map_err(
+                    |error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            11,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    },
+                )?,
+                terminal_outcome: serde_json::from_str(&row.get::<_, String>(12)?).map_err(
+                    |error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            12,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    },
+                )?,
+                terminal_desired: serde_json::from_str(&row.get::<_, String>(13)?).map_err(
                     |error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             13,
@@ -884,25 +888,7 @@ impl Persistence {
                         )
                     },
                 )?,
-                terminal_outcome: serde_json::from_str(&row.get::<_, String>(14)?).map_err(
-                    |error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            14,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    },
-                )?,
-                terminal_desired: serde_json::from_str(&row.get::<_, String>(15)?).map_err(
-                    |error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            15,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    },
-                )?,
-                operation_kind: row.get(16)?,
+                operation_kind: row.get(14)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1543,8 +1529,6 @@ mod tests {
                 "demo",
                 &temp.path().join("installed.toml"),
                 &temp.path().join("installed.lock"),
-                &temp.path().join("candidate.toml"),
-                &temp.path().join("candidate.lock"),
                 "manifest",
                 "lock",
                 GraphRevision(1),
@@ -1608,8 +1592,6 @@ mod tests {
                 "demo",
                 &temp.path().join("installed.toml"),
                 &temp.path().join("installed.lock"),
-                &temp.path().join("candidate.toml"),
-                &temp.path().join("candidate.lock"),
                 "manifest",
                 "lock",
                 GraphRevision(1),

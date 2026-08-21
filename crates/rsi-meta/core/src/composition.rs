@@ -339,7 +339,10 @@ pub(crate) async fn launch_and_prepare_pumping_services(
         }
     };
     tokio::task::yield_now().await;
-    while let Ok(call) = host_services.try_recv() {
+    for _ in 0..host_services.len() {
+        let call = host_services
+            .try_recv()
+            .expect("the composition launcher is the sole host-service receiver");
         let result = crate::host::registry::execute_host_service(persistence, &call);
         let _ = call.reply.send(result);
     }

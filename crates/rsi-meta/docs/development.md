@@ -14,6 +14,8 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets
 cargo xtask rsi-meta code-health
 cargo xtask verify-docs
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --lib --no-deps
+cargo test --locked --workspace --doc
 ```
 
 Run the product-wide standalone checks when a package, ABI, schema, fixture, or shared contract changes:

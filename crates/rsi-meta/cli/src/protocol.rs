@@ -17,6 +17,7 @@ pub const CONTROL_PROTOCOL: &str = "rsi-meta.control";
 pub const CONTROL_VERSION: u32 = 0;
 pub const MAX_CONTROL_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
+/// Closed top-level discriminator for daemon control envelopes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlEnvelopeKind {
@@ -25,20 +26,28 @@ pub enum ControlEnvelopeKind {
     Event,
 }
 
+/// Versioned caller-to-daemon command envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommandEnvelope {
+    /// Exact protocol identity; must equal [`CONTROL_PROTOCOL`].
     pub protocol: String,
+    /// Exact protocol version; must equal [`CONTROL_VERSION`].
     pub version: u32,
+    /// Must be [`ControlEnvelopeKind::Command`].
     pub kind: ControlEnvelopeKind,
+    /// Caller-owned idempotency and result correlation identifier.
     pub command_id: String,
+    /// Optional optimistic-concurrency precondition for graph mutation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_graph_revision: Option<GraphRevision>,
     pub payload: Command,
+    /// Preserved forward-compatible envelope fields.
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 impl CommandEnvelope {
+    /// Creates a command with the current protocol header.
     pub fn new(command_id: impl Into<String>, payload: Command) -> Self {
         Self {
             protocol: CONTROL_PROTOCOL.to_owned(),
@@ -58,15 +67,22 @@ impl CommandEnvelope {
     }
 }
 
+/// Closed daemon control command vocabulary with unknown-command preservation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// Atomically applies one exact composition manifest/lock pair.
     ApplyManifestPath {
+        /// Candidate manifest path resolved by the daemon before installation.
         manifest_path: PathBuf,
+        /// Matching lock path.
         lock_path: PathBuf,
     },
     QueryGraph,
+    /// Queries a bounded page of durable host events.
     QueryEvents {
+        /// Return events strictly after this cursor.
         after_cursor: u64,
+        /// Maximum events to return.
         limit: u32,
     },
     InspectPlugin {
@@ -74,8 +90,11 @@ pub enum Command {
     },
     RotateToken,
     Shutdown,
+    /// Forward-compatible command not understood by this daemon.
     Unknown {
+        /// External command discriminator.
         command_type: String,
+        /// Preserved command fields excluding the discriminator.
         payload: serde_json::Map<String, serde_json::Value>,
     },
 }
@@ -214,19 +233,27 @@ const fn default_event_query_limit() -> u32 {
     1_000
 }
 
+/// Versioned correlated result of one daemon command.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommandOutcomeEnvelope {
+    /// Exact protocol identity; must equal [`CONTROL_PROTOCOL`].
     pub protocol: String,
+    /// Exact protocol version; must equal [`CONTROL_VERSION`].
     pub version: u32,
+    /// Must be [`ControlEnvelopeKind::Result`].
     pub kind: ControlEnvelopeKind,
+    /// Identifier from the corresponding command.
     pub command_id: String,
+    /// Committed graph revision after processing the command.
     pub graph_revision: GraphRevision,
     pub payload: CommandOutcome,
+    /// Preserved forward-compatible envelope fields.
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 impl CommandOutcomeEnvelope {
+    /// Creates a bounded result, replacing oversized payloads with rejection.
     pub fn new(
         command_id: impl Into<String>,
         graph_revision: GraphRevision,
@@ -258,6 +285,7 @@ impl CommandOutcomeEnvelope {
     }
 }
 
+/// Closed semantic result vocabulary for daemon commands.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
@@ -268,43 +296,63 @@ pub enum CommandOutcome {
     NoChange {
         graph: GraphSnapshot,
     },
+    /// Process-fixed package changes require daemon restart.
     RestartRequired {
+        /// Currently active composition, if any.
         current: Option<CompositionDigest>,
+        /// Validated desired composition.
         candidate: CompositionDigest,
+        /// Packages requiring a new process.
         packages: Vec<PackageId>,
     },
     Graph {
         graph: GraphSnapshot,
+        /// Last durable host-event cursor.
         cursor: u64,
     },
+    /// Bounded durable event query result.
     Events {
+        /// Events ordered by increasing cursor.
         events: Vec<EventEnvelope>,
     },
     Plugin {
         instance: Option<PluginInspection>,
     },
     TokenRotated {
+        /// New monotonic token generation.
         generation: u64,
     },
+    /// Command was safely rejected without the requested mutation.
     Rejected {
+        /// Stable machine-readable rejection code.
         code: String,
+        /// Bounded human-readable rejection summary.
         message: String,
+        /// Structured bounded rejection metadata.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         details: BTreeMap<String, serde_json::Value>,
     },
     ShuttingDown,
 }
 
+/// Versioned durable host event delivered by query or subscription.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    /// Exact protocol identity; must equal [`CONTROL_PROTOCOL`].
     pub protocol: String,
+    /// Exact protocol version; must equal [`CONTROL_VERSION`].
     pub version: u32,
+    /// Must be [`ControlEnvelopeKind::Event`].
     pub kind: ControlEnvelopeKind,
+    /// Monotonic durable event cursor.
     pub cursor: u64,
+    /// Operation that caused the event, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Graph revision in effect when the event was committed.
     pub graph_revision: GraphRevision,
     pub payload: Event,
+    /// Preserved forward-compatible envelope fields.
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
@@ -324,25 +372,32 @@ impl From<HostEventRecord> for EventEnvelope {
     }
 }
 
+/// Parsed one-shot CLI request before conversion to the daemon wire contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliRequest {
     ApplyManifest {
         manifest: PathBuf,
         lock: PathBuf,
+        /// Caller-owned idempotency identity.
         operation_id: String,
     },
     QueryGraph,
+    /// Queries a bounded durable event page.
     QueryEvents {
+        /// Return events strictly after this cursor.
         after: u64,
+        /// Maximum events to return.
         limit: u32,
     },
     InspectPlugin {
         instance_id: String,
     },
     RotateToken {
+        /// Caller-owned idempotency identity.
         operation_id: String,
     },
     Shutdown {
+        /// Caller-owned idempotency identity.
         operation_id: String,
     },
 }
@@ -456,7 +511,7 @@ pub fn rejected(
 }
 
 #[cfg(test)]
-pub fn outcome(
+pub(crate) fn outcome(
     command_id: impl Into<String>,
     graph_revision: GraphRevision,
     payload: CommandOutcome,

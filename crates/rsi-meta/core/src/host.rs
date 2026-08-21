@@ -74,26 +74,37 @@ impl CompositionFiles {
     }
 }
 
+/// Workspace configuration used to open an embedded composition host.
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
+    /// Product-owned durable workspace and cache locations.
     pub workspace: CompositionWorkspace,
-    pub command_capacity: usize,
-    pub event_capacity: usize,
+    #[cfg(test)]
+    command_capacity: usize,
 }
 
 impl OpenOptions {
     pub fn new(workspace: CompositionWorkspace) -> Self {
         Self {
             workspace,
-            command_capacity: 128,
-            event_capacity: 256,
+            #[cfg(test)]
+            command_capacity: REGISTRY_COMMAND_CAPACITY,
         }
     }
 }
 
+const REGISTRY_COMMAND_CAPACITY: usize = 128;
+const REGISTRY_QUERY_CAPACITY: usize = 128;
+const PLUGIN_COMMAND_CAPACITY: usize = 128;
+const HOST_SERVICE_CAPACITY: usize = 128;
+const EVENT_CAPACITY: usize = 256;
+
+/// Request to open a declared service from one consumer instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServiceOpenRequest {
+    /// Active consumer instance requesting the service.
     pub consumer: InstanceId,
+    /// Exact declared service key to resolve.
     pub service: ServiceKey,
 }
 
@@ -118,10 +129,12 @@ impl fmt::Debug for ServiceStream {
 }
 
 impl ServiceStream {
+    /// Returns the host-assigned logical stream identifier.
     pub fn stream_id(&self) -> &str {
         self.port.stream_id()
     }
 
+    /// Returns the generation-pinned provider instance.
     pub fn provider(&self) -> &InstanceId {
         &self.provider
     }
@@ -169,6 +182,7 @@ impl ServiceStream {
     }
 }
 
+/// Replay-then-live stream of durable host events after a caller cursor.
 pub struct EventStream {
     replay: mpsc::Receiver<Result<HostEventRecord>>,
     replay_complete: bool,
@@ -207,6 +221,7 @@ impl EventStream {
         }
     }
 
+    /// Receives the next ordered event or terminal subscription failure.
     pub async fn recv(&mut self) -> Option<Result<HostEventRecord>> {
         futures_util::StreamExt::next(self).await
     }
@@ -253,6 +268,7 @@ impl Stream for EventStream {
     }
 }
 
+/// Embedded owner of one atomically published composition graph.
 #[derive(Clone)]
 pub struct CompositionHost {
     inner: Arc<HostInner>,
@@ -269,22 +285,29 @@ impl fmt::Debug for CompositionHost {
 
 struct HostInner {
     routing: Arc<ArcSwap<RoutingSnapshot>>,
-    cutover: Arc<StdMutex<()>>,
     sender: mpsc::Sender<RegistryMessage>,
+    queries: mpsc::Sender<RegistryQuery>,
     join: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutting_down: AtomicBool,
     shutdown_operation: StdMutex<Option<OperationId>>,
     retirements: RetirementRegistry,
 }
 
-fn with_current_routing<T>(
-    cutover: &StdMutex<()>,
+fn admit_current_service(
     routing: &ArcSwap<RoutingSnapshot>,
-    operation: impl FnOnce(&RoutingSnapshot) -> T,
-) -> T {
-    let _cutover = cutover.lock().expect("routing cutover mutex poisoned");
-    let snapshot = routing.load_full();
-    operation(&snapshot)
+    request: &ServiceOpenRequest,
+) -> Result<(
+    InstanceId,
+    crate::runtime::RuntimeHandle,
+    crate::model::GenerationLease,
+)> {
+    loop {
+        let snapshot = routing.load_full();
+        let admitted = admit_service(&snapshot, request);
+        if Arc::ptr_eq(&snapshot, &routing.load_full()) {
+            return admitted;
+        }
+    }
 }
 
 fn admit_service(
@@ -303,21 +326,21 @@ fn admit_service(
             instance: request.consumer.clone(),
         });
     }
-    if !instance
-        .requires
-        .iter()
-        .any(|requirement| requirement.service == request.service)
-    {
-        return Err(HostError::UndeclaredService {
-            consumer: request.consumer.clone(),
-            service: request.service.clone(),
-        });
-    }
     let key = RouteKey {
         consumer: request.consumer.clone(),
         service: request.service.clone(),
     };
     let Some(route) = snapshot.route(&key) else {
+        if !instance
+            .requires
+            .iter()
+            .any(|requirement| requirement.service == request.service)
+        {
+            return Err(HostError::UndeclaredService {
+                consumer: request.consumer.clone(),
+                service: request.service.clone(),
+            });
+        }
         return Err(HostError::UnresolvedService {
             consumer: request.consumer.clone(),
             service: request.service.clone(),
@@ -345,12 +368,14 @@ fn publish_routing_cutover(
 ) {
     let _cutover = cutover.lock().expect("routing cutover mutex poisoned");
     next.mark_admitting();
+    // Lock-free readers that lose admission on `old` retry the published snapshot.
+    // Reversing these two operations creates a transient no-admission gap.
+    routing.store(Arc::new(next));
     old.stop_admission();
     for generation in retired {
         generation.stop_admission();
     }
     inside_cutover();
-    routing.store(Arc::new(next));
 }
 
 impl CompositionHost {
@@ -388,12 +413,15 @@ impl CompositionHost {
         let token_generation = persistence.token_generation()?;
         let latest_composition_event = persistence.latest_composition_event()?;
 
-        let (events, _) = broadcast::channel(options.event_capacity.max(1));
-        let (sender, receiver) = mpsc::channel(options.command_capacity.max(1));
-        let (plugin_commands, plugin_command_receiver) =
-            mpsc::channel(options.command_capacity.max(1));
-        let (host_services, mut host_service_receiver) =
-            mpsc::channel(options.command_capacity.max(1));
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        #[cfg(test)]
+        let registry_command_capacity = options.command_capacity;
+        #[cfg(not(test))]
+        let registry_command_capacity = REGISTRY_COMMAND_CAPACITY;
+        let (sender, receiver) = mpsc::channel(registry_command_capacity);
+        let (queries, query_receiver) = mpsc::channel(REGISTRY_QUERY_CAPACITY);
+        let (plugin_commands, plugin_command_receiver) = mpsc::channel(PLUGIN_COMMAND_CAPACITY);
+        let (host_services, mut host_service_receiver) = mpsc::channel(HOST_SERVICE_CAPACITY);
         let (runtime_faults, runtime_fault_receiver) =
             mpsc::channel(crate::model::MAX_COMPOSITION_INSTANCES);
         let (runtime_tick_sender, runtime_ticks) = tokio::sync::watch::channel(0_u64);
@@ -584,6 +612,7 @@ impl CompositionHost {
             plugin_command_receiver,
             host_service_receiver,
             runtime_fault_receiver,
+            query_receiver,
             retirements: Arc::clone(&retirements),
             current_mode,
             fatal: false,
@@ -593,8 +622,8 @@ impl CompositionHost {
         Ok(Self {
             inner: Arc::new(HostInner {
                 routing,
-                cutover,
                 sender,
+                queries,
                 join: Mutex::new(Some(join)),
                 shutting_down: AtomicBool::new(false),
                 shutdown_operation: StdMutex::new(None),
@@ -603,6 +632,7 @@ impl CompositionHost {
         })
     }
 
+    /// Returns a lock-free snapshot of current graph and durable cursor state.
     pub fn snapshot(&self) -> HostSnapshot {
         let snapshot = self.inner.routing.load();
         HostSnapshot {
@@ -624,8 +654,8 @@ impl CompositionHost {
     pub async fn subscribe(&self, after_cursor: u64) -> Result<EventStream> {
         let (start_sender, start_response) = oneshot::channel();
         self.inner
-            .sender
-            .send(RegistryMessage::Subscribe {
+            .queries
+            .send(RegistryQuery::Subscribe {
                 reply: start_sender,
             })
             .await
@@ -635,7 +665,7 @@ impl CompositionHost {
             .map_err(|_| HostError::ResponseDropped)??;
         let (replay_sender, replay_receiver) = mpsc::channel(EVENT_REPLAY_CHANNEL_CAPACITY);
         tokio::spawn(pump_event_replay(
-            self.inner.sender.clone(),
+            self.inner.queries.clone(),
             replay_sender,
             after_cursor,
             start.through_cursor,
@@ -713,8 +743,8 @@ impl CompositionHost {
     pub async fn events_after(&self, after_cursor: u64, limit: u32) -> Result<EventPage> {
         let (reply, response) = oneshot::channel();
         self.inner
-            .sender
-            .send(RegistryMessage::ReplayEvents {
+            .queries
+            .send(RegistryQuery::ReplayEvents {
                 after_cursor,
                 through_cursor: u64::MAX,
                 limit,
@@ -742,8 +772,8 @@ impl CompositionHost {
     ) -> Result<Option<crate::PluginInspection>> {
         let (reply, response) = oneshot::channel();
         self.inner
-            .sender
-            .send(RegistryMessage::InspectPlugin { instance_id, reply })
+            .queries
+            .send(RegistryQuery::InspectPlugin { instance_id, reply })
             .await
             .map_err(|_| HostError::RegistryClosed)?;
         response
@@ -784,10 +814,7 @@ impl CompositionHost {
     /// Returns an error for unknown/inactive consumers, undeclared injections,
     /// or unresolved optional injections.
     pub fn open_service(&self, request: ServiceOpenRequest) -> Result<ServiceStream> {
-        let (provider, runtime, lease) =
-            with_current_routing(&self.inner.cutover, &self.inner.routing, |snapshot| {
-                admit_service(snapshot, &request)
-            })?;
+        let (provider, runtime, lease) = admit_current_service(&self.inner.routing, &request)?;
         let port = runtime.open_stream(&request.consumer, request.service)?;
         Ok(ServiceStream {
             provider,
@@ -921,6 +948,14 @@ enum RegistryMessage {
         command: CommandEnvelope,
         reply: oneshot::Sender<Result<CommandOutcomeEnvelope>>,
     },
+    #[cfg(test)]
+    Pause {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
+}
+
+enum RegistryQuery {
     Subscribe {
         reply: oneshot::Sender<Result<SubscriptionStart>>,
     },
@@ -934,11 +969,6 @@ enum RegistryMessage {
         instance_id: InstanceId,
         reply: oneshot::Sender<Option<PluginInspection>>,
     },
-    #[cfg(test)]
-    Pause {
-        entered: oneshot::Sender<()>,
-        release: oneshot::Receiver<()>,
-    },
 }
 
 struct SubscriptionStart {
@@ -947,7 +977,7 @@ struct SubscriptionStart {
 }
 
 async fn pump_event_replay(
-    registry: mpsc::Sender<RegistryMessage>,
+    registry: mpsc::Sender<RegistryQuery>,
     replay_output: mpsc::Sender<Result<HostEventRecord>>,
     mut after_cursor: u64,
     through_cursor: u64,
@@ -955,7 +985,7 @@ async fn pump_event_replay(
     while after_cursor < through_cursor {
         let (page_sender, page_response) = oneshot::channel();
         if registry
-            .send(RegistryMessage::ReplayEvents {
+            .send(RegistryQuery::ReplayEvents {
                 after_cursor,
                 through_cursor,
                 limit: EVENT_REPLAY_PAGE_SIZE,
@@ -1163,10 +1193,14 @@ mode = "development"
         let (filler_reply, _filler_response) = oneshot::channel();
         host.inner
             .sender
-            .send(RegistryMessage::ReplayEvents {
-                after_cursor: 0,
-                through_cursor: 0,
-                limit: 1,
+            .send(RegistryMessage::Submit {
+                command: CommandEnvelope::new(
+                    "queue-filler",
+                    Command::Unknown {
+                        command_type: "queue_filler".to_owned(),
+                        payload: serde_json::Map::new(),
+                    },
+                ),
                 reply: filler_reply,
             })
             .await
@@ -1203,7 +1237,7 @@ mode = "development"
             u64::from(EVENT_REPLAY_PAGE_SIZE) + 1,
         ));
 
-        let RegistryMessage::ReplayEvents {
+        let RegistryQuery::ReplayEvents {
             after_cursor,
             through_cursor,
             reply,
@@ -1242,7 +1276,7 @@ mode = "development"
             }
         }
 
-        let RegistryMessage::ReplayEvents {
+        let RegistryQuery::ReplayEvents {
             after_cursor,
             through_cursor,
             reply,
@@ -1280,7 +1314,7 @@ mode = "development"
         let (replay_sender, replay) = mpsc::channel(EVENT_REPLAY_CHANNEL_CAPACITY);
         let (events, live) = broadcast::channel(1);
         let pump = tokio::spawn(pump_event_replay(registry, replay_sender, 0, 1));
-        let RegistryMessage::ReplayEvents { reply, .. } =
+        let RegistryQuery::ReplayEvents { reply, .. } =
             requests.recv().await.expect("replay page request")
         else {
             panic!("replay pump sent an unexpected registry message")
@@ -1721,7 +1755,7 @@ mode = "development"
     }
 
     #[test]
-    fn cutover_mutex_never_exposes_the_stopped_old_snapshot() {
+    fn cutover_has_no_stopped_old_publication_gap() {
         let root = tempfile::tempdir().expect("tempdir");
         let (old, _, _, _) = plugin_gate_fixture(root.path());
         old.mark_admitting();
@@ -1752,21 +1786,11 @@ mode = "development"
         };
         inside_receiver
             .recv()
-            .expect("commit reached stopped-before-store point");
-        let start_reader = Arc::new(std::sync::Barrier::new(2));
-        let reader = {
-            let routing = Arc::clone(&routing);
-            let cutover = Arc::clone(&cutover);
-            let start_reader = Arc::clone(&start_reader);
-            std::thread::spawn(move || {
-                start_reader.wait();
-                with_current_routing(&cutover, &routing, RoutingSnapshot::revision)
-            })
-        };
-        start_reader.wait();
+            .expect("commit reached post-publication hook");
+        assert_eq!(routing.load().revision(), GraphRevision(4));
+        assert!(!old.is_admitting());
         release_sender.send(()).expect("finish cutover");
         commit.join().expect("commit thread");
-        assert_eq!(reader.join().expect("reader thread"), GraphRevision(4));
         assert_eq!(routing.load().revision(), GraphRevision(4));
     }
 }

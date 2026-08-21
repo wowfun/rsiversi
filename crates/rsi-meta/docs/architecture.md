@@ -12,12 +12,15 @@ Inside the core crate, composition parsing, transaction recovery, persistence, r
 OperationId lookup and first input snapshot
               |
               v
-validation and immutable CAS staging
+bounded read, normalization, and validation (no cache mutation)
               |
               v
 process-fixed preflight -- yes --> durable RestartRequired only
               |
               no
+              v
+immutable CAS staging and identity recheck
+              |
               v
 shadow prepare -- failure --> reverse abort
               |
@@ -34,7 +37,7 @@ atomic routing publication
 reverse retirement after generation leases drain
 ```
 
-The graph revision advances only when a routing graph becomes active. A failure after durable commit but before publication terminates the host; a later `open` reconstructs the committed graph rather than continuing with split state.
+The graph revision advances only when a routing graph becomes active. At cutover the new admitting snapshot is published before admission stops on the old generations; lock-free readers that race the boundary can therefore retry against a usable snapshot. A failure after durable commit but before publication terminates the host; a later `open` reconstructs the committed graph rather than continuing with split state.
 
 ## Process-fixed installation
 
