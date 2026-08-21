@@ -25,23 +25,33 @@ pub type AdapterFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 /// Pull-based event stream returned by a provider-author interface.
 pub type AdapterStream<E> = Pin<Box<dyn Stream<Item = Result<E, AiError>> + Send + 'static>>;
 
+/// Normalized language stream returned after a prepared call starts.
 pub type LanguageAdapterStream = AdapterStream<LanguageEvent>;
+/// Normalized image stream returned after a prepared call starts.
 pub type ImageAdapterStream = AdapterStream<ImageEvent>;
+/// Normalized transcription stream returned after a prepared call starts.
 pub type TranscriptionAdapterStream = AdapterStream<TranscriptionEvent>;
+/// Normalized speech stream returned after a prepared call starts.
 pub type SpeechAdapterStream = AdapterStream<SpeechEvent>;
 
 /// Current provider-side state of one explicitly deferred language response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeferredStatus {
+    /// Accepted remotely but not yet executing.
     Queued,
+    /// Executing or producing resumable output remotely.
     InProgress,
+    /// Completed successfully.
     Completed,
+    /// Reached a terminal provider failure.
     Failed,
+    /// Reached a terminal cancelled state.
     Cancelled,
 }
 
 impl DeferredStatus {
+    /// Returns whether no later distinct status is valid.
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
@@ -64,6 +74,7 @@ pub struct DeferredLanguageCheckpoint {
 }
 
 impl DeferredLanguageCheckpoint {
+    /// Creates an initial checkpoint before a resumable stream has been opened.
     pub fn new(
         call: PreparedCallSnapshot,
         operation_id: impl Into<String>,
@@ -82,6 +93,7 @@ impl DeferredLanguageCheckpoint {
         Ok(checkpoint)
     }
 
+    /// Revalidates a checkpoint decoded from durable state.
     pub fn validate(&self) -> Result<(), ProviderSdkError> {
         self.call.validate()?;
         validate_id("operation_id", &self.operation_id)?;
@@ -94,26 +106,32 @@ impl DeferredLanguageCheckpoint {
         validate_provider_state(self.provider_state.as_ref())
     }
 
+    /// Returns the original frozen call facts.
     pub const fn call(&self) -> &PreparedCallSnapshot {
         &self.call
     }
 
+    /// Returns the remote provider operation identifier.
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }
 
+    /// Returns the latest observed provider status.
     pub const fn status(&self) -> DeferredStatus {
         self.status
     }
 
+    /// Returns whether any resumable provider stream has been created.
     pub const fn stream_created(&self) -> bool {
         self.stream_created
     }
 
+    /// Returns the cursor after the last durably paired normalized event batch.
     pub const fn sequence_number(&self) -> Option<u64> {
         self.sequence_number
     }
 
+    /// Returns bounded parser state required to resume after the cursor.
     pub const fn provider_state(&self) -> Option<&ProviderExtension> {
         self.provider_state.as_ref()
     }
@@ -209,6 +227,7 @@ pub struct DeferredLanguageBatch {
 }
 
 impl DeferredLanguageBatch {
+    /// Couples one bounded event batch with the cursor immediately after it.
     pub fn new(
         events: Vec<LanguageEvent>,
         checkpoint: DeferredLanguageCheckpoint,
@@ -223,25 +242,33 @@ impl DeferredLanguageBatch {
         Ok(Self { events, checkpoint })
     }
 
+    /// Returns normalized events that must be committed with the checkpoint.
     pub fn events(&self) -> &[LanguageEvent] {
         &self.events
     }
 
+    /// Returns the post-event durable checkpoint.
     pub const fn checkpoint(&self) -> &DeferredLanguageCheckpoint {
         &self.checkpoint
     }
 }
 
+/// Atomic event/checkpoint batches returned by one deferred resume request.
 pub type DeferredLanguageAdapterStream = AdapterStream<DeferredLanguageBatch>;
 
 /// AI capability selected before a provider call is prepared.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
+    /// Text, multimodal understanding, reasoning, and tool calls.
     Language,
+    /// Image generation or editing.
     Image,
+    /// Audio-to-text transcription.
     Transcription,
+    /// Text-to-audio synthesis.
     Speech,
+    /// Live bidirectional Realtime interaction.
     Realtime,
 }
 
@@ -258,6 +285,7 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// Creates bounded retry facts for an orchestration layer to interpret durably.
     pub fn new(
         max_retries: u8,
         retryable_kinds: Vec<ErrorKind>,
@@ -291,10 +319,12 @@ impl RetryPolicy {
         })
     }
 
+    /// Returns the maximum retries after the initial attempt.
     pub const fn max_retries(&self) -> u8 {
         self.max_retries
     }
 
+    /// Returns whether the policy admits the provider-neutral failure category.
     pub fn retries(&self, kind: ErrorKind) -> bool {
         self.retryable_kinds.contains(&kind)
     }
@@ -311,6 +341,7 @@ impl RetryPolicy {
         self.jitter_per_mille
     }
 
+    /// Revalidates retry facts decoded from a prepared snapshot.
     pub fn validate(&self) -> Result<(), ProviderSdkError> {
         Self::new(
             self.max_retries,
@@ -345,21 +376,34 @@ impl Default for RetryPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedCallSnapshot {
+    /// Caller-visible call identity unique within the owning runtime.
     pub call_id: String,
+    /// Exact configured provider deployment.
     pub deployment_id: String,
+    /// Provider family that owns translation semantics.
     pub provider_family: String,
+    /// Typed capability prepared for the call.
     pub capability: Capability,
+    /// Exact model identifier supplied by the caller.
     pub model: String,
+    /// Provider protocol family frozen during preparation.
     pub protocol: String,
+    /// Transport kind frozen during preparation.
     pub transport: String,
+    /// Redacted endpoint identity suitable for replay diagnostics.
     pub endpoint_fingerprint: String,
+    /// Provider configuration generation pinned by the call.
     pub config_generation: u64,
+    /// Redacted source of the resolved credential, when required.
     pub credential_source: Option<CredentialSourceSnapshot>,
+    /// Finite retry facts for a durable orchestration layer.
     pub retry_policy: RetryPolicy,
+    /// Lowercase SHA-256 of canonical provider-neutral request bytes.
     pub request_sha256: String,
 }
 
 impl PreparedCallSnapshot {
+    /// Revalidates redacted facts decoded from durable or wire state.
     pub fn validate(&self) -> Result<(), ProviderSdkError> {
         for (field, value) in [
             ("call_id", self.call_id.as_str()),
@@ -401,6 +445,7 @@ pub struct PrepareContext {
 }
 
 impl PrepareContext {
+    /// Couples redacted snapshot facts with nonserializable secret and media access.
     #[must_use]
     pub fn new(
         snapshot: PreparedCallSnapshot,
@@ -414,14 +459,17 @@ impl PrepareContext {
         }
     }
 
+    /// Returns persistable redacted call facts.
     pub const fn snapshot(&self) -> &PreparedCallSnapshot {
         &self.snapshot
     }
 
+    /// Returns the resolved secret and source facts when the provider requires one.
     pub const fn credential(&self) -> Option<&ResolvedCredential> {
         self.credential.as_ref()
     }
 
+    /// Returns the Start-time media resolver.
     pub fn media(&self) -> &Arc<dyn MediaResolver> {
         &self.media
     }
@@ -431,7 +479,7 @@ impl PrepareContext {
         &self,
         descriptor: &MediaDescriptor,
         abort: AbortSignal,
-    ) -> Result<Vec<u8>, AiError> {
+    ) -> Result<Arc<[u8]>, AiError> {
         let bytes = self.media.read(descriptor.clone(), abort).await?;
         if u64::try_from(bytes.len()).ok() != Some(descriptor.byte_len()) {
             return Err(AiError::new(
@@ -472,11 +520,12 @@ impl fmt::Debug for PrepareContext {
 
 /// Resolves locator-free media only after a prepared call crosses its Start barrier.
 pub trait MediaResolver: fmt::Debug + Send + Sync {
+    /// Reads one body cooperatively, leaving descriptor verification to the caller context.
     fn read(
         &self,
         descriptor: MediaDescriptor,
         abort: AbortSignal,
-    ) -> AdapterFuture<Result<Vec<u8>, AiError>>;
+    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>>;
 }
 
 /// Default resolver used when a Registry was not connected to an artifact store.
@@ -488,7 +537,7 @@ impl MediaResolver for MissingMediaResolver {
         &self,
         _descriptor: MediaDescriptor,
         _abort: AbortSignal,
-    ) -> AdapterFuture<Result<Vec<u8>, AiError>> {
+    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
         Box::pin(async {
             Err(AiError::new(
                 ErrorKind::Artifact,
@@ -506,11 +555,13 @@ impl MediaResolver for MissingMediaResolver {
 pub struct AbortSignal(CancellationToken);
 
 impl AbortSignal {
+    /// Creates an independent cancellation signal.
     #[must_use]
     pub fn new() -> Self {
         Self(CancellationToken::new())
     }
 
+    /// Signals cancellation to all clones.
     pub fn abort(&self) {
         self.0.cancel();
     }
@@ -519,10 +570,12 @@ impl AbortSignal {
         self.0.is_cancelled()
     }
 
+    /// Waits until this signal is cancelled.
     pub async fn cancelled(&self) {
         self.0.cancelled().await;
     }
 
+    /// Returns a clone of the underlying Tokio cancellation token for adapters.
     pub fn cancellation_token(&self) -> CancellationToken {
         self.0.clone()
     }
@@ -538,6 +591,7 @@ pub struct Prepared<T> {
 }
 
 impl<T> Prepared<T> {
+    /// Creates a provider-I/O-free one-shot call around its Start executor.
     pub fn new<F>(snapshot: PreparedCallSnapshot, executor: F) -> Self
     where
         F: FnOnce(AbortSignal) -> AdapterFuture<Result<T, AiError>> + Send + 'static,
@@ -548,10 +602,12 @@ impl<T> Prepared<T> {
         }
     }
 
+    /// Returns redacted facts that may be committed before Start.
     pub const fn snapshot(&self) -> &PreparedCallSnapshot {
         &self.snapshot
     }
 
+    /// Consumes the prepared call and permits exactly one external provider attempt.
     pub async fn start(mut self, abort: AbortSignal) -> Result<T, AiError> {
         let executor = self
             .executor
@@ -573,6 +629,7 @@ impl<T> fmt::Debug for Prepared<T> {
 
 /// Language provider seam.
 pub trait LanguageAdapter: fmt::Debug + Send + Sync {
+    /// Validates and freezes one language call without performing provider I/O.
     fn prepare(
         &self,
         context: PrepareContext,
@@ -603,6 +660,7 @@ pub trait LanguageAdapter: fmt::Debug + Send + Sync {
 /// Provider-owned controller for one explicitly deferred language response.
 #[async_trait]
 pub trait DeferredLanguageOperation: fmt::Debug + Send {
+    /// Returns the latest cursor for atomic persistence with observed events.
     fn checkpoint(&self) -> DeferredLanguageCheckpoint;
 
     /// Performs exactly one status request.
@@ -618,6 +676,7 @@ pub trait DeferredLanguageOperation: fmt::Debug + Send {
     async fn cancel(&mut self, abort: AbortSignal) -> Result<DeferredStatus, AiError>;
 }
 
+/// Owned provider controller for one deferred response.
 pub type DeferredLanguageAdapterHandle = Box<dyn DeferredLanguageOperation>;
 
 fn deferred_unsupported() -> AiError {
@@ -632,6 +691,7 @@ fn deferred_unsupported() -> AiError {
 
 /// Image provider seam.
 pub trait ImageAdapter: fmt::Debug + Send + Sync {
+    /// Validates and freezes one image call without performing provider I/O.
     fn prepare(
         &self,
         context: PrepareContext,
@@ -642,6 +702,7 @@ pub trait ImageAdapter: fmt::Debug + Send + Sync {
 
 /// Transcription provider seam.
 pub trait TranscriptionAdapter: fmt::Debug + Send + Sync {
+    /// Validates and freezes one transcription call without performing provider I/O.
     fn prepare(
         &self,
         context: PrepareContext,
@@ -652,6 +713,7 @@ pub trait TranscriptionAdapter: fmt::Debug + Send + Sync {
 
 /// Speech provider seam.
 pub trait SpeechAdapter: fmt::Debug + Send + Sync {
+    /// Validates and freezes one speech call without performing provider I/O.
     fn prepare(
         &self,
         context: PrepareContext,
@@ -663,15 +725,20 @@ pub trait SpeechAdapter: fmt::Debug + Send + Sync {
 /// Live provider transport hidden by the standalone Realtime façade.
 #[async_trait]
 pub trait RealtimeConnection: fmt::Debug + Send {
+    /// Sends one validated live command.
     async fn send(&mut self, command: RealtimeCommand) -> Result<(), AiError>;
+    /// Receives the next provider event, or clean EOF after closure.
     async fn next_event(&mut self) -> Result<Option<RealtimeEvent>, AiError>;
+    /// Performs bounded orderly transport closure.
     async fn close(&mut self) -> Result<(), AiError>;
 }
 
+/// Owned live transport created by a prepared Realtime call.
 pub type RealtimeAdapterTransport = Box<dyn RealtimeConnection>;
 
 /// Realtime provider seam.
 pub trait RealtimeAdapter: fmt::Debug + Send + Sync {
+    /// Validates and freezes one live session without opening its transport.
     fn prepare(
         &self,
         context: PrepareContext,
@@ -699,6 +766,7 @@ pub struct ProviderRegistration {
 }
 
 impl ProviderRegistration {
+    /// Starts a registration builder for one exact deployment and provider family.
     pub fn builder(
         deployment_id: impl Into<String>,
         provider_family: impl Into<String>,
@@ -706,34 +774,42 @@ impl ProviderRegistration {
         ProviderRegistrationBuilder::new(deployment_id.into(), provider_family.into())
     }
 
+    /// Returns the exact routing key for this deployment.
     pub fn deployment_id(&self) -> &str {
         &self.deployment_id
     }
 
+    /// Returns the provider family that owns translation policy.
     pub fn provider_family(&self) -> &str {
         &self.provider_family
     }
 
+    /// Returns the frozen provider protocol family.
     pub fn protocol(&self) -> &str {
         &self.protocol
     }
 
+    /// Returns the frozen transport kind.
     pub fn transport(&self) -> &str {
         &self.transport
     }
 
+    /// Returns redacted endpoint identity used in prepared snapshots.
     pub fn endpoint_fingerprint(&self) -> &str {
         &self.endpoint_fingerprint
     }
 
+    /// Returns the immutable provider configuration generation.
     pub const fn config_generation(&self) -> u64 {
         self.config_generation
     }
 
+    /// Returns the provider credential requirement, when any.
     pub const fn credential(&self) -> Option<&CredentialRequirement> {
         self.credential.as_ref()
     }
 
+    /// Returns the finite orchestration retry facts.
     pub const fn retry_policy(&self) -> &RetryPolicy {
         &self.retry_policy
     }
@@ -813,17 +889,20 @@ impl ProviderRegistrationBuilder {
     }
 
     #[must_use]
+    /// Sets the credential requirement resolved during preparation.
     pub fn with_credential(mut self, credential: CredentialRequirement) -> Self {
         self.credential = Some(credential);
         self
     }
 
     #[must_use]
+    /// Replaces the finite retry facts attached to prepared snapshots.
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
     }
 
+    /// Sets protocol, transport, and redacted endpoint identity together.
     pub fn with_protocol(
         mut self,
         protocol: impl Into<String>,
@@ -843,6 +922,7 @@ impl ProviderRegistrationBuilder {
     }
 
     #[must_use]
+    /// Sets the provider configuration generation frozen by later calls.
     pub const fn with_config_generation(mut self, generation: u64) -> Self {
         self.config_generation = generation;
         self
@@ -893,6 +973,7 @@ impl ProviderRegistrationBuilder {
         self
     }
 
+    /// Freezes a deployment that exposes at least one capability adapter.
     pub fn build(self) -> Result<ProviderRegistration, ProviderSdkError> {
         if self.language.is_none()
             && self.image.is_none()
@@ -949,6 +1030,7 @@ impl ProviderSdkError {
         }
     }
 
+    /// Returns the stable machine-readable provider SDK failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }

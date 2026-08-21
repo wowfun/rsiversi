@@ -17,8 +17,11 @@ const MAX_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens served from a provider cache, when reported.
     pub cache_read_tokens: Option<u64>,
+    /// Input tokens written to a provider cache, when reported.
     pub cache_write_tokens: Option<u64>,
+    /// Output tokens attributed to hidden reasoning, when reported.
     pub reasoning_tokens: Option<u64>,
 }
 
@@ -26,10 +29,15 @@ pub struct TokenUsage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
+    /// The model reached a natural or caller-provided stop condition.
     Stop,
+    /// The response ended with one or more tool calls for the caller to execute.
     ToolCalls,
+    /// The provider stopped at the configured output-token limit.
     MaxTokens,
+    /// Provider content policy stopped the response.
     ContentFilter,
+    /// Cancellation ended the response after a normalized terminal event.
     Cancelled,
 }
 
@@ -37,8 +45,11 @@ pub enum FinishReason {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    /// Provider-neutral identifier used to correlate the later tool result.
     pub id: String,
+    /// Exact declared tool name selected by the model.
     pub name: String,
+    /// Raw JSON argument text preserved without lossy parsing.
     pub arguments: String,
 }
 
@@ -46,8 +57,11 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentBlock {
+    /// User-visible assistant text.
     Text { text: String },
+    /// Provider-exposed reasoning text kept distinct from visible output.
     Reasoning { text: String },
+    /// One complete model-requested tool call.
     ToolCall(ToolCall),
 }
 
@@ -55,17 +69,28 @@ pub enum ContentBlock {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentStart {
+    /// Opens a user-visible text block.
     Text,
+    /// Opens a provider-exposed reasoning block.
     Reasoning,
-    ToolCall { id: String, name: String },
+    /// Opens a tool call whose arguments arrive as deltas.
+    ToolCall {
+        /// Correlation identifier for the later tool result.
+        id: String,
+        /// Exact declared tool name.
+        name: String,
+    },
 }
 
 /// One incremental update for an open content block.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ContentDelta {
+    /// Appends visible text to an open text block.
     Text(String),
+    /// Appends reasoning text to an open reasoning block.
     Reasoning(String),
+    /// Appends raw JSON text to an open tool-call block.
     ToolArguments(String),
 }
 
@@ -73,6 +98,7 @@ pub enum ContentDelta {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
+    /// Provider-neutral source identifier unique within the response.
     pub id: String,
     pub title: Option<String>,
     pub url: Option<String>,
@@ -82,7 +108,9 @@ pub struct Source {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Warning {
+    /// Stable bounded warning code.
     pub code: String,
+    /// Safe bounded explanation for callers.
     pub message: String,
 }
 
@@ -90,8 +118,11 @@ pub struct Warning {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderExtension {
+    /// Provider-family namespace that owns the extension meaning.
     pub namespace: String,
+    /// Namespace-local extension format version.
     pub version: u32,
+    /// Bounded JSON value containing no secrets or binary media.
     pub value: Value,
 }
 
@@ -110,32 +141,42 @@ impl ProviderExtension {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LanguageEvent {
+    /// Opens the next indexed content block.
     ContentStarted {
+        /// Zero-based contiguous block index.
         index: u32,
+        /// Metadata fixing the block's content kind.
         content: ContentStart,
     },
+    /// Appends data to an open content block.
     ContentDelta {
+        /// Index of the open block receiving the delta.
         index: u32,
+        /// Kind-matched incremental content.
         delta: ContentDelta,
     },
+    /// Closes an open content block.
     ContentFinished {
+        /// Index of the block to close.
         index: u32,
     },
-    Source {
-        source: Source,
-    },
-    Warning {
-        warning: Warning,
-    },
-    Usage {
-        usage: TokenUsage,
-    },
+    /// Adds one citeable source to the response.
+    Source { source: Source },
+    /// Adds one non-terminal compatibility or provider warning.
+    Warning { warning: Warning },
+    /// Supplies the response's sole cumulative usage record.
+    Usage { usage: TokenUsage },
+    /// Terminates a successful response after every content block is closed.
     Finished {
         reason: FinishReason,
+        /// Optional bounded state needed to replay provider reasoning or tool context.
         replay: Option<ProviderExtension>,
     },
+    /// Terminates a failed response and exposes validated partial output for
+    /// diagnostics, never as a successful [`LanguageOutput`].
     Failed {
         error: AiError,
+        /// Optional bounded provider state observed before failure.
         replay: Option<ProviderExtension>,
     },
 }
@@ -144,11 +185,17 @@ pub enum LanguageEvent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageOutput {
+    /// Ordered complete content blocks.
     pub content: Vec<ContentBlock>,
+    /// Successful terminal reason.
     pub finish_reason: FinishReason,
+    /// Sole cumulative usage record, when reported.
     pub usage: Option<TokenUsage>,
+    /// Optional provider state required for a later request replay.
     pub replay: Option<ProviderExtension>,
+    /// Ordered safe warnings retained from the attempt.
     pub warnings: Vec<Warning>,
+    /// Ordered citeable sources retained from the attempt.
     pub sources: Vec<Source>,
 }
 
@@ -227,10 +274,15 @@ impl LanguageOutput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguagePartialOutput {
+    /// Complete content blocks accepted before failure.
     pub content: Vec<ContentBlock>,
+    /// Usage observed before failure, when reported.
     pub usage: Option<TokenUsage>,
+    /// Optional provider state observed before failure.
     pub replay: Option<ProviderExtension>,
+    /// Safe warnings observed before failure.
     pub warnings: Vec<Warning>,
+    /// Sources observed before failure.
     pub sources: Vec<Source>,
 }
 
@@ -261,14 +313,18 @@ impl StreamError {
     }
 }
 
-/// Terminal language assembly failure, with provider partial output preserved.
+/// Terminal language assembly failure. Provider partial output is diagnostic
+/// evidence and never a successful [`LanguageOutput`].
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum LanguageAssemblyError {
+    /// The normalized event stream violated ordering, bounds, or terminal grammar.
     #[error(transparent)]
     Protocol(#[from] StreamError),
+    /// The provider emitted a semantic failure after some valid output.
     #[error("{error}")]
     Provider {
         error: AiError,
+        /// Valid normalized output accepted before the failure, for diagnostics.
         partial: Box<LanguagePartialOutput>,
     },
 }
@@ -351,7 +407,6 @@ pub struct LanguageAssembler {
 }
 
 impl LanguageAssembler {
-    /// Starts an empty assembler.
     #[must_use]
     pub const fn new() -> Self {
         Self {

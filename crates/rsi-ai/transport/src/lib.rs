@@ -3,10 +3,17 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)] // TransportError owns the bounded failure contract.
 
+mod json_extract;
+
+pub use json_extract::{
+    BoundedJsonExtractor, JsonExtractEvent, JsonExtraction, JsonExtractionLimits,
+};
+
 use std::{fmt, pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt as _};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
@@ -25,38 +32,295 @@ const MAX_SSE_FRAME_BYTES: usize = 256 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
+const REQUEST_BODY_RAW_CHUNK_BYTES: usize = 48 * 1024;
+const _: () = assert!(REQUEST_BODY_RAW_CHUNK_BYTES.is_multiple_of(3));
 
 /// Pull-based HTTP body bytes. Each transport failure is terminal.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, TransportError>> + Send + 'static>>;
 /// Pull-based decoded SSE `data` fields.
 pub type SseStream = Pin<Box<dyn Stream<Item = Result<String, TransportError>> + Send + 'static>>;
 
+enum RequestBodyPart {
+    Bytes(Bytes),
+    Base64(Arc<[u8]>),
+}
+
+/// A JSON request body that is buffered when it has no media and streamed
+/// otherwise.
+pub struct JsonRequestBody {
+    body: RequestBody,
+}
+
+impl JsonRequestBody {
+    /// Wraps already encoded JSON bytes as one buffered request body.
+    pub fn buffered(bytes: impl Into<Bytes>) -> Self {
+        Self {
+            body: RequestBody::Buffered(bytes.into()),
+        }
+    }
+}
+
+impl fmt::Debug for JsonRequestBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JsonRequestBody")
+            .field(
+                "buffered_bytes",
+                &match &self.body {
+                    RequestBody::Buffered(bytes) => Some(bytes.len()),
+                    RequestBody::Streaming(_) => None,
+                },
+            )
+            .field("streaming", &matches!(self.body, RequestBody::Streaming(_)))
+            .finish()
+    }
+}
+
+/// One JSON Pointer to a `null` slot that will receive streamed base64 bytes.
+#[derive(Clone)]
+pub struct JsonBase64Replacement {
+    pointer: String,
+    prefix: String,
+    bytes: Arc<[u8]>,
+}
+
+impl fmt::Debug for JsonBase64Replacement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JsonBase64Replacement")
+            .field("pointer", &self.pointer)
+            .field("prefix", &self.prefix)
+            .field("byte_len", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl JsonBase64Replacement {
+    /// Declares a JSON Pointer slot, string prefix, and raw bytes to encode there.
+    ///
+    /// The referenced slot must exist and contain `null` when passed to
+    /// [`json_base64_body`].
+    pub fn new(pointer: impl Into<String>, prefix: impl Into<String>, bytes: Arc<[u8]>) -> Self {
+        Self {
+            pointer: pointer.into(),
+            prefix: prefix.into(),
+            bytes,
+        }
+    }
+}
+
+fn stream_request_body(parts: Vec<RequestBodyPart>) -> ByteStream {
+    Box::pin(stream! {
+        for part in parts {
+            match part {
+                RequestBodyPart::Bytes(bytes) => {
+                    if !bytes.is_empty() {
+                        yield Ok(bytes);
+                    }
+                }
+                RequestBodyPart::Base64(bytes) => {
+                    for chunk in bytes.chunks(REQUEST_BODY_RAW_CHUNK_BYTES) {
+                        yield Ok(Bytes::from(BASE64.encode(chunk)));
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Fills declared `null` JSON slots with lazily base64-encoded media values.
+///
+/// The implementation owns the temporary wire markers and proves that they are
+/// absent from the complete JSON template before serializing it, so caller data
+/// cannot collide with a replacement marker.
+pub fn json_base64_body(
+    mut template: Value,
+    replacements: Vec<JsonBase64Replacement>,
+) -> Result<JsonRequestBody, TransportError> {
+    struct Located {
+        start: usize,
+        end: usize,
+        prefix: Bytes,
+        bytes: Arc<[u8]>,
+    }
+
+    if replacements.is_empty() {
+        let body = serde_json::to_vec(&template).map_err(|error| {
+            TransportError::new("http.invalid_body_template", error.to_string())
+        })?;
+        return Ok(JsonRequestBody::buffered(body));
+    }
+
+    let mut markers = Vec::with_capacity(replacements.len());
+    for (index, replacement) in replacements.iter().enumerate() {
+        let marker = unique_media_marker(&template, index);
+        let slot = template.pointer_mut(&replacement.pointer).ok_or_else(|| {
+            TransportError::new("http.invalid_body_template", "JSON media slot is missing")
+        })?;
+        if !slot.is_null() {
+            return Err(TransportError::new(
+                "http.invalid_body_template",
+                "JSON media slot is not empty",
+            ));
+        }
+        *slot = Value::String(marker.clone());
+        markers.push(marker);
+    }
+    let template =
+        Bytes::from(serde_json::to_vec(&template).map_err(|error| {
+            TransportError::new("http.invalid_body_template", error.to_string())
+        })?);
+    let mut located = Vec::with_capacity(replacements.len());
+    for (replacement, marker) in replacements.into_iter().zip(markers) {
+        let marker = serde_json::to_vec(&marker).map_err(|error| {
+            TransportError::new("http.invalid_body_template", error.to_string())
+        })?;
+        let offsets = json_string_token_offsets(&template, &marker);
+        let [start] = offsets.as_slice() else {
+            unreachable!("one generated marker occupies exactly one complete JSON string token")
+        };
+        let start = *start;
+        let mut prefix = serde_json::to_vec(&replacement.prefix).map_err(|error| {
+            TransportError::new("http.invalid_body_template", error.to_string())
+        })?;
+        let Some(b'"') = prefix.pop() else {
+            return Err(TransportError::new(
+                "http.invalid_body_template",
+                "JSON media prefix is not a string",
+            ));
+        };
+        located.push(Located {
+            start,
+            end: start + marker.len(),
+            prefix: Bytes::from(prefix),
+            bytes: replacement.bytes,
+        });
+    }
+    located.sort_unstable_by_key(|replacement| replacement.start);
+    debug_assert!(
+        located.windows(2).all(|pair| pair[0].end <= pair[1].start),
+        "distinct complete JSON string tokens cannot overlap"
+    );
+
+    let mut parts = Vec::with_capacity(located.len().saturating_mul(4).saturating_add(1));
+    let mut offset = 0;
+    for replacement in located {
+        parts.push(RequestBodyPart::Bytes(
+            template.slice(offset..replacement.start),
+        ));
+        parts.push(RequestBodyPart::Bytes(replacement.prefix));
+        parts.push(RequestBodyPart::Base64(replacement.bytes));
+        parts.push(RequestBodyPart::Bytes(Bytes::from_static(b"\"")));
+        offset = replacement.end;
+    }
+    parts.push(RequestBodyPart::Bytes(template.slice(offset..)));
+    Ok(JsonRequestBody {
+        body: RequestBody::Streaming(stream_request_body(parts)),
+    })
+}
+
+fn json_string_token_offsets(json: &[u8], token: &[u8]) -> Vec<usize> {
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while offset < json.len() {
+        if json[offset] != b'"' {
+            offset += 1;
+            continue;
+        }
+        let start = offset;
+        offset += 1;
+        let mut escaped = false;
+        while offset < json.len() {
+            let byte = json[offset];
+            offset += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                if &json[start..offset] == token {
+                    matches.push(start);
+                }
+                break;
+            }
+        }
+    }
+    matches
+}
+
+fn unique_media_marker(template: &Value, replacement_index: usize) -> String {
+    let string_count = json_string_count(template);
+    for candidate in 0..=string_count {
+        let marker = format!("\0rsi-media-{replacement_index}-{candidate}\0");
+        if !json_contains_string(template, &marker) {
+            return marker;
+        }
+    }
+    unreachable!("one more distinct marker than JSON strings must be absent")
+}
+
+fn json_string_count(value: &Value) -> usize {
+    match value {
+        Value::String(_) => 1,
+        Value::Array(values) => values.iter().map(json_string_count).sum(),
+        Value::Object(values) => values
+            .iter()
+            .map(|(_key, value)| 1_usize.saturating_add(json_string_count(value)))
+            .sum(),
+        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+    }
+}
+
+fn json_contains_string(value: &Value, candidate: &str) -> bool {
+    match value {
+        Value::String(value) => value == candidate,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_string(value, candidate)),
+        Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key == candidate || json_contains_string(value, candidate)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
 /// Whether a provider uses `[DONE]` or clean EOF to terminate SSE.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SseTermination {
+    /// A `data: [DONE]` event terminates the stream.
     DoneSentinel,
+    /// Clean end-of-file terminates the stream.
     Eof,
 }
 
 /// Shared provider wire grammar for one Chat Completions SSE chunk.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsChunk {
+    /// Incremental choices emitted by the provider.
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub choices: Vec<ChatCompletionsChoice>,
+    /// Usage totals, when the provider includes them in this chunk.
     pub usage: Option<ChatCompletionsUsage>,
 }
 
+/// One choice from a Chat Completions streaming chunk.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsChoice {
+    /// Incremental content for the choice.
     #[serde(default)]
     pub delta: ChatCompletionsDelta,
+    /// Provider finish reason when this choice has terminated.
     pub finish_reason: Option<String>,
 }
 
+/// Incremental assistant content in a Chat Completions choice.
 #[derive(Debug, Default, Deserialize)]
 pub struct ChatCompletionsDelta {
+    /// User-visible text appended by this chunk.
     pub content: Option<String>,
+    /// Provider reasoning text appended by this chunk, when exposed.
     pub reasoning_content: Option<String>,
+    /// Incremental tool-call fragments indexed by the provider.
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub tool_calls: Vec<ChatCompletionsToolDelta>,
 }
@@ -69,31 +333,49 @@ where
     Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
+/// One indexed tool-call fragment from a Chat Completions chunk.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsToolDelta {
+    /// Stable position of the tool call within the assistant turn.
     pub index: u32,
+    /// Provider-assigned call identifier, normally present in the first fragment.
     pub id: Option<String>,
+    /// Incremental function name and argument payload.
     pub function: Option<ChatCompletionsFunctionDelta>,
 }
 
+/// Incremental function payload for a streamed tool call.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsFunctionDelta {
+    /// Function name fragment, when supplied by the provider.
     pub name: Option<String>,
+    /// JSON argument text fragment, to be concatenated in stream order.
     pub arguments: Option<String>,
 }
 
+/// Provider token counters from a Chat Completions response.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsUsage {
+    /// Total prompt tokens charged by the provider.
     pub prompt_tokens: u64,
+    /// Total completion tokens charged by the provider.
     pub completion_tokens: u64,
+    /// Provider-specific prompt cache-hit counter.
     pub prompt_cache_hit_tokens: Option<u64>,
+    /// OpenAI-compatible cache-read input counter.
     pub cache_read_input_tokens: Option<u64>,
+    /// OpenAI-compatible cache-creation input counter.
     pub cache_creation_input_tokens: Option<u64>,
+    /// Optional detailed completion-token counters.
     pub completion_tokens_details: Option<ChatCompletionTokenDetails>,
 }
 
 impl ChatCompletionsUsage {
     #[must_use]
+    /// Converts provider-specific counters into the shared usage contract.
+    ///
+    /// `prompt_cache_hit_tokens` takes precedence over
+    /// `cache_read_input_tokens` when both are present.
     pub fn normalized(self) -> TokenUsage {
         TokenUsage {
             input_tokens: self.prompt_tokens,
@@ -109,8 +391,10 @@ impl ChatCompletionsUsage {
     }
 }
 
+/// Detailed completion-token counters returned by a provider.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionTokenDetails {
+    /// Completion tokens the provider classifies as reasoning.
     pub reasoning_tokens: Option<u64>,
 }
 
@@ -119,10 +403,16 @@ pub struct HttpRequest {
     method: Method,
     url: reqwest::Url,
     headers: HeaderMap,
-    body: Bytes,
+    body: RequestBody,
+}
+
+enum RequestBody {
+    Buffered(Bytes),
+    Streaming(ByteStream),
 }
 
 impl HttpRequest {
+    /// Creates an empty request after validating the endpoint URL.
     pub fn new(method: Method, url: impl AsRef<str>) -> Result<Self, TransportError> {
         let url = reqwest::Url::parse(url.as_ref()).map_err(|error| {
             TransportError::new("http.invalid_url", format!("invalid endpoint URL: {error}"))
@@ -132,10 +422,11 @@ impl HttpRequest {
             method,
             url,
             headers: HeaderMap::new(),
-            body: Bytes::new(),
+            body: RequestBody::Buffered(Bytes::new()),
         })
     }
 
+    /// Adds a header, rejecting transport-owned `Host` and `Content-Length`.
     pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Result<Self, TransportError> {
         if matches!(name.as_str(), "host" | "content-length") {
             return Err(TransportError::new(
@@ -147,6 +438,7 @@ impl HttpRequest {
         Ok(self)
     }
 
+    /// Sets an authorization bearer token without retaining its formatted value.
     pub fn bearer_auth(mut self, secret: &SecretValue) -> Result<Self, TransportError> {
         let encoded = Zeroizing::new(format!("Bearer {}", secret.expose()));
         let value = HeaderValue::from_str(&encoded).map_err(|_| {
@@ -160,8 +452,23 @@ impl HttpRequest {
     }
 
     #[must_use]
+    /// Replaces the request body with buffered bytes.
     pub fn body(mut self, body: impl Into<Bytes>) -> Self {
-        self.body = body.into();
+        self.body = RequestBody::Buffered(body.into());
+        self
+    }
+
+    #[must_use]
+    /// Replaces the request body with a pull-based stream.
+    pub fn body_stream(mut self, body: ByteStream) -> Self {
+        self.body = RequestBody::Streaming(body);
+        self
+    }
+
+    #[must_use]
+    /// Replaces the request body with a prepared buffered-or-streaming JSON body.
+    pub fn json_body(mut self, body: JsonRequestBody) -> Self {
+        self.body = body.body;
         self
     }
 
@@ -176,10 +483,6 @@ impl HttpRequest {
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
-
-    pub fn body_bytes(&self) -> &Bytes {
-        &self.body
-    }
 }
 
 impl fmt::Debug for HttpRequest {
@@ -189,7 +492,17 @@ impl fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("header_names", &self.headers.keys().collect::<Vec<_>>())
-            .field("body_bytes", &self.body.len())
+            .field(
+                "body_bytes",
+                &match &self.body {
+                    RequestBody::Buffered(bytes) => Some(bytes.len()),
+                    RequestBody::Streaming(_) => None,
+                },
+            )
+            .field(
+                "streaming_body",
+                &matches!(&self.body, RequestBody::Streaming(_)),
+            )
             .finish()
     }
 }
@@ -198,6 +511,7 @@ impl fmt::Debug for HttpRequest {
 pub struct HttpResponse {
     pub status: u16,
     pub headers: HeaderMap,
+    /// Pull-based response body; each transport failure is terminal.
     pub body: ByteStream,
 }
 
@@ -214,6 +528,10 @@ impl fmt::Debug for HttpResponse {
 /// Injectable true-external HTTP seam.
 #[async_trait]
 pub trait HttpTransport: fmt::Debug + Send + Sync {
+    /// Executes one request until headers arrive, cancellation wins, or it fails.
+    ///
+    /// Implementations must not retry because retry ownership belongs above the
+    /// true external-effect seam.
     async fn execute(
         &self,
         request: HttpRequest,
@@ -228,6 +546,7 @@ pub struct ReqwestTransport {
 }
 
 impl ReqwestTransport {
+    /// Constructs a transport with the crate's finite default timeouts.
     pub fn new() -> Result<Self, TransportError> {
         Self::with_timeouts(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)
     }
@@ -260,11 +579,14 @@ impl HttpTransport for ReqwestTransport {
         request: HttpRequest,
         abort: CancellationToken,
     ) -> Result<HttpResponse, TransportError> {
-        let mut outgoing = self
+        let outgoing = self
             .client
             .request(request.method, request.url)
-            .headers(request.headers)
-            .body(request.body);
+            .headers(request.headers);
+        let mut outgoing = match request.body {
+            RequestBody::Buffered(bytes) => outgoing.body(bytes),
+            RequestBody::Streaming(stream) => outgoing.body(reqwest::Body::wrap_stream(stream)),
+        };
         outgoing = outgoing.header(http::header::ACCEPT_ENCODING, "identity");
         let response = tokio::select! {
             () = abort.cancelled() => {
@@ -396,8 +718,29 @@ pub fn transport_stream_error(error: TransportError) -> AiError {
 /// Maps a failure while assembling a dispatched response body.
 #[allow(clippy::needless_pass_by_value)] // Intended for direct use with Result::map_err.
 pub fn transport_body_error(error: TransportError) -> AiError {
+    let kind = if error.code() == "http.body_too_large" {
+        ErrorKind::OutputValidation
+    } else {
+        ErrorKind::Transport
+    };
     provider_error(
-        ErrorKind::Transport,
+        kind,
+        ErrorPhase::Assemble,
+        DispatchStatus::Dispatched,
+        error.to_string(),
+    )
+}
+
+/// Maps bounded incremental JSON extraction from a successful provider response.
+#[allow(clippy::needless_pass_by_value)] // Intended for direct use with Result::map_err.
+pub fn transport_json_response_error(error: TransportError) -> AiError {
+    let kind = if error.code() == "json.extract_limit" {
+        ErrorKind::OutputValidation
+    } else {
+        ErrorKind::Protocol
+    };
+    provider_error(
+        kind,
         ErrorPhase::Assemble,
         DispatchStatus::Dispatched,
         error.to_string(),
@@ -491,7 +834,8 @@ pub fn decode_sse(mut body: ByteStream, termination: SseTermination) -> SseStrea
                 if line.is_empty() {
                     let complete = std::mem::take(&mut frame);
                     match decode_sse_frame(&complete) {
-                        Ok(Some(data)) if data == "[DONE]" => {
+                        Ok(Some(data))
+                            if termination == SseTermination::DoneSentinel && data == "[DONE]" => {
                             done = true;
                             break;
                         }
@@ -584,6 +928,7 @@ pub struct TransportError {
 }
 
 impl TransportError {
+    /// Creates a failure with a stable code and sanitized, bounded message.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         let message = rsi_ai_protocol::sanitize_error_summary(&message.into());
         Self {
@@ -592,6 +937,7 @@ impl TransportError {
         }
     }
 
+    /// Returns the stable machine-readable failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }

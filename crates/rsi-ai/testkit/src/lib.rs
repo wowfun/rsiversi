@@ -30,14 +30,20 @@ use rsi_ai_provider::{
 /// In-memory content-addressed media source for deterministic adapter tests.
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryMediaResolver {
-    bodies: Arc<BTreeMap<String, Vec<u8>>>,
+    bodies: Arc<BTreeMap<String, Arc<[u8]>>>,
 }
 
 impl InMemoryMediaResolver {
     #[must_use]
+    /// Creates a resolver keyed by each descriptor's lowercase SHA-256 digest.
     pub fn new(bodies: BTreeMap<String, Vec<u8>>) -> Self {
         Self {
-            bodies: Arc::new(bodies),
+            bodies: Arc::new(
+                bodies
+                    .into_iter()
+                    .map(|(digest, bytes)| (digest, Arc::from(bytes)))
+                    .collect(),
+            ),
         }
     }
 }
@@ -47,7 +53,7 @@ impl MediaResolver for InMemoryMediaResolver {
         &self,
         descriptor: MediaDescriptor,
         _abort: AbortSignal,
-    ) -> AdapterFuture<Result<Vec<u8>, AiError>> {
+    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
         let body = self.bodies.get(descriptor.sha256()).cloned();
         Box::pin(async move {
             body.ok_or_else(|| {
@@ -78,6 +84,7 @@ macro_rules! scripted_stream_adapter {
         $trait:ident,
         $stream:ident
     ) => {
+        #[doc = concat!("Deterministic scripted adapter producing `", stringify!($event), "` events.")]
         #[derive(Clone)]
         pub struct $adapter {
             inner: Arc<$inner>,
@@ -91,6 +98,7 @@ macro_rules! scripted_stream_adapter {
 
         impl $adapter {
             #[must_use]
+            /// Creates an adapter that replays the supplied events on every start.
             pub fn new(events: Vec<$event>) -> Self {
                 Self {
                     inner: Arc::new($inner {
@@ -189,6 +197,7 @@ struct ScriptedRealtimeInner {
 
 impl ScriptedRealtimeAdapter {
     #[must_use]
+    /// Creates a session that emits the supplied events without command gating.
     pub fn new(events: Vec<RealtimeEvent>) -> Self {
         Self {
             inner: Arc::new(ScriptedRealtimeInner {
@@ -216,6 +225,7 @@ impl ScriptedRealtimeAdapter {
         }
     }
 
+    /// Returns all commands sent through sessions created by this adapter.
     pub fn commands(&self) -> Vec<RealtimeCommand> {
         self.inner
             .commands
@@ -317,6 +327,7 @@ struct ScriptedLanguageInner {
 
 impl ScriptedLanguageAdapter {
     #[must_use]
+    /// Creates an adapter that replays the supplied events on every start.
     pub fn new(events: Vec<LanguageEvent>) -> Self {
         Self {
             inner: Arc::new(ScriptedLanguageInner {
@@ -383,6 +394,7 @@ pub struct FunctionalLanguageAdapter {
 }
 
 impl FunctionalLanguageAdapter {
+    /// Creates an adapter whose handler derives a deterministic script per request.
     pub fn new<F>(handler: F) -> Self
     where
         F: Fn(LanguageRequest) -> Result<Vec<LanguageEvent>, AiError> + Send + Sync + 'static,

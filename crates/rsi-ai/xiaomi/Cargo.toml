@@ -19,12 +19,15 @@ rsi-ai-protocol = { path = "../protocol" }
 rsi-ai-provider = { path = "../provider" }
 rsi-ai-transport = { path = "../transport" }
 serde_json.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
 rsi-ai = { path = "../core" }
 rsi-ai-auth = { path = "../auth" }
 rsi-ai-testkit = { path = "../testkit" }
+hex.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 
 [lints]

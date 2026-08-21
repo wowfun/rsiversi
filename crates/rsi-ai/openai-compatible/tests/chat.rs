@@ -17,7 +17,7 @@ use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_openai_compatible::{ChatCompletionsAdapter, ChatCompletionsConfig};
 use rsi_ai_protocol::{
     ContentBlock, LanguageRequest, LanguageSettings, MediaDescriptor, MediaKind, Message,
-    MessageContent, ReasoningEffort, ToolCall,
+    MessageContent, ReasoningEffort, ResponseFormat, ToolCall,
 };
 use rsi_ai_provider::ProviderRegistration;
 use rsi_ai_testkit::InMemoryMediaResolver;
@@ -133,7 +133,16 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
                     .expect("stop")
                     .with_reasoning_effort(ReasoningEffort::Medium),
             )
-            .expect("settings"),
+            .expect("settings")
+            .with_response_format(
+                ResponseFormat::json_schema(
+                    "answer",
+                    None,
+                    json!({"type":"string", "const":"\0rsi-media-0\0"}),
+                )
+                .expect("response format"),
+            )
+            .expect("structured output"),
         )
         .await
         .expect("completion");
@@ -161,6 +170,8 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
 
     let (headers, body) = capture.0.lock().expect("capture").take().expect("call");
     assert_eq!(headers["authorization"], "Bearer super-secret");
+    assert_eq!(headers["transfer-encoding"], "chunked");
+    assert!(!headers.contains_key("content-length"));
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
     assert_eq!(body["max_tokens"], 321);
@@ -169,6 +180,10 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
     assert_eq!(body["seed"], 7);
     assert_eq!(body["stop"], json!(["END"]));
     assert_eq!(body["reasoning_effort"], "medium");
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"]["const"],
+        "\0rsi-media-0\0"
+    );
     assert_eq!(body["messages"][1]["reasoning_content"], "prior thought");
     assert_eq!(
         body["messages"][0]["content"][1]["image_url"]["url"],

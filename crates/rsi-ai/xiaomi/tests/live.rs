@@ -59,52 +59,58 @@ async fn xiaomi_token_plan_synthesizes_then_transcribes_real_audio() {
         "Xiaomi Token Plan key has the wrong format"
     );
     let endpoint = token_plan_origin();
-
-    let speech = tokio::time::timeout(
-        Duration::from_mins(2),
-        registry(&key, &endpoint, InMemoryMediaResolver::default())
-            .speech(ModelRef::new("xiaomi-live", "mimo-v2.5-tts").expect("model"))
-            .expect("speech")
-            .synthesize(
-                SpeechRequest::new("Hello world.", "mimo_default", SpeechFormat::Wav)
+    let mut observed = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let speech = tokio::time::timeout(
+            Duration::from_mins(2),
+            registry(&key, &endpoint, InMemoryMediaResolver::default())
+                .speech(ModelRef::new("xiaomi-live", "mimo-v2.5-tts").expect("model"))
+                .expect("speech")
+                .synthesize(
+                    SpeechRequest::new(
+                        "Hello world. This is a live speech recognition test.",
+                        "mimo_default",
+                        SpeechFormat::Wav,
+                    )
                     .expect("speech request"),
-            ),
-    )
-    .await
-    .expect("live Xiaomi TTS request timed out")
-    .expect("live Xiaomi TTS");
-    assert!(
-        speech.audio.bytes.len() > 44,
-        "Xiaomi TTS returned no WAV payload"
-    );
+                ),
+        )
+        .await
+        .expect("live Xiaomi TTS request timed out")
+        .expect("live Xiaomi TTS");
+        assert!(
+            speech.audio.bytes.len() > 44,
+            "Xiaomi TTS returned no WAV payload"
+        );
 
-    let descriptor = speech.audio.descriptor.clone();
-    let media = InMemoryMediaResolver::new(BTreeMap::from([(
-        descriptor.sha256().to_owned(),
-        speech.audio.bytes,
-    )]));
-    let transcription = tokio::time::timeout(
-        Duration::from_mins(2),
-        registry(&key, &endpoint, media)
-            .transcription(ModelRef::new("xiaomi-live", "mimo-v2.5-asr").expect("model"))
-            .expect("transcription")
-            .transcribe(
-                TranscriptionRequest::new(descriptor)
-                    .expect("transcription request")
-                    .with_language("en")
-                    .expect("transcription language"),
-            ),
-    )
-    .await
-    .expect("live Xiaomi ASR request timed out")
-    .expect("live Xiaomi ASR");
-    let transcript = transcription.text.to_ascii_lowercase();
-    assert!(
-        transcript.contains("hello"),
-        "unexpected live transcript: {transcript:?}"
-    );
-    assert!(
-        transcript.contains("world"),
-        "unexpected live transcript: {transcript:?}"
-    );
+        let descriptor = speech.audio.descriptor.clone();
+        let media = InMemoryMediaResolver::new(BTreeMap::from([(
+            descriptor.sha256().to_owned(),
+            speech.audio.bytes,
+        )]));
+        let transcription = tokio::time::timeout(
+            Duration::from_mins(2),
+            registry(&key, &endpoint, media)
+                .transcription(ModelRef::new("xiaomi-live", "mimo-v2.5-asr").expect("model"))
+                .expect("transcription")
+                .transcribe(
+                    TranscriptionRequest::new(descriptor)
+                        .expect("transcription request")
+                        .with_language("en")
+                        .expect("transcription language"),
+                ),
+        )
+        .await
+        .expect("live Xiaomi ASR request timed out")
+        .expect("live Xiaomi ASR");
+        let transcript = transcription.text.to_ascii_lowercase();
+        if ["hello", "world", "test"]
+            .into_iter()
+            .all(|expected| transcript.contains(expected))
+        {
+            return;
+        }
+        observed.push(transcript);
+    }
+    panic!("unexpected live TTS-to-ASR transcripts: {observed:?}");
 }

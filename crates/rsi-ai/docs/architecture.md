@@ -64,7 +64,20 @@ Image and speech bytes are emitted in nonempty chunks with contiguous sequence
 numbers and assembled under capability byte limits. Transcription text and
 segments are ordered and bounded. Realtime validates one SessionStarted event,
 bounded commands/events, monotonic input audio sequence, and one Closed event.
-Dropping a generation or live session signals abort.
+Dropping a generation or live session signals abort. The provider bridge never
+blocks the synchronous plugin callback: it retains each Realtime input credit
+until the provider task dequeues that command, so a stalled provider paces the
+caller at the existing byte-credit boundary instead of failing a full internal
+queue.
+Large JSON media responses use the transport package's single bounded
+incremental extractor. Provider adapters select a JSON Pointer and either a
+string or object-array mode, then retain only the normalized envelope and one
+bounded extracted chunk or item before semantic decoding. Already
+syntax-validated items may be emitted before a later envelope or requested-count error; a
+terminal error means consumers must discard the partial operation result.
+OpenAI multipart image-edit and transcription requests stream small framing
+segments around shared media owners; they never assemble a second contiguous
+copy of all input media.
 Production HTTP attempts have finite connect and whole-request deadlines and
 observe abort while streaming the body. The OpenAI Realtime WebSocket dialer
 has a finite connect deadline and observes abort during connect and socket I/O.
@@ -97,10 +110,10 @@ The maintained wrappers expose this matrix:
 `rsi-agent` asks only for a model identifier; provider instance, endpoint, and
 protocol come from the composition binding and plugin config. Language model
 requests and retries are transcript events. Direct media and Realtime calls use
-a caller-owned `AiOperationId`; the agent database commits Prepared and Started
-barriers before Start and a terminal record before returning success. Recovery
-maps prepared-only operations to NotStarted and started operations without a
-terminal record to OutcomeUnknown without calling a provider.
+a caller-owned `AiOperationId`; the owning
+[`rsi-agent` architecture](../../rsi-agent/docs/architecture.md#direct-ai-operations-and-artifacts)
+defines reservation, effect barriers, bounded duplicate suppression, and
+recovery.
 
 The agent workspace CAS stores validated image/audio bytes by SHA-256. Durable
 records carry descriptors or artifact references, never base64 or provider

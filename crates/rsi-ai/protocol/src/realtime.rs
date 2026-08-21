@@ -8,6 +8,7 @@ const MAX_REALTIME_TEXT_BYTES: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeAudioFormat {
+    /// Little-endian signed 16-bit PCM samples.
     Pcm16,
 }
 
@@ -22,6 +23,7 @@ pub struct RealtimeRequest {
 }
 
 impl RealtimeRequest {
+    /// Creates a session request for an exact provider voice using PCM16 audio.
     pub fn new(voice: impl Into<String>) -> Result<Self, StreamError> {
         let voice = voice.into();
         validation::identifier("realtime.voice", &voice)
@@ -34,6 +36,7 @@ impl RealtimeRequest {
         })
     }
 
+    /// Adds bounded model instructions frozen with the session request.
     pub fn with_instructions(
         mut self,
         instructions: impl Into<String>,
@@ -66,6 +69,7 @@ impl RealtimeRequest {
         self.output_format
     }
 
+    /// Revalidates a deserialized session request.
     pub fn validate(&self) -> Result<(), StreamError> {
         validation::identifier("realtime.voice", &self.voice)
             .map_err(|reason| StreamError::invalid("request.invalid_voice", reason))?;
@@ -85,11 +89,28 @@ impl RealtimeRequest {
 /// Caller-to-provider commands on one live session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RealtimeCommand {
-    AppendAudio { sequence: u32, bytes: Vec<u8> },
-    AppendText { text: String },
-    CommitInput { item_id: String },
+    /// Appends one ordered bounded chunk to the current audio input.
+    AppendAudio {
+        /// One-based contiguous input-audio sequence.
+        sequence: u32,
+        /// Raw PCM audio bytes.
+        bytes: Vec<u8>,
+    },
+    /// Appends text to the current input item.
+    AppendText {
+        /// Bounded UTF-8 input text.
+        text: String,
+    },
+    /// Commits the accumulated input as one provider item.
+    CommitInput {
+        /// Caller-chosen identifier for the committed item.
+        item_id: String,
+    },
+    /// Requests a response from the committed conversation state.
     RequestResponse,
+    /// Cancels one active provider response.
     CancelResponse { response_id: String },
+    /// Begins orderly session closure; no later command is valid.
     Close,
 }
 
@@ -97,49 +118,65 @@ pub enum RealtimeCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeCloseReason {
+    /// The caller requested orderly closure.
     Client,
+    /// The provider ended the session.
     Provider,
+    /// A finite session I/O deadline elapsed.
     Timeout,
+    /// The owning cancellation signal aborted the session.
     Aborted,
+    /// Invalid provider or caller traffic made the session unusable.
     Protocol,
 }
 
 /// Provider-to-caller events on one live session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RealtimeEvent {
+    /// Opens the session and must be its first event.
     SessionStarted {
+        /// Provider session identifier safe for correlation.
         session_id: String,
     },
-    InputSpeechStarted {
-        item_id: String,
-    },
+    /// Reports provider-side speech detection for an input item.
+    InputSpeechStarted { item_id: String },
+    /// Appends an interim transcript fragment for an input item.
     InputTranscriptDelta {
         item_id: String,
+        /// Bounded transcript fragment.
         text: String,
     },
+    /// Supplies the final transcript for an input item.
     InputTranscriptFinished {
         item_id: String,
+        /// Bounded final transcript.
         text: String,
     },
+    /// Appends visible text to one provider response.
     OutputTextDelta {
         response_id: String,
+        /// Bounded visible text fragment.
         text: String,
     },
+    /// Emits one audio chunk for a provider response.
     OutputAudioChunk {
         response_id: String,
+        /// Nonzero provider response chunk sequence.
         sequence: u32,
+        /// Raw bounded audio bytes.
         bytes: Vec<u8>,
     },
+    /// Requests that the caller take over an item outside the live model session.
     HandoffRequested {
+        /// Identifier of the input item requiring handoff.
         item_id: String,
+        /// Provider explanation safe to display to the caller.
         text: String,
     },
-    RecoverableError {
-        error: AiError,
-    },
-    Closed {
-        reason: RealtimeCloseReason,
-    },
+    /// Reports a non-terminal provider failure.
+    RecoverableError { error: AiError },
+    /// Terminates the session; no later event or command is valid.
+    Closed { reason: RealtimeCloseReason },
 }
 
 /// Stateful grammar validation shared by Realtime adapters and consumers.
@@ -152,6 +189,7 @@ pub struct RealtimeValidator {
 }
 
 impl RealtimeValidator {
+    /// Starts a validator before the mandatory session-start event.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -162,6 +200,7 @@ impl RealtimeValidator {
         }
     }
 
+    /// Validates and records one caller command against current session state.
     pub fn push_command(&mut self, command: &RealtimeCommand) -> Result<(), StreamError> {
         self.require_live()?;
         if self.closing {
@@ -200,6 +239,7 @@ impl RealtimeValidator {
         Ok(())
     }
 
+    /// Validates and records one provider event against current session state.
     pub fn push_event(&mut self, event: &RealtimeEvent) -> Result<(), StreamError> {
         if self.closed {
             return Err(StreamError::invalid(

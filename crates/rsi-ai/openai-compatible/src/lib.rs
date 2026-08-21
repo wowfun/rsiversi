@@ -6,7 +6,6 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_stream::stream;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::StreamExt as _;
 use http::{HeaderName, HeaderValue, Method};
 use rsi_ai_protocol::{
@@ -18,9 +17,10 @@ use rsi_ai_provider::{
     AdapterFuture, LanguageAdapter, LanguageAdapterStream, PrepareContext, Prepared,
 };
 use rsi_ai_transport::{
-    ChatCompletionsChunk, HttpRequest, HttpTransport, SseTermination, decode_sse,
-    invalid_request_error, provider_error as ai_error, provider_http_error,
-    transport_connect_error, transport_stream_error,
+    ChatCompletionsChunk, HttpRequest, HttpTransport, JsonBase64Replacement, JsonRequestBody,
+    SseTermination, decode_sse, invalid_request_error, json_base64_body,
+    provider_error as ai_error, provider_http_error, transport_connect_error,
+    transport_stream_error,
 };
 use serde_json::{Map, Value, json};
 
@@ -33,6 +33,7 @@ pub struct ChatCompletionsConfig {
 }
 
 impl ChatCompletionsConfig {
+    /// Creates a configuration using `/v1/chat/completions` with image input enabled.
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
@@ -43,6 +44,7 @@ impl ChatCompletionsConfig {
         Ok(config)
     }
 
+    /// Replaces the absolute ASCII request path after validating the full URL.
     pub fn with_path(mut self, path: impl Into<String>) -> Result<Self, AiError> {
         self.path = path.into();
         self.validate()?;
@@ -50,6 +52,7 @@ impl ChatCompletionsConfig {
     }
 
     #[must_use]
+    /// Enables or disables image input at request preparation time.
     pub const fn with_image_input(mut self, allow: bool) -> Self {
         self.allow_image_input = allow;
         self
@@ -93,6 +96,7 @@ pub struct ChatCompletionsAdapter {
 
 impl ChatCompletionsAdapter {
     #[must_use]
+    /// Binds validated endpoint policy to the transport that performs each request.
     pub fn new(config: ChatCompletionsConfig, transport: Arc<dyn HttpTransport>) -> Self {
         Self { config, transport }
     }
@@ -165,7 +169,7 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                         .map_err(invalid_request_error)?
                         .bearer_auth(credential.secret())
                         .map_err(invalid_request_error)?
-                        .body(body);
+                        .json_body(body);
                     let response = transport
                         .execute(outgoing, abort.cancellation_token())
                         .await
@@ -189,10 +193,21 @@ async fn build_request_body(
     request: &LanguageRequest,
     abort: rsi_ai_provider::AbortSignal,
     allow_image_input: bool,
-) -> Result<Vec<u8>, AiError> {
+) -> Result<JsonRequestBody, AiError> {
     let mut messages = Vec::with_capacity(request.messages().len());
-    for message in request.messages() {
-        messages.push(serialize_message(context, message, abort.clone(), allow_image_input).await?);
+    let mut media = Vec::new();
+    for (message_index, message) in request.messages().iter().enumerate() {
+        messages.push(
+            serialize_message(
+                context,
+                message,
+                abort.clone(),
+                allow_image_input,
+                message_index,
+                &mut media,
+            )
+            .await?,
+        );
     }
     let tools = request
         .tools()
@@ -261,14 +276,7 @@ async fn build_request_body(
             );
         }
     }
-    serde_json::to_vec(&body).map_err(|error| {
-        ai_error(
-            ErrorKind::InvalidRequest,
-            ErrorPhase::Prepare,
-            DispatchStatus::NotStarted,
-            error.to_string(),
-        )
-    })
+    json_base64_body(Value::Object(body), media).map_err(invalid_request_error)
 }
 
 fn serialize_tool_choice(choice: &ToolChoice) -> Value {
@@ -288,6 +296,8 @@ async fn serialize_message(
     message: &Message,
     abort: rsi_ai_provider::AbortSignal,
     allow_image_input: bool,
+    message_index: usize,
+    media_replacements: &mut Vec<JsonBase64Replacement>,
 ) -> Result<Value, AiError> {
     match message.role() {
         MessageRole::System | MessageRole::Developer | MessageRole::User => {
@@ -305,10 +315,18 @@ async fn serialize_message(
                     }
                     MessageContent::Image(media) if allow_image_input && role == "user" => {
                         let bytes = context.resolve_media(media, abort.clone()).await?;
+                        media_replacements.push(JsonBase64Replacement::new(
+                            format!(
+                                "/messages/{message_index}/content/{}/image_url/url",
+                                wire_blocks.len()
+                            ),
+                            format!("data:{};base64,", media.mime_type()),
+                            bytes,
+                        ));
                         wire_blocks.push(json!({
                             "type":"image_url",
                             "image_url": {
-                                "url": format!("data:{};base64,{}", media.mime_type(), BASE64.encode(bytes))
+                                "url": null
                             }
                         }));
                     }

@@ -58,6 +58,17 @@ async fn eof_terminated_sse_accepts_a_final_complete_frame() {
 }
 
 #[tokio::test]
+async fn eof_terminated_sse_preserves_a_literal_done_event() {
+    let mut values = decode_sse(chunks(&["data: [DONE]\n\n"]), SseTermination::Eof);
+
+    assert_eq!(
+        values.next().await.expect("event").expect("valid"),
+        "[DONE]"
+    );
+    assert!(values.next().await.is_none());
+}
+
+#[tokio::test]
 async fn sse_rejects_a_frame_over_the_bound_before_allocating_unboundedly() {
     let oversized = format!("data: {}\n\n", "x".repeat(256 * 1024 + 1));
     let mut values = decode_sse(chunks(&[&oversized]), SseTermination::Eof);

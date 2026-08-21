@@ -46,6 +46,7 @@ pub struct DeepSeekAdapter {
 }
 
 impl DeepSeekAdapter {
+    /// Binds `DeepSeek` endpoint policy to the no-retry HTTP transport.
     pub fn new(config: DeepSeekConfig, transport: Arc<dyn HttpTransport>) -> Result<Self, AiError> {
         Ok(Self {
             inner: ChatCompletionsAdapter::new(config.chat, transport),

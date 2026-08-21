@@ -18,6 +18,7 @@ const MAX_SECRET_BYTES: usize = 64 * 1024;
 pub struct CredentialId(String);
 
 impl CredentialId {
+    /// Creates a bounded printable credential identifier.
     pub fn new(value: impl Into<String>) -> Result<Self, CredentialError> {
         let value = value.into();
         validate_ascii_id("credential id", &value)?;
@@ -28,6 +29,7 @@ impl CredentialId {
         &self.0
     }
 
+    /// Revalidates an identifier decoded from an untrusted snapshot.
     pub fn validate(&self) -> Result<(), CredentialError> {
         validate_ascii_id("credential id", &self.0)
     }
@@ -42,6 +44,7 @@ struct SecretInner {
 }
 
 impl SecretValue {
+    /// Captures a bounded safe UTF-8 secret in zeroizing owned storage.
     pub fn new(value: impl Into<String>) -> Result<Self, CredentialError> {
         let value = value.into();
         if value.is_empty()
@@ -78,21 +81,17 @@ impl fmt::Display for SecretValue {
     }
 }
 
-impl PartialEq for SecretValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.expose() == other.expose()
-    }
-}
-
-impl Eq for SecretValue {}
-
 /// Credential source recorded in a redacted prepared-call snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialSource {
+    /// A per-registry explicit override.
     Explicit,
+    /// A nonpersistent in-memory credential.
     Memory,
+    /// The configured persistent credential store.
     Store,
+    /// A process environment variable captured during builder configuration.
     Environment,
 }
 
@@ -101,7 +100,9 @@ pub enum CredentialSource {
 #[serde(deny_unknown_fields)]
 pub struct CredentialSourceSnapshot {
     pub id: CredentialId,
+    /// Winning source in the deterministic precedence order.
     pub source: CredentialSource,
+    /// Captured variable name only when `source` is [`CredentialSource::Environment`].
     pub environment_variable: Option<String>,
 }
 
@@ -132,6 +133,7 @@ pub struct ResolvedCredential {
 }
 
 impl ResolvedCredential {
+    /// Exposes secret text only at the provider/auth seam.
     pub fn expose_secret(&self) -> &str {
         self.secret.expose()
     }
@@ -140,6 +142,7 @@ impl ResolvedCredential {
         &self.secret
     }
 
+    /// Returns persistable source facts containing no secret value.
     pub const fn source(&self) -> &CredentialSourceSnapshot {
         &self.source
     }
@@ -163,6 +166,7 @@ pub struct CredentialRequirement {
 }
 
 impl CredentialRequirement {
+    /// Creates a logical credential requirement with ordered environment fallbacks.
     pub fn new<I, S>(
         id: impl Into<String>,
         environment_variables: I,
@@ -192,8 +196,11 @@ impl CredentialRequirement {
 
 /// Pluggable persistent credential seam. Production uses the OS keyring.
 pub trait CredentialStore: fmt::Debug + Send + Sync {
+    /// Loads a credential or reports that no stored value exists.
     fn get(&self, id: &CredentialId) -> Result<Option<SecretValue>, StoreError>;
+    /// Replaces the stored value for an identifier.
     fn set(&self, id: &CredentialId, secret: &SecretValue) -> Result<(), StoreError>;
+    /// Deletes an identifier; absence must be treated as success.
     fn delete(&self, id: &CredentialId) -> Result<(), StoreError>;
 }
 
@@ -204,6 +211,7 @@ pub struct OsKeyringStore {
 }
 
 impl OsKeyringStore {
+    /// Creates an OS-keyring adapter under one bounded service name.
     pub fn new(service: impl Into<String>) -> Result<Self, CredentialError> {
         let service = service.into();
         validate_ascii_id("keyring service", &service)?;
@@ -251,35 +259,26 @@ pub struct CredentialManager {
 }
 
 impl CredentialManager {
+    /// Starts a builder whose mutable inputs are frozen by [`CredentialManagerBuilder::build`].
     #[must_use]
     pub fn builder() -> CredentialManagerBuilder {
         CredentialManagerBuilder::default()
     }
 
+    /// Resolves explicit, memory, store, then captured-environment sources in that order.
     pub fn resolve(
         &self,
         requirement: &CredentialRequirement,
     ) -> Result<ResolvedCredential, CredentialError> {
-        if let Some(secret) = self.explicit.get(requirement.id()) {
-            return Ok(resolved(
-                requirement.id.clone(),
-                secret.clone(),
-                CredentialSource::Explicit,
-                None,
-            ));
+        if let Some(resolved) = self.try_resolve_in_memory(requirement) {
+            return resolved;
         }
-        if let Some(secret) = self.memory.get(requirement.id()) {
-            return Ok(resolved(
-                requirement.id.clone(),
-                secret.clone(),
-                CredentialSource::Memory,
-                None,
-            ));
-        }
-        if let Some(store) = &self.store
-            && let Some(secret) = store
-                .get(requirement.id())
-                .map_err(CredentialError::store)?
+        let Some(store) = self.store.as_ref() else {
+            return resolve_environment(requirement, &self.environment);
+        };
+        if let Some(secret) = store
+            .get(requirement.id())
+            .map_err(CredentialError::store)?
         {
             return Ok(resolved(
                 requirement.id.clone(),
@@ -288,22 +287,40 @@ impl CredentialManager {
                 None,
             ));
         }
-        for variable in &requirement.environment_variables {
-            if let Some(secret) = self.environment.get(variable) {
-                return Ok(resolved(
-                    requirement.id.clone(),
-                    secret.clone(),
-                    CredentialSource::Environment,
-                    Some(variable.clone()),
-                ));
-            }
-        }
-        Err(CredentialError::new(
-            "credential.missing",
-            format!("credential `{}` is unavailable", requirement.id.as_str()),
-        ))
+        resolve_environment(requirement, &self.environment)
     }
 
+    /// Resolves sources that cannot call a persistent credential backend.
+    ///
+    /// `None` means a configured persistent store must be queried before
+    /// environment fallback can be considered.
+    pub fn try_resolve_in_memory(
+        &self,
+        requirement: &CredentialRequirement,
+    ) -> Option<Result<ResolvedCredential, CredentialError>> {
+        if let Some(secret) = self.explicit.get(requirement.id()) {
+            return Some(Ok(resolved(
+                requirement.id.clone(),
+                secret.clone(),
+                CredentialSource::Explicit,
+                None,
+            )));
+        }
+        if let Some(secret) = self.memory.get(requirement.id()) {
+            return Some(Ok(resolved(
+                requirement.id.clone(),
+                secret.clone(),
+                CredentialSource::Memory,
+                None,
+            )));
+        }
+        if self.store.is_some() {
+            return None;
+        }
+        Some(resolve_environment(requirement, &self.environment))
+    }
+
+    /// Persists a credential through the configured store without changing this manager.
     pub fn persist(&self, id: &CredentialId, secret: &SecretValue) -> Result<(), CredentialError> {
         self.store
             .as_ref()
@@ -316,6 +333,26 @@ impl CredentialManager {
             .set(id, secret)
             .map_err(CredentialError::store)
     }
+}
+
+fn resolve_environment(
+    requirement: &CredentialRequirement,
+    environment: &BTreeMap<String, SecretValue>,
+) -> Result<ResolvedCredential, CredentialError> {
+    for variable in &requirement.environment_variables {
+        if let Some(secret) = environment.get(variable) {
+            return Ok(resolved(
+                requirement.id.clone(),
+                secret.clone(),
+                CredentialSource::Environment,
+                Some(variable.clone()),
+            ));
+        }
+    }
+    Err(CredentialError::new(
+        "credential.missing",
+        format!("credential `{}` is unavailable", requirement.id.as_str()),
+    ))
 }
 
 impl fmt::Debug for CredentialManager {
@@ -343,6 +380,7 @@ pub struct CredentialManagerBuilder {
 }
 
 impl CredentialManagerBuilder {
+    /// Adds the highest-precedence secret for one logical identifier.
     pub fn with_explicit(
         mut self,
         id: impl Into<String>,
@@ -352,6 +390,7 @@ impl CredentialManagerBuilder {
         Ok(self)
     }
 
+    /// Adds a nonpersistent secret below explicit overrides in precedence.
     pub fn with_memory(
         mut self,
         id: impl Into<String>,
@@ -362,15 +401,18 @@ impl CredentialManagerBuilder {
     }
 
     #[must_use]
+    /// Selects the persistent credential adapter queried before environment fallback.
     pub fn with_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
         self.store = Some(store);
         self
     }
 
+    /// Selects the production OS-keyring adapter under one service name.
     pub fn with_os_keyring(self, service: impl Into<String>) -> Result<Self, CredentialError> {
         Ok(self.with_store(Arc::new(OsKeyringStore::new(service)?)))
     }
 
+    /// Replaces captured environment fallbacks with supplied deterministic values.
     pub fn with_captured_environment(
         mut self,
         environment: BTreeMap<String, String>,
@@ -402,6 +444,7 @@ impl CredentialManagerBuilder {
     }
 
     #[must_use]
+    /// Freezes all configured sources into an immutable resolver.
     pub fn build(self) -> CredentialManager {
         CredentialManager {
             explicit: Arc::new(self.explicit),
@@ -484,6 +527,7 @@ impl CredentialError {
         Self::new(error.code, error.message)
     }
 
+    /// Returns the stable machine-readable credential failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }
@@ -498,6 +542,7 @@ pub struct StoreError {
 }
 
 impl StoreError {
+    /// Creates a safe persistent-adapter failure without secret payloads.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -505,6 +550,7 @@ impl StoreError {
         }
     }
 
+    /// Returns the adapter-supplied machine-readable failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }

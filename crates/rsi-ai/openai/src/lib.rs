@@ -13,6 +13,7 @@ use std::{
 use async_stream::{stream, try_stream};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _, stream as futures_stream};
 use http::{HeaderValue, Method};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -33,9 +34,11 @@ use rsi_ai_provider::{
     SpeechAdapterStream, TranscriptionAdapter, TranscriptionAdapterStream,
 };
 use rsi_ai_transport::{
-    ByteStream, HttpRequest, HttpTransport, SseTermination, TransportError, collect_body,
-    decode_sse, invalid_request_error, provider_error as ai_error, provider_http_error,
-    transport_body_error, transport_connect_error, transport_stream_error,
+    BoundedJsonExtractor, ByteStream, HttpRequest, HttpTransport, JsonBase64Replacement,
+    JsonExtractEvent, JsonExtractionLimits, JsonRequestBody, SseTermination, TransportError,
+    collect_body, decode_sse, invalid_request_error, json_base64_body, provider_error as ai_error,
+    provider_http_error, transport_body_error, transport_connect_error,
+    transport_json_response_error, transport_stream_error,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -45,12 +48,15 @@ use tokio_tungstenite::{
 };
 
 // Ten maximum-size (32 MiB) decoded images require about 427 MiB of base64;
-// the remaining headroom covers the bounded JSON envelope. This is a per-call
-// transient ceiling, not a process-wide concurrency budget.
+// the remaining headroom covers the bounded JSON envelope. This limits total
+// streamed response bytes; the incremental extractor does not retain that sum.
 const MAX_JSON_BODY_BYTES: usize = 448 * 1024 * 1024;
+const MAX_IMAGE_ENVELOPE_BYTES: usize = 1024 * 1024;
+const MAX_IMAGE_ITEM_JSON_BYTES: usize = 43 * 1024 * 1024;
 const MAX_TRANSCRIPTION_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DEFERRED_CONTROL_BODY_BYTES: usize = 1024 * 1024;
 const OUTPUT_CHUNK_BYTES: usize = 256 * 1024;
+const ENCODED_OUTPUT_CHUNK_BYTES: usize = (OUTPUT_CHUNK_BYTES / 3) * 4;
 const DEFAULT_REALTIME_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -73,6 +79,7 @@ impl Default for OpenAiConfig {
 }
 
 impl OpenAiConfig {
+    /// Creates endpoint policy after validating every capability URL.
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
@@ -127,6 +134,7 @@ macro_rules! http_adapter {
 
         impl $name {
             #[must_use]
+            /// Binds the official endpoint policy to the no-retry HTTP transport.
             pub fn new(config: OpenAiConfig, transport: Arc<dyn HttpTransport>) -> Self {
                 Self { config, transport }
             }
@@ -152,13 +160,17 @@ http_adapter!(OpenAiSpeechAdapter);
 /// Minimal JSON WebSocket used by the `OpenAI` Realtime adapter.
 #[async_trait]
 pub trait RealtimeJsonSocket: fmt::Debug + Send {
+    /// Sends one JSON command as a complete WebSocket message.
     async fn send_json(&mut self, value: Value) -> Result<(), AiError>;
+    /// Receives the next complete JSON event, or `None` after clean closure.
     async fn next_json(&mut self) -> Result<Option<Value>, AiError>;
+    /// Initiates a clean WebSocket close handshake.
     async fn close(&mut self) -> Result<(), AiError>;
 }
 
 /// Injectable Realtime WebSocket connect seam.
 pub trait RealtimeDialer: fmt::Debug + Send + Sync {
+    /// Opens one authenticated socket, bounded by cancellation and dialer timeout.
     fn connect(
         &self,
         url: String,
@@ -174,6 +186,7 @@ pub struct TokioRealtimeDialer {
 }
 
 impl TokioRealtimeDialer {
+    /// Constructs a production dialer with a finite, nonzero connection timeout.
     pub fn with_connect_timeout(connect_timeout: Duration) -> Result<Self, AiError> {
         if connect_timeout.is_zero() {
             return Err(ai_error(
@@ -336,11 +349,13 @@ pub struct OpenAiRealtimeAdapter {
 
 impl OpenAiRealtimeAdapter {
     #[must_use]
+    /// Binds endpoint policy to an injectable Realtime connection seam.
     pub fn new(config: OpenAiConfig, dialer: Arc<dyn RealtimeDialer>) -> Self {
         Self { config, dialer }
     }
 
     #[must_use]
+    /// Constructs an adapter using the default rustls-backed dialer.
     pub fn production(config: OpenAiConfig) -> Self {
         Self::new(config, Arc::new(TokioRealtimeDialer::default()))
     }
@@ -970,11 +985,13 @@ async fn responses_request(
     stream: bool,
     background: bool,
     abort: AbortSignal,
-) -> Result<Vec<u8>, AiError> {
+) -> Result<JsonRequestBody, AiError> {
     let mut input = Vec::new();
+    let mut media_replacements = Vec::new();
     for message in request.messages() {
         match message.role() {
             MessageRole::System | MessageRole::Developer | MessageRole::User => {
+                let input_index = input.len();
                 let role = match message.role() {
                     MessageRole::System => "system",
                     MessageRole::Developer => "developer",
@@ -989,17 +1006,33 @@ async fn responses_request(
                         }
                         MessageContent::Image(media) => {
                             let bytes = context.resolve_media(media, abort.clone()).await?;
+                            media_replacements.push(JsonBase64Replacement::new(
+                                format!(
+                                    "/input/{input_index}/content/{}/image_url",
+                                    wire_blocks.len()
+                                ),
+                                format!("data:{};base64,", media.mime_type()),
+                                bytes,
+                            ));
                             wire_blocks.push(json!({
                                 "type":"input_image",
-                                "image_url":format!("data:{};base64,{}", media.mime_type(), BASE64.encode(bytes))
+                                "image_url":null
                             }));
                         }
                         MessageContent::Audio(media) => {
                             let bytes = context.resolve_media(media, abort.clone()).await?;
+                            media_replacements.push(JsonBase64Replacement::new(
+                                format!(
+                                    "/input/{input_index}/content/{}/input_audio/data",
+                                    wire_blocks.len()
+                                ),
+                                "",
+                                bytes,
+                            ));
                             wire_blocks.push(json!({
                                 "type":"input_audio",
                                 "input_audio": {
-                                    "data": BASE64.encode(bytes),
+                                    "data": null,
                                     "format": audio_format(media.mime_type())?,
                                 }
                             }));
@@ -1173,7 +1206,7 @@ async fn responses_request(
             ));
         }
     }
-    serde_json::to_vec(&body).map_err(invalid_request_error)
+    json_base64_body(Value::Object(body), media_replacements).map_err(invalid_request_error)
 }
 
 fn push_responses_assistant_text(input: &mut Vec<Value>, text: &mut Vec<Value>) {
@@ -1767,25 +1800,32 @@ impl ImageAdapter for OpenAiImageAdapter {
                         (
                             "/v1/images/generations",
                             "application/json".to_owned(),
-                            serde_json::to_vec(&json!({
-                                "model":model, "prompt":request.prompt(), "n":request.count()
-                            }))
-                            .map_err(invalid_request_error)?,
+                            OpenAiRequestBody::Buffered(
+                                serde_json::to_vec(&json!({
+                                    "model":model, "prompt":request.prompt(), "n":request.count()
+                                }))
+                                .map_err(invalid_request_error)?,
+                            ),
                         )
                     } else {
-                        let mut parts = vec![
-                            ("model".to_owned(), None, None, model.into_bytes()),
+                        let mut parts: Vec<MultipartPart> = vec![
+                            (
+                                "model".to_owned(),
+                                None,
+                                None,
+                                Arc::from(model.into_bytes()),
+                            ),
                             (
                                 "prompt".to_owned(),
                                 None,
                                 None,
-                                request.prompt().as_bytes().to_vec(),
+                                Arc::from(request.prompt().as_bytes()),
                             ),
                             (
                                 "n".to_owned(),
                                 None,
                                 None,
-                                request.count().to_string().into_bytes(),
+                                Arc::from(request.count().to_string().into_bytes()),
                             ),
                         ];
                         for (index, media) in request.inputs().iter().enumerate() {
@@ -1808,7 +1848,7 @@ impl ImageAdapter for OpenAiImageAdapter {
                         }
                         let boundary =
                             format!("rsi-ai-{}", &context.snapshot().request_sha256[..24]);
-                        let body = multipart(&boundary, parts)?;
+                        let body = OpenAiRequestBody::Streaming(multipart(&boundary, parts)?);
                         (
                             "/v1/images/edits",
                             format!("multipart/form-data; boundary={boundary}"),
@@ -1824,70 +1864,107 @@ impl ImageAdapter for OpenAiImageAdapter {
                     if !(200..300).contains(&response.status) {
                         return Err(http_failure(response.status, response.body).await);
                     }
-                    let body = collect_body(response.body, MAX_JSON_BODY_BYTES)
-                        .await
-                        .map_err(transport_body_error)?;
-                    let response: OpenAiImagesResponse<'_> = serde_json::from_slice(&body)
-                        .map_err(|_| {
-                            ai_error(
-                                ErrorKind::Protocol,
-                                ErrorPhase::Assemble,
-                                DispatchStatus::Dispatched,
-                                "OpenAI Images returned malformed JSON",
-                            )
-                        })?;
-                    let data = response.data;
-                    if data.len() != usize::from(request.count()) {
-                        return Err(ai_error(
-                            ErrorKind::OutputValidation,
-                            ErrorPhase::Assemble,
-                            DispatchStatus::Dispatched,
-                            "OpenAI Images output count differs from the request",
-                        ));
-                    }
-                    let mut events = Vec::new();
-                    for (index, item) in data.iter().enumerate() {
-                        let bytes = BASE64.decode(item.b64_json).map_err(|_| {
-                            ai_error(
-                                ErrorKind::Protocol,
-                                ErrorPhase::Assemble,
-                                DispatchStatus::Dispatched,
-                                "OpenAI Images item has invalid base64",
-                            )
-                        })?;
-                        let index = u32::try_from(index).expect("image count is bounded");
-                        events.push(ImageEvent::OutputStarted {
-                            index,
-                            mime_type: "image/png".to_owned(),
-                        });
-                        for (offset, chunk) in bytes.chunks(OUTPUT_CHUNK_BYTES).enumerate() {
-                            events.push(ImageEvent::OutputChunk {
-                                index,
-                                sequence: u32::try_from(offset + 1).expect("image is bounded"),
-                                bytes: chunk.to_vec(),
-                            });
-                        }
-                        events.push(ImageEvent::OutputFinished { index });
-                    }
-                    events.push(ImageEvent::Finished);
-                    Ok(Box::pin(futures_stream::iter(events.into_iter().map(Ok)))
-                        as ImageAdapterStream)
+                    Ok(openai_image_stream(response.body, request.count()))
                 })
             }))
         })
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAiImagesResponse<'a> {
-    #[serde(borrow)]
-    data: Vec<OpenAiImageData<'a>>,
+fn image_response_error(summary: impl Into<String>) -> AiError {
+    ai_error(
+        ErrorKind::Protocol,
+        ErrorPhase::Assemble,
+        DispatchStatus::Dispatched,
+        summary.into(),
+    )
+}
+
+fn image_output_validation_error(summary: &'static str) -> AiError {
+    ai_error(
+        ErrorKind::OutputValidation,
+        ErrorPhase::Assemble,
+        DispatchStatus::Dispatched,
+        summary,
+    )
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAiImageData<'a> {
     #[serde(borrow)]
     b64_json: &'a str,
+}
+
+fn openai_image_stream(mut body: ByteStream, expected_items: u8) -> ImageAdapterStream {
+    Box::pin(stream! {
+        let limits = JsonExtractionLimits::new(
+            MAX_JSON_BODY_BYTES,
+            MAX_IMAGE_ENVELOPE_BYTES,
+            MAX_IMAGE_ITEM_JSON_BYTES,
+        ).expect("OpenAI image extraction limits are valid");
+        let mut extractor = BoundedJsonExtractor::object_array("/data", limits)
+            .expect("OpenAI image JSON pointer is valid");
+        let mut index = 0_u32;
+        while let Some(chunk) = body.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    yield Err(transport_body_error(error));
+                    return;
+                }
+            };
+            for byte in chunk {
+                let item = match extractor.push(byte) {
+                    Ok(Some(JsonExtractEvent::ArrayItem(item))) => item,
+                    Ok(Some(JsonExtractEvent::TargetStarted | JsonExtractEvent::StringChunk(_)) | None) => continue,
+                    Err(error) => {
+                        yield Err(transport_json_response_error(error));
+                        return;
+                    }
+                };
+                let Ok(item) = serde_json::from_slice::<OpenAiImageData<'_>>(&item) else {
+                    yield Err(image_response_error("OpenAI Images returned malformed item JSON"));
+                    return;
+                };
+                yield Ok(ImageEvent::OutputStarted {
+                    index,
+                    mime_type: "image/png".to_owned(),
+                });
+                let mut sequence = 1_u32;
+                let mut decoded_bytes = 0_u64;
+                for encoded in item.b64_json.as_bytes().chunks(ENCODED_OUTPUT_CHUNK_BYTES) {
+                    let Ok(bytes) = BASE64.decode(encoded) else {
+                        yield Err(image_response_error("OpenAI Images item has invalid base64"));
+                        return;
+                    };
+                    decoded_bytes = match decoded_bytes.checked_add(bytes.len() as u64) {
+                        Some(total) if total <= rsi_ai_protocol::MAX_IMAGE_BYTES => total,
+                        _ => {
+                            yield Err(image_output_validation_error("OpenAI Images item exceeds its decoded byte bound"));
+                            return;
+                        }
+                    };
+                    if !bytes.is_empty() {
+                        yield Ok(ImageEvent::OutputChunk { index, sequence, bytes });
+                        sequence = sequence.saturating_add(1);
+                    }
+                }
+                yield Ok(ImageEvent::OutputFinished { index });
+                index = index.saturating_add(1);
+            }
+        }
+        if let Err(error) = extractor.finish() {
+            yield Err(transport_json_response_error(error));
+            return;
+        }
+        if index != u32::from(expected_items) {
+            yield Err(image_output_validation_error(
+                "OpenAI Images output count differs from the request",
+            ));
+            return;
+        }
+        yield Ok(ImageEvent::Finished);
+    })
 }
 
 impl TranscriptionAdapter for OpenAiTranscriptionAdapter {
@@ -1907,13 +1984,18 @@ impl TranscriptionAdapter for OpenAiTranscriptionAdapter {
                     let audio = context
                         .resolve_media(request.audio(), abort.clone())
                         .await?;
-                    let mut parts = vec![
-                        ("model".to_owned(), None, None, model.into_bytes()),
+                    let mut parts: Vec<MultipartPart> = vec![
+                        (
+                            "model".to_owned(),
+                            None,
+                            None,
+                            Arc::from(model.into_bytes()),
+                        ),
                         (
                             "response_format".to_owned(),
                             None,
                             None,
-                            b"verbose_json".to_vec(),
+                            Arc::from(b"verbose_json".as_slice()),
                         ),
                         (
                             "file".to_owned(),
@@ -1927,14 +2009,19 @@ impl TranscriptionAdapter for OpenAiTranscriptionAdapter {
                             "language".to_owned(),
                             None,
                             None,
-                            language.as_bytes().to_vec(),
+                            Arc::from(language.as_bytes()),
                         ));
                     }
                     if let Some(prompt) = request.prompt() {
-                        parts.push(("prompt".to_owned(), None, None, prompt.as_bytes().to_vec()));
+                        parts.push((
+                            "prompt".to_owned(),
+                            None,
+                            None,
+                            Arc::from(prompt.as_bytes()),
+                        ));
                     }
                     let boundary = format!("rsi-ai-{}", &context.snapshot().request_sha256[..24]);
-                    let body = multipart(&boundary, parts)?;
+                    let body = OpenAiRequestBody::Streaming(multipart(&boundary, parts)?);
                     let outgoing = authorized_request(
                         &context,
                         config.url("/v1/audio/transcriptions"),
@@ -2061,7 +2148,9 @@ impl SpeechAdapter for OpenAiSpeechAdapter {
                             .expect("speech payload is an object")
                             .insert("speed".to_owned(), json!(speed));
                     }
-                    let body = serde_json::to_vec(&payload).map_err(invalid_request_error)?;
+                    let body = JsonRequestBody::buffered(
+                        serde_json::to_vec(&payload).map_err(invalid_request_error)?,
+                    );
                     let outgoing =
                         authorized_json_request(&context, config.url("/v1/audio/speech"), body)?;
                     let response = transport
@@ -2115,9 +2204,15 @@ fn speech_stream(mut body: ByteStream, format: SpeechFormat) -> SpeechAdapterStr
 fn authorized_json_request(
     context: &PrepareContext,
     url: String,
-    body: Vec<u8>,
+    body: JsonRequestBody,
 ) -> Result<HttpRequest, AiError> {
-    authorized_request(context, url, "application/json", body)
+    let request = authorized_control_request(context, Method::POST, url)?
+        .header(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )
+        .map_err(invalid_request_error)?;
+    Ok(request.json_body(body))
 }
 
 fn authorized_control_request(
@@ -2139,22 +2234,18 @@ fn authorized_control_request(
         .map_err(invalid_request_error)
 }
 
+enum OpenAiRequestBody {
+    Buffered(Vec<u8>),
+    Streaming(ByteStream),
+}
+
 fn authorized_request(
     context: &PrepareContext,
     url: String,
     content_type: &str,
-    body: Vec<u8>,
+    body: OpenAiRequestBody,
 ) -> Result<HttpRequest, AiError> {
-    let credential = context.credential().ok_or_else(|| {
-        ai_error(
-            ErrorKind::Authentication,
-            ErrorPhase::Send,
-            DispatchStatus::NotDispatched,
-            "OpenAI credential is unavailable",
-        )
-    })?;
-    HttpRequest::new(Method::POST, url)
-        .map_err(invalid_request_error)?
+    let request = authorized_control_request(context, Method::POST, url)?
         .header(
             http::header::CONTENT_TYPE,
             HeaderValue::from_str(content_type).map_err(|_| {
@@ -2166,15 +2257,16 @@ fn authorized_request(
                 )
             })?,
         )
-        .map_err(invalid_request_error)?
-        .bearer_auth(credential.secret())
-        .map_err(invalid_request_error)
-        .map(|request| request.body(body))
+        .map_err(invalid_request_error)?;
+    Ok(match body {
+        OpenAiRequestBody::Buffered(body) => request.body(body),
+        OpenAiRequestBody::Streaming(body) => request.body_stream(body),
+    })
 }
 
-type MultipartPart = (String, Option<String>, Option<String>, Vec<u8>);
+type MultipartPart = (String, Option<String>, Option<String>, Arc<[u8]>);
 
-fn multipart(boundary: &str, parts: Vec<MultipartPart>) -> Result<Vec<u8>, AiError> {
+fn multipart(boundary: &str, parts: Vec<MultipartPart>) -> Result<ByteStream, AiError> {
     if parts.iter().any(|(_, _, _, body)| {
         body.windows(boundary.len())
             .any(|window| window == boundary.as_bytes())
@@ -2186,24 +2278,28 @@ fn multipart(boundary: &str, parts: Vec<MultipartPart>) -> Result<Vec<u8>, AiErr
             "media collides with the multipart boundary",
         ));
     }
-    let mut output = Vec::new();
-    for (name, filename, mime, body) in parts {
-        output.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"").as_bytes(),
-        );
-        if let Some(filename) = filename {
-            output.extend_from_slice(format!("; filename=\"{filename}\"").as_bytes());
+    let boundary = boundary.to_owned();
+    Ok(Box::pin(stream! {
+        for (name, filename, mime, body) in parts {
+            let mut header = format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\""
+            );
+            if let Some(filename) = filename {
+                write!(header, "; filename=\"{filename}\"")
+                    .expect("writing to String cannot fail");
+            }
+            header.push_str("\r\n");
+            if let Some(mime) = mime {
+                write!(header, "Content-Type: {mime}\r\n")
+                    .expect("writing to String cannot fail");
+            }
+            header.push_str("\r\n");
+            yield Ok(Bytes::from(header));
+            yield Ok(Bytes::from_owner(body));
+            yield Ok(Bytes::from_static(b"\r\n"));
         }
-        output.extend_from_slice(b"\r\n");
-        if let Some(mime) = mime {
-            output.extend_from_slice(format!("Content-Type: {mime}\r\n").as_bytes());
-        }
-        output.extend_from_slice(b"\r\n");
-        output.extend_from_slice(&body);
-        output.extend_from_slice(b"\r\n");
-    }
-    output.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    Ok(output)
+        yield Ok(Bytes::from(format!("--{boundary}--\r\n")));
+    }))
 }
 
 fn responses_usage(value: &Value) -> TokenUsage {

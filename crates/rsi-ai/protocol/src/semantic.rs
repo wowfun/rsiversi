@@ -22,7 +22,9 @@ const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaKind {
+    /// Still-image bytes with an `image/` MIME type.
     Image,
+    /// Audio bytes with an `audio/` MIME type.
     Audio,
 }
 
@@ -40,6 +42,7 @@ pub struct MediaDescriptor {
 }
 
 impl MediaDescriptor {
+    /// Creates locator-free media identity from kind, MIME type, length, and SHA-256.
     pub fn new(
         kind: MediaKind,
         mime_type: impl Into<String>,
@@ -59,6 +62,7 @@ impl MediaDescriptor {
         Ok(descriptor)
     }
 
+    /// Adds a bounded nonzero width and height to an image descriptor.
     pub fn with_image_dimensions(mut self, width: u32, height: u32) -> Result<Self, SemanticError> {
         if self.kind != MediaKind::Image {
             return Err(SemanticError::new(
@@ -73,6 +77,7 @@ impl MediaDescriptor {
         Ok(self)
     }
 
+    /// Adds a positive duration in milliseconds to an audio descriptor.
     pub fn with_audio_duration_ms(mut self, duration_ms: u64) -> Result<Self, SemanticError> {
         if self.kind != MediaKind::Audio {
             return Err(SemanticError::new(
@@ -86,22 +91,27 @@ impl MediaDescriptor {
         Ok(self)
     }
 
+    /// Returns the media class that determines validation bounds.
     pub const fn kind(&self) -> MediaKind {
         self.kind
     }
 
+    /// Returns the validated media MIME type.
     pub fn mime_type(&self) -> &str {
         &self.mime_type
     }
 
+    /// Returns the exact byte length of the separately transported body.
     pub const fn byte_len(&self) -> u64 {
         self.byte_len
     }
 
+    /// Returns the lowercase hexadecimal SHA-256 of the body.
     pub fn sha256(&self) -> &str {
         &self.sha256
     }
 
+    /// Revalidates a deserialized descriptor and kind-specific metadata.
     pub fn validate(&self) -> Result<(), SemanticError> {
         let maximum = match self.kind {
             MediaKind::Image => MAX_IMAGE_BYTES,
@@ -179,10 +189,15 @@ impl MediaDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
+    /// Product-level instruction with highest request precedence.
     System,
+    /// Application-developer instruction distinct from end-user input.
     Developer,
+    /// End-user input.
     User,
+    /// Prior model output.
     Assistant,
+    /// Result of a model-requested tool call.
     Tool,
 }
 
@@ -195,19 +210,31 @@ pub enum MessageRole {
     deny_unknown_fields
 )]
 pub enum MessageContent {
+    /// Plain UTF-8 message content.
     Text {
+        /// Bounded nonempty text.
         text: String,
     },
+    /// Locator-free image input or prior image output.
     Image(MediaDescriptor),
+    /// Locator-free audio input or prior audio output.
     Audio(MediaDescriptor),
+    /// Provider-exposed reasoning and optional replay evidence.
     Reasoning {
+        /// Bounded reasoning text.
         text: String,
+        /// Bounded provider-private evidence needed for a later request.
         evidence: Option<ProviderExtension>,
     },
+    /// Tool call previously emitted by the assistant.
     ToolCall(ToolCall),
+    /// Content returned for one earlier tool call.
     ToolResult {
+        /// Identifier of the corresponding assistant tool call.
         call_id: String,
+        /// Bounded text, image, or audio result blocks.
         content: Vec<MessageContent>,
+        /// Whether the tool execution failed semantically.
         is_error: bool,
     },
 }
@@ -221,26 +248,32 @@ pub struct Message {
 }
 
 impl Message {
+    /// Creates a validated system text message.
     pub fn system_text(text: impl Into<String>) -> Result<Self, SemanticError> {
         Self::new_text(MessageRole::System, text)
     }
 
+    /// Creates a validated developer text message.
     pub fn developer_text(text: impl Into<String>) -> Result<Self, SemanticError> {
         Self::new_text(MessageRole::Developer, text)
     }
 
+    /// Creates a validated user text message.
     pub fn user_text(text: impl Into<String>) -> Result<Self, SemanticError> {
         Self::new_text(MessageRole::User, text)
     }
 
+    /// Creates a validated multimodal user message.
     pub fn user(content: Vec<MessageContent>) -> Result<Self, SemanticError> {
         Self::new(MessageRole::User, content)
     }
 
+    /// Creates a validated assistant history message.
     pub fn assistant(content: Vec<MessageContent>) -> Result<Self, SemanticError> {
         Self::new(MessageRole::Assistant, content)
     }
 
+    /// Creates the sole result block for one previous tool call.
     pub fn tool_result(
         call_id: impl Into<String>,
         content: Vec<MessageContent>,
@@ -256,10 +289,12 @@ impl Message {
         )
     }
 
+    /// Returns the role governing which content kinds are valid.
     pub fn role(&self) -> MessageRole {
         self.role
     }
 
+    /// Returns ordered validated message content.
     pub fn content(&self) -> &[MessageContent] {
         &self.content
     }
@@ -274,6 +309,7 @@ impl Message {
         Ok(message)
     }
 
+    /// Revalidates message bounds and role-to-content relationships.
     pub fn validate(&self) -> Result<(), SemanticError> {
         if self.content.is_empty() || self.content.len() > MAX_BLOCKS_PER_MESSAGE {
             return Err(SemanticError::new(
@@ -402,6 +438,7 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
+    /// Creates a named function tool with a bounded JSON Schema input contract.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -416,14 +453,17 @@ impl ToolDefinition {
         Ok(tool)
     }
 
+    /// Returns the exact tool name exposed to the model.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the model-visible tool description.
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    /// Returns the bounded object or boolean JSON Schema for tool arguments.
     pub fn input_schema(&self) -> &Value {
         &self.input_schema
     }
@@ -460,9 +500,13 @@ impl ToolDefinition {
     deny_unknown_fields
 )]
 pub enum ToolChoice {
+    /// Lets the model decide whether and which tool to call.
     Auto,
+    /// Forbids function-tool calls.
     None,
+    /// Requires at least one function-tool call.
     Required,
+    /// Requires the named declared function tool.
     Specific(String),
 }
 
@@ -470,18 +514,25 @@ pub enum ToolChoice {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostedTool {
-    WebSearch { max_uses: Option<u8> },
+    /// Requests provider-hosted web search.
+    WebSearch {
+        /// Optional provider-neutral maximum searches for the operation.
+        max_uses: Option<u8>,
+    },
 }
 
 /// Requested language output representation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseFormat {
+    /// Ordinary text or tool-call output.
     Text,
+    /// Strict output constrained by a caller-provided JSON Schema.
     JsonSchema {
         name: String,
         description: Option<String>,
         schema: Value,
+        /// Must remain true at every untrusted boundary.
         strict: bool,
     },
 }
@@ -490,10 +541,15 @@ pub enum ResponseFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
+    /// Smallest provider-supported reasoning budget.
     Minimal,
+    /// Low reasoning budget.
     Low,
+    /// Provider-default medium reasoning budget.
     Medium,
+    /// High reasoning budget.
     High,
+    /// Highest extended reasoning budget.
     Xhigh,
 }
 
@@ -511,12 +567,14 @@ pub struct LanguageSettings {
 }
 
 impl LanguageSettings {
+    /// Sets a positive bounded output-token limit.
     pub fn with_max_output_tokens(mut self, value: u32) -> Result<Self, SemanticError> {
         self.max_output_tokens = Some(value);
         self.validate()?;
         Ok(self)
     }
 
+    /// Sets finite temperature and nucleus-sampling controls.
     pub fn with_sampling(
         mut self,
         temperature: Option<f64>,
@@ -529,11 +587,13 @@ impl LanguageSettings {
     }
 
     #[must_use]
+    /// Sets the deterministic sampling seed when supported by the adapter.
     pub const fn with_seed(mut self, seed: i64) -> Self {
         self.seed = Some(seed);
         self
     }
 
+    /// Sets bounded nonempty stop sequences.
     pub fn with_stop(mut self, stop: Vec<String>) -> Result<Self, SemanticError> {
         self.stop = stop;
         self.validate()?;
@@ -541,6 +601,7 @@ impl LanguageSettings {
     }
 
     #[must_use]
+    /// Sets requested reasoning effort when supported by the adapter.
     pub const fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
         self
@@ -570,6 +631,7 @@ impl LanguageSettings {
         self.reasoning_effort
     }
 
+    /// Revalidates all optional generation controls and aggregate stop bounds.
     pub fn validate(&self) -> Result<(), SemanticError> {
         if self.max_output_tokens == Some(0)
             || self
@@ -599,6 +661,7 @@ impl LanguageSettings {
 }
 
 impl ResponseFormat {
+    /// Creates a strict bounded JSON Schema response format.
     pub fn json_schema(
         name: impl Into<String>,
         description: Option<String>,
@@ -708,6 +771,7 @@ pub struct LanguageRequest {
 }
 
 impl LanguageRequest {
+    /// Creates a request from one or more validated messages with default controls.
     pub fn new(messages: Vec<Message>) -> Result<Self, SemanticError> {
         let request = Self {
             messages,
@@ -722,6 +786,7 @@ impl LanguageRequest {
         Ok(request)
     }
 
+    /// Adds function tools and a selection policy that must reference them consistently.
     pub fn with_tools(
         mut self,
         tools: Vec<ToolDefinition>,
@@ -733,6 +798,7 @@ impl LanguageRequest {
         Ok(self)
     }
 
+    /// Adds bounded provider-hosted tools with shared semantics.
     pub fn with_hosted_tools(
         mut self,
         hosted_tools: Vec<HostedTool>,
@@ -742,6 +808,7 @@ impl LanguageRequest {
         Ok(self)
     }
 
+    /// Selects text or strict structured output.
     pub fn with_response_format(
         mut self,
         response_format: ResponseFormat,
@@ -751,6 +818,7 @@ impl LanguageRequest {
         Ok(self)
     }
 
+    /// Adds bounded provider-private request extensions.
     pub fn with_extensions(
         mut self,
         extensions: Vec<ProviderExtension>,
@@ -760,6 +828,7 @@ impl LanguageRequest {
         Ok(self)
     }
 
+    /// Replaces the optional generation controls.
     pub fn with_settings(mut self, settings: LanguageSettings) -> Result<Self, SemanticError> {
         settings.validate()?;
         self.settings = settings;
@@ -770,6 +839,7 @@ impl LanguageRequest {
         &self.messages
     }
 
+    /// Returns caller-executed function tools exposed to the model.
     pub fn tools(&self) -> &[ToolDefinition] {
         &self.tools
     }
@@ -778,6 +848,7 @@ impl LanguageRequest {
         &self.tool_choice
     }
 
+    /// Returns provider-executed tools requested for the operation.
     pub fn hosted_tools(&self) -> &[HostedTool] {
         &self.hosted_tools
     }
@@ -794,11 +865,13 @@ impl LanguageRequest {
         &self.extensions
     }
 
+    /// Validates and returns deterministic canonical JSON bytes for identity and persistence.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, SemanticError> {
         self.validate()?;
         self.canonical_bytes_unchecked()
     }
 
+    /// Revalidates deserialized request structure, relationships, and aggregate bounds.
     pub fn validate(&self) -> Result<(), SemanticError> {
         if self.messages.is_empty() || self.messages.len() > MAX_MESSAGES {
             return Err(SemanticError::new(
@@ -961,10 +1034,12 @@ impl SemanticError {
         }
     }
 
+    /// Returns the stable machine-readable semantic failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }
 
+    /// Returns the request field path responsible for rejection.
     pub fn field(&self) -> &str {
         &self.field
     }

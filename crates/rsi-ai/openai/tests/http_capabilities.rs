@@ -11,6 +11,7 @@ use axum::{
     response::Response,
     routing::post,
 };
+use futures_util::StreamExt as _;
 use rsi_ai::{ModelRef, Registry};
 use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_openai::{
@@ -18,9 +19,9 @@ use rsi_ai_openai::{
     OpenAiTranscriptionAdapter,
 };
 use rsi_ai_protocol::{
-    ContentBlock, HostedTool, ImageRequest, LanguageRequest, LanguageSettings, MediaDescriptor,
-    MediaKind, Message, MessageContent, ReasoningEffort, SpeechFormat, SpeechRequest, ToolCall,
-    TranscriptionRequest,
+    ContentBlock, ErrorKind, HostedTool, ImageEvent, ImageRequest, LanguageRequest,
+    LanguageSettings, MediaDescriptor, MediaKind, Message, MessageContent, ReasoningEffort,
+    ResponseFormat, SpeechFormat, SpeechRequest, ToolCall, TranscriptionRequest,
 };
 use rsi_ai_provider::ProviderRegistration;
 use rsi_ai_testkit::InMemoryMediaResolver;
@@ -86,7 +87,7 @@ async fn endpoint(
                 "data: [DONE]\n\n"
             )))
             .expect("response"),
-        "/v1/images/generations" => Response::new(Body::from(
+        "/v1/images/generations" | "/v1/images/edits" => Response::new(Body::from(
             json!({"data":[{"b64_json":"iVBORw=="}]}).to_string(),
         )),
         "/v1/audio/transcriptions" => {
@@ -104,6 +105,72 @@ async fn endpoint(
             .expect("speech"),
         path => panic!("unexpected path {path}"),
     }
+}
+
+async fn one_image() -> Response {
+    Response::new(Body::from(r#"{"data":[{"b64_json":"iVBORw=="}]}"#))
+}
+
+#[tokio::test]
+async fn image_count_mismatch_follows_completed_image_events_with_output_validation() {
+    let app = Router::new().route("/v1/images/generations", post(one_image));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+    let registration = ProviderRegistration::builder("openai", "openai")
+        .expect("registration")
+        .with_credential(credential())
+        .with_image(OpenAiImageAdapter::new(
+            OpenAiConfig::new(format!("http://{address}")).expect("config"),
+            Arc::new(ReqwestTransport::new().expect("transport")),
+        ))
+        .build()
+        .expect("provider");
+    let image = Registry::builder(
+        CredentialManager::builder()
+            .with_explicit("openai", "openai-secret")
+            .expect("credential")
+            .build(),
+    )
+    .register(registration)
+    .expect("registration")
+    .build()
+    .expect("registry")
+    .image(ModelRef::new("openai", "gpt-image-1").expect("model"))
+    .expect("image");
+
+    let mut generation = image
+        .prepare(ImageRequest::new("two dots", 2).expect("request"))
+        .await
+        .expect("prepare")
+        .start()
+        .await
+        .expect("start");
+    let events = generation.by_ref().collect::<Vec<_>>().await;
+    assert_eq!(
+        events,
+        vec![
+            ImageEvent::OutputStarted {
+                index: 0,
+                mime_type: "image/png".to_owned(),
+            },
+            ImageEvent::OutputChunk {
+                index: 0,
+                sequence: 1,
+                bytes: vec![137, 80, 78, 71],
+            },
+            ImageEvent::OutputFinished { index: 0 },
+        ]
+    );
+    let error = generation
+        .finish()
+        .expect_err("one image cannot satisfy a two-image request");
+    assert_eq!(
+        error.provider_error().map(rsi_ai_protocol::AiError::kind),
+        Some(ErrorKind::OutputValidation)
+    );
 }
 
 async fn language_model(capture: Capture) -> rsi_ai::LanguageModel {
@@ -136,6 +203,29 @@ async fn language_model(capture: Capture) -> rsi_ai::LanguageModel {
     .expect("registry")
     .language(ModelRef::new("openai", "gpt-5").expect("model"))
     .expect("language")
+}
+
+#[tokio::test]
+async fn text_only_language_request_is_buffered_with_content_length() {
+    let capture = Capture::default();
+    language_model(capture.clone())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user(vec![MessageContent::Text {
+                    text: "hello".to_owned(),
+                }])
+                .expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let calls = capture.0.lock().expect("capture");
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].1.contains_key("content-length"));
+    assert!(!calls[0].1.contains_key("transfer-encoding"));
 }
 
 #[tokio::test]
@@ -191,6 +281,7 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
     let app = Router::new()
         .route("/v1/responses", post(endpoint))
         .route("/v1/images/generations", post(endpoint))
+        .route("/v1/images/edits", post(endpoint))
         .route("/v1/audio/transcriptions", post(endpoint))
         .route("/v1/audio/speech", post(endpoint))
         .with_state(capture.clone());
@@ -218,20 +309,23 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
         .build()
         .expect("provider");
     let audio_digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    let image_digest = "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543";
     let registry = Registry::builder(
         CredentialManager::builder()
             .with_explicit("openai", "openai-secret")
             .expect("credential")
             .build(),
     )
-    .with_media_resolver(InMemoryMediaResolver::new(BTreeMap::from([(
-        audio_digest.to_owned(),
-        b"hello world".to_vec(),
-    )])))
+    .with_media_resolver(InMemoryMediaResolver::new(BTreeMap::from([
+        (audio_digest.to_owned(), b"hello world".to_vec()),
+        (image_digest.to_owned(), vec![137, 80, 78, 71]),
+    ])))
     .register(registration)
     .expect("register")
     .build()
     .expect("registry");
+    let image_media =
+        MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest).expect("image input");
 
     let language = registry
         .language(ModelRef::new("openai", "gpt-5").expect("model"))
@@ -249,7 +343,13 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
                     }),
                 ])
                 .expect("assistant history"),
-                Message::user_text("hello").expect("message"),
+                Message::user(vec![
+                    MessageContent::Text {
+                        text: "hello".to_owned(),
+                    },
+                    MessageContent::Image(image_media.clone()),
+                ])
+                .expect("message"),
             ])
             .expect("request")
             .with_hosted_tools(vec![HostedTool::WebSearch { max_uses: None }])
@@ -262,7 +362,16 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
                     .expect("sampling")
                     .with_reasoning_effort(ReasoningEffort::High),
             )
-            .expect("settings"),
+            .expect("settings")
+            .with_response_format(
+                ResponseFormat::json_schema(
+                    "answer",
+                    None,
+                    json!({"type":"string", "const":"\0rsi-media-0\0"}),
+                )
+                .expect("response format"),
+            )
+            .expect("structured output"),
         )
         .await
         .expect("response");
@@ -285,7 +394,12 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
     let image = registry
         .image(ModelRef::new("openai", "gpt-image-1").expect("model"))
         .expect("image")
-        .generate(ImageRequest::new("a dot", 1).expect("request"))
+        .generate(
+            ImageRequest::new("a dot", 1)
+                .expect("request")
+                .with_inputs(vec![image_media], None)
+                .expect("image edit"),
+        )
         .await
         .expect("image output");
     assert_eq!(image.images[0].bytes, [137, 80, 78, 71]);
@@ -321,6 +435,8 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
             .get("authorization")
             .is_some_and(|value| value == "Bearer openai-secret")
     }));
+    assert_eq!(calls[0].1["transfer-encoding"], "chunked");
+    assert!(!calls[0].1.contains_key("content-length"));
     let response_body: Value = serde_json::from_slice(&calls[0].2).expect("responses request");
     assert_eq!(response_body["stream"], true);
     assert_eq!(response_body["max_output_tokens"], 800);
@@ -330,6 +446,25 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
     assert_eq!(response_body["input"][0]["type"], "message");
     assert_eq!(response_body["input"][0]["content"][0]["text"], "before");
     assert_eq!(response_body["input"][1]["type"], "function_call");
+    assert_eq!(
+        response_body["input"][2]["content"][1]["image_url"],
+        "data:image/png;base64,iVBORw=="
+    );
+    assert_eq!(
+        response_body["text"]["format"]["schema"]["const"],
+        "\0rsi-media-0\0"
+    );
+    assert_eq!(calls[1].0, "/v1/images/edits");
+    assert_eq!(calls[1].1["transfer-encoding"], "chunked");
+    assert!(!calls[1].1.contains_key("content-length"));
+    assert!(
+        calls[1]
+            .2
+            .windows(4)
+            .any(|window| window == [137, 80, 78, 71])
+    );
+    assert_eq!(calls[2].1["transfer-encoding"], "chunked");
+    assert!(!calls[2].1.contains_key("content-length"));
     let transcription_body = &calls[2].2;
     assert!(
         transcription_body

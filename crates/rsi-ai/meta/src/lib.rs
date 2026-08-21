@@ -8,9 +8,10 @@ use serde_json::Value;
 use thiserror::Error;
 
 use rsi_ai_protocol::{
-    AiError, ImageRequest, LanguageEvent, LanguageRequest, MAX_CONTROL_FRAME_BYTES,
-    MediaDescriptor, MediaKind, RealtimeCloseReason, RealtimeRequest, SpeechRequest, TokenUsage,
-    TranscriptionEvent, TranscriptionRequest, WireFrame, decode_wire_frame, encode_wire_frame,
+    AiError, ImageRequest, LanguageEvent, LanguageRequest, MAX_BINARY_CHUNK_BYTES,
+    MAX_CONTROL_FRAME_BYTES, MediaDescriptor, MediaKind, RealtimeCloseReason, RealtimeRequest,
+    SpeechRequest, TokenUsage, TranscriptionEvent, TranscriptionRequest, WireFrame,
+    decode_wire_frame, encode_wire_frame,
 };
 pub use rsi_ai_provider::{Capability, PreparedCallSnapshot, RetryPolicy};
 use rsi_meta::{
@@ -69,6 +70,7 @@ pub struct MetaServiceStream {
 }
 
 impl MetaServiceStream {
+    /// Opens a generation-pinned service stream and grants its initial byte credit.
     pub async fn open(
         host: &CompositionHost,
         consumer: InstanceId,
@@ -91,10 +93,12 @@ impl MetaServiceStream {
         self.service
     }
 
+    /// Returns the selected provider generation's instance identity.
     pub const fn provider(&self) -> &InstanceId {
         &self.provider
     }
 
+    /// Validates, frames, and sends one caller control message.
     pub async fn send_control(&mut self, control: &ClientControl) -> Result<(), MetaStreamError> {
         let call_id = control.call_id();
         let payload = encode_client_control(control)?;
@@ -106,6 +110,7 @@ impl MetaServiceStream {
         Ok(())
     }
 
+    /// Sends one ordered binary fragment for a previously declared blob.
     pub async fn send_blob_chunk(
         &mut self,
         call_id: impl Into<String>,
@@ -125,6 +130,9 @@ impl MetaServiceStream {
         Ok(())
     }
 
+    /// Receives the next provider frame and replenishes consumed data credit.
+    ///
+    /// A clean underlying close without `End` or `Cancel` is an error.
     pub async fn recv(&mut self) -> Result<Option<MetaIncoming>, MetaStreamError> {
         loop {
             let Some(frame) = self.stream.recv().await else {
@@ -183,11 +191,13 @@ impl MetaServiceStream {
         }
     }
 
+    /// Declares that the caller will send no more frames.
     pub async fn half_close(&mut self) -> Result<(), MetaStreamError> {
         self.stream.half_close().await?;
         Ok(())
     }
 
+    /// Cancels the service stream with a bounded caller-facing reason.
     pub async fn cancel(&mut self, reason: impl Into<String>) -> Result<(), MetaStreamError> {
         self.stream.cancel(reason).await?;
         Ok(())
@@ -213,12 +223,15 @@ pub enum MetaIncoming {
     BlobChunk {
         call_id: String,
         blob_id: String,
+        /// Monotonic chunk sequence number.
         sequence: u32,
         final_chunk: bool,
         bytes: Vec<u8>,
     },
     End,
+    /// Provider-initiated cancellation.
     Cancel {
+        /// Sanitized cancellation reason.
         reason: String,
     },
 }
@@ -227,164 +240,216 @@ pub enum MetaIncoming {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientControl {
+    /// Validates a language request and prepares it without provider I/O.
     PrepareLanguage {
         call_id: String,
         model: String,
         request: LanguageRequest,
     },
+    /// Validates an image request and prepares it without provider I/O.
     PrepareImage {
         call_id: String,
         model: String,
         request: ImageRequest,
     },
+    /// Validates a transcription request and prepares it without provider I/O.
     PrepareTranscription {
         call_id: String,
         model: String,
         request: TranscriptionRequest,
     },
+    /// Validates a speech request and prepares it without provider I/O.
     PrepareSpeech {
         call_id: String,
         model: String,
         request: SpeechRequest,
     },
+    /// Validates a realtime request and prepares it without provider I/O.
     PrepareRealtime {
         call_id: String,
         model: String,
         request: RealtimeRequest,
     },
+    /// Declares metadata for an input blob before sending its chunks.
     DeclareInputBlob {
         call_id: String,
         blob_id: String,
         descriptor: MediaDescriptor,
     },
-    Start {
-        call_id: String,
-    },
-    Abort {
-        call_id: String,
-    },
+    /// Starts the prepared call and permits provider I/O.
+    Start { call_id: String },
+    /// Aborts a prepared or running call.
+    Abort { call_id: String },
+    /// Appends text to a realtime input buffer.
     RealtimeAppendText {
         call_id: String,
+        /// Nonempty text fragment.
         text: String,
     },
+    /// Appends one complete audio frame to a realtime input buffer.
     RealtimeAppendAudio {
         call_id: String,
+        /// Identifier for the accompanying blob frame.
         blob_id: String,
+        /// Nonzero audio-frame sequence number.
         sequence: u32,
+        /// Audio descriptor matching the accompanying bytes.
         descriptor: MediaDescriptor,
     },
+    /// Commits buffered realtime input as one item.
     RealtimeCommitInput {
         call_id: String,
+        /// Caller-assigned committed item identifier.
         item_id: String,
     },
-    RealtimeRequestResponse {
-        call_id: String,
-    },
+    /// Requests a response from the active realtime session.
+    RealtimeRequestResponse { call_id: String },
+    /// Cancels one in-progress realtime response.
     RealtimeCancelResponse {
         call_id: String,
         response_id: String,
     },
-    RealtimeClose {
-        call_id: String,
-    },
+    /// Cleanly closes the active realtime session.
+    RealtimeClose { call_id: String },
 }
 
 /// Provider-to-caller control messages. Large media stays on raw blob frames.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerControl {
+    /// Confirms preparation and describes the resulting immutable call.
     Prepared {
         call_id: String,
+        /// Validated preparation snapshot used by start and retry policy.
         snapshot: PreparedCallSnapshot,
     },
+    /// Emits one semantic language-generation event.
     LanguageEvent {
         call_id: String,
+        /// Ordered language event.
         event: LanguageEvent,
     },
+    /// Declares the identity and MIME type of an image output blob.
     ImageOutputStarted {
         call_id: String,
+        /// Zero-based image position in the requested output set.
         index: u32,
+        /// Identifier used by following blob frames.
         blob_id: String,
         mime_type: String,
     },
+    /// Completes one image output after all of its blob frames.
     ImageOutputFinished {
         call_id: String,
+        /// Zero-based image position in the requested output set.
         index: u32,
         blob_id: String,
+        /// Descriptor of the complete emitted image.
         descriptor: MediaDescriptor,
     },
+    /// Completes image generation after every output blob.
     ImageFinished {
         call_id: String,
+        /// Provider usage totals, when reported.
         usage: Option<TokenUsage>,
     },
+    /// Emits one semantic transcription event.
     TranscriptionEvent {
         call_id: String,
+        /// Ordered transcription event.
         event: TranscriptionEvent,
     },
+    /// Declares the identity and MIME type of synthesized speech.
     SpeechOutputStarted {
         call_id: String,
+        /// Identifier used by following blob frames.
         blob_id: String,
         mime_type: String,
     },
+    /// Completes synthesized speech after all blob frames.
     SpeechOutputFinished {
         call_id: String,
         blob_id: String,
+        /// Descriptor of the complete emitted audio.
         descriptor: MediaDescriptor,
     },
+    /// Completes speech generation.
     SpeechFinished {
         call_id: String,
+        /// Provider usage totals, when reported.
         usage: Option<TokenUsage>,
     },
+    /// Confirms a connected realtime provider session.
     RealtimeSessionStarted {
         call_id: String,
+        /// Provider-assigned session identifier.
         session_id: String,
     },
+    /// Reports that realtime voice activity began for an item.
     RealtimeSpeechStarted {
         call_id: String,
+        /// Provider or caller item identifier.
         item_id: String,
     },
+    /// Appends text to one realtime response.
     RealtimeTextDelta {
         call_id: String,
+        /// Provider-assigned response identifier.
         response_id: String,
+        /// Ordered text fragment.
         text: String,
     },
+    /// Appends or completes transcription for one realtime input item.
     RealtimeTranscriptDelta {
         call_id: String,
+        /// Input item being transcribed.
         item_id: String,
+        /// Ordered transcript fragment.
         text: String,
+        /// Whether no further transcript fragments will follow for this item.
         finished: bool,
     },
+    /// Declares one realtime audio blob frame.
     RealtimeAudio {
         call_id: String,
         response_id: String,
+        /// Monotonic audio-frame sequence number.
         sequence: u32,
+        /// Identifier used by the accompanying blob frame.
         blob_id: String,
+        /// Descriptor matching the accompanying audio bytes.
         descriptor: MediaDescriptor,
     },
+    /// Requests host-level handoff for a recognized realtime item.
     RealtimeHandoffRequested {
         call_id: String,
+        /// Item that triggered handoff.
         item_id: String,
+        /// Recognized text supplied to the handoff target.
         text: String,
     },
-    RealtimeRecoverableError {
-        call_id: String,
-        error: AiError,
-    },
+    /// Reports a recoverable realtime error without terminating the session.
+    RealtimeRecoverableError { call_id: String, error: AiError },
+    /// Reports terminal closure of the realtime session.
     RealtimeClosed {
         call_id: String,
         reason: RealtimeCloseReason,
     },
+    /// Terminates any capability call with a typed failure.
     Failed {
+        /// Active or prepared call identifier.
         call_id: String,
         error: AiError,
     },
 }
 
+/// Validates and encodes one caller control message as bounded JSON.
 pub fn encode_client_control(value: &ClientControl) -> Result<Vec<u8>, MetaWireError> {
     value.validate()?;
     encode(value)
 }
 
+/// Decodes and validates one bounded caller control message.
 pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControl, MetaWireError> {
     check_size(bytes)?;
     let value =
@@ -393,11 +458,13 @@ pub fn decode_client_control(bytes: &[u8]) -> Result<ClientControl, MetaWireErro
     Ok(value)
 }
 
+/// Validates and encodes one provider control message as bounded JSON.
 pub fn encode_server_control(value: &ServerControl) -> Result<Vec<u8>, MetaWireError> {
     value.validate()?;
     encode(value)
 }
 
+/// Decodes and validates one bounded provider control message.
 pub fn decode_server_control(bytes: &[u8]) -> Result<ServerControl, MetaWireError> {
     check_size(bytes)?;
     let value =
@@ -529,6 +596,15 @@ impl ClientControl {
                         "Realtime input must be an audio descriptor".to_owned(),
                     ));
                 }
+                if descriptor.byte_len() == 0
+                    || descriptor.byte_len()
+                        > u64::try_from(MAX_BINARY_CHUNK_BYTES)
+                            .expect("binary chunk bound fits u64")
+                {
+                    return Err(MetaWireError::InvalidValue(
+                        "Realtime audio frame is empty or exceeds its bound".to_owned(),
+                    ));
+                }
                 Ok(())
             }
             Self::RealtimeCommitInput { call_id, item_id } => ids(call_id, Some(item_id)),
@@ -593,6 +669,7 @@ fn check_size(bytes: &[u8]) -> Result<(), MetaWireError> {
     }
 }
 
+/// Failure to encode, decode, or validate an rsi-ai meta control message.
 #[derive(Debug, Error)]
 pub enum MetaWireError {
     #[error("control message exceeds its byte bound")]
@@ -604,6 +681,7 @@ pub enum MetaWireError {
 }
 
 impl MetaWireError {
+    /// Returns the stable machine-readable failure code.
     pub const fn code(&self) -> &'static str {
         match self {
             Self::ControlTooLarge => "meta.control_too_large",

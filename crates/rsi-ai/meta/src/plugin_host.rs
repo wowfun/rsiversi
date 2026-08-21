@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{
         Arc, Mutex,
@@ -38,16 +38,46 @@ use crate::{
 const MAX_MEDIA_BLOBS: usize = 4_096;
 const MAX_MEDIA_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Content-addressed, generation-local media supplied over rsi-meta blob frames.
+/// Content-addressed live-call media supplied over rsi-meta blob frames.
 #[derive(Clone, Debug, Default)]
 pub struct PluginMediaResolver {
     inner: Arc<Mutex<MediaStore>>,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MediaOwner {
+    stream_id: String,
+    call_id: String,
+}
+
+impl MediaOwner {
+    fn new(stream_id: impl Into<String>, call_id: impl Into<String>) -> Self {
+        Self {
+            stream_id: stream_id.into(),
+            call_id: call_id.into(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct MediaStore {
-    bodies: BTreeMap<String, Arc<[u8]>>,
+    bodies: BTreeMap<String, MediaBody>,
     bytes: u64,
+}
+
+struct MediaBody {
+    bytes: Arc<[u8]>,
+    owners: BTreeSet<MediaOwner>,
+}
+
+impl fmt::Debug for MediaBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaBody")
+            .field("byte_len", &self.bytes.len())
+            .field("owners", &self.owners)
+            .finish()
+    }
 }
 
 impl PluginMediaResolver {
@@ -59,17 +89,27 @@ impl PluginMediaResolver {
         Ok((store.bodies.len(), store.bytes))
     }
 
-    fn insert(&self, descriptor: &MediaDescriptor, bytes: Vec<u8>) -> Result<(), PluginError> {
+    fn insert(
+        &self,
+        owner: &MediaOwner,
+        descriptor: &MediaDescriptor,
+        bytes: Vec<u8>,
+    ) -> Result<(), PluginError> {
         let mut store = self
             .inner
             .lock()
             .map_err(|_| PluginError::new("media store poisoned"))?;
         if let Some(existing) = store.bodies.get(descriptor.sha256()) {
-            return if existing.as_ref() == bytes.as_slice() {
-                Ok(())
-            } else {
-                Err(PluginError::new("media digest collision"))
-            };
+            if existing.bytes.as_ref() != bytes.as_slice() {
+                return Err(PluginError::new("media digest collision"));
+            }
+            store
+                .bodies
+                .get_mut(descriptor.sha256())
+                .expect("entry checked above")
+                .owners
+                .insert(owner.clone());
+            return Ok(());
         }
         let length =
             u64::try_from(bytes.len()).map_err(|_| PluginError::new("media length overflow"))?;
@@ -82,9 +122,55 @@ impl PluginMediaResolver {
             return Err(PluginError::new("generation media quota exceeded"));
         }
         store.bytes += length;
-        store
+        store.bodies.insert(
+            descriptor.sha256().to_owned(),
+            MediaBody {
+                bytes: Arc::from(bytes),
+                owners: BTreeSet::from([owner.clone()]),
+            },
+        );
+        Ok(())
+    }
+
+    fn release_call(&self, owner: &MediaOwner) -> Result<(), PluginError> {
+        let mut store = self
+            .inner
+            .lock()
+            .map_err(|_| PluginError::new("media store poisoned"))?;
+        let released = store
             .bodies
-            .insert(descriptor.sha256().to_owned(), Arc::from(bytes));
+            .extract_if(.., |_, body| {
+                body.owners.remove(owner);
+                body.owners.is_empty()
+            })
+            .map(|(_, body)| u64::try_from(body.bytes.len()).unwrap_or(u64::MAX))
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| PluginError::new("media length overflow"))?;
+        store.bytes = store
+            .bytes
+            .checked_sub(released)
+            .ok_or_else(|| PluginError::new("media accounting underflow"))?;
+        Ok(())
+    }
+
+    fn release_stream(&self, stream_id: &str) -> Result<(), PluginError> {
+        let mut store = self
+            .inner
+            .lock()
+            .map_err(|_| PluginError::new("media store poisoned"))?;
+        let released = store
+            .bodies
+            .extract_if(.., |_, body| {
+                body.owners.retain(|owner| owner.stream_id != stream_id);
+                body.owners.is_empty()
+            })
+            .map(|(_, body)| u64::try_from(body.bytes.len()).unwrap_or(u64::MAX))
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| PluginError::new("media length overflow"))?;
+        store.bytes = store
+            .bytes
+            .checked_sub(released)
+            .ok_or_else(|| PluginError::new("media accounting underflow"))?;
         Ok(())
     }
 }
@@ -94,7 +180,7 @@ impl MediaResolver for PluginMediaResolver {
         &self,
         descriptor: MediaDescriptor,
         abort: AbortSignal,
-    ) -> AdapterFuture<Result<Vec<u8>, AiError>> {
+    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
         let value = self.inner.lock().map_or_else(
             |_| {
                 Err(ai_error(
@@ -104,7 +190,12 @@ impl MediaResolver for PluginMediaResolver {
                     "media store lock is poisoned",
                 ))
             },
-            |store| Ok(store.bodies.get(descriptor.sha256()).cloned()),
+            |store| {
+                Ok(store
+                    .bodies
+                    .get(descriptor.sha256())
+                    .map(|body| Arc::clone(&body.bytes)))
+            },
         );
         Box::pin(async move {
             let value = value?.ok_or_else(|| {
@@ -123,16 +214,7 @@ impl MediaResolver for PluginMediaResolver {
                     "input media read was cancelled",
                 ));
             }
-            tokio::task::spawn_blocking(move || value.as_ref().to_vec())
-                .await
-                .map_err(|error| {
-                    ai_error(
-                        ErrorKind::Artifact,
-                        ErrorPhase::Send,
-                        DispatchStatus::NotDispatched,
-                        format!("input media copy worker failed: {error}"),
-                    )
-                })
+            Ok(value)
         })
     }
 }
@@ -140,12 +222,15 @@ impl MediaResolver for PluginMediaResolver {
 /// Registry and exact deployment identity produced from one plugin generation config.
 #[derive(Clone, Debug)]
 pub struct PluginProvider {
+    /// Exact capability registry exposed by this generation.
     pub registry: Registry,
+    /// Stable deployment identity included in prepared snapshots.
     pub deployment_id: String,
 }
 
 /// Concrete dylib seam. Building a generation must perform no provider I/O.
 pub trait PluginProviderFactory: Default + fmt::Debug + Send + 'static {
+    /// Builds one generation from validated configuration without provider I/O.
     fn build(
         &self,
         generation: u64,
@@ -226,6 +311,7 @@ impl<F: PluginProviderFactory> fmt::Debug for ProviderPlugin<F> {
 struct PluginStream {
     service: AiService,
     output: StreamOutput,
+    media: PluginMediaResolver,
     calls: Mutex<BTreeMap<String, CallSlot>>,
     uploads: Mutex<BTreeMap<String, Upload>>,
     input_closed: AtomicBool,
@@ -242,8 +328,96 @@ enum CallSlot {
     RealtimePrepared(PreparedRealtimeSession),
     Running {
         cancel: CancellationToken,
-        realtime: Option<std::sync::mpsc::SyncSender<RealtimeCommand>>,
+        realtime: Option<RealtimeCommandQueue>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct RealtimeCommandQueue {
+    sender: tokio::sync::mpsc::Sender<QueuedRealtimeCommand>,
+}
+
+#[derive(Debug)]
+struct QueuedRealtimeCommand {
+    command: RealtimeCommand,
+    input_credit: Option<DeferredInputCredit>,
+}
+
+#[derive(Debug)]
+struct DeferredInputCredit {
+    stream: Arc<PluginStream>,
+    charge: u64,
+}
+
+impl DeferredInputCredit {
+    const fn new(stream: Arc<PluginStream>, charge: u64) -> Self {
+        Self { stream, charge }
+    }
+
+    fn return_to_caller(self) {
+        tokio::spawn(async move {
+            let credit = Frame::service_event(
+                Some(self.stream.output.request_id.clone()),
+                self.stream.service.key(),
+                EVENT_CREDIT,
+                json!({"bytes":self.charge}),
+            );
+            if self.stream.output.post(credit, 0).await.is_err() {
+                fail_output_stream(&self.stream);
+            }
+        });
+    }
+}
+
+impl QueuedRealtimeCommand {
+    fn into_command(self) -> RealtimeCommand {
+        let Self {
+            command,
+            input_credit,
+        } = self;
+        if let Some(input_credit) = input_credit {
+            input_credit.return_to_caller();
+        }
+        command
+    }
+}
+
+impl RealtimeCommandQueue {
+    fn new() -> (Self, tokio::sync::mpsc::Receiver<QueuedRealtimeCommand>) {
+        // Each queued command retains at least one byte of the caller's
+        // STREAM_BYTE_BUDGET until dequeue. Matching the entry capacity to
+        // that byte window makes Full unreachable for a credit-honoring host.
+        Self::with_capacity(
+            usize::try_from(STREAM_BYTE_BUDGET).expect("stream byte budget fits this platform"),
+        )
+    }
+
+    fn with_capacity(
+        capacity: usize,
+    ) -> (Self, tokio::sync::mpsc::Receiver<QueuedRealtimeCommand>) {
+        let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
+        (Self { sender }, receiver)
+    }
+
+    fn try_send(
+        &self,
+        command: RealtimeCommand,
+        input_credit: Option<DeferredInputCredit>,
+    ) -> Result<(), PluginError> {
+        self.sender
+            .try_send(QueuedRealtimeCommand {
+                command,
+                input_credit,
+            })
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    PluginError::new("Realtime command queue is full")
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    PluginError::new("Realtime command queue is closed")
+                }
+            })
+    }
 }
 
 #[derive(Debug)]
@@ -251,6 +425,7 @@ struct Upload {
     call_id: String,
     assembler: Option<BlobAssembler>,
     realtime_sequence: Option<u32>,
+    deferred_input_credit: u64,
 }
 
 #[derive(Debug)]
@@ -480,6 +655,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
         let stream = Arc::new(PluginStream {
             service,
             output: StreamOutput::new(self.host, request_id.to_owned(), service),
+            media: self.media.clone(),
             calls: Mutex::new(BTreeMap::new()),
             uploads: Mutex::new(BTreeMap::new()),
             input_closed: AtomicBool::new(false),
@@ -531,7 +707,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
             .ok_or(PluginError::new("provider is not committed"))?
             .provider
             .clone();
-        match decode_wire_frame(payload)
+        let input_credit_deferred = match decode_wire_frame(payload)
             .map_err(|error| PluginError::context("invalid nested AI frame", &error))?
         {
             WireFrame::Control { call_id, payload } => {
@@ -540,7 +716,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 if control.call_id() != call_id {
                     return Err(PluginError::new("nested call id mismatch"));
                 }
-                self.handle_control(Arc::clone(&stream), provider, control)?;
+                self.handle_control(Arc::clone(&stream), provider, control, charge)?
             }
             WireFrame::BlobChunk {
                 call_id,
@@ -548,11 +724,19 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 sequence,
                 final_chunk,
                 bytes,
-            } => {
-                self.handle_blob(&stream, &call_id, &blob_id, sequence, final_chunk, &bytes)?;
-            }
+            } => Self::handle_blob(
+                &stream,
+                &call_id,
+                &blob_id,
+                sequence,
+                final_chunk,
+                &bytes,
+                charge,
+            )?,
+        };
+        if !input_credit_deferred {
+            self.post_input_credit(stream, charge);
         }
-        self.post_input_credit(stream, charge);
         Ok(())
     }
 
@@ -562,7 +746,8 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
         stream: Arc<PluginStream>,
         provider: PluginProvider,
         control: ClientControl,
-    ) -> Result<(), PluginError> {
+        input_charge: u64,
+    ) -> Result<bool, PluginError> {
         match control {
             ClientControl::PrepareLanguage {
                 call_id,
@@ -589,7 +774,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 self.runtime.spawn(prepare_language(
                     stream, provider, call_id, model, request, cancel,
                 ));
-                Ok(())
+                Ok(false)
             }
             ClientControl::PrepareImage {
                 call_id,
@@ -601,7 +786,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 self.runtime.spawn(prepare_image(
                     stream, provider, call_id, model, request, cancel,
                 ));
-                Ok(())
+                Ok(false)
             }
             ClientControl::PrepareTranscription {
                 call_id,
@@ -613,7 +798,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 self.runtime.spawn(prepare_transcription(
                     stream, provider, call_id, model, request, cancel,
                 ));
-                Ok(())
+                Ok(false)
             }
             ClientControl::PrepareSpeech {
                 call_id,
@@ -625,7 +810,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 self.runtime.spawn(prepare_speech(
                     stream, provider, call_id, model, request, cancel,
                 ));
-                Ok(())
+                Ok(false)
             }
             ClientControl::PrepareRealtime {
                 call_id,
@@ -637,7 +822,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 self.runtime.spawn(prepare_realtime(
                     stream, provider, call_id, model, request, cancel,
                 ));
-                Ok(())
+                Ok(false)
             }
             ClientControl::Start { call_id } => {
                 let prepared = {
@@ -684,16 +869,8 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                             .spawn(run_speech(stream, call_id, prepared, cancel));
                     }
                     CallSlot::RealtimePrepared(prepared) => {
-                        let (commands, blocking_receiver) = std::sync::mpsc::sync_channel(64);
-                        let (async_sender, receiver) = tokio::sync::mpsc::channel(64);
+                        let (commands, receiver) = RealtimeCommandQueue::new();
                         insert_running(&stream, &call_id, cancel.clone(), Some(commands))?;
-                        self.runtime.spawn_blocking(move || {
-                            while let Ok(command) = blocking_receiver.recv() {
-                                if async_sender.blocking_send(command).is_err() {
-                                    break;
-                                }
-                            }
-                        });
                         self.runtime
                             .spawn(run_realtime(stream, call_id, prepared, cancel, receiver));
                     }
@@ -701,7 +878,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                         unreachable!("filtered above")
                     }
                 }
-                Ok(())
+                Ok(false)
             }
             ClientControl::Abort { call_id } => {
                 if let Some(slot) = stream
@@ -718,10 +895,15 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                         | CallSlot::ImagePrepared(_)
                         | CallSlot::TranscriptionPrepared(_)
                         | CallSlot::SpeechPrepared(_)
-                        | CallSlot::RealtimePrepared(_) => {}
+                        | CallSlot::RealtimePrepared(_) => {
+                            stream.media.release_call(&MediaOwner::new(
+                                &stream.output.request_id,
+                                &call_id,
+                            ))?;
+                        }
                     }
                 }
-                Ok(())
+                Ok(false)
             }
             ClientControl::DeclareInputBlob {
                 call_id,
@@ -742,9 +924,10 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                         call_id,
                         assembler: Some(BlobAssembler::new(descriptor)),
                         realtime_sequence: None,
+                        deferred_input_credit: 0,
                     },
                 );
-                Ok(())
+                Ok(false)
             }
             ClientControl::RealtimeAppendAudio {
                 call_id,
@@ -766,18 +949,37 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                         call_id,
                         assembler: Some(BlobAssembler::new(descriptor)),
                         realtime_sequence: Some(sequence),
+                        deferred_input_credit: input_charge,
                     },
                 );
-                Ok(())
+                Ok(true)
             }
             ClientControl::RealtimeAppendText { call_id, text } => {
-                send_realtime_command(&stream, &call_id, RealtimeCommand::AppendText { text })
+                send_realtime_command(
+                    &stream,
+                    &call_id,
+                    RealtimeCommand::AppendText { text },
+                    input_charge,
+                )?;
+                Ok(true)
             }
             ClientControl::RealtimeCommitInput { call_id, item_id } => {
-                send_realtime_command(&stream, &call_id, RealtimeCommand::CommitInput { item_id })
+                send_realtime_command(
+                    &stream,
+                    &call_id,
+                    RealtimeCommand::CommitInput { item_id },
+                    input_charge,
+                )?;
+                Ok(true)
             }
             ClientControl::RealtimeRequestResponse { call_id } => {
-                send_realtime_command(&stream, &call_id, RealtimeCommand::RequestResponse)
+                send_realtime_command(
+                    &stream,
+                    &call_id,
+                    RealtimeCommand::RequestResponse,
+                    input_charge,
+                )?;
+                Ok(true)
             }
             ClientControl::RealtimeCancelResponse {
                 call_id,
@@ -786,23 +988,26 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 &stream,
                 &call_id,
                 RealtimeCommand::CancelResponse { response_id },
-            ),
+                input_charge,
+            )
+            .map(|()| true),
             ClientControl::RealtimeClose { call_id } => {
-                send_realtime_command(&stream, &call_id, RealtimeCommand::Close)
+                send_realtime_command(&stream, &call_id, RealtimeCommand::Close, input_charge)?;
+                Ok(true)
             }
         }
     }
 
     fn handle_blob(
-        &self,
-        stream: &PluginStream,
+        stream: &Arc<PluginStream>,
         call_id: &str,
         blob_id: &str,
         sequence: u32,
         final_chunk: bool,
         bytes: &[u8],
-    ) -> Result<(), PluginError> {
-        let complete = {
+        input_charge: u64,
+    ) -> Result<bool, PluginError> {
+        let (complete, input_credit_deferred) = {
             let mut uploads = stream
                 .uploads
                 .lock()
@@ -813,6 +1018,14 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
             if upload.call_id != call_id {
                 return Err(PluginError::new("input blob call id mismatch"));
             }
+            let input_credit_deferred = upload.realtime_sequence.is_some();
+            if input_credit_deferred {
+                upload.deferred_input_credit = upload
+                    .deferred_input_credit
+                    .checked_add(input_charge)
+                    .filter(|charge| *charge <= STREAM_BYTE_BUDGET)
+                    .ok_or(PluginError::new("Realtime input credit exceeds its window"))?;
+            }
             let assembler = upload
                 .assembler
                 .as_mut()
@@ -820,7 +1033,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
             assembler
                 .push(sequence, bytes, final_chunk)
                 .map_err(|_| PluginError::new("invalid input blob chunk"))?;
-            if final_chunk {
+            let complete = if final_chunk {
                 let upload = uploads
                     .remove(blob_id)
                     .ok_or(PluginError::new("input blob disappeared"))?;
@@ -831,23 +1044,34 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 let bytes = assembler
                     .finish()
                     .map_err(|_| PluginError::new("invalid complete input blob"))?;
-                Some((descriptor, bytes, upload.realtime_sequence))
+                Some((
+                    descriptor,
+                    bytes,
+                    upload.realtime_sequence,
+                    upload.deferred_input_credit,
+                ))
             } else {
                 None
-            }
+            };
+            (complete, input_credit_deferred)
         };
-        if let Some((descriptor, bytes, realtime_sequence)) = complete {
+        if let Some((descriptor, bytes, realtime_sequence, deferred_input_credit)) = complete {
             if let Some(sequence) = realtime_sequence {
                 send_realtime_command(
                     stream,
                     call_id,
                     RealtimeCommand::AppendAudio { sequence, bytes },
+                    deferred_input_credit,
                 )?;
             } else {
-                self.media.insert(&descriptor, bytes)?;
+                stream.media.insert(
+                    &MediaOwner::new(&stream.output.request_id, call_id),
+                    &descriptor,
+                    bytes,
+                )?;
             }
         }
-        Ok(())
+        Ok(input_credit_deferred)
     }
 
     fn half_close(&self, request_id: &str, service: &str) -> Result<(), PluginError> {
@@ -889,6 +1113,7 @@ impl<F: PluginProviderFactory> ProviderPlugin<F> {
                 cancel.cancel();
             }
         }
+        self.media.release_stream(request_id)?;
         let output = Arc::clone(&stream);
         self.runtime.spawn(async move {
             let _ = output.output.terminal(EVENT_CANCEL, payload).await;
@@ -1059,8 +1284,7 @@ impl<F: PluginProviderFactory> Plugin for ProviderPlugin<F> {
 
     fn shutdown(&mut self) -> Result<(), Self::Error> {
         for stream in self.streams.values() {
-            stream.cancelled.store(true, Ordering::Release);
-            stream.output.wake();
+            fail_output_stream(stream);
         }
         self.streams.clear();
         Ok(())
@@ -1110,7 +1334,7 @@ fn insert_running(
     stream: &PluginStream,
     call_id: &str,
     cancel: CancellationToken,
-    realtime: Option<std::sync::mpsc::SyncSender<RealtimeCommand>>,
+    realtime: Option<RealtimeCommandQueue>,
 ) -> Result<(), PluginError> {
     let previous = stream
         .calls
@@ -1124,10 +1348,16 @@ fn insert_running(
 }
 
 fn send_realtime_command(
-    stream: &PluginStream,
+    stream: &Arc<PluginStream>,
     call_id: &str,
     command: RealtimeCommand,
+    input_charge: u64,
 ) -> Result<(), PluginError> {
+    if input_charge == 0 {
+        return Err(PluginError::new(
+            "Realtime input frame has no credit charge",
+        ));
+    }
     if stream.service != AiService::Realtime {
         return Err(PluginError::new(
             "Realtime command arrived on a different service",
@@ -1146,9 +1376,10 @@ fn send_realtime_command(
             _ => return Err(PluginError::new("Realtime call is not running")),
         }
     };
-    sender
-        .send(command)
-        .map_err(|_| PluginError::new("Realtime command queue is closed"))
+    sender.try_send(
+        command,
+        Some(DeferredInputCredit::new(Arc::clone(stream), input_charge)),
+    )
 }
 
 macro_rules! prepare_capability {
@@ -1204,10 +1435,22 @@ macro_rules! prepare_capability {
                         {
                             fail_output_stream(&stream);
                         }
+                    } else {
+                        let _ = stream
+                            .media
+                            .release_call(&MediaOwner::new(&stream.output.request_id, &call_id));
                     }
                 }
                 Err(error) => {
                     if !remove_call(&stream, &call_id) {
+                        return;
+                    }
+                    if stream
+                        .media
+                        .release_call(&MediaOwner::new(&stream.output.request_id, &call_id))
+                        .is_err()
+                    {
+                        fail_output_stream(&stream);
                         return;
                     }
                     let _ = stream
@@ -1299,10 +1542,7 @@ async fn run_language(
                 .await;
         }
     }
-    if !remove_call(&stream, &call_id) {
-        return;
-    }
-    maybe_end(stream, &tokio::runtime::Handle::current());
+    finish_running_call(stream, call_id, None).await;
 }
 
 #[derive(Debug)]
@@ -1609,7 +1849,7 @@ async fn run_realtime(
     call_id: String,
     prepared: PreparedRealtimeSession,
     cancel: CancellationToken,
-    mut commands: tokio::sync::mpsc::Receiver<RealtimeCommand>,
+    mut commands: tokio::sync::mpsc::Receiver<QueuedRealtimeCommand>,
 ) {
     let mut failure = None;
     match prepared.start().await {
@@ -1625,6 +1865,7 @@ async fn run_realtime(
                         failure = Some(protocol_ai_error("Realtime command channel closed"));
                         break;
                     };
+                    let command = command.into_command();
                     let closes = matches!(command, RealtimeCommand::Close);
                     let result = if closes { session.close().await } else { session.send(command).await };
                     if let Err(error) = result {
@@ -1755,6 +1996,14 @@ async fn finish_running_call(stream: Arc<PluginStream>, call_id: String, failure
             })
             .await;
     }
+    if stream
+        .media
+        .release_call(&MediaOwner::new(&stream.output.request_id, &call_id))
+        .is_err()
+    {
+        fail_output_stream(&stream);
+        return;
+    }
     if !remove_call(&stream, &call_id) {
         return;
     }
@@ -1790,6 +2039,7 @@ fn fail_output_stream(stream: &PluginStream) {
         }
         calls.clear();
     }
+    let _ = stream.media.release_stream(&stream.output.request_id);
 }
 
 fn remove_call(stream: &PluginStream, call_id: &str) -> bool {
@@ -1872,10 +2122,12 @@ fn ai_error(
 pub struct PluginError(String);
 
 impl PluginError {
+    /// Creates a plugin failure with a sanitized, bounded summary.
     pub fn new(summary: impl AsRef<str>) -> Self {
         Self(sanitize_error_summary(summary.as_ref()))
     }
 
+    /// Adds a static operation context to a displayable underlying failure.
     pub fn context(context: &'static str, error: &impl fmt::Display) -> Self {
         Self::new(format!("{context}: {error}"))
     }
@@ -1891,12 +2143,13 @@ impl std::error::Error for PluginError {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use rsi_ai_protocol::{ErrorKind, MediaDescriptor, MediaKind};
     use rsi_ai_provider::{AbortSignal, MediaResolver as _};
 
-    use super::{OutputCredit, PluginMediaResolver};
+    use super::{MediaOwner, OutputCredit, PluginMediaResolver, RealtimeCommandQueue};
 
     #[tokio::test]
     async fn output_credit_grant_before_wait_registration_is_not_lost() {
@@ -1935,5 +2188,110 @@ mod tests {
             .expect_err("poisoning is not reported as a missing artifact");
         assert_eq!(error.kind(), ErrorKind::Artifact);
         assert_eq!(error.safe_summary(), "media store lock is poisoned");
+    }
+
+    #[tokio::test]
+    async fn completed_call_reclaims_owned_media() {
+        let resolver = PluginMediaResolver::default();
+        let owner = MediaOwner::new("stream-1", "call-1");
+        let descriptor = MediaDescriptor::new(
+            MediaKind::Image,
+            "image/png",
+            1,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("descriptor");
+        resolver
+            .insert(&owner, &descriptor, vec![1])
+            .expect("upload");
+        assert_eq!(resolver.usage().expect("usage"), (1, 1));
+        let first = resolver
+            .read(descriptor.clone(), AbortSignal::new())
+            .await
+            .expect("first read");
+        let second = resolver
+            .read(descriptor.clone(), AbortSignal::new())
+            .await
+            .expect("second read");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        resolver.release_call(&owner).expect("release");
+
+        assert_eq!(resolver.usage().expect("usage"), (0, 0));
+        let error = resolver
+            .read(descriptor, AbortSignal::new())
+            .await
+            .expect_err("released media is no longer resolvable");
+        assert_eq!(error.kind(), ErrorKind::Artifact);
+    }
+
+    #[test]
+    fn media_resolver_debug_redacts_retained_binary_bytes() {
+        let resolver = PluginMediaResolver::default();
+        let owner = MediaOwner::new("stream-1", "call-1");
+        let descriptor = MediaDescriptor::new(
+            MediaKind::Audio,
+            "audio/wav",
+            4,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("descriptor");
+        resolver
+            .insert(&owner, &descriptor, vec![115, 101, 99, 114])
+            .expect("upload");
+
+        let debug = format!("{resolver:?}");
+        assert!(!debug.contains("115, 101, 99, 114"));
+        assert!(debug.contains("byte_len"));
+    }
+
+    #[test]
+    fn sequential_calls_can_exceed_generation_media_budget_cumulatively() {
+        let resolver = PluginMediaResolver::default();
+        let bytes_per_call = 32 * 1024 * 1024;
+        let descriptor = MediaDescriptor::new(
+            MediaKind::Image,
+            "image/png",
+            bytes_per_call,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("descriptor");
+
+        for call in 0..17 {
+            let owner = MediaOwner::new("stream-1", format!("call-{call}"));
+            resolver
+                .insert(
+                    &owner,
+                    &descriptor,
+                    vec![1; usize::try_from(bytes_per_call).expect("test call size fits usize")],
+                )
+                .expect("only live bytes count against quota");
+            resolver.release_call(&owner).expect("release");
+        }
+
+        assert_eq!(resolver.usage().expect("usage"), (0, 0));
+    }
+
+    #[test]
+    fn realtime_command_queue_reports_backpressure_without_blocking() {
+        let (queue, _receiver) = RealtimeCommandQueue::with_capacity(1);
+        queue
+            .try_send(rsi_ai_protocol::RealtimeCommand::RequestResponse, None)
+            .expect("first command fits");
+
+        let error = queue
+            .try_send(rsi_ai_protocol::RealtimeCommand::RequestResponse, None)
+            .expect_err("a full queue rejects work synchronously");
+        assert_eq!(error.to_string(), "Realtime command queue is full");
+    }
+
+    #[test]
+    fn production_realtime_queue_does_not_fail_inside_one_input_credit_window() {
+        let (queue, _receiver) = RealtimeCommandQueue::new();
+        for _ in 0..65 {
+            queue
+                .try_send(rsi_ai_protocol::RealtimeCommand::RequestResponse, None)
+                .expect("the protocol credit window, not a 64-item queue, owns pacing");
+        }
     }
 }

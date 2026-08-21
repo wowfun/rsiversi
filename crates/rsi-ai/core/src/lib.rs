@@ -92,6 +92,7 @@ struct RegistryInner {
 }
 
 impl Registry {
+    /// Starts a builder with immutable credential resolution and no media resolver.
     #[must_use]
     pub fn builder(credentials: CredentialManager) -> RegistryBuilder {
         RegistryBuilder {
@@ -102,6 +103,7 @@ impl Registry {
     }
 
     #[allow(clippy::needless_pass_by_value)] // All capability selectors intentionally share ownership semantics.
+    /// Resolves an exact language handle without provider I/O.
     pub fn language(&self, model: ModelRef) -> Result<LanguageModel, RegistryError> {
         let registration = self.registration(&model)?;
         if registration.language().is_none() {
@@ -121,6 +123,7 @@ impl Registry {
         })
     }
 
+    /// Resolves an exact image handle without provider I/O.
     pub fn image(&self, model: ModelRef) -> Result<ImageModel, RegistryError> {
         let registration = self.registration(&model)?;
         require_capability(registration.image().is_some(), &model, "image")?;
@@ -131,6 +134,7 @@ impl Registry {
         ))
     }
 
+    /// Resolves an exact transcription handle without provider I/O.
     pub fn transcription(&self, model: ModelRef) -> Result<TranscriptionModel, RegistryError> {
         let registration = self.registration(&model)?;
         require_capability(
@@ -145,6 +149,7 @@ impl Registry {
         ))
     }
 
+    /// Resolves an exact speech handle without provider I/O.
     pub fn speech(&self, model: ModelRef) -> Result<SpeechModel, RegistryError> {
         let registration = self.registration(&model)?;
         require_capability(registration.speech().is_some(), &model, "speech")?;
@@ -155,6 +160,7 @@ impl Registry {
         ))
     }
 
+    /// Resolves an exact live Realtime handle without provider I/O.
     pub fn realtime(&self, model: ModelRef) -> Result<RealtimeModel, RegistryError> {
         let registration = self.registration(&model)?;
         require_capability(registration.realtime().is_some(), &model, "realtime")?;
@@ -202,6 +208,7 @@ pub struct RegistryBuilder {
 }
 
 impl RegistryBuilder {
+    /// Installs the Start-time media resolver shared by all prepared calls.
     #[must_use]
     pub fn with_media_resolver<R>(mut self, resolver: R) -> Self
     where
@@ -211,6 +218,7 @@ impl RegistryBuilder {
         self
     }
 
+    /// Adds one uniquely named immutable provider deployment.
     pub fn register(mut self, registration: ProviderRegistration) -> Result<Self, RegistryError> {
         let id = registration.deployment_id().to_owned();
         if self.registrations.contains_key(&id) {
@@ -223,6 +231,7 @@ impl RegistryBuilder {
         Ok(self)
     }
 
+    /// Freezes exact routing and all local dependency handles.
     pub fn build(self) -> Result<Registry, RegistryError> {
         Ok(Registry {
             inner: Arc::new(RegistryInner {
@@ -243,6 +252,11 @@ impl RegistryInner {
         let Some(requirement) = registration.credential().cloned() else {
             return Ok(None);
         };
+        if let Some(resolved) = self.credentials.try_resolve_in_memory(&requirement) {
+            return resolved
+                .map(Some)
+                .map_err(|error| RegistryError::new(error.code(), error.to_string()));
+        }
         let credentials = self.credentials.clone();
         tokio::task::spawn_blocking(move || credentials.resolve(&requirement))
             .await
@@ -360,6 +374,7 @@ impl LanguageModel {
         &self.descriptor
     }
 
+    /// Validates and freezes one one-shot language call without provider I/O.
     pub async fn prepare(
         &self,
         request: LanguageRequest,
@@ -387,6 +402,7 @@ impl LanguageModel {
         Ok(PreparedLanguageCall { prepared })
     }
 
+    /// Prepares, starts, drains, and validates one language response.
     pub async fn complete(
         &self,
         request: LanguageRequest,
@@ -485,6 +501,7 @@ macro_rules! streaming_capability {
         $complete:ident,
         $terminal:pat
     ) => {
+        /// Resolved exact capability handle.
         #[derive(Clone)]
         pub struct $model {
             registry: Arc<RegistryInner>,
@@ -513,6 +530,7 @@ macro_rules! streaming_capability {
                 &self.descriptor
             }
 
+            /// Validates and freezes one one-shot call without provider I/O.
             pub async fn prepare(&self, request: $request) -> Result<$prepared, RegistryError> {
                 request
                     .validate()
@@ -539,6 +557,7 @@ macro_rules! streaming_capability {
                 Ok($prepared { prepared })
             }
 
+            /// Prepares, starts, drains, and validates one complete result.
             pub async fn $complete(&self, request: $request) -> Result<$output, RegistryError> {
                 use futures_util::StreamExt as _;
 
@@ -557,16 +576,19 @@ macro_rules! streaming_capability {
             }
         }
 
+        /// Provider-I/O-free one-shot prepared call.
         #[derive(Debug)]
         pub struct $prepared {
             prepared: Prepared<$stream>,
         }
 
         impl $prepared {
+            /// Returns redacted facts that may be committed before Start.
             pub const fn snapshot(&self) -> &PreparedCallSnapshot {
                 self.prepared.snapshot()
             }
 
+            /// Consumes the prepared value and performs one provider attempt.
             pub async fn start(self) -> Result<$generation, RegistryError> {
                 let abort = AbortSignal::new();
                 let stream = self
@@ -584,6 +606,7 @@ macro_rules! streaming_capability {
             }
         }
 
+        /// Pull-based validated stream.
         pub struct $generation {
             stream: $stream,
             assembler: Option<$assembler>,
@@ -593,10 +616,12 @@ macro_rules! streaming_capability {
         }
 
         impl $generation {
+            /// Signals cooperative cancellation to the active provider attempt.
             pub fn abort(&self) {
                 self.abort.abort();
             }
 
+            /// Returns assembled output only after a valid terminal event.
             pub fn finish(mut self) -> Result<$output, RegistryError> {
                 if let Some(error) = self.error.take() {
                     return Err(error);
@@ -741,6 +766,7 @@ impl RealtimeModel {
         &self.descriptor
     }
 
+    /// Validates and freezes a live session without opening its transport.
     pub async fn prepare(
         &self,
         request: RealtimeRequest,
@@ -770,6 +796,7 @@ impl RealtimeModel {
         Ok(PreparedRealtimeSession { prepared })
     }
 
+    /// Prepares and starts one live non-replayable session.
     pub async fn connect(
         &self,
         request: RealtimeRequest,
@@ -787,16 +814,19 @@ impl fmt::Debug for RealtimeModel {
     }
 }
 
+/// Provider-I/O-free prepared Realtime session.
 #[derive(Debug)]
 pub struct PreparedRealtimeSession {
     prepared: Prepared<RealtimeAdapterTransport>,
 }
 
 impl PreparedRealtimeSession {
+    /// Returns redacted facts that may be committed before opening the transport.
     pub const fn snapshot(&self) -> &PreparedCallSnapshot {
         self.prepared.snapshot()
     }
 
+    /// Consumes the prepared value and opens one live provider transport.
     pub async fn start(self) -> Result<RealtimeSession, RegistryError> {
         let abort = AbortSignal::new();
         let transport = self
@@ -822,6 +852,7 @@ pub struct RealtimeSession {
 }
 
 impl RealtimeSession {
+    /// Validates and sends one live command in session order.
     pub async fn send(&mut self, command: RealtimeCommand) -> Result<(), RegistryError> {
         self.validator
             .push_command(&command)
@@ -832,6 +863,7 @@ impl RealtimeSession {
             .map_err(RegistryError::provider)
     }
 
+    /// Receives and validates the next event; returns `None` only after `Closed`.
     pub async fn next_event(&mut self) -> Result<Option<RealtimeEvent>, RegistryError> {
         if self.closed {
             return Ok(None);
@@ -854,6 +886,7 @@ impl RealtimeSession {
         Ok(Some(event))
     }
 
+    /// Requests orderly closure and closes the underlying transport once.
     pub async fn close(&mut self) -> Result<(), RegistryError> {
         if self.closed {
             return Ok(());
@@ -871,6 +904,7 @@ impl RealtimeSession {
             .map_err(RegistryError::provider)
     }
 
+    /// Signals immediate cooperative cancellation without waiting for closure.
     pub fn abort(&self) {
         self.abort.abort();
     }
@@ -899,6 +933,7 @@ pub struct PreparedDeferredLanguageCall {
 }
 
 impl PreparedDeferredLanguageCall {
+    /// Returns redacted facts that may be committed before submission.
     pub const fn snapshot(&self) -> &PreparedCallSnapshot {
         self.prepared.snapshot()
     }
@@ -921,6 +956,7 @@ pub struct DeferredLanguageHandle {
 }
 
 impl DeferredLanguageHandle {
+    /// Returns the latest provider-owned cursor for durable persistence.
     pub fn checkpoint(&self) -> DeferredLanguageCheckpoint {
         self.operation.checkpoint()
     }
@@ -985,6 +1021,7 @@ pub struct DeferredLanguageGeneration<'handle> {
 }
 
 impl DeferredLanguageGeneration<'_> {
+    /// Signals cooperative cancellation of this single resume request.
     pub fn abort(&self) {
         self.abort.abort();
     }
@@ -1083,10 +1120,12 @@ pub struct PreparedLanguageCall {
 }
 
 impl PreparedLanguageCall {
+    /// Returns redacted facts that may be committed before Start.
     pub const fn snapshot(&self) -> &PreparedCallSnapshot {
         self.prepared.snapshot()
     }
 
+    /// Consumes the prepared value and starts one provider stream.
     pub async fn start(self) -> Result<LanguageGeneration, RegistryError> {
         let abort = AbortSignal::new();
         let stream = self
@@ -1114,10 +1153,13 @@ pub struct LanguageGeneration {
 }
 
 impl LanguageGeneration {
+    /// Signals cooperative cancellation to the active provider attempt.
     pub fn abort(&self) {
         self.abort.abort();
     }
 
+    /// Returns complete output, or a terminal error carrying diagnostic partial
+    /// output that must not be treated as a successful response.
     pub fn finish(mut self) -> Result<LanguageOutput, LanguageAssemblyError> {
         if let Some(error) = self.protocol_error.take() {
             return Err(LanguageAssemblyError::Protocol(error));
@@ -1258,6 +1300,7 @@ impl RegistryError {
         }
     }
 
+    /// Returns the stable registry or nested provider failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }

@@ -12,16 +12,17 @@ bounds. Successful HTTP bodies and error bodies are collected with explicit
 limits. Provider errors expose a bounded safe summary, phase, dispatch status,
 and retry hints rather than raw response bodies.
 
-Media JSON responses are currently whole-body operations. One OpenAI image
-call may transiently retain at most 448 MiB of JSON/base64 before decoded image
-buffers and output chunks are published; one Xiaomi audio call may retain at
-most 180 MiB before decoding. Those limits derive from the semantic maximum of
-ten 32 MiB images and one 128 MiB audio body plus base64 and envelope overhead.
-They are per call, so callers must include concurrency when setting a process
-memory budget.
+Large media JSON responses are incrementally extracted under independent total
+body, normalized-envelope, item, nesting, and decoded-media limits. OpenAI
+Images retains at most one bounded image item plus its small normalized
+envelope; Xiaomi speech retains one bounded base64 chunk plus its normalized
+envelope. Successfully decoded chunks or items may precede a later terminal
+validation error, so callers must publish only the completed operation result.
+Limits remain per call, and deployments must include configured concurrency in
+their process memory budget.
 
-`SecretValue` is zeroized when its last owner is dropped and always formats as
-redacted. A prepared snapshot identifies only the selected credential source.
+`SecretValue` is zeroized when its last owner is dropped, always formats as
+redacted, and deliberately exposes no equality operation. A prepared snapshot identifies only the selected credential source.
 Standalone resolution precedence is explicit, in-memory, persistent store,
 then the environment captured by the builder. Plugin wrappers receive secrets
 only from fields marked `x-rsi-meta-secret`; they do not consult the process
@@ -31,6 +32,9 @@ events, or Debug output.
 Media requests contain locator-free descriptors. A resolver reads bytes only at
 Start and verifies length and SHA-256 before translation. Plugin binary frames
 are bounded, sequenced, credited, and reassembled against the same descriptor.
+Realtime input credit is returned only when the provider task dequeues the
+corresponding command, bounding a stalled bridge without blocking the plugin
+callback or converting ordinary pressure into stream failure.
 Provider URL fetching is not part of the protocol. `rsi-agent` stores media in
 an owner-only, quota-bounded CAS and re-verifies every read.
 

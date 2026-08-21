@@ -1652,6 +1652,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bytes",
  "futures-util",
  "http",
  "percent-encoding",
@@ -1731,6 +1732,7 @@ version = "0.0.1"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -1754,6 +1756,7 @@ dependencies = [
  "axum",
  "base64",
  "futures-util",
+ "hex",
  "http",
  "rsi-ai",
  "rsi-ai-auth",
@@ -1761,7 +1764,9 @@ dependencies = [
  "rsi-ai-provider",
  "rsi-ai-testkit",
  "rsi-ai-transport",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

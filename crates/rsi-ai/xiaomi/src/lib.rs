@@ -7,7 +7,7 @@ use std::{fmt, sync::Arc};
 
 use async_stream::stream;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use futures_util::{StreamExt as _, stream as futures_stream};
+use futures_util::StreamExt as _;
 use http::{HeaderValue, Method};
 use rsi_ai_protocol::{
     AiError, DispatchStatus, ErrorKind, ErrorPhase, SpeechEvent, SpeechFormat, SpeechRequest,
@@ -18,9 +18,11 @@ use rsi_ai_provider::{
     TranscriptionAdapter, TranscriptionAdapterStream,
 };
 use rsi_ai_transport::{
-    ByteStream, ChatCompletionsChunk, HttpRequest, HttpTransport, SseTermination, collect_body,
-    decode_sse, invalid_request_error, provider_error as ai_error, provider_http_error,
-    transport_body_error, transport_connect_error, transport_stream_error,
+    BoundedJsonExtractor, ByteStream, ChatCompletionsChunk, HttpRequest, HttpTransport,
+    JsonBase64Replacement, JsonExtractEvent, JsonExtractionLimits, JsonRequestBody, SseTermination,
+    decode_sse, invalid_request_error, json_base64_body, provider_error as ai_error,
+    provider_http_error, transport_body_error, transport_connect_error,
+    transport_json_response_error, transport_stream_error,
 };
 use serde_json::{Value, json};
 
@@ -28,7 +30,9 @@ use serde_json::{Value, json};
 // remaining headroom covers the bounded Chat Completions JSON envelope. This
 // is a per-call transient ceiling.
 const MAX_AUDIO_JSON_BYTES: usize = 180 * 1024 * 1024;
+const MAX_AUDIO_ENVELOPE_BYTES: usize = 1024 * 1024;
 const OUTPUT_CHUNK_BYTES: usize = 256 * 1024;
+const ENCODED_AUDIO_CHUNK_BYTES: usize = (OUTPUT_CHUNK_BYTES / 3) * 4;
 
 /// Fixed Xiaomi `MiMo` API origin.
 #[derive(Clone, Debug)]
@@ -45,6 +49,7 @@ impl Default for XiaomiConfig {
 }
 
 impl XiaomiConfig {
+    /// Creates endpoint policy after validating the Chat Completions URL.
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
@@ -68,6 +73,7 @@ macro_rules! xiaomi_adapter {
 
         impl $name {
             #[must_use]
+            /// Binds Xiaomi endpoint policy to the no-retry HTTP transport.
             pub fn new(config: XiaomiConfig, transport: Arc<dyn HttpTransport>) -> Self {
                 Self { config, transport }
             }
@@ -134,22 +140,31 @@ impl TranscriptionAdapter for XiaomiTranscriptionAdapter {
                             "Xiaomi MiMo ASR language must be auto, zh, or en",
                         ));
                     }
-                    let body = serde_json::to_vec(&json!({
-                    "model":model,
-                    "messages":[{
-                        "role":"user",
-                        "content":[{
-                            "type":"input_audio",
-                            "input_audio":{
-                                "data":format!("data:{};base64,{}", request.audio().mime_type(), BASE64.encode(bytes)),
-                                "format":format,
-                            }
-                        }]
-                    }],
-                    "asr_options":{"language":language},
-                    "stream":true,
-                    "stream_options":{"include_usage":true},
-                })).map_err(invalid_request_error)?;
+                    let body = json!({
+                        "model":model,
+                        "messages":[{
+                            "role":"user",
+                            "content":[{
+                                "type":"input_audio",
+                                "input_audio":{
+                                    "data":null,
+                                    "format":format,
+                                }
+                            }]
+                        }],
+                        "asr_options":{"language":language},
+                        "stream":true,
+                        "stream_options":{"include_usage":true},
+                    });
+                    let body = json_base64_body(
+                        body,
+                        vec![JsonBase64Replacement::new(
+                            "/messages/0/content/0/input_audio/data",
+                            format!("data:{};base64,", request.audio().mime_type()),
+                            bytes,
+                        )],
+                    )
+                    .map_err(invalid_request_error)?;
                     let outgoing = authorized(&context, config.url(), body)?;
                     let response = transport
                         .execute(outgoing, abort.cancellation_token())
@@ -255,13 +270,15 @@ impl SpeechAdapter for XiaomiSpeechAdapter {
                         SpeechFormat::Mp3 => "mp3",
                     };
                     let streaming = request.format() == SpeechFormat::Pcm16;
-                    let body = serde_json::to_vec(&json!({
-                        "model":model,
-                        "messages":[{"role":"assistant", "content":request.text()}],
-                        "audio":{"format":wire_format, "voice":request.voice()},
-                        "stream":streaming,
-                    }))
-                    .map_err(invalid_request_error)?;
+                    let body = JsonRequestBody::buffered(
+                        serde_json::to_vec(&json!({
+                            "model":model,
+                            "messages":[{"role":"assistant", "content":request.text()}],
+                            "audio":{"format":wire_format, "voice":request.voice()},
+                            "stream":streaming,
+                        }))
+                        .map_err(invalid_request_error)?,
+                    );
                     let outgoing = authorized(&context, config.url(), body)?;
                     let response = transport
                         .execute(outgoing, abort.cancellation_token())
@@ -276,37 +293,7 @@ impl SpeechAdapter for XiaomiSpeechAdapter {
                             request.format(),
                         ))
                     } else {
-                        let body = collect_body(response.body, MAX_AUDIO_JSON_BYTES)
-                            .await
-                            .map_err(transport_body_error)?;
-                        let value: Value = serde_json::from_slice(&body).map_err(|_| {
-                            ai_error(
-                                ErrorKind::Protocol,
-                                ErrorPhase::Assemble,
-                                DispatchStatus::Dispatched,
-                                "Xiaomi MiMo TTS returned malformed JSON",
-                            )
-                        })?;
-                        let encoded = value
-                            .pointer("/choices/0/message/audio/data")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| {
-                                ai_error(
-                                    ErrorKind::Protocol,
-                                    ErrorPhase::Assemble,
-                                    DispatchStatus::Dispatched,
-                                    "Xiaomi MiMo TTS response has no audio data",
-                                )
-                            })?;
-                        let bytes = BASE64.decode(encoded).map_err(|_| {
-                            ai_error(
-                                ErrorKind::Protocol,
-                                ErrorPhase::Assemble,
-                                DispatchStatus::Dispatched,
-                                "Xiaomi MiMo TTS audio has invalid base64",
-                            )
-                        })?;
-                        Ok(completed_speech(&bytes, request.format()))
+                        Ok(completed_speech_stream(response.body, request.format()))
                     }
                 })
             }))
@@ -378,25 +365,140 @@ fn tts_stream(mut input: rsi_ai_transport::SseStream, format: SpeechFormat) -> S
     })
 }
 
-fn completed_speech(bytes: &[u8], format: SpeechFormat) -> SpeechAdapterStream {
-    let mut events = vec![SpeechEvent::OutputStarted {
-        mime_type: mime_type(format).to_owned(),
-    }];
-    for (index, chunk) in bytes.chunks(OUTPUT_CHUNK_BYTES).enumerate() {
-        events.push(SpeechEvent::AudioChunk {
-            sequence: u32::try_from(index + 1).expect("speech output is bounded"),
-            bytes: chunk.to_vec(),
-        });
+#[derive(Debug, serde::Deserialize)]
+struct XiaomiTtsResponse<'a> {
+    #[serde(borrow)]
+    choices: Vec<XiaomiTtsChoice<'a>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct XiaomiTtsChoice<'a> {
+    #[serde(borrow)]
+    message: XiaomiTtsMessage<'a>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct XiaomiTtsMessage<'a> {
+    #[serde(borrow)]
+    audio: XiaomiTtsAudio<'a>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct XiaomiTtsAudio<'a> {
+    data: &'a str,
+}
+
+fn completed_speech_stream(mut body: ByteStream, format: SpeechFormat) -> SpeechAdapterStream {
+    Box::pin(stream! {
+        let limits = JsonExtractionLimits::new(
+            MAX_AUDIO_JSON_BYTES,
+            MAX_AUDIO_ENVELOPE_BYTES,
+            ENCODED_AUDIO_CHUNK_BYTES,
+        ).expect("Xiaomi audio extraction limits are valid");
+        let mut extractor = BoundedJsonExtractor::string(
+            "/choices/0/message/audio/data",
+            limits,
+        ).expect("Xiaomi audio JSON pointer is valid");
+        let mut sequence = 1_u32;
+        let mut decoded_bytes = 0_usize;
+        while let Some(chunk) = body.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    yield Err(transport_body_error(error));
+                    return;
+                }
+            };
+            for byte in chunk {
+                match extractor.push(byte) {
+                    Ok(Some(JsonExtractEvent::TargetStarted)) => {
+                        yield Ok(SpeechEvent::OutputStarted { mime_type: mime_type(format).to_owned() });
+                    }
+                    Ok(Some(JsonExtractEvent::StringChunk(encoded))) => {
+                        let Ok(bytes) = BASE64.decode(encoded) else {
+                            yield Err(completed_speech_error("Xiaomi MiMo TTS audio has invalid base64"));
+                            return;
+                        };
+                        decoded_bytes = match decoded_bytes.checked_add(bytes.len()) {
+                            Some(total) if total <= usize::try_from(rsi_ai_protocol::MAX_AUDIO_BYTES)
+                                .expect("audio byte bound fits usize") => total,
+                            _ => {
+                                yield Err(completed_speech_output_error("Xiaomi MiMo TTS audio exceeds its decoded byte bound"));
+                                return;
+                            }
+                        };
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        yield Ok(SpeechEvent::AudioChunk { sequence, bytes });
+                        sequence = sequence.saturating_add(1);
+                    }
+                    Ok(Some(JsonExtractEvent::ArrayItem(_)) | None) => {}
+                    Err(error) => {
+                        yield Err(transport_json_response_error(error));
+                        return;
+                    }
+                }
+            }
+        }
+        let extracted = match extractor.finish() {
+            Ok(extracted) => extracted,
+            Err(error) => {
+                yield Err(transport_json_response_error(error));
+                return;
+            }
+        };
+        let Ok(response) = serde_json::from_slice::<XiaomiTtsResponse<'_>>(&extracted.envelope) else {
+            yield Err(completed_speech_error("Xiaomi MiMo TTS returned malformed JSON"));
+            return;
+        };
+        let [choice] = response.choices.as_slice() else {
+            yield Err(completed_speech_output_error("Xiaomi MiMo TTS response must contain one choice"));
+            return;
+        };
+        debug_assert!(choice.audio_data().is_empty());
+        if decoded_bytes == 0 {
+            yield Err(ai_error(
+                ErrorKind::OutputValidation,
+                ErrorPhase::Assemble,
+                DispatchStatus::Dispatched,
+                "Xiaomi MiMo TTS response ended without audio",
+            ));
+            return;
+        }
+        yield Ok(SpeechEvent::OutputFinished);
+        yield Ok(SpeechEvent::Finished);
+    })
+}
+
+fn completed_speech_error(summary: impl Into<String>) -> AiError {
+    ai_error(
+        ErrorKind::Protocol,
+        ErrorPhase::Assemble,
+        DispatchStatus::Dispatched,
+        summary.into(),
+    )
+}
+
+fn completed_speech_output_error(summary: impl Into<String>) -> AiError {
+    ai_error(
+        ErrorKind::OutputValidation,
+        ErrorPhase::Assemble,
+        DispatchStatus::Dispatched,
+        summary.into(),
+    )
+}
+
+impl XiaomiTtsChoice<'_> {
+    const fn audio_data(&self) -> &str {
+        self.message.audio.data
     }
-    events.push(SpeechEvent::OutputFinished);
-    events.push(SpeechEvent::Finished);
-    Box::pin(futures_stream::iter(events.into_iter().map(Ok)))
 }
 
 fn authorized(
     context: &PrepareContext,
     url: String,
-    body: Vec<u8>,
+    body: JsonRequestBody,
 ) -> Result<HttpRequest, AiError> {
     let credential = context.credential().ok_or_else(|| {
         ai_error(
@@ -415,7 +517,7 @@ fn authorized(
         .map_err(invalid_request_error)?
         .bearer_auth(credential.secret())
         .map_err(invalid_request_error)
-        .map(|request| request.body(body))
+        .map(|request| request.json_body(body))
 }
 
 fn token_usage(value: &Value) -> TokenUsage {

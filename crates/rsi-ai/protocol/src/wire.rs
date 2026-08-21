@@ -13,14 +13,15 @@ const HEADER_BYTES: usize = 20;
 /// One normalized rsi-ai payload carried inside an rsi-meta DATA frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WireFrame {
-    Control {
-        call_id: String,
-        payload: Vec<u8>,
-    },
+    /// One bounded JSON control payload for a prepared or running call.
+    Control { call_id: String, payload: Vec<u8> },
+    /// One raw binary media chunk carried without base64 expansion.
     BlobChunk {
         call_id: String,
         blob_id: String,
+        /// One-based contiguous chunk sequence.
         sequence: u32,
+        /// Whether this is the final chunk for the blob.
         final_chunk: bool,
         bytes: Vec<u8>,
     },
@@ -207,6 +208,7 @@ pub struct BlobAssembler {
 }
 
 impl BlobAssembler {
+    /// Starts an assembler for bytes expected to match `descriptor` exactly.
     #[must_use]
     pub fn new(descriptor: MediaDescriptor) -> Self {
         Self {
@@ -222,6 +224,7 @@ impl BlobAssembler {
         &self.descriptor
     }
 
+    /// Appends one contiguous chunk and records whether it is terminal.
     pub fn push(
         &mut self,
         sequence: u32,
@@ -267,6 +270,7 @@ impl BlobAssembler {
         Ok(())
     }
 
+    /// Returns bytes only after length and SHA-256 agree with the descriptor.
     pub fn finish(self) -> Result<Vec<u8>, WireError> {
         if !self.final_seen {
             return Err(WireError::new(
@@ -331,6 +335,7 @@ impl WireError {
         }
     }
 
+    /// Returns the stable machine-readable wire failure code.
     pub const fn code(&self) -> &'static str {
         self.code
     }

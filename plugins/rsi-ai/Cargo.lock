@@ -1368,6 +1368,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
+ "bytes",
  "futures-util",
  "http",
  "percent-encoding",
@@ -1487,6 +1488,7 @@ version = "0.0.1"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -1513,6 +1515,7 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-ai-provider",
  "rsi-ai-transport",
+ "serde",
  "serde_json",
 ]
 

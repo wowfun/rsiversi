@@ -3,7 +3,9 @@ use rsi_ai_meta::{
     decode_server_control, encode_client_control, encode_server_control,
 };
 use rsi_ai_meta::{Capability, PreparedCallSnapshot, RetryPolicy};
-use rsi_ai_protocol::{LanguageRequest, MediaDescriptor, MediaKind, Message};
+use rsi_ai_protocol::{
+    LanguageRequest, MAX_BINARY_CHUNK_BYTES, MediaDescriptor, MediaKind, Message,
+};
 
 fn snapshot() -> PreparedCallSnapshot {
     PreparedCallSnapshot {
@@ -74,6 +76,28 @@ fn realtime_audio_control_rejects_non_audio_descriptors() {
         sequence: 1,
         descriptor: image,
     };
+    assert!(matches!(
+        encode_client_control(&control),
+        Err(MetaWireError::InvalidValue(_))
+    ));
+}
+
+#[test]
+fn realtime_audio_control_rejects_oversized_frames_before_upload() {
+    let audio = MediaDescriptor::new(
+        MediaKind::Audio,
+        "audio/wav",
+        u64::try_from(MAX_BINARY_CHUNK_BYTES + 1).expect("bounded test length"),
+        "00".repeat(32),
+    )
+    .expect("valid general audio descriptor");
+    let control = ClientControl::RealtimeAppendAudio {
+        call_id: "call-1".to_owned(),
+        blob_id: "blob-1".to_owned(),
+        sequence: 1,
+        descriptor: audio,
+    };
+
     assert!(matches!(
         encode_client_control(&control),
         Err(MetaWireError::InvalidValue(_))

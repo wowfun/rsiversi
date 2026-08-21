@@ -38,6 +38,8 @@ cargo test --manifest-path plugins/rsi-ai/Cargo.toml --workspace
 cargo clippy --manifest-path plugins/rsi-ai/Cargo.toml --workspace --all-targets -- -D warnings
 cargo xtask rsi-agent conformance
 cargo xtask verify-docs
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --lib --no-deps
+cargo test --locked --workspace --doc
 ```
 
 Live-provider smoke tests require an explicit opt-in and are not release-gate
@@ -48,4 +50,7 @@ The ignored live tests are `deepseek_v4_flash_streams_a_real_completion` and
 `xiaomi_token_plan_synthesizes_then_transcribes_real_audio`. They read secrets
 only from the process environment. Xiaomi defaults to the official China Token
 Plan origin; set `XIAOMI_TOKEN_PLAN_BASE_URL` to the account's displayed
-OpenAI-compatible base URL when it belongs to another cluster.
+OpenAI-compatible base URL when it belongs to another cluster. The Xiaomi smoke
+requires a recognizable TTS-to-ASR round trip; because both outputs are
+provider-generated, it permits one complete semantic retry, while transport,
+authentication, protocol, and timeout failures remain immediately terminal.

@@ -1,7 +1,10 @@
 use bytes::Bytes;
 use futures_util::stream;
 use rsi_ai_protocol::{DispatchStatus, ErrorKind, ErrorPhase};
-use rsi_ai_transport::{ByteStream, TransportError, provider_http_error, transport_stream_error};
+use rsi_ai_transport::{
+    ByteStream, TransportError, provider_http_error, transport_body_error,
+    transport_json_response_error, transport_stream_error,
+};
 
 fn body(value: &'static str) -> ByteStream {
     Box::pin(stream::iter([Ok(Bytes::from_static(value.as_bytes()))]))
@@ -59,4 +62,27 @@ fn stream_transport_mapping_preserves_cancellation_and_timeout() {
         "HTTP request timed out",
     ));
     assert_eq!(timed_out.kind(), ErrorKind::Timeout);
+}
+
+#[test]
+fn successful_response_limits_are_output_validation_not_transport_or_protocol() {
+    let body = transport_body_error(TransportError::new(
+        "http.body_too_large",
+        "response body exceeds its byte bound",
+    ));
+    assert_eq!(body.kind(), ErrorKind::OutputValidation);
+    assert_eq!(body.phase(), ErrorPhase::Assemble);
+
+    let json = transport_json_response_error(TransportError::new(
+        "json.extract_limit",
+        "JSON item exceeds its byte bound",
+    ));
+    assert_eq!(json.kind(), ErrorKind::OutputValidation);
+    assert_eq!(json.phase(), ErrorPhase::Assemble);
+
+    let malformed = transport_json_response_error(TransportError::new(
+        "json.extract",
+        "JSON response is malformed",
+    ));
+    assert_eq!(malformed.kind(), ErrorKind::Protocol);
 }

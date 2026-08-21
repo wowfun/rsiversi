@@ -28,21 +28,37 @@ pub fn sanitize_error_summary(value: &str) -> String {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
+    /// The caller supplied a request outside the provider-neutral contract.
     InvalidRequest,
+    /// The selected provider does not implement the requested capability or setting.
     Unsupported,
+    /// The provider rejected or could not resolve the configured credential.
     Authentication,
+    /// The credential is valid but lacks authority for the requested operation.
     Permission,
+    /// The selected provider resource does not exist.
     NotFound,
+    /// The provider temporarily refused work because of a rate limit.
     RateLimited,
+    /// The account has exhausted a billing or usage quota.
     Quota,
+    /// A finite operation deadline elapsed.
     Timeout,
+    /// The transport failed without a valid provider response.
     Transport,
+    /// The provider reported an internal or unavailable-server failure.
     Server,
+    /// Provider output could not satisfy the normalized semantic contract.
     OutputValidation,
+    /// Provider or wire traffic violated its declared protocol.
     Protocol,
+    /// The caller or owner cancelled the operation.
     Cancelled,
+    /// Failure occurred after dispatch may have crossed the external-effect seam.
     DispatchUncertain,
+    /// A provider-managed deferred operation no longer exists.
     RemoteExpired,
+    /// Media resolution, validation, or durable artifact handling failed.
     Artifact,
 }
 
@@ -97,15 +113,25 @@ impl ErrorKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorPhase {
+    /// Request validation and provider preparation before external I/O.
     Prepare,
+    /// Establishing the provider transport connection.
     Connect,
+    /// Sending request headers or body bytes.
     Send,
+    /// Waiting for the first semantic provider event.
     FirstEvent,
+    /// Reading or translating an active response stream.
     Stream,
+    /// Validating and assembling normalized output.
     Assemble,
+    /// Submitting a provider-managed background response.
     DeferredSubmit,
+    /// Polling or resuming a provider-managed response.
     DeferredPoll,
+    /// Cancelling a provider-managed response.
     DeferredCancel,
+    /// Operating a live Realtime session.
     Realtime,
 }
 
@@ -113,9 +139,13 @@ pub enum ErrorPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchStatus {
+    /// No provider attempt was created.
     NotStarted,
+    /// An attempt began locally but the request was proven not to be dispatched.
     NotDispatched,
+    /// The request crossed the provider effect seam.
     Dispatched,
+    /// The failure leaves dispatch unknowable and callers must not retry blindly.
     Unknown,
 }
 
@@ -168,22 +198,27 @@ impl AiError {
         self.dispatch_status
     }
 
+    /// Returns the validated HTTP status, when the provider exposed one.
     pub const fn status(&self) -> Option<u16> {
         self.status
     }
 
+    /// Returns the bounded provider-specific error code, when available.
     pub fn provider_code(&self) -> Option<&str> {
         self.provider_code.as_deref()
     }
 
+    /// Returns the provider-requested delay in milliseconds, without applying retry policy.
     pub const fn retry_after_ms(&self) -> Option<u64> {
         self.retry_after_ms
     }
 
+    /// Returns the provider request identifier retained for safe diagnostics.
     pub fn request_id(&self) -> Option<&str> {
         self.request_id.as_deref()
     }
 
+    /// Returns the bounded summary safe to persist or display.
     pub fn safe_summary(&self) -> &str {
         &self.safe_summary
     }

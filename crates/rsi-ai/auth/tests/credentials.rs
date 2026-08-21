@@ -37,6 +37,38 @@ fn requirement() -> CredentialRequirement {
 }
 
 #[test]
+fn nonblocking_resolution_defers_only_when_the_store_must_be_consulted() {
+    let explicit = CredentialManager::builder()
+        .with_explicit("openai.default", "explicit")
+        .expect("explicit")
+        .with_store(Arc::new(FakeStore::default()))
+        .build();
+    let resolved = explicit
+        .try_resolve_in_memory(&requirement())
+        .expect("explicit source is immediately resolvable")
+        .expect("credential");
+    assert_eq!(resolved.source().source, CredentialSource::Explicit);
+
+    let store_only = CredentialManager::builder()
+        .with_store(Arc::new(FakeStore::with("openai.default", "store")))
+        .build();
+    assert!(store_only.try_resolve_in_memory(&requirement()).is_none());
+
+    let environment = CredentialManager::builder()
+        .with_captured_environment(BTreeMap::from([(
+            "OPENAI_API_KEY".to_owned(),
+            "environment".to_owned(),
+        )]))
+        .expect("environment")
+        .build();
+    let resolved = environment
+        .try_resolve_in_memory(&requirement())
+        .expect("no store can block environment fallback")
+        .expect("credential");
+    assert_eq!(resolved.source().source, CredentialSource::Environment);
+}
+
+#[test]
 fn resolution_precedence_is_explicit_then_memory_then_store_then_captured_env() {
     let manager = CredentialManager::builder()
         .with_explicit("openai.default", "explicit")

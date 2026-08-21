@@ -22,6 +22,7 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// Creates a text-only request for `count` generated images.
     pub fn new(prompt: impl Into<String>, count: u8) -> Result<Self, StreamError> {
         let request = Self {
             prompt: prompt.into(),
@@ -33,6 +34,7 @@ impl ImageRequest {
         Ok(request)
     }
 
+    /// Adds bounded image inputs and an optional image mask for editing.
     pub fn with_inputs(
         mut self,
         inputs: Vec<MediaDescriptor>,
@@ -60,6 +62,7 @@ impl ImageRequest {
         self.mask.as_ref()
     }
 
+    /// Revalidates a deserialized request and all media-kind relationships.
     pub fn validate(&self) -> Result<(), StreamError> {
         validation::safe_text("image.prompt", &self.prompt, MAX_REQUEST_BYTES, false)
             .map_err(|reason| StreamError::invalid("request.invalid_prompt", reason))?;
@@ -91,35 +94,47 @@ impl ImageRequest {
 /// Normalized image generation events.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImageEvent {
+    /// Opens the next image output.
     OutputStarted {
+        /// Zero-based contiguous output index.
         index: u32,
+        /// Declared MIME type for the following bytes.
         mime_type: String,
     },
+    /// Appends one bounded binary chunk to an open output.
     OutputChunk {
+        /// Index of the open output.
         index: u32,
+        /// One-based contiguous chunk sequence.
         sequence: u32,
         bytes: Vec<u8>,
     },
+    /// Closes one image output and computes its descriptor.
     OutputFinished {
+        /// Index of the output to close.
         index: u32,
     },
-    Usage {
-        usage: TokenUsage,
-    },
+    /// Supplies the operation's sole cumulative usage record.
+    Usage { usage: TokenUsage },
+    /// Terminates the stream after at least one output is closed.
     Finished,
 }
 
 /// One complete binary output and its computed descriptor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MediaOutput {
+    /// Descriptor computed from the assembled bytes.
     pub descriptor: MediaDescriptor,
+    /// Complete validated media body.
     pub bytes: Vec<u8>,
 }
 
 /// Complete image generation output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImageOutput {
+    /// Ordered generated images.
     pub images: Vec<MediaOutput>,
+    /// Provider-reported usage, when available.
     pub usage: Option<TokenUsage>,
 }
 
@@ -145,6 +160,7 @@ impl ImageAssembler {
         }
     }
 
+    /// Applies one event while enforcing output, chunk, terminal, and size invariants.
     pub fn push(&mut self, event: &ImageEvent) -> Result<(), StreamError> {
         if self.finished {
             return Err(StreamError::invalid(
@@ -195,6 +211,7 @@ impl ImageAssembler {
         Ok(())
     }
 
+    /// Returns complete output only after a valid terminal event.
     pub fn finish(self) -> Result<ImageOutput, StreamError> {
         if !self.finished {
             return Err(StreamError::invalid(
@@ -220,6 +237,7 @@ pub struct TranscriptionRequest {
 }
 
 impl TranscriptionRequest {
+    /// Creates a request for one validated audio descriptor.
     pub fn new(audio: MediaDescriptor) -> Result<Self, StreamError> {
         if audio.kind() != MediaKind::Audio {
             return Err(StreamError::invalid(
@@ -251,6 +269,7 @@ impl TranscriptionRequest {
         self.timestamps
     }
 
+    /// Adds a bounded language identifier hint.
     pub fn with_language(mut self, language: impl Into<String>) -> Result<Self, StreamError> {
         let language = language.into();
         validation::identifier("transcription.language", &language)
@@ -259,6 +278,7 @@ impl TranscriptionRequest {
         Ok(self)
     }
 
+    /// Adds bounded provider context for transcription.
     pub fn with_prompt(mut self, prompt: impl Into<String>) -> Result<Self, StreamError> {
         let prompt = prompt.into();
         validation::safe_text("transcription.prompt", &prompt, MAX_REQUEST_BYTES, false)
@@ -268,11 +288,13 @@ impl TranscriptionRequest {
     }
 
     #[must_use]
+    /// Selects whether the provider should return timestamped segments.
     pub const fn with_timestamps(mut self, timestamps: bool) -> Self {
         self.timestamps = timestamps;
         self
     }
 
+    /// Revalidates a deserialized request and its audio-kind constraint.
     pub fn validate(&self) -> Result<(), StreamError> {
         if self.audio.kind() != MediaKind::Audio {
             return Err(StreamError::invalid(
@@ -299,8 +321,11 @@ impl TranscriptionRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptionSegment {
+    /// Zero-based contiguous segment identifier.
     pub id: u32,
+    /// Inclusive segment start offset in milliseconds.
     pub start_ms: u64,
+    /// Segment end offset in milliseconds, not earlier than `start_ms`.
     pub end_ms: u64,
     pub text: String,
 }
@@ -309,19 +334,33 @@ pub struct TranscriptionSegment {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptionEvent {
-    TextDelta { text: String },
+    /// Appends text to the complete transcript.
+    TextDelta {
+        /// Bounded UTF-8 transcript fragment.
+        text: String,
+    },
+    /// Adds one final ordered timestamped segment.
     Segment { segment: TranscriptionSegment },
+    /// Supplies the operation's sole cumulative usage record.
     Usage { usage: TokenUsage },
-    Finished { language: Option<String> },
+    /// Terminates a nonempty transcript.
+    Finished {
+        /// Provider-detected language, when reported.
+        language: Option<String>,
+    },
 }
 
 /// Complete assembled transcription.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptionOutput {
+    /// Complete assembled transcript text.
     pub text: String,
+    /// Ordered final timestamped segments.
     pub segments: Vec<TranscriptionSegment>,
+    /// Provider-detected language, when reported.
     pub language: Option<String>,
+    /// Provider-reported usage, when available.
     pub usage: Option<TokenUsage>,
 }
 
@@ -349,6 +388,7 @@ impl TranscriptionAssembler {
         }
     }
 
+    /// Applies one event while enforcing text, segment, usage, and terminal invariants.
     pub fn push(&mut self, event: &TranscriptionEvent) -> Result<(), StreamError> {
         if self.finished {
             return Err(StreamError::invalid(
@@ -416,6 +456,7 @@ impl TranscriptionAssembler {
         Ok(())
     }
 
+    /// Returns complete output only after a valid terminal event.
     pub fn finish(self) -> Result<TranscriptionOutput, StreamError> {
         if !self.finished {
             return Err(StreamError::invalid(
@@ -436,8 +477,11 @@ impl TranscriptionAssembler {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpeechFormat {
+    /// Headerless little-endian signed 16-bit PCM samples.
     Pcm16,
+    /// RIFF/WAVE audio.
     Wav,
+    /// MPEG Layer III audio.
     Mp3,
 }
 
@@ -452,6 +496,7 @@ pub struct SpeechRequest {
 }
 
 impl SpeechRequest {
+    /// Creates a bounded speech request using an exact voice and output format.
     pub fn new(
         text: impl Into<String>,
         voice: impl Into<String>,
@@ -467,6 +512,7 @@ impl SpeechRequest {
         Ok(request)
     }
 
+    /// Adds a finite provider-neutral speaking-rate multiplier.
     pub fn with_speed(mut self, speed: f32) -> Result<Self, StreamError> {
         self.speed = Some(speed);
         self.validate()?;
@@ -489,6 +535,7 @@ impl SpeechRequest {
         self.speed
     }
 
+    /// Revalidates a deserialized request and its speaking-rate bound.
     pub fn validate(&self) -> Result<(), StreamError> {
         validation::safe_text("speech.text", &self.text, MAX_REQUEST_BYTES, false)
             .map_err(|reason| StreamError::invalid("request.invalid_text", reason))?;
@@ -510,17 +557,31 @@ impl SpeechRequest {
 /// Normalized streaming speech events.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SpeechEvent {
-    OutputStarted { mime_type: String },
-    AudioChunk { sequence: u32, bytes: Vec<u8> },
+    /// Opens the operation's sole audio output.
+    OutputStarted {
+        /// Declared MIME type for the following bytes.
+        mime_type: String,
+    },
+    /// Appends one bounded audio chunk.
+    AudioChunk {
+        /// One-based contiguous chunk sequence.
+        sequence: u32,
+        bytes: Vec<u8>,
+    },
+    /// Closes the audio output and computes its descriptor.
     OutputFinished,
+    /// Supplies the operation's sole cumulative usage record.
     Usage { usage: TokenUsage },
+    /// Terminates the stream after the output is closed.
     Finished,
 }
 
 /// Complete speech output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpeechOutput {
+    /// Complete validated synthesized audio.
     pub audio: MediaOutput,
+    /// Provider-reported usage, when available.
     pub usage: Option<TokenUsage>,
 }
 
@@ -544,6 +605,7 @@ impl SpeechAssembler {
         }
     }
 
+    /// Applies one event while enforcing the single-output stream grammar.
     pub fn push(&mut self, event: &SpeechEvent) -> Result<(), StreamError> {
         if self.finished {
             return Err(StreamError::invalid(
@@ -583,6 +645,7 @@ impl SpeechAssembler {
         Ok(())
     }
 
+    /// Returns complete output only after a valid terminal event.
     pub fn finish(self) -> Result<SpeechOutput, StreamError> {
         if !self.finished {
             return Err(StreamError::invalid(
