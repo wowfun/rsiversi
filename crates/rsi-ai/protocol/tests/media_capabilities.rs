@@ -3,6 +3,19 @@ use rsi_ai_protocol::{
     SpeechAssembler, SpeechEvent, SpeechFormat, SpeechRequest, TokenUsage, TranscriptionAssembler,
     TranscriptionEvent, TranscriptionRequest, TranscriptionSegment,
 };
+
+#[test]
+fn media_mime_requires_a_nonempty_subtype() {
+    let digest = "a".repeat(64);
+
+    let image = MediaDescriptor::new(MediaKind::Image, "image/", 1, &digest)
+        .expect_err("an image MIME type needs a subtype");
+    assert_eq!(image.code(), "media.invalid_mime");
+
+    let audio = MediaDescriptor::new(MediaKind::Audio, "audio/", 1, digest)
+        .expect_err("an audio MIME type needs a subtype");
+    assert_eq!(audio.code(), "media.invalid_mime");
+}
 use serde_json::json;
 
 fn usage() -> TokenUsage {
@@ -56,22 +69,19 @@ fn deserialized_media_metadata_cannot_cross_kind_boundaries() {
     let mut invalid_audio = serde_json::to_value(audio()).expect("audio JSON");
     invalid_audio["width"] = json!(10);
     invalid_audio["height"] = json!(10);
-    let invalid_audio: MediaDescriptor =
-        serde_json::from_value(invalid_audio).expect("shape decodes");
-    assert!(invalid_audio.validate().is_err());
+    serde_json::from_value::<MediaDescriptor>(invalid_audio)
+        .expect_err("audio dimensions must fail at the typed boundary");
 
     let mut invalid_image = serde_json::to_value(image()).expect("image JSON");
     invalid_image["duration_ms"] = json!(100);
-    let invalid_image: MediaDescriptor =
-        serde_json::from_value(invalid_image).expect("shape decodes");
-    assert!(invalid_image.validate().is_err());
+    serde_json::from_value::<MediaDescriptor>(invalid_image)
+        .expect_err("image duration must fail at the typed boundary");
 
     let mut half_dimensions = serde_json::to_value(image()).expect("image JSON");
     half_dimensions["width"] = json!(10);
     half_dimensions["height"] = json!(null);
-    let half_dimensions: MediaDescriptor =
-        serde_json::from_value(half_dimensions).expect("shape decodes");
-    assert!(half_dimensions.validate().is_err());
+    serde_json::from_value::<MediaDescriptor>(half_dimensions)
+        .expect_err("half-specified image dimensions must fail at the typed boundary");
 }
 
 #[test]

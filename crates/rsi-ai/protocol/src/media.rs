@@ -12,13 +12,41 @@ pub const MAX_IMAGE_OUTPUTS: u8 = 10;
 const MAX_TRANSCRIPTION_SEGMENTS: usize = 4_096;
 
 /// One bounded image generation request.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRequest {
     prompt: String,
     count: u8,
     inputs: Vec<MediaDescriptor>,
     mask: Option<MediaDescriptor>,
+}
+
+impl<'de> Deserialize<'de> for ImageRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireRequest {
+            prompt: String,
+            count: u8,
+            inputs: Vec<MediaDescriptor>,
+            mask: Option<MediaDescriptor>,
+        }
+
+        let wire = WireRequest::deserialize(deserializer)?;
+        let request = Self {
+            prompt: wire.prompt,
+            count: wire.count,
+            inputs: wire.inputs,
+            mask: wire.mask,
+        };
+        request
+            .validate()
+            .map(|()| request)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ImageRequest {
@@ -227,13 +255,41 @@ impl ImageAssembler {
 }
 
 /// Transcription of one bounded audio object.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptionRequest {
     audio: MediaDescriptor,
     language: Option<String>,
     prompt: Option<String>,
     timestamps: bool,
+}
+
+impl<'de> Deserialize<'de> for TranscriptionRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireRequest {
+            audio: MediaDescriptor,
+            language: Option<String>,
+            prompt: Option<String>,
+            timestamps: bool,
+        }
+
+        let wire = WireRequest::deserialize(deserializer)?;
+        let request = Self {
+            audio: wire.audio,
+            language: wire.language,
+            prompt: wire.prompt,
+            timestamps: wire.timestamps,
+        };
+        request
+            .validate()
+            .map(|()| request)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TranscriptionRequest {
@@ -486,13 +542,41 @@ pub enum SpeechFormat {
 }
 
 /// One bounded text-to-speech request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechRequest {
     text: String,
     voice: String,
     format: SpeechFormat,
     speed: Option<f32>,
+}
+
+impl<'de> Deserialize<'de> for SpeechRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireRequest {
+            text: String,
+            voice: String,
+            format: SpeechFormat,
+            speed: Option<f32>,
+        }
+
+        let wire = WireRequest::deserialize(deserializer)?;
+        let request = Self {
+            text: wire.text,
+            voice: wire.voice,
+            format: wire.format,
+            speed: wire.speed,
+        };
+        request
+            .validate()
+            .map(|()| request)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl SpeechRequest {

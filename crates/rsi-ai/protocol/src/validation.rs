@@ -1,4 +1,5 @@
-use serde_json::{Map, Value};
+use serde_json::Value;
+use std::fmt;
 
 use crate::{MAX_EXTENSION_BYTES, MAX_ID_BYTES, MAX_JSON_DEPTH, MAX_JSON_NODES};
 
@@ -82,18 +83,39 @@ pub(crate) fn safe_text(
     Ok(())
 }
 
-pub(crate) fn validate_json(value: &Value) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JsonValidationError {
+    TooDeep,
+    TooManyNodes,
+}
+
+impl fmt::Display for JsonValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooDeep => write!(formatter, "JSON nesting exceeds {MAX_JSON_DEPTH}"),
+            Self::TooManyNodes => {
+                write!(formatter, "JSON node count exceeds {MAX_JSON_NODES}")
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_json(value: &Value) -> Result<(), JsonValidationError> {
     let mut nodes = 0;
     validate_json_at(value, 0, &mut nodes)
 }
 
-fn validate_json_at(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), String> {
+fn validate_json_at(
+    value: &Value,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), JsonValidationError> {
     if depth > MAX_JSON_DEPTH {
-        return Err(format!("JSON nesting exceeds {MAX_JSON_DEPTH}"));
+        return Err(JsonValidationError::TooDeep);
     }
     *nodes = nodes.saturating_add(1);
     if *nodes > MAX_JSON_NODES {
-        return Err(format!("JSON node count exceeds {MAX_JSON_NODES}"));
+        return Err(JsonValidationError::TooManyNodes);
     }
     match value {
         Value::Array(values) => {
@@ -111,24 +133,25 @@ fn validate_json_at(value: &Value, depth: usize, nodes: &mut usize) -> Result<()
     Ok(())
 }
 
-pub(crate) fn canonical_json(value: &Value) -> Result<Value, String> {
-    validate_json(value)?;
-    Ok(match value {
-        Value::Array(values) => Value::Array(
-            values
-                .iter()
-                .map(canonical_json)
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Value::Object(values) => {
-            let mut keys = values.keys().collect::<Vec<_>>();
-            keys.sort_unstable();
-            let mut canonical = Map::new();
-            for key in keys {
-                canonical.insert(key.clone(), canonical_json(&values[key])?);
+pub(crate) fn canonical_json(mut value: Value) -> Result<Value, JsonValidationError> {
+    validate_json(&value)?;
+    sort_json_keys(&mut value);
+    Ok(value)
+}
+
+fn sort_json_keys(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                sort_json_keys(value);
             }
-            Value::Object(canonical)
         }
-        scalar => scalar.clone(),
-    })
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                sort_json_keys(value);
+            }
+            values.sort_keys();
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }

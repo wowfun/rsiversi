@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,12 +11,406 @@ use crate::{
 pub const MAX_MESSAGES: usize = 256;
 pub const MAX_BLOCKS_PER_MESSAGE: usize = 256;
 pub const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes in one provider-neutral freeform tool grammar.
+pub const MAX_FREEFORM_GRAMMAR_BYTES: usize = 64 * 1024;
 pub const MAX_STOP_SEQUENCES: usize = 8;
 pub const MAX_STOP_SEQUENCE_BYTES: usize = 1_024;
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_AUDIO_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 65_535;
+/// Maximum provider-extension formats one language profile may accept.
+pub const MAX_ACCEPTED_PROVIDER_EXTENSIONS: usize = 64;
+/// Maximum exact model-capacity profiles retained by one adapter configuration.
+pub const MAX_LANGUAGE_MODEL_PROFILES: usize = 256;
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+
+/// Provider wire family used to project caller-owned tools and rich results.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDialect {
+    /// `OpenAI` Responses function and custom-tool items.
+    Responses,
+    /// OpenAI-compatible Chat Completions function calls.
+    ChatCompletions,
+}
+
+/// Provider wire projection for an image-bearing tool result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageToolResultMode {
+    /// Text and image blocks remain in one Responses function-call output.
+    FunctionOutput,
+    /// Tool text is followed by an adjacent user multimodal image message.
+    AdjacentUserMessage,
+}
+
+/// Whether a generation-pinned language route accepts image tool results.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "support",
+    content = "mode",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ImageToolResultCapability {
+    /// The route has an explicit, tested image-result projection.
+    Yes(ImageToolResultMode),
+    /// The route is explicitly text-only.
+    No,
+    /// The adapter cannot prove support and callers must omit image-result tools.
+    Unknown,
+}
+
+/// Exact token capacities configured for one language-model identifier.
+#[allow(clippy::struct_field_names)] // The repeated suffix is part of the explicit wire unit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageModelLimits {
+    context_window_tokens: u32,
+    default_output_reserve_tokens: u32,
+    max_output_reserve_tokens: u32,
+}
+
+impl<'de> Deserialize<'de> for LanguageModelLimits {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[allow(clippy::struct_field_names)]
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireLimits {
+            context_window_tokens: u32,
+            default_output_reserve_tokens: u32,
+            max_output_reserve_tokens: u32,
+        }
+
+        let limits = WireLimits::deserialize(deserializer)?;
+        Self::new(
+            limits.context_window_tokens,
+            limits.default_output_reserve_tokens,
+            limits.max_output_reserve_tokens,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl LanguageModelLimits {
+    /// Creates one internally consistent model-capacity description.
+    pub fn new(
+        context_window_tokens: u32,
+        default_output_reserve_tokens: u32,
+        max_output_reserve_tokens: u32,
+    ) -> Result<Self, SemanticError> {
+        validate_language_model_limits(
+            "language_model_limits",
+            context_window_tokens,
+            default_output_reserve_tokens,
+            max_output_reserve_tokens,
+        )?;
+        Ok(Self {
+            context_window_tokens,
+            default_output_reserve_tokens,
+            max_output_reserve_tokens,
+        })
+    }
+
+    /// Complete input and output context capacity.
+    #[must_use]
+    pub const fn context_window_tokens(self) -> u32 {
+        self.context_window_tokens
+    }
+
+    /// Default output capacity reserved by an orchestrator.
+    #[must_use]
+    pub const fn default_output_reserve_tokens(self) -> u32 {
+        self.default_output_reserve_tokens
+    }
+
+    /// Largest output reserve accepted for this model.
+    #[must_use]
+    pub const fn max_output_reserve_tokens(self) -> u32 {
+        self.max_output_reserve_tokens
+    }
+}
+
+/// Bounded exact model-to-capacity facts shared by language adapters.
+///
+/// Missing identifiers intentionally have no inferred fallback.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LanguageModelProfiles {
+    profiles: BTreeMap<String, LanguageModelLimits>,
+}
+
+impl LanguageModelProfiles {
+    /// Adds one unique, bounded printable-ASCII model identifier.
+    pub fn with_profile(
+        mut self,
+        model: impl Into<String>,
+        limits: LanguageModelLimits,
+    ) -> Result<Self, SemanticError> {
+        self.insert(model, limits)?;
+        Ok(self)
+    }
+
+    /// Inserts one exact model profile without replacing an existing fact.
+    pub fn insert(
+        &mut self,
+        model: impl Into<String>,
+        limits: LanguageModelLimits,
+    ) -> Result<(), SemanticError> {
+        let model = model.into();
+        validation::identifier("language_model_profiles.id", &model).map_err(|reason| {
+            SemanticError::new(
+                "language_model_profiles.invalid_id",
+                "language_model_profiles.id",
+                reason,
+            )
+        })?;
+        if self.profiles.contains_key(&model) {
+            return Err(SemanticError::new(
+                "language_model_profiles.duplicate",
+                "language_model_profiles.id",
+                "must be unique",
+            ));
+        }
+        if self.profiles.len() >= MAX_LANGUAGE_MODEL_PROFILES {
+            return Err(SemanticError::new(
+                "language_model_profiles.too_many",
+                "language_model_profiles",
+                format!("must contain at most {MAX_LANGUAGE_MODEL_PROFILES} entries"),
+            ));
+        }
+        self.profiles.insert(model, limits);
+        Ok(())
+    }
+
+    /// Returns the exact configured limits, or `None` when no fact is known.
+    #[must_use]
+    pub fn get(&self, model: &str) -> Option<LanguageModelLimits> {
+        self.profiles.get(model).copied()
+    }
+}
+
+/// Exact namespace and version of provider-private state accepted on replay.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderExtensionFormat {
+    namespace: String,
+    version: u32,
+}
+
+impl<'de> Deserialize<'de> for ProviderExtensionFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireFormat {
+            namespace: String,
+            version: u32,
+        }
+
+        let format = WireFormat::deserialize(deserializer)?;
+        Self::new(format.namespace, format.version).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ProviderExtensionFormat {
+    /// Creates one bounded provider-extension identity.
+    pub fn new(namespace: impl Into<String>, version: u32) -> Result<Self, SemanticError> {
+        let format = Self {
+            namespace: namespace.into(),
+            version,
+        };
+        format.validate()?;
+        Ok(format)
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    fn validate(&self) -> Result<(), SemanticError> {
+        validation::identifier(
+            "language_profile.accepted_provider_extensions.namespace",
+            &self.namespace,
+        )
+        .map_err(|reason| {
+            SemanticError::new(
+                "language_profile.invalid_extension",
+                "language_profile.accepted_provider_extensions.namespace",
+                reason,
+            )
+        })
+    }
+}
+
+/// Provider-I/O-free capabilities captured before one language request is built.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageProfile {
+    context_window_tokens: u32,
+    default_output_reserve_tokens: u32,
+    max_output_reserve_tokens: u32,
+    tool_dialect: ToolDialect,
+    supports_freeform_tools: bool,
+    image_tool_result: ImageToolResultCapability,
+    accepted_provider_extensions: Vec<ProviderExtensionFormat>,
+}
+
+impl<'de> Deserialize<'de> for LanguageProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[allow(clippy::struct_field_names)]
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireProfile {
+            context_window_tokens: u32,
+            default_output_reserve_tokens: u32,
+            max_output_reserve_tokens: u32,
+            tool_dialect: ToolDialect,
+            supports_freeform_tools: bool,
+            image_tool_result: ImageToolResultCapability,
+            accepted_provider_extensions: Vec<ProviderExtensionFormat>,
+        }
+
+        let profile = WireProfile::deserialize(deserializer)?;
+        Self::new(
+            profile.context_window_tokens,
+            profile.default_output_reserve_tokens,
+            profile.max_output_reserve_tokens,
+            profile.tool_dialect,
+            profile.supports_freeform_tools,
+            profile.image_tool_result,
+            profile.accepted_provider_extensions,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl LanguageProfile {
+    /// Creates a complete generation-pinned language capability profile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        context_window_tokens: u32,
+        default_output_reserve_tokens: u32,
+        max_output_reserve_tokens: u32,
+        tool_dialect: ToolDialect,
+        supports_freeform_tools: bool,
+        image_tool_result: ImageToolResultCapability,
+        accepted_provider_extensions: Vec<ProviderExtensionFormat>,
+    ) -> Result<Self, SemanticError> {
+        validate_language_model_limits(
+            "language_profile",
+            context_window_tokens,
+            default_output_reserve_tokens,
+            max_output_reserve_tokens,
+        )?;
+        let profile = Self {
+            context_window_tokens,
+            default_output_reserve_tokens,
+            max_output_reserve_tokens,
+            tool_dialect,
+            supports_freeform_tools,
+            image_tool_result,
+            accepted_provider_extensions,
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    pub const fn context_window_tokens(&self) -> u32 {
+        self.context_window_tokens
+    }
+
+    pub const fn default_output_reserve_tokens(&self) -> u32 {
+        self.default_output_reserve_tokens
+    }
+
+    pub const fn max_output_reserve_tokens(&self) -> u32 {
+        self.max_output_reserve_tokens
+    }
+
+    pub const fn tool_dialect(&self) -> ToolDialect {
+        self.tool_dialect
+    }
+
+    pub const fn supports_freeform_tools(&self) -> bool {
+        self.supports_freeform_tools
+    }
+
+    pub const fn image_tool_result(&self) -> ImageToolResultCapability {
+        self.image_tool_result
+    }
+
+    pub fn accepted_provider_extensions(&self) -> &[ProviderExtensionFormat] {
+        &self.accepted_provider_extensions
+    }
+
+    /// Returns whether private state may be forwarded to this exact profile.
+    pub fn accepts_extension(&self, extension: &ProviderExtension) -> bool {
+        self.accepted_provider_extensions.iter().any(|accepted| {
+            accepted.namespace == extension.namespace && accepted.version == extension.version
+        })
+    }
+
+    /// Revalidates all numeric and aggregate profile bounds after decoding.
+    pub fn validate(&self) -> Result<(), SemanticError> {
+        validate_language_model_limits(
+            "language_profile",
+            self.context_window_tokens,
+            self.default_output_reserve_tokens,
+            self.max_output_reserve_tokens,
+        )?;
+        if self.accepted_provider_extensions.len() > MAX_ACCEPTED_PROVIDER_EXTENSIONS {
+            return Err(SemanticError::new(
+                "language_profile.too_many_extensions",
+                "language_profile.accepted_provider_extensions",
+                format!("must contain at most {MAX_ACCEPTED_PROVIDER_EXTENSIONS} entries"),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for accepted in &self.accepted_provider_extensions {
+            accepted.validate()?;
+            if !seen.insert((accepted.namespace.as_str(), accepted.version)) {
+                return Err(SemanticError::new(
+                    "language_profile.duplicate_extension",
+                    "language_profile.accepted_provider_extensions",
+                    "namespace/version pairs must be unique",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_language_model_limits(
+    field: &str,
+    context_window_tokens: u32,
+    default_output_reserve_tokens: u32,
+    max_output_reserve_tokens: u32,
+) -> Result<(), SemanticError> {
+    if context_window_tokens == 0
+        || default_output_reserve_tokens == 0
+        || default_output_reserve_tokens > max_output_reserve_tokens
+        || max_output_reserve_tokens >= context_window_tokens
+    {
+        return Err(SemanticError::new(
+            "language_profile.invalid_token_limits",
+            field,
+            "token limits must satisfy 0 < default reserve <= max reserve < context window",
+        ));
+    }
+    Ok(())
+}
 
 /// Media class whose bytes travel separately from semantic JSON.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -29,7 +423,7 @@ pub enum MediaKind {
 }
 
 /// Locator-free identity and validated metadata for one media body.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaDescriptor {
     kind: MediaKind,
@@ -39,6 +433,40 @@ pub struct MediaDescriptor {
     width: Option<u32>,
     height: Option<u32>,
     duration_ms: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for MediaDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireDescriptor {
+            kind: MediaKind,
+            mime_type: String,
+            byte_len: u64,
+            sha256: String,
+            width: Option<u32>,
+            height: Option<u32>,
+            duration_ms: Option<u64>,
+        }
+
+        let wire = WireDescriptor::deserialize(deserializer)?;
+        let descriptor = Self {
+            kind: wire.kind,
+            mime_type: wire.mime_type,
+            byte_len: wire.byte_len,
+            sha256: wire.sha256,
+            width: wire.width,
+            height: wire.height,
+            duration_ms: wire.duration_ms,
+        };
+        descriptor
+            .validate()
+            .map(|()| descriptor)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl MediaDescriptor {
@@ -128,7 +556,8 @@ impl MediaDescriptor {
             MediaKind::Image => "image/",
             MediaKind::Audio => "audio/",
         };
-        if self.mime_type.len() > 127
+        if self.mime_type.len() <= expected_prefix.len()
+            || self.mime_type.len() > 127
             || !self.mime_type.starts_with(expected_prefix)
             || !self.mime_type.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'+' | b'-')
@@ -240,11 +669,28 @@ pub enum MessageContent {
 }
 
 /// A complete provider-neutral message.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
     role: MessageRole,
     content: Vec<MessageContent>,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireMessage {
+            role: MessageRole,
+            content: Vec<MessageContent>,
+        }
+
+        let wire = WireMessage::deserialize(deserializer)?;
+        Self::new(wire.role, wire.content).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Message {
@@ -318,6 +764,13 @@ impl Message {
                 format!("must contain 1..={MAX_BLOCKS_PER_MESSAGE} blocks"),
             ));
         }
+        if self.role == MessageRole::Tool && self.content.len() != 1 {
+            return Err(SemanticError::new(
+                "message.invalid_content",
+                "message.content",
+                "a tool message must contain exactly one tool result",
+            ));
+        }
         for (index, block) in self.content.iter().enumerate() {
             validate_message_content(self.role, block, &format!("message.content[{index}]"))?;
         }
@@ -356,9 +809,12 @@ fn validate_message_content(
     }
 
     match block {
-        MessageContent::Text { text } | MessageContent::Reasoning { text, .. } => {
+        MessageContent::Text { text } => {
             validation::safe_text(field, text, MAX_REQUEST_BYTES, false)
                 .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))?;
+        }
+        MessageContent::Reasoning { text, evidence } => {
+            validate_reasoning_content(text, evidence.as_ref(), field)?;
         }
         MessageContent::Image(media) => {
             if media.kind != MediaKind::Image {
@@ -428,13 +884,126 @@ fn validate_message_content(
     Ok(())
 }
 
-/// Provider-neutral function tool declaration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+fn validate_reasoning_content(
+    text: &str,
+    evidence: Option<&ProviderExtension>,
+    field: &str,
+) -> Result<(), SemanticError> {
+    validation::safe_text(field, text, MAX_REQUEST_BYTES, false)
+        .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))?;
+    if let Some(evidence) = evidence {
+        evidence
+            .validate(&format!("{field}.evidence"))
+            .map_err(|error| {
+                SemanticError::new("message.invalid_content", field, error.to_string())
+            })?;
+    }
+    Ok(())
+}
+
+/// Provider-neutral tool declaration with a JSON function schema and optional
+/// freeform projection for providers that support custom grammar tools.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolDefinition {
     name: String,
     description: String,
     input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    freeform: Option<FreeformToolDefinition>,
+}
+
+impl<'de> Deserialize<'de> for ToolDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireTool {
+            name: String,
+            description: String,
+            input_schema: Value,
+            #[serde(default)]
+            freeform: Option<FreeformToolDefinition>,
+        }
+
+        let wire = WireTool::deserialize(deserializer)?;
+        let tool = Self {
+            name: wire.name,
+            description: wire.description,
+            input_schema: wire.input_schema,
+            freeform: wire.freeform,
+        };
+        tool.validate()
+            .map(|()| tool)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Bounded provider-neutral freeform grammar attached to one tool.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FreeformToolDefinition {
+    format: FreeformFormat,
+    grammar: String,
+}
+
+impl<'de> Deserialize<'de> for FreeformToolDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireFreeform {
+            format: FreeformFormat,
+            grammar: String,
+        }
+
+        let wire = WireFreeform::deserialize(deserializer)?;
+        Self::new(wire.format, wire.grammar).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Closed freeform grammar families supported by semantic adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreeformFormat {
+    /// Lark grammar used by `OpenAI` Responses custom tools.
+    Lark,
+}
+
+impl FreeformToolDefinition {
+    /// Creates a bounded freeform grammar definition.
+    pub fn new(format: FreeformFormat, grammar: impl Into<String>) -> Result<Self, SemanticError> {
+        let definition = Self {
+            format,
+            grammar: grammar.into(),
+        };
+        definition.validate()?;
+        Ok(definition)
+    }
+
+    pub const fn format(&self) -> FreeformFormat {
+        self.format
+    }
+
+    pub fn grammar(&self) -> &str {
+        &self.grammar
+    }
+
+    fn validate(&self) -> Result<(), SemanticError> {
+        validation::safe_text(
+            "tool.freeform.grammar",
+            &self.grammar,
+            MAX_FREEFORM_GRAMMAR_BYTES,
+            false,
+        )
+        .map_err(|reason| {
+            SemanticError::new("tool.invalid_freeform", "tool.freeform.grammar", reason)
+        })
+    }
 }
 
 impl ToolDefinition {
@@ -448,6 +1017,7 @@ impl ToolDefinition {
             name: name.into(),
             description: description.into(),
             input_schema,
+            freeform: None,
         };
         tool.validate()?;
         Ok(tool)
@@ -466,6 +1036,20 @@ impl ToolDefinition {
     /// Returns the bounded object or boolean JSON Schema for tool arguments.
     pub fn input_schema(&self) -> &Value {
         &self.input_schema
+    }
+
+    /// Selects a provider-neutral freeform projection for capable adapters.
+    pub fn with_freeform(
+        mut self,
+        freeform: FreeformToolDefinition,
+    ) -> Result<Self, SemanticError> {
+        self.freeform = Some(freeform);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub const fn freeform(&self) -> Option<&FreeformToolDefinition> {
+        self.freeform.as_ref()
     }
 
     fn validate(&self) -> Result<(), SemanticError> {
@@ -487,7 +1071,11 @@ impl ToolDefinition {
                 "must be an object or boolean JSON Schema",
             ));
         }
-        validate_json("tool.input_schema", &self.input_schema)
+        validate_json("tool.input_schema", &self.input_schema)?;
+        if let Some(freeform) = &self.freeform {
+            freeform.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -522,7 +1110,7 @@ pub enum HostedTool {
 }
 
 /// Requested language output representation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseFormat {
     /// Ordinary text or tool-call output.
@@ -535,6 +1123,44 @@ pub enum ResponseFormat {
         /// Must remain true at every untrusted boundary.
         strict: bool,
     },
+}
+
+impl<'de> Deserialize<'de> for ResponseFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+        enum WireFormat {
+            Text,
+            JsonSchema {
+                name: String,
+                description: Option<String>,
+                schema: Value,
+                strict: bool,
+            },
+        }
+
+        let format = match WireFormat::deserialize(deserializer)? {
+            WireFormat::Text => Self::Text,
+            WireFormat::JsonSchema {
+                name,
+                description,
+                schema,
+                strict,
+            } => Self::JsonSchema {
+                name,
+                description,
+                schema,
+                strict,
+            },
+        };
+        format
+            .validate()
+            .map(|()| format)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Provider-neutral reasoning effort requested by a language call.
@@ -555,7 +1181,7 @@ pub enum ReasoningEffort {
 
 /// Optional generation controls. Unsupported controls must be rejected by the
 /// selected adapter during Prepare, never silently omitted.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageSettings {
     max_output_tokens: Option<u32>,
@@ -564,6 +1190,38 @@ pub struct LanguageSettings {
     seed: Option<i64>,
     stop: Vec<String>,
     reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl<'de> Deserialize<'de> for LanguageSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct WireSettings {
+            max_output_tokens: Option<u32>,
+            temperature: Option<f64>,
+            top_p: Option<f64>,
+            seed: Option<i64>,
+            stop: Vec<String>,
+            reasoning_effort: Option<ReasoningEffort>,
+        }
+
+        let wire = WireSettings::deserialize(deserializer)?;
+        let settings = Self {
+            max_output_tokens: wire.max_output_tokens,
+            temperature: wire.temperature,
+            top_p: wire.top_p,
+            seed: wire.seed,
+            stop: wire.stop,
+            reasoning_effort: wire.reasoning_effort,
+        };
+        settings
+            .validate()
+            .map(|()| settings)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl LanguageSettings {
@@ -758,7 +1416,7 @@ impl ResponseFormat {
 }
 
 /// One validated language request; model/provider selection lives outside it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageRequest {
     messages: Vec<Message>,
@@ -768,6 +1426,40 @@ pub struct LanguageRequest {
     response_format: ResponseFormat,
     settings: LanguageSettings,
     extensions: Vec<ProviderExtension>,
+}
+
+impl<'de> Deserialize<'de> for LanguageRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireRequest {
+            messages: Vec<Message>,
+            tools: Vec<ToolDefinition>,
+            tool_choice: ToolChoice,
+            hosted_tools: Vec<HostedTool>,
+            response_format: ResponseFormat,
+            settings: LanguageSettings,
+            extensions: Vec<ProviderExtension>,
+        }
+
+        let wire = WireRequest::deserialize(deserializer)?;
+        let request = Self {
+            messages: wire.messages,
+            tools: wire.tools,
+            tool_choice: wire.tool_choice,
+            hosted_tools: wire.hosted_tools,
+            response_format: wire.response_format,
+            settings: wire.settings,
+            extensions: wire.extensions,
+        };
+        request
+            .validate()
+            .map(|()| request)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl LanguageRequest {
@@ -792,9 +1484,9 @@ impl LanguageRequest {
         tools: Vec<ToolDefinition>,
         tool_choice: ToolChoice,
     ) -> Result<Self, SemanticError> {
-        validate_tools(&tools, &tool_choice)?;
         self.tools = tools;
         self.tool_choice = tool_choice;
+        self.validate()?;
         Ok(self)
     }
 
@@ -803,8 +1495,8 @@ impl LanguageRequest {
         mut self,
         hosted_tools: Vec<HostedTool>,
     ) -> Result<Self, SemanticError> {
-        validate_hosted_tools(&hosted_tools)?;
         self.hosted_tools = hosted_tools;
+        self.validate()?;
         Ok(self)
     }
 
@@ -813,8 +1505,8 @@ impl LanguageRequest {
         mut self,
         response_format: ResponseFormat,
     ) -> Result<Self, SemanticError> {
-        response_format.validate()?;
         self.response_format = response_format;
+        self.validate()?;
         Ok(self)
     }
 
@@ -823,15 +1515,15 @@ impl LanguageRequest {
         mut self,
         extensions: Vec<ProviderExtension>,
     ) -> Result<Self, SemanticError> {
-        validate_extensions(&extensions)?;
         self.extensions = extensions;
+        self.validate()?;
         Ok(self)
     }
 
     /// Replaces the optional generation controls.
     pub fn with_settings(mut self, settings: LanguageSettings) -> Result<Self, SemanticError> {
-        settings.validate()?;
         self.settings = settings;
+        self.validate()?;
         Ok(self)
     }
 
@@ -883,11 +1575,64 @@ impl LanguageRequest {
         for message in &self.messages {
             message.validate()?;
         }
+        let mut calls = BTreeSet::new();
+        let mut results = BTreeSet::new();
+        for message in &self.messages {
+            for block in &message.content {
+                match block {
+                    MessageContent::ToolCall(call) => {
+                        if !calls.insert(call.id.as_str()) {
+                            return Err(SemanticError::new(
+                                "request.duplicate_tool_call",
+                                "messages",
+                                format!("tool call id {} is not conversation-wide unique", call.id),
+                            ));
+                        }
+                    }
+                    MessageContent::ToolResult { call_id, .. } => {
+                        if !calls.contains(call_id.as_str()) {
+                            return Err(SemanticError::new(
+                                "request.orphan_tool_result",
+                                "messages",
+                                format!(
+                                    "tool result {call_id} has no earlier retained assistant call"
+                                ),
+                            ));
+                        }
+                        if !results.insert(call_id.as_str()) {
+                            return Err(SemanticError::new(
+                                "request.duplicate_tool_result",
+                                "messages",
+                                format!("tool call id {call_id} has more than one result"),
+                            ));
+                        }
+                    }
+                    MessageContent::Text { .. }
+                    | MessageContent::Image(_)
+                    | MessageContent::Audio(_)
+                    | MessageContent::Reasoning { .. } => {}
+                }
+            }
+        }
         self.settings.validate()?;
         validate_tools(&self.tools, &self.tool_choice)?;
         validate_hosted_tools(&self.hosted_tools)?;
         self.response_format.validate()?;
-        validate_extensions(&self.extensions)
+        validate_extensions(&self.extensions)?;
+        self.validate_aggregate_size()
+    }
+
+    fn validate_aggregate_size(&self) -> Result<(), SemanticError> {
+        let encoded = validation::encoded_len(self)
+            .map_err(|reason| SemanticError::new("request.encoding", "request", reason))?;
+        if encoded > MAX_REQUEST_BYTES {
+            return Err(SemanticError::new(
+                "request.too_large",
+                "request",
+                format!("canonical encoding exceeds {MAX_REQUEST_BYTES} bytes"),
+            ));
+        }
+        Ok(())
     }
 
     fn canonical_bytes_unchecked(&self) -> Result<Vec<u8>, SemanticError> {
@@ -895,7 +1640,7 @@ impl LanguageRequest {
             SemanticError::new("request.encoding", "request", error.to_string())
         })?;
         let canonical =
-            validation::canonical_json(&value).map_err(|reason| json_error("request", reason))?;
+            validation::canonical_json(value).map_err(|reason| json_error("request", reason))?;
         let bytes = serde_json::to_vec(&canonical).map_err(|error| {
             SemanticError::new("request.encoding", "request", error.to_string())
         })?;
@@ -933,6 +1678,12 @@ fn validate_tools(tools: &[ToolDefinition], tool_choice: &ToolChoice) -> Result<
             validation::encoded_len(&tool.input_schema)
                 .map_err(|reason| SemanticError::new("tool.invalid_schema", "tools", reason))?,
         );
+        if let Some(freeform) = &tool.freeform {
+            schema_bytes =
+                schema_bytes.saturating_add(validation::encoded_len(&freeform.grammar).map_err(
+                    |reason| SemanticError::new("tool.invalid_freeform", "tools", reason),
+                )?);
+        }
     }
     if schema_bytes > MAX_TOOL_SCHEMA_BYTES {
         return Err(SemanticError::new(
@@ -1005,15 +1756,12 @@ fn validate_json(field: &str, value: &Value) -> Result<(), SemanticError> {
     validation::validate_json(value).map_err(|reason| json_error(field, reason))
 }
 
-fn json_error(field: &str, reason: String) -> SemanticError {
-    let code = if reason.contains("nesting") {
-        "json.too_deep"
-    } else if reason.contains("node count") {
-        "json.too_many_nodes"
-    } else {
-        "json.invalid"
+fn json_error(field: &str, reason: validation::JsonValidationError) -> SemanticError {
+    let code = match reason {
+        validation::JsonValidationError::TooDeep => "json.too_deep",
+        validation::JsonValidationError::TooManyNodes => "json.too_many_nodes",
     };
-    SemanticError::new(code, field, reason)
+    SemanticError::new(code, field, reason.to_string())
 }
 
 /// Rejection at a provider-neutral semantic constructor.
@@ -1042,5 +1790,10 @@ impl SemanticError {
     /// Returns the request field path responsible for rejection.
     pub fn field(&self) -> &str {
         &self.field
+    }
+
+    /// Returns the stable human-readable constraint that was violated.
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }

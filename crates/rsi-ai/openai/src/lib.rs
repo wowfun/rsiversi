@@ -4,7 +4,7 @@
 #![allow(clippy::missing_errors_doc)] // AiError carries the public failure taxonomy.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
     sync::{Arc, Mutex},
     time::Duration,
@@ -20,11 +20,11 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use rsi_ai_auth::SecretValue;
 use rsi_ai_protocol::{
     AiError, ContentDelta, ContentStart, DispatchStatus, ErrorKind, ErrorPhase, FinishReason,
-    HostedTool, ImageEvent, ImageRequest, LanguageEvent, LanguageRequest, MessageContent,
-    MessageRole, ProviderExtension, RealtimeAudioFormat, RealtimeCloseReason, RealtimeCommand,
-    RealtimeEvent, RealtimeRequest, ResponseFormat, Source, SpeechEvent, SpeechFormat,
-    SpeechRequest, TokenUsage, ToolChoice, TranscriptionEvent, TranscriptionRequest,
-    TranscriptionSegment,
+    HostedTool, ImageEvent, ImageRequest, LanguageEvent, LanguageModelLimits,
+    LanguageModelProfiles, LanguageRequest, MessageContent, MessageRole, ProviderExtension,
+    RealtimeAudioFormat, RealtimeCloseReason, RealtimeCommand, RealtimeEvent, RealtimeRequest,
+    ResponseFormat, Source, SpeechEvent, SpeechFormat, SpeechRequest, TokenUsage, ToolCallKind,
+    ToolChoice, ToolDefinition, TranscriptionEvent, TranscriptionRequest, TranscriptionSegment,
 };
 use rsi_ai_provider::{
     AbortSignal, AdapterFuture, DeferredLanguageAdapterHandle, DeferredLanguageAdapterStream,
@@ -37,7 +37,7 @@ use rsi_ai_transport::{
     BoundedJsonExtractor, ByteStream, HttpRequest, HttpTransport, JsonBase64Replacement,
     JsonExtractEvent, JsonExtractionLimits, JsonRequestBody, SseTermination, TransportError,
     collect_body, decode_sse, invalid_request_error, json_base64_body, provider_error as ai_error,
-    provider_http_error, transport_body_error, transport_connect_error,
+    provider_http_error, reclassify_context_limit, transport_body_error, transport_connect_error,
     transport_json_response_error, transport_stream_error,
 };
 use serde::{Deserialize, Serialize};
@@ -68,12 +68,14 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
     endpoint: String,
+    language_models: LanguageModelProfiles,
 }
 
 impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             endpoint: "https://api.openai.com".to_owned(),
+            language_models: LanguageModelProfiles::default(),
         }
     }
 }
@@ -83,6 +85,7 @@ impl OpenAiConfig {
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
+            language_models: LanguageModelProfiles::default(),
         };
         for path in [
             "/v1/responses",
@@ -93,6 +96,24 @@ impl OpenAiConfig {
             HttpRequest::new(Method::POST, config.url(path)).map_err(invalid_request_error)?;
         }
         Ok(config)
+    }
+
+    /// Adds one exact model-capacity profile; duplicates and oversized maps fail.
+    pub fn with_model_profile(
+        mut self,
+        model: impl Into<String>,
+        limits: LanguageModelLimits,
+    ) -> Result<Self, AiError> {
+        self.language_models
+            .insert(model, limits)
+            .map_err(|error| invalid_language_profile(error.reason()))?;
+        Ok(self)
+    }
+
+    fn model_limits(&self, model: &str) -> Result<LanguageModelLimits, AiError> {
+        self.language_models.get(model).ok_or_else(|| {
+            invalid_language_profile("language model has no configured capacity profile")
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -122,6 +143,15 @@ impl OpenAiConfig {
             utf8_percent_encode(model, NON_ALPHANUMERIC)
         ))
     }
+}
+
+fn invalid_language_profile(message: impl Into<String>) -> AiError {
+    ai_error(
+        ErrorKind::InvalidRequest,
+        ErrorPhase::Prepare,
+        DispatchStatus::NotStarted,
+        message,
+    )
 }
 
 macro_rules! http_adapter {
@@ -615,12 +645,34 @@ impl RealtimeConnection for OpenAiRealtimeConnection {
 }
 
 impl LanguageAdapter for OpenAiResponsesAdapter {
+    fn describe(&self, model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
+        let limits = self.config.model_limits(model)?;
+        Ok(rsi_ai_protocol::LanguageProfile::new(
+            limits.context_window_tokens(),
+            limits.default_output_reserve_tokens(),
+            limits.max_output_reserve_tokens(),
+            rsi_ai_protocol::ToolDialect::Responses,
+            true,
+            rsi_ai_protocol::ImageToolResultCapability::Yes(
+                rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
+            ),
+            vec![
+                rsi_ai_protocol::ProviderExtensionFormat::new("openai.responses.replay", 0)
+                    .expect("static OpenAI replay extension is valid"),
+            ],
+        )
+        .expect("static OpenAI Responses profile is valid"))
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,
         model: String,
         request: LanguageRequest,
     ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, AiError>> {
+        if let Err(error) = self.config.model_limits(&model) {
+            return Box::pin(async move { Err(error) });
+        }
         if let Err(error) = validate_responses_request(&request) {
             return Box::pin(async move { Err(error) });
         }
@@ -657,6 +709,9 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
         model: String,
         request: LanguageRequest,
     ) -> AdapterFuture<Result<Prepared<DeferredLanguageAdapterHandle>, AiError>> {
+        if let Err(error) = self.config.model_limits(&model) {
+            return Box::pin(async move { Err(error) });
+        }
         if let Err(error) = validate_responses_request(&request) {
             return Box::pin(async move { Err(error) });
         }
@@ -988,6 +1043,17 @@ async fn responses_request(
 ) -> Result<JsonRequestBody, AiError> {
     let mut input = Vec::new();
     let mut media_replacements = Vec::new();
+    let custom_calls = request
+        .messages()
+        .iter()
+        .flat_map(rsi_ai_protocol::Message::content)
+        .filter_map(|content| match content {
+            MessageContent::ToolCall(call) if call.kind == ToolCallKind::Freeform => {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     for message in request.messages() {
         match message.role() {
             MessageRole::System | MessageRole::Developer | MessageRole::User => {
@@ -1051,12 +1117,21 @@ async fn responses_request(
                         })),
                         MessageContent::ToolCall(call) => {
                             push_responses_assistant_text(&mut input, &mut text);
-                            input.push(json!({
-                                "type":"function_call",
-                                "call_id":call.id,
-                                "name":call.name,
-                                "arguments":call.arguments,
-                            }));
+                            if call.kind == ToolCallKind::Freeform {
+                                input.push(json!({
+                                    "type":"custom_tool_call",
+                                    "call_id":call.id,
+                                    "name":call.name,
+                                    "input":call.arguments,
+                                }));
+                            } else {
+                                input.push(json!({
+                                    "type":"function_call",
+                                    "call_id":call.id,
+                                    "name":call.name,
+                                    "arguments":call.arguments,
+                                }));
+                            }
                         }
                         MessageContent::Reasoning { .. } => {
                             return Err(ai_error(
@@ -1088,24 +1163,57 @@ async fn responses_request(
                 else {
                     unreachable!("message role validation")
                 };
+                let input_index = input.len();
                 let mut output = String::new();
+                let mut rich_output = Vec::new();
+                let mut has_media = false;
                 for block in content {
                     match block {
-                        MessageContent::Text { text } => output.push_str(text),
-                        MessageContent::Image(_) | MessageContent::Audio(_) => {
+                        MessageContent::Text { text } => {
+                            output.push_str(text);
+                            rich_output.push(json!({"type":"input_text", "text":text}));
+                        }
+                        MessageContent::Image(media) => {
+                            has_media = true;
+                            let bytes = context.resolve_media(media, abort.clone()).await?;
+                            media_replacements.push(JsonBase64Replacement::new(
+                                format!(
+                                    "/input/{input_index}/output/{}/image_url",
+                                    rich_output.len()
+                                ),
+                                format!("data:{};base64,", media.mime_type()),
+                                bytes,
+                            ));
+                            rich_output.push(json!({
+                                "type":"input_image",
+                                "image_url":null
+                            }));
+                        }
+                        MessageContent::Audio(_) => {
                             return Err(ai_error(
                                 ErrorKind::Unsupported,
                                 ErrorPhase::Prepare,
                                 DispatchStatus::NotStarted,
-                                "OpenAI function outputs require text in v1",
+                                "OpenAI function outputs do not accept audio in v1",
                             ));
                         }
                         _ => unreachable!("tool result validation"),
                     }
                 }
-                input.push(json!({
-                    "type":"function_call_output", "call_id":call_id, "output":output
-                }));
+                let output = if has_media {
+                    Value::Array(rich_output)
+                } else {
+                    Value::String(output)
+                };
+                if custom_calls.contains(call_id) {
+                    input.push(json!({
+                        "type":"custom_tool_call_output", "call_id":call_id, "output":output
+                    }));
+                } else {
+                    input.push(json!({
+                        "type":"function_call_output", "call_id":call_id, "output":output
+                    }));
+                }
             }
         }
     }
@@ -1139,20 +1247,36 @@ async fn responses_request(
                     .tools()
                     .iter()
                     .map(|tool| {
-                        json!({
-                            "type":"function",
-                            "name":tool.name(),
-                            "description":tool.description(),
-                            "parameters":tool.input_schema(),
-                            "strict":true,
-                        })
+                        if let Some(freeform) = tool.freeform() {
+                            let syntax = match freeform.format() {
+                                rsi_ai_protocol::FreeformFormat::Lark => "lark",
+                            };
+                            json!({
+                                "type":"custom",
+                                "name":tool.name(),
+                                "description":tool.description(),
+                                "format": {
+                                    "type":"grammar",
+                                    "syntax":syntax,
+                                    "definition":freeform.grammar(),
+                                },
+                            })
+                        } else {
+                            json!({
+                                "type":"function",
+                                "name":tool.name(),
+                                "description":tool.description(),
+                                "parameters":tool.input_schema(),
+                                "strict":true,
+                            })
+                        }
                     })
                     .collect(),
             ),
         );
         body.insert(
             "tool_choice".to_owned(),
-            responses_tool_choice(request.tool_choice()),
+            responses_tool_choice(request.tool_choice(), request.tools()),
         );
     }
     for hosted in request.hosted_tools() {
@@ -1219,12 +1343,22 @@ fn push_responses_assistant_text(input: &mut Vec<Value>, text: &mut Vec<Value>) 
     }
 }
 
-fn responses_tool_choice(choice: &ToolChoice) -> Value {
+fn responses_tool_choice(choice: &ToolChoice, tools: &[ToolDefinition]) -> Value {
     match choice {
         ToolChoice::Auto => Value::String("auto".to_owned()),
         ToolChoice::None => Value::String("none".to_owned()),
         ToolChoice::Required => Value::String("required".to_owned()),
-        ToolChoice::Specific(name) => json!({"type":"function", "name":name}),
+        ToolChoice::Specific(name) => {
+            let kind = if tools
+                .iter()
+                .any(|tool| tool.name() == name && tool.freeform().is_some())
+            {
+                "custom"
+            } else {
+                "function"
+            };
+            json!({"type":kind, "name":name})
+        }
     }
 }
 
@@ -1417,20 +1551,18 @@ impl ResponsesParser {
             }
             "response.output_item.added" => {
                 let item = event.get("item").unwrap_or(&Value::Null);
-                if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                    let item_id = required_response_string(
-                        item,
-                        "id",
-                        "OpenAI function call has no item id",
-                    )?;
+                let item_type = item.get("type").and_then(Value::as_str);
+                if matches!(item_type, Some("function_call" | "custom_tool_call")) {
+                    let item_id =
+                        required_response_string(item, "id", "OpenAI tool call has no item id")?;
                     validate_provider_item_id(item_id)?;
                     let call_id = required_response_string(
                         item,
                         "call_id",
-                        "OpenAI function call has no call_id",
+                        "OpenAI tool call has no call_id",
                     )?;
                     let name =
-                        required_response_string(item, "name", "OpenAI function call has no name")?;
+                        required_response_string(item, "name", "OpenAI tool call has no name")?;
                     if usize::try_from(self.next_index)
                         .map_or(true, |value| value >= rsi_ai_protocol::MAX_CONTENT_BLOCKS)
                     {
@@ -1449,6 +1581,11 @@ impl ResponsesParser {
                         content: ContentStart::ToolCall {
                             id: call_id.to_owned(),
                             name: name.to_owned(),
+                            kind: if item_type == Some("custom_tool_call") {
+                                ToolCallKind::Freeform
+                            } else {
+                                ToolCallKind::Function
+                            },
                         },
                     });
                     if self
@@ -1469,8 +1606,13 @@ impl ResponsesParser {
                             "OpenAI Responses repeated a function item id",
                         ));
                     }
+                    let arguments_field = if item_type == Some("custom_tool_call") {
+                        "input"
+                    } else {
+                        "arguments"
+                    };
                     if let Some(arguments) = item
-                        .get("arguments")
+                        .get(arguments_field)
                         .and_then(Value::as_str)
                         .filter(|value| !value.is_empty())
                     {
@@ -1481,7 +1623,7 @@ impl ResponsesParser {
                     }
                 }
             }
-            "response.function_call_arguments.delta" => {
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
                 let item_id = required_response_string(
                     event,
                     "item_id",
@@ -1568,12 +1710,7 @@ impl ResponsesParser {
                 }
             }
             "response.failed" | "error" => {
-                output.push(language_failed(ai_error(
-                    ErrorKind::Server,
-                    ErrorPhase::Stream,
-                    DispatchStatus::Dispatched,
-                    "OpenAI Responses did not complete successfully",
-                )));
+                output.push(language_failed(responses_failure(event)));
             }
             "response.created"
             | "response.in_progress"
@@ -1585,6 +1722,7 @@ impl ResponsesParser {
             | "response.reasoning_summary_part.done"
             | "response.reasoning_summary_text.done"
             | "response.function_call_arguments.done"
+            | "response.custom_tool_call_input.done"
             | "response.web_search_call.in_progress"
             | "response.web_search_call.searching"
             | "response.web_search_call.completed" => {}
@@ -1623,6 +1761,48 @@ impl ResponsesParser {
                 value: json!({"response_id":id}),
             });
         output.push(LanguageEvent::Finished { reason, replay });
+    }
+}
+
+fn responses_failure(event: &Value) -> AiError {
+    let details = if event.get("type").and_then(Value::as_str) == Some("error") {
+        Some(event)
+    } else {
+        event
+            .get("response")
+            .and_then(|response| response.get("error"))
+            .filter(|error| !error.is_null())
+            .or_else(|| event.get("error"))
+            .filter(|error| !error.is_null())
+    };
+    let code = details
+        .and_then(|details| details.get("code"))
+        .and_then(Value::as_str);
+    let summary = details
+        .and_then(|details| details.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("OpenAI Responses did not complete successfully");
+    let kind = if code == Some("context_length_exceeded") {
+        ErrorKind::ContextLimit
+    } else {
+        ErrorKind::Server
+    };
+    let error = ai_error(
+        kind,
+        ErrorPhase::Stream,
+        DispatchStatus::Dispatched,
+        summary,
+    );
+    match code {
+        Some(code) => error.with_provider_code(code).unwrap_or_else(|_| {
+            ai_error(
+                ErrorKind::Protocol,
+                ErrorPhase::Stream,
+                DispatchStatus::Dispatched,
+                "OpenAI Responses returned an invalid error code",
+            )
+        }),
+        None => error,
     }
 }
 
@@ -2367,7 +2547,8 @@ async fn http_failure(status: u16, body: ByteStream) -> AiError {
 }
 
 async fn http_failure_at(status: u16, body: ByteStream, phase: ErrorPhase) -> AiError {
-    provider_http_error(status, body, phase, "OpenAI rejected the request").await
+    let error = provider_http_error(status, body, phase, "OpenAI rejected the request").await;
+    reclassify_context_limit(error)
 }
 
 fn language_failed(error: AiError) -> LanguageEvent {

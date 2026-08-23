@@ -3,15 +3,20 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)] // AiError carries the public failure taxonomy.
 
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 use async_stream::stream;
 use futures_util::StreamExt as _;
 use http::{HeaderName, HeaderValue, Method};
 use rsi_ai_protocol::{
     AiError, ContentDelta, ContentStart, DispatchStatus, ErrorKind, ErrorPhase, FinishReason,
-    HostedTool, LanguageEvent, LanguageRequest, Message, MessageContent, MessageRole,
-    ResponseFormat, ToolChoice,
+    HostedTool, ImageToolResultCapability, ImageToolResultMode, LanguageEvent, LanguageModelLimits,
+    LanguageModelProfiles, LanguageProfile, LanguageRequest, Message, MessageContent, MessageRole,
+    ResponseFormat, ToolCallKind, ToolChoice, ToolDialect,
 };
 use rsi_ai_provider::{
     AdapterFuture, LanguageAdapter, LanguageAdapterStream, PrepareContext, Prepared,
@@ -19,8 +24,8 @@ use rsi_ai_provider::{
 use rsi_ai_transport::{
     ChatCompletionsChunk, HttpRequest, HttpTransport, JsonBase64Replacement, JsonRequestBody,
     SseTermination, decode_sse, invalid_request_error, json_base64_body,
-    provider_error as ai_error, provider_http_error, transport_connect_error,
-    transport_stream_error,
+    provider_error as ai_error, provider_http_error, reclassify_context_limit,
+    transport_connect_error, transport_stream_error,
 };
 use serde_json::{Map, Value, json};
 
@@ -30,6 +35,7 @@ pub struct ChatCompletionsConfig {
     endpoint: String,
     path: String,
     allow_image_input: bool,
+    language_models: LanguageModelProfiles,
 }
 
 impl ChatCompletionsConfig {
@@ -39,6 +45,7 @@ impl ChatCompletionsConfig {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
             path: "/v1/chat/completions".to_owned(),
             allow_image_input: true,
+            language_models: LanguageModelProfiles::default(),
         };
         config.validate()?;
         Ok(config)
@@ -56,6 +63,24 @@ impl ChatCompletionsConfig {
     pub const fn with_image_input(mut self, allow: bool) -> Self {
         self.allow_image_input = allow;
         self
+    }
+
+    /// Adds one exact model-capacity profile; duplicates and oversized maps fail.
+    pub fn with_model_profile(
+        mut self,
+        model: impl Into<String>,
+        limits: LanguageModelLimits,
+    ) -> Result<Self, AiError> {
+        self.language_models
+            .insert(model, limits)
+            .map_err(|error| invalid_profile(error.reason()))?;
+        Ok(self)
+    }
+
+    fn model_limits(&self, model: &str) -> Result<LanguageModelLimits, AiError> {
+        self.language_models
+            .get(model)
+            .ok_or_else(|| invalid_profile("language model has no configured capacity profile"))
     }
 
     fn url(&self) -> String {
@@ -113,12 +138,33 @@ impl fmt::Debug for ChatCompletionsAdapter {
 }
 
 impl LanguageAdapter for ChatCompletionsAdapter {
+    fn describe(&self, model: &str) -> Result<LanguageProfile, AiError> {
+        let limits = self.config.model_limits(model)?;
+        Ok(LanguageProfile::new(
+            limits.context_window_tokens(),
+            limits.default_output_reserve_tokens(),
+            limits.max_output_reserve_tokens(),
+            ToolDialect::ChatCompletions,
+            false,
+            if self.config.allow_image_input {
+                ImageToolResultCapability::Yes(ImageToolResultMode::AdjacentUserMessage)
+            } else {
+                ImageToolResultCapability::No
+            },
+            Vec::new(),
+        )
+        .expect("static Chat Completions profile is valid"))
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,
         model: String,
         request: LanguageRequest,
     ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, AiError>> {
+        if let Err(error) = self.config.model_limits(&model) {
+            return Box::pin(async move { Err(error) });
+        }
         let unsupported_hosted = request
             .hosted_tools()
             .iter()
@@ -132,6 +178,36 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                     "Chat Completions does not support provider-hosted tools",
                 ))
             });
+        }
+        if request.tools().iter().any(|tool| tool.freeform().is_some()) {
+            return Box::pin(async {
+                Err(ai_error(
+                    ErrorKind::Unsupported,
+                    ErrorPhase::Prepare,
+                    DispatchStatus::NotStarted,
+                    "Chat Completions cannot preserve freeform custom-tool semantics",
+                ))
+            });
+        }
+        if request.messages().iter().any(|message| {
+            message.content().iter().any(|content| {
+                matches!(
+                    content,
+                    MessageContent::ToolCall(call) if call.kind == ToolCallKind::Freeform
+                )
+            })
+        }) {
+            return Box::pin(async {
+                Err(ai_error(
+                    ErrorKind::Unsupported,
+                    ErrorPhase::Prepare,
+                    DispatchStatus::NotStarted,
+                    "Chat Completions cannot preserve freeform custom-tool history",
+                ))
+            });
+        }
+        if let Err(error) = validate_chat_tool_result_adjacency(&request) {
+            return Box::pin(async move { Err(error) });
         }
         let snapshot = context.snapshot().clone();
         let config = self.config.clone();
@@ -187,6 +263,49 @@ impl LanguageAdapter for ChatCompletionsAdapter {
     }
 }
 
+fn invalid_profile(message: impl Into<String>) -> AiError {
+    ai_error(
+        ErrorKind::InvalidRequest,
+        ErrorPhase::Prepare,
+        DispatchStatus::NotStarted,
+        message,
+    )
+}
+
+fn validate_chat_tool_result_adjacency(request: &LanguageRequest) -> Result<(), AiError> {
+    let mut adjacent_calls = BTreeSet::new();
+    for message in request.messages() {
+        match message.role() {
+            MessageRole::Assistant => {
+                adjacent_calls.clear();
+                adjacent_calls.extend(message.content().iter().filter_map(|content| {
+                    let MessageContent::ToolCall(call) = content else {
+                        return None;
+                    };
+                    Some(call.id.as_str())
+                }));
+            }
+            MessageRole::Tool => {
+                let MessageContent::ToolResult { call_id, .. } = &message.content()[0] else {
+                    unreachable!("tool message validation")
+                };
+                if !adjacent_calls.remove(call_id.as_str()) {
+                    return Err(ai_error(
+                        ErrorKind::InvalidRequest,
+                        ErrorPhase::Prepare,
+                        DispatchStatus::NotStarted,
+                        "Chat Completions tool results must immediately follow their assistant tool-call group",
+                    ));
+                }
+            }
+            MessageRole::System | MessageRole::Developer | MessageRole::User => {
+                adjacent_calls.clear();
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn build_request_body(
     context: &PrepareContext,
     model: &str,
@@ -194,21 +313,7 @@ async fn build_request_body(
     abort: rsi_ai_provider::AbortSignal,
     allow_image_input: bool,
 ) -> Result<JsonRequestBody, AiError> {
-    let mut messages = Vec::with_capacity(request.messages().len());
-    let mut media = Vec::new();
-    for (message_index, message) in request.messages().iter().enumerate() {
-        messages.push(
-            serialize_message(
-                context,
-                message,
-                abort.clone(),
-                allow_image_input,
-                message_index,
-                &mut media,
-            )
-            .await?,
-        );
-    }
+    let (messages, media) = serialize_messages(context, request, abort, allow_image_input).await?;
     let tools = request
         .tools()
         .iter()
@@ -279,6 +384,63 @@ async fn build_request_body(
     json_base64_body(Value::Object(body), media).map_err(invalid_request_error)
 }
 
+async fn serialize_messages(
+    context: &PrepareContext,
+    request: &LanguageRequest,
+    abort: rsi_ai_provider::AbortSignal,
+    allow_image_input: bool,
+) -> Result<(Vec<Value>, Vec<JsonBase64Replacement>), AiError> {
+    let mut messages = Vec::with_capacity(request.messages().len());
+    let mut media = Vec::new();
+    let mut request_index = 0;
+    while request_index < request.messages().len() {
+        let message = &request.messages()[request_index];
+        if message.role() == MessageRole::Tool {
+            let group_end = request.messages()[request_index..]
+                .iter()
+                .position(|candidate| candidate.role() != MessageRole::Tool)
+                .map_or(request.messages().len(), |offset| request_index + offset);
+            let group_len = group_end - request_index;
+            let mut tool_messages = Vec::with_capacity(group_len);
+            let mut image_messages = Vec::new();
+            for tool_message in &request.messages()[request_index..group_end] {
+                let image_index = messages.len() + group_len + image_messages.len();
+                let (tool, images) = serialize_tool_result(
+                    context,
+                    tool_message,
+                    abort.clone(),
+                    allow_image_input,
+                    image_index,
+                    &mut media,
+                )
+                .await?;
+                tool_messages.push(tool);
+                if let Some(images) = images {
+                    image_messages.push(images);
+                }
+            }
+            messages.extend(tool_messages);
+            messages.extend(image_messages);
+            request_index = group_end;
+            continue;
+        }
+        let message_index = messages.len();
+        messages.extend(
+            serialize_message(
+                context,
+                message,
+                abort.clone(),
+                allow_image_input,
+                message_index,
+                &mut media,
+            )
+            .await?,
+        );
+        request_index += 1;
+    }
+    Ok((messages, media))
+}
+
 fn serialize_tool_choice(choice: &ToolChoice) -> Value {
     match choice {
         ToolChoice::Auto => Value::String("auto".to_owned()),
@@ -298,7 +460,7 @@ async fn serialize_message(
     allow_image_input: bool,
     message_index: usize,
     media_replacements: &mut Vec<JsonBase64Replacement>,
-) -> Result<Value, AiError> {
+) -> Result<Vec<Value>, AiError> {
     match message.role() {
         MessageRole::System | MessageRole::Developer | MessageRole::User => {
             let role = match message.role() {
@@ -343,7 +505,7 @@ async fn serialize_message(
                     | MessageContent::ToolResult { .. } => unreachable!("role validation"),
                 }
             }
-            Ok(json!({"role":role, "content":wire_blocks}))
+            Ok(vec![json!({"role":role, "content":wire_blocks})])
         }
         MessageRole::Assistant => {
             let mut text = String::new();
@@ -385,33 +547,78 @@ async fn serialize_message(
                     value.insert("reasoning_content".to_owned(), Value::String(reasoning));
                 }
             }
-            Ok(Value::Object(value))
+            Ok(vec![Value::Object(value)])
         }
         MessageRole::Tool => {
-            let MessageContent::ToolResult {
-                call_id, content, ..
-            } = &message.content()[0]
-            else {
-                unreachable!("role validation")
-            };
-            let mut text = String::new();
-            for block in content {
-                match block {
-                    MessageContent::Text { text: value } => text.push_str(value),
-                    MessageContent::Image(_) | MessageContent::Audio(_) => {
-                        return Err(ai_error(
-                            ErrorKind::Unsupported,
-                            ErrorPhase::Prepare,
-                            DispatchStatus::NotStarted,
-                            "Chat Completions tool results require text",
-                        ));
-                    }
-                    _ => unreachable!("tool result validation"),
-                }
+            let (tool, images) = serialize_tool_result(
+                context,
+                message,
+                abort,
+                allow_image_input,
+                message_index + 1,
+                media_replacements,
+            )
+            .await?;
+            match images {
+                Some(images) => Ok(vec![tool, images]),
+                None => Ok(vec![tool]),
             }
-            Ok(json!({"role":"tool", "tool_call_id":call_id, "content":text}))
         }
     }
+}
+
+async fn serialize_tool_result(
+    context: &PrepareContext,
+    message: &Message,
+    abort: rsi_ai_provider::AbortSignal,
+    allow_image_input: bool,
+    image_message_index: usize,
+    media_replacements: &mut Vec<JsonBase64Replacement>,
+) -> Result<(Value, Option<Value>), AiError> {
+    let MessageContent::ToolResult {
+        call_id, content, ..
+    } = &message.content()[0]
+    else {
+        unreachable!("role validation")
+    };
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for block in content {
+        match block {
+            MessageContent::Text { text: value } => text.push_str(value),
+            MessageContent::Image(image) if allow_image_input => images.push(image),
+            MessageContent::Image(_) | MessageContent::Audio(_) => {
+                return Err(ai_error(
+                    ErrorKind::Unsupported,
+                    ErrorPhase::Prepare,
+                    DispatchStatus::NotStarted,
+                    "Chat Completions tool results require text",
+                ));
+            }
+            _ => unreachable!("tool result validation"),
+        }
+    }
+    let tool = json!({"role":"tool", "tool_call_id":call_id, "content":text});
+    if images.is_empty() {
+        return Ok((tool, None));
+    }
+    let mut image_content = Vec::with_capacity(images.len());
+    for image in images {
+        let bytes = context.resolve_media(image, abort.clone()).await?;
+        media_replacements.push(JsonBase64Replacement::new(
+            format!(
+                "/messages/{image_message_index}/content/{}/image_url/url",
+                image_content.len()
+            ),
+            format!("data:{};base64,", image.mime_type()),
+            bytes,
+        ));
+        image_content.push(json!({
+            "type":"image_url",
+            "image_url":{"url":null}
+        }));
+    }
+    Ok((tool, Some(json!({"role":"user", "content":image_content}))))
 }
 
 #[derive(Debug)]
@@ -510,7 +717,11 @@ fn translate_chat_stream(mut input: rsi_ai_transport::SseStream) -> LanguageAdap
                         next_output = next_output.saturating_add(1);
                         yield Ok(LanguageEvent::ContentStarted {
                             index: output_index,
-                            content: ContentStart::ToolCall { id: id.clone(), name: name.clone() },
+                            content: ContentStart::ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                kind: rsi_ai_protocol::ToolCallKind::Function,
+                            },
                         });
                         tools.insert(call.index, ToolState { output_index, id, name });
                     }
@@ -591,13 +802,14 @@ fn map_finish_reason(reason: &str) -> Result<FinishReason, AiError> {
 }
 
 async fn http_failure(status: u16, body: rsi_ai_transport::ByteStream) -> AiError {
-    provider_http_error(
+    let error = provider_http_error(
         status,
         body,
         ErrorPhase::FirstEvent,
         "provider rejected the request",
     )
-    .await
+    .await;
+    reclassify_context_limit(error)
 }
 
 fn failed(error: AiError) -> LanguageEvent {

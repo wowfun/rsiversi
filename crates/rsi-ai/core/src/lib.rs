@@ -374,6 +374,15 @@ impl LanguageModel {
         &self.descriptor
     }
 
+    /// Describes the model through the generation-pinned adapter without provider I/O.
+    pub fn describe(&self) -> Result<rsi_ai_protocol::LanguageProfile, RegistryError> {
+        self.registration
+            .language()
+            .expect("language handle proves adapter exists")
+            .describe(&self.descriptor.model)
+            .map_err(RegistryError::provider)
+    }
+
     /// Validates and freezes one one-shot language call without provider I/O.
     pub async fn prepare(
         &self,

@@ -11,9 +11,9 @@ use futures_util::Stream;
 use rsi_ai_auth::{CredentialRequirement, CredentialSourceSnapshot, ResolvedCredential};
 use rsi_ai_protocol::{
     AiError, DispatchStatus, ErrorKind, ErrorPhase, ImageEvent, ImageRequest, LanguageEvent,
-    LanguageRequest, MAX_EXTENSION_BYTES, MediaDescriptor, ProviderExtension, RealtimeCommand,
-    RealtimeEvent, RealtimeRequest, SpeechEvent, SpeechRequest, TranscriptionEvent,
-    TranscriptionRequest,
+    LanguageProfile, LanguageRequest, MAX_EXTENSION_BYTES, MediaDescriptor, ProviderExtension,
+    RealtimeCommand, RealtimeEvent, RealtimeRequest, SpeechEvent, SpeechRequest,
+    TranscriptionEvent, TranscriptionRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -629,6 +629,9 @@ impl<T> fmt::Debug for Prepared<T> {
 
 /// Language provider seam.
 pub trait LanguageAdapter: fmt::Debug + Send + Sync {
+    /// Describes one model without credentials, network, filesystem, or other provider I/O.
+    fn describe(&self, model: &str) -> Result<LanguageProfile, AiError>;
+
     /// Validates and freezes one language call without performing provider I/O.
     fn prepare(
         &self,

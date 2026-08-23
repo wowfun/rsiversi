@@ -4,7 +4,9 @@ use axum::{Router, routing::post};
 use rsi_ai::{ModelRef, Registry};
 use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_deepseek::{DeepSeekAdapter, DeepSeekConfig};
-use rsi_ai_protocol::{LanguageRequest, LanguageSettings, Message, ReasoningEffort};
+use rsi_ai_protocol::{
+    LanguageModelLimits, LanguageRequest, LanguageSettings, Message, ReasoningEffort,
+};
 use rsi_ai_provider::ProviderRegistration;
 use rsi_ai_transport::ReqwestTransport;
 
@@ -23,10 +25,16 @@ async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
     tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
 
     let adapter = DeepSeekAdapter::new(
-        DeepSeekConfig::with_endpoint(format!("http://{address}")).expect("config"),
+        DeepSeekConfig::with_endpoint(format!("http://{address}"))
+            .and_then(|config| {
+                config.with_model_profile(
+                    "deepseek-chat",
+                    LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits"),
+                )
+            })
+            .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
-    )
-    .expect("adapter");
+    );
     let registry = Registry::builder(
         CredentialManager::builder()
             .with_explicit("deepseek", "test")
@@ -62,10 +70,16 @@ async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
 #[tokio::test]
 async fn deepseek_rejects_unsupported_settings_during_prepare() {
     let adapter = DeepSeekAdapter::new(
-        DeepSeekConfig::with_endpoint("http://127.0.0.1:9").expect("config"),
+        DeepSeekConfig::with_endpoint("http://127.0.0.1:9")
+            .and_then(|config| {
+                config.with_model_profile(
+                    "deepseek-reasoner",
+                    LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits"),
+                )
+            })
+            .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
-    )
-    .expect("adapter");
+    );
     let registry = Registry::builder(
         CredentialManager::builder()
             .with_explicit("deepseek", "test")

@@ -19,11 +19,12 @@ use rsi_ai_openai::{
     OpenAiTranscriptionAdapter,
 };
 use rsi_ai_protocol::{
-    ContentBlock, ErrorKind, HostedTool, ImageEvent, ImageRequest, LanguageRequest,
-    LanguageSettings, MediaDescriptor, MediaKind, Message, MessageContent, ReasoningEffort,
-    ResponseFormat, SpeechFormat, SpeechRequest, ToolCall, TranscriptionRequest,
+    ContentBlock, ErrorKind, FreeformFormat, FreeformToolDefinition, HostedTool, ImageEvent,
+    ImageRequest, LanguageModelLimits, LanguageRequest, LanguageSettings, MediaDescriptor,
+    MediaKind, Message, MessageContent, ReasoningEffort, ResponseFormat, SpeechFormat,
+    SpeechRequest, ToolCall, ToolChoice, ToolDefinition, TranscriptionRequest,
 };
-use rsi_ai_provider::ProviderRegistration;
+use rsi_ai_provider::{LanguageAdapter, ProviderRegistration};
 use rsi_ai_testkit::InMemoryMediaResolver;
 use rsi_ai_transport::ReqwestTransport;
 use serde_json::{Value, json};
@@ -32,6 +33,60 @@ type CapturedCall = (String, HeaderMap, Vec<u8>);
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<CapturedCall>>>);
+
+fn language_config(endpoint: impl Into<String>) -> OpenAiConfig {
+    OpenAiConfig::new(endpoint)
+        .and_then(|config| {
+            config.with_model_profile(
+                "gpt-5",
+                LanguageModelLimits::new(200_000, 4_096, 32_768).expect("model limits"),
+            )
+        })
+        .expect("language config")
+}
+
+#[test]
+fn responses_describe_uses_the_exact_configured_model_capacity() {
+    let adapter = OpenAiResponsesAdapter::new(
+        OpenAiConfig::new("http://127.0.0.1:9")
+            .and_then(|config| {
+                config.with_model_profile(
+                    "gpt-small",
+                    LanguageModelLimits::new(128_000, 4_096, 16_384).expect("small limits"),
+                )
+            })
+            .and_then(|config| {
+                config.with_model_profile(
+                    "gpt-large",
+                    LanguageModelLimits::new(1_000_000, 8_192, 65_536).expect("large limits"),
+                )
+            })
+            .expect("config"),
+        Arc::new(ReqwestTransport::new().expect("transport")),
+    );
+
+    assert_eq!(
+        adapter
+            .describe("gpt-small")
+            .expect("small profile")
+            .context_window_tokens(),
+        128_000
+    );
+    assert_eq!(
+        adapter
+            .describe("gpt-large")
+            .expect("large profile")
+            .context_window_tokens(),
+        1_000_000
+    );
+    assert_eq!(
+        adapter
+            .describe("unknown")
+            .expect_err("unknown model")
+            .kind(),
+        ErrorKind::InvalidRequest
+    );
+}
 
 async fn endpoint(
     State(capture): State<Capture>,
@@ -44,6 +99,26 @@ async fn endpoint(
         .lock()
         .expect("capture")
         .push((uri.path().to_owned(), headers, body.to_vec()));
+    if uri.path() == "/v1/responses"
+        && body
+            .windows(b"custom-parser-case".len())
+            .any(|part| part == b"custom-parser-case")
+    {
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(concat!(
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"id\":\"item-custom\",\"call_id\":\"call-custom\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\n",
+                "data: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"item-custom\",\"delta\":\"*** Begin Patch\\n*** End Patch\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                "data: [DONE]\n\n"
+            )))
+            .expect("custom tool response");
+    }
+    if uri.path() == "/v1/responses"
+        && let Some(response) = responses_failure_fixture(&body)
+    {
+        return response;
+    }
     if uri.path() == "/v1/responses" && body.windows(15).any(|part| part == b"incomplete-case") {
         return Response::builder()
             .header("content-type", "text/event-stream")
@@ -105,6 +180,45 @@ async fn endpoint(
             .expect("speech"),
         path => panic!("unexpected path {path}"),
     }
+}
+
+fn responses_failure_fixture(body: &[u8]) -> Option<Response> {
+    const FIXTURES: [(&[u8], &str, &str); 5] = [
+        (
+            b"context-limit-case",
+            r#"{"type":"response.failed","response":{"id":"resp-context-limit","status":"failed","error":{"code":"context_length_exceeded","message":"input exceeds this model's context window"}}}"#,
+            "context limit response",
+        ),
+        (
+            b"null-error-case",
+            r#"{"type":"response.failed","response":{"error":null},"error":{"code":"server_error","message":"nested fallback"}}"#,
+            "null nested error response",
+        ),
+        (
+            b"envelope-message-case",
+            r#"{"type":"response.failed","message":"do not scrape this envelope"}"#,
+            "envelope message response",
+        ),
+        (
+            b"invalid-error-code-case",
+            r#"{"type":"response.failed","error":{"code":"bad code","message":"provider failed"}}"#,
+            "invalid error code response",
+        ),
+        (
+            b"top-level-error-case",
+            r#"{"type":"error","code":"context_length_exceeded","message":"top-level context limit","param":null,"sequence_number":1}"#,
+            "top-level error response",
+        ),
+    ];
+    let (_, event, label) = FIXTURES
+        .into_iter()
+        .find(|(marker, _, _)| body.windows(marker.len()).any(|part| part == *marker))?;
+    Some(
+        Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(format!("data: {event}\n\ndata: [DONE]\n\n")))
+            .expect(label),
+    )
 }
 
 async fn one_image() -> Response {
@@ -186,7 +300,7 @@ async fn language_model(capture: Capture) -> rsi_ai::LanguageModel {
         .expect("registration")
         .with_credential(credential())
         .with_language(OpenAiResponsesAdapter::new(
-            OpenAiConfig::new(format!("http://{address}")).expect("config"),
+            language_config(format!("http://{address}")),
             Arc::new(ReqwestTransport::new().expect("transport")),
         ))
         .build()
@@ -228,6 +342,110 @@ async fn text_only_language_request_is_buffered_with_content_length() {
     assert!(!calls[0].1.contains_key("transfer-encoding"));
 }
 
+fn freeform_patch_tool() -> ToolDefinition {
+    function_patch_tool()
+        .with_freeform(
+            FreeformToolDefinition::new(FreeformFormat::Lark, "start: /.+/")
+                .expect("freeform grammar"),
+        )
+        .expect("freeform tool")
+}
+
+fn function_patch_tool() -> ToolDefinition {
+    ToolDefinition::new(
+        "apply_patch",
+        "Apply a patch.",
+        json!({
+            "type": "object",
+            "required": ["patch"],
+            "properties": {"patch": {"type": "string"}},
+            "additionalProperties": false
+        }),
+    )
+    .expect("function schema")
+}
+
+#[tokio::test]
+async fn responses_preserves_historical_freeform_wire_kind_when_the_catalog_changes() {
+    let capture = Capture::default();
+    let output = language_model(capture.clone())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("custom-parser-case").expect("message"),
+            ])
+            .expect("request")
+            .with_tools(vec![freeform_patch_tool()], ToolChoice::Auto)
+            .expect("tools"),
+        )
+        .await
+        .expect("custom tool response");
+    let [ContentBlock::ToolCall(call)] = output.content.as_slice() else {
+        panic!("expected one custom tool call: {:?}", output.content)
+    };
+    assert_eq!(call.id, "call-custom");
+    assert_eq!(call.name, "apply_patch");
+    assert_eq!(call.arguments, "*** Begin Patch\n*** End Patch");
+    assert_eq!(call.kind, rsi_ai_protocol::ToolCallKind::Freeform);
+
+    language_model(capture.clone())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::assistant(vec![MessageContent::ToolCall(call.clone())])
+                    .expect("assistant tool call"),
+                Message::tool_result(
+                    call.id.clone(),
+                    vec![MessageContent::Text {
+                        text: "Done".to_owned(),
+                    }],
+                    false,
+                )
+                .expect("tool result"),
+                Message::user_text("continue").expect("message"),
+            ])
+            .expect("request")
+            .with_tools(vec![function_patch_tool()], ToolChoice::Auto)
+            .expect("tools"),
+        )
+        .await
+        .expect("custom history response");
+
+    let calls = capture.0.lock().expect("capture");
+    let first: Value = serde_json::from_slice(&calls[0].2).expect("first request");
+    assert_eq!(first["tools"][0]["type"], "custom");
+    assert_eq!(first["tools"][0]["format"]["syntax"], "lark");
+    let second: Value = serde_json::from_slice(&calls[1].2).expect("second request");
+    assert_eq!(second["tools"][0]["type"], "function");
+    assert_eq!(second["input"][0]["type"], "custom_tool_call");
+    assert_eq!(second["input"][0]["input"], call.arguments);
+    assert_eq!(second["input"][1]["type"], "custom_tool_call_output");
+}
+
+#[tokio::test]
+async fn responses_forces_a_declared_freeform_tool_as_custom() {
+    let capture = Capture::default();
+    language_model(capture.clone())
+        .await
+        .complete(
+            LanguageRequest::new(vec![Message::user_text("force patch").expect("message")])
+                .expect("request")
+                .with_tools(
+                    vec![freeform_patch_tool()],
+                    ToolChoice::Specific("apply_patch".to_owned()),
+                )
+                .expect("tools"),
+        )
+        .await
+        .expect("response");
+
+    let calls = capture.0.lock().expect("capture");
+    let request: Value = serde_json::from_slice(&calls[0].2).expect("request JSON");
+    assert_eq!(request["tools"][0]["type"], "custom");
+    assert_eq!(request["tool_choice"]["type"], "custom");
+    assert_eq!(request["tool_choice"]["name"], "apply_patch");
+}
+
 #[tokio::test]
 async fn max_output_token_incomplete_response_preserves_partial_output() {
     let output = language_model(Capture::default())
@@ -250,6 +468,85 @@ async fn max_output_token_incomplete_response_preserves_partial_output() {
         output.replay.expect("replay").value["response_id"],
         "resp-limit"
     );
+}
+
+#[tokio::test]
+async fn responses_failed_event_preserves_the_context_limit_error() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("context-limit-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect_err("context limit must remain a provider failure");
+    let provider = error.provider_error().expect("provider error facts");
+    assert_eq!(provider.kind(), ErrorKind::ContextLimit);
+    assert_eq!(provider.provider_code(), Some("context_length_exceeded"));
+    assert_eq!(
+        provider.safe_summary(),
+        "input exceeds this model's context window"
+    );
+}
+
+#[tokio::test]
+async fn responses_top_level_error_event_preserves_provider_facts() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("top-level-error-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect_err("top-level error event must fail");
+    let provider = error.provider_error().expect("provider error facts");
+    assert_eq!(provider.kind(), ErrorKind::ContextLimit);
+    assert_eq!(provider.provider_code(), Some("context_length_exceeded"));
+    assert_eq!(provider.safe_summary(), "top-level context limit");
+}
+
+#[tokio::test]
+async fn responses_failed_event_uses_only_valid_nested_error_facts() {
+    let model = language_model(Capture::default()).await;
+    let request = |prompt: &str| {
+        LanguageRequest::new(vec![Message::user_text(prompt).expect("message")]).expect("request")
+    };
+
+    let fallback = model
+        .complete(request("null-error-case"))
+        .await
+        .expect_err("nested provider error must fail");
+    let fallback = fallback.provider_error().expect("provider error facts");
+    assert_eq!(fallback.safe_summary(), "nested fallback");
+    assert_eq!(fallback.provider_code(), Some("server_error"));
+
+    let envelope = model
+        .complete(request("envelope-message-case"))
+        .await
+        .expect_err("envelope failure must fail");
+    assert_eq!(
+        envelope
+            .provider_error()
+            .expect("provider error facts")
+            .safe_summary(),
+        "OpenAI Responses did not complete successfully"
+    );
+
+    let invalid = model
+        .complete(request("invalid-error-code-case"))
+        .await
+        .expect_err("invalid provider code must fail closed");
+    let invalid = invalid.provider_error().expect("provider error facts");
+    assert_eq!(invalid.kind(), ErrorKind::Protocol);
+    assert_eq!(
+        invalid.safe_summary(),
+        "OpenAI Responses returned an invalid error code"
+    );
+    assert_eq!(invalid.provider_code(), None);
 }
 
 #[tokio::test]
@@ -291,7 +588,7 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
 
-    let config = OpenAiConfig::new(format!("http://{address}")).expect("config");
+    let config = language_config(format!("http://{address}"));
     let transport = Arc::new(ReqwestTransport::new().expect("transport"));
     let registration = ProviderRegistration::builder("openai", "openai")
         .expect("registration")
@@ -340,9 +637,21 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
                         id: "call-1".to_owned(),
                         name: "lookup".to_owned(),
                         arguments: "{}".to_owned(),
+                        kind: rsi_ai_protocol::ToolCallKind::Function,
                     }),
                 ])
                 .expect("assistant history"),
+                Message::tool_result(
+                    "call-1",
+                    vec![
+                        MessageContent::Text {
+                            text: "tool text".to_owned(),
+                        },
+                        MessageContent::Image(image_media.clone()),
+                    ],
+                    false,
+                )
+                .expect("rich tool result"),
                 Message::user(vec![
                     MessageContent::Text {
                         text: "hello".to_owned(),
@@ -447,7 +756,15 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
     assert_eq!(response_body["input"][0]["content"][0]["text"], "before");
     assert_eq!(response_body["input"][1]["type"], "function_call");
     assert_eq!(
-        response_body["input"][2]["content"][1]["image_url"],
+        response_body["input"][2]["output"][0],
+        json!({"type":"input_text", "text":"tool text"})
+    );
+    assert_eq!(
+        response_body["input"][2]["output"][1]["image_url"],
+        "data:image/png;base64,iVBORw=="
+    );
+    assert_eq!(
+        response_body["input"][3]["content"][1]["image_url"],
         "data:image/png;base64,iVBORw=="
     );
     assert_eq!(

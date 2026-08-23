@@ -109,6 +109,7 @@ async fn complete_preserves_structured_provider_error_facts() {
     )
     .expect("error")
     .with_status(429)
+    .expect("valid HTTP status")
     .with_retry_after_ms(2_500)
     .with_request_id("request-1")
     .expect("request id");

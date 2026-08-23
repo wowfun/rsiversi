@@ -21,6 +21,7 @@ use memchr::memchr2;
 use rsi_ai_auth::SecretValue;
 use rsi_ai_protocol::{
     AiError, DispatchStatus, ErrorKind, ErrorPhase, TokenUsage, sanitize_error_summary,
+    validate_identifier,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -780,14 +781,44 @@ pub async fn provider_http_error(
         (500..=599, _) => ErrorKind::Server,
         _ => ErrorKind::Transport,
     };
-    let mut error =
-        provider_error(kind, phase, DispatchStatus::Dispatched, summary).with_status(status);
+    let mut error = provider_error(kind, phase, DispatchStatus::Dispatched, summary);
+    if (100..=599).contains(&status) {
+        error = match error.with_status(status) {
+            Ok(error) => error,
+            Err(invalid) => provider_error(
+                ErrorKind::Protocol,
+                phase,
+                DispatchStatus::Dispatched,
+                invalid.to_string(),
+            ),
+        };
+    }
     if let Some(code) = provider_code
-        && let Ok(with_code) = error.clone().with_provider_code(code)
+        && validate_identifier("provider_code", code).is_ok()
     {
-        error = with_code;
+        error = match error.with_provider_code(code) {
+            Ok(error) => error,
+            Err(invalid) => provider_error(
+                ErrorKind::Protocol,
+                phase,
+                DispatchStatus::Dispatched,
+                invalid.to_string(),
+            ),
+        };
     }
     error
+}
+
+/// Reclassifies the shared OpenAI-compatible context overflow response.
+#[must_use]
+pub fn reclassify_context_limit(error: AiError) -> AiError {
+    if matches!(error.status(), Some(400 | 422))
+        && error.provider_code() == Some("context_length_exceeded")
+    {
+        error.with_kind(ErrorKind::ContextLimit)
+    } else {
+        error
+    }
 }
 
 /// Decodes SSE framing incrementally without buffering an unbounded body.

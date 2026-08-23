@@ -49,8 +49,20 @@ pub struct ToolCall {
     pub id: String,
     /// Exact declared tool name selected by the model.
     pub name: String,
-    /// Raw JSON argument text preserved without lossy parsing.
+    /// Raw function JSON or freeform input preserved without lossy parsing.
     pub arguments: String,
+    /// Provider-neutral syntax used for the call and its later result.
+    pub kind: ToolCallKind,
+}
+
+/// Provider-neutral syntax used to emit one tool call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallKind {
+    /// JSON arguments for a function tool.
+    Function,
+    /// Raw input governed by a freeform grammar.
+    Freeform,
 }
 
 /// One complete provider-neutral content block.
@@ -79,6 +91,8 @@ pub enum ContentStart {
         id: String,
         /// Exact declared tool name.
         name: String,
+        /// Exact provider-neutral call syntax.
+        kind: ToolCallKind,
     },
 }
 
@@ -115,7 +129,7 @@ pub struct Warning {
 }
 
 /// Bounded provider-private JSON that never contains binary data or secrets.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderExtension {
     /// Provider-family namespace that owns the extension meaning.
@@ -126,12 +140,38 @@ pub struct ProviderExtension {
     pub value: Value,
 }
 
+impl<'de> Deserialize<'de> for ProviderExtension {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireExtension {
+            namespace: String,
+            version: u32,
+            value: Value,
+        }
+
+        let wire = WireExtension::deserialize(deserializer)?;
+        let extension = Self {
+            namespace: wire.namespace,
+            version: wire.version,
+            value: wire.value,
+        };
+        extension
+            .validate("provider_extension")
+            .map(|()| extension)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 impl ProviderExtension {
     pub(crate) fn validate(&self, field: &str) -> Result<(), StreamError> {
         validation::identifier(&format!("{field}.namespace"), &self.namespace)
             .map_err(|message| StreamError::invalid("stream.invalid_extension", message))?;
         validation::validate_json(&self.value)
-            .map_err(|message| StreamError::invalid("stream.invalid_extension", message))?;
+            .map_err(|error| StreamError::invalid("stream.invalid_extension", error.to_string()))?;
         validation::extension_size(&format!("{field}.value"), &self.value)
             .map_err(|message| StreamError::invalid("stream.extension_too_large", message))
     }
@@ -231,6 +271,7 @@ impl LanguageOutput {
                     ContentStart::ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
+                        kind: call.kind,
                     },
                     ContentDelta::ToolArguments(call.arguments.clone()),
                 ),
@@ -347,6 +388,7 @@ enum OpenContent {
         id: String,
         name: String,
         arguments: String,
+        kind: ToolCallKind,
     },
 }
 
@@ -382,10 +424,12 @@ impl OpenContent {
                 id,
                 name,
                 arguments,
+                kind,
             } => ContentBlock::ToolCall(ToolCall {
                 id,
                 name,
                 arguments,
+                kind,
             }),
         }
     }
@@ -453,7 +497,7 @@ impl LanguageAssembler {
                 let open = match content {
                     ContentStart::Text => OpenContent::Text(String::new()),
                     ContentStart::Reasoning => OpenContent::Reasoning(String::new()),
-                    ContentStart::ToolCall { id, name } => {
+                    ContentStart::ToolCall { id, name, kind } => {
                         validation::identifier("tool_call.id", id).map_err(|message| {
                             StreamError::invalid("stream.invalid_tool_call", message)
                         })?;
@@ -465,6 +509,7 @@ impl LanguageAssembler {
                             id: id.clone(),
                             name: name.clone(),
                             arguments: String::new(),
+                            kind: *kind,
                         }
                     }
                 };

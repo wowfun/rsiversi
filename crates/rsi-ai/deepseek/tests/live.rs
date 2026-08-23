@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use rsi_ai::{ModelRef, Registry};
 use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_deepseek::{DeepSeekAdapter, DeepSeekConfig};
-use rsi_ai_protocol::{LanguageRequest, LanguageSettings, Message};
+use rsi_ai_protocol::{LanguageModelLimits, LanguageRequest, LanguageSettings, Message};
 use rsi_ai_provider::ProviderRegistration;
 use rsi_ai_transport::ReqwestTransport;
 
@@ -12,10 +12,19 @@ use rsi_ai_transport::ReqwestTransport;
 async fn deepseek_v4_flash_streams_a_real_completion() {
     let key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY must be set explicitly");
     let adapter = DeepSeekAdapter::new(
-        DeepSeekConfig::default(),
+        DeepSeekConfig::default()
+            .with_model_profile(
+                "deepseek-v4-flash",
+                LanguageModelLimits::new(
+                    required_u32("DEEPSEEK_CONTEXT_WINDOW_TOKENS"),
+                    required_u32("DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS"),
+                    required_u32("DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS"),
+                )
+                .expect("live model limits"),
+            )
+            .expect("live model profile"),
         Arc::new(ReqwestTransport::new().expect("transport")),
-    )
-    .expect("adapter");
+    );
     let registry = Registry::builder(
         CredentialManager::builder()
             .with_explicit("deepseek.live", key)
@@ -65,4 +74,11 @@ async fn deepseek_v4_flash_streams_a_real_completion() {
             .as_ref()
             .is_some_and(|usage| usage.input_tokens > 0 && usage.output_tokens > 0)
     );
+}
+
+fn required_u32(name: &str) -> u32 {
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} must be set explicitly"))
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} must be a u32"))
 }

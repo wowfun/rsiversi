@@ -6,7 +6,7 @@
 use std::{fmt, sync::Arc};
 
 use rsi_ai_openai_compatible::{ChatCompletionsAdapter, ChatCompletionsConfig};
-use rsi_ai_protocol::{AiError, LanguageRequest};
+use rsi_ai_protocol::{AiError, LanguageModelLimits, LanguageRequest};
 use rsi_ai_provider::{
     AdapterFuture, LanguageAdapter, LanguageAdapterStream, PrepareContext, Prepared,
 };
@@ -37,6 +37,16 @@ impl DeepSeekConfig {
             .with_image_input(false);
         Ok(Self { chat })
     }
+
+    /// Adds one exact model-capacity profile to this deployment.
+    pub fn with_model_profile(
+        mut self,
+        model: impl Into<String>,
+        limits: LanguageModelLimits,
+    ) -> Result<Self, AiError> {
+        self.chat = self.chat.with_model_profile(model, limits)?;
+        Ok(self)
+    }
 }
 
 /// `DeepSeek` chat/reasoner adapter. Reasoning replay is preserved on tool-call turns.
@@ -47,10 +57,10 @@ pub struct DeepSeekAdapter {
 
 impl DeepSeekAdapter {
     /// Binds `DeepSeek` endpoint policy to the no-retry HTTP transport.
-    pub fn new(config: DeepSeekConfig, transport: Arc<dyn HttpTransport>) -> Result<Self, AiError> {
-        Ok(Self {
+    pub fn new(config: DeepSeekConfig, transport: Arc<dyn HttpTransport>) -> Self {
+        Self {
             inner: ChatCompletionsAdapter::new(config.chat, transport),
-        })
+        }
     }
 }
 
@@ -64,6 +74,10 @@ impl fmt::Debug for DeepSeekAdapter {
 }
 
 impl LanguageAdapter for DeepSeekAdapter {
+    fn describe(&self, model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
+        self.inner.describe(model)
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,

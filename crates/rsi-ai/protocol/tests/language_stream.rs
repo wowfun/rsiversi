@@ -92,6 +92,7 @@ fn language_stream_assembles_interleaved_reasoning_text_and_tool_arguments() {
             content: ContentStart::ToolCall {
                 id: "call-1".to_owned(),
                 name: "lookup".to_owned(),
+                kind: rsi_ai_protocol::ToolCallKind::Function,
             },
         },
         LanguageEvent::ContentDelta {
@@ -126,6 +127,7 @@ fn language_stream_assembles_interleaved_reasoning_text_and_tool_arguments() {
                     id: "call-1".to_owned(),
                     name: "lookup".to_owned(),
                     arguments: "{not-json".to_owned(),
+                    kind: rsi_ai_protocol::ToolCallKind::Function,
                 }),
             ],
             finish_reason: FinishReason::ToolCalls,

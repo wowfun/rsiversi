@@ -325,6 +325,21 @@ struct ScriptedLanguageInner {
     start_count: AtomicUsize,
 }
 
+fn test_language_profile() -> rsi_ai_protocol::LanguageProfile {
+    rsi_ai_protocol::LanguageProfile::new(
+        128_000,
+        4_096,
+        32_768,
+        rsi_ai_protocol::ToolDialect::Responses,
+        true,
+        rsi_ai_protocol::ImageToolResultCapability::Yes(
+            rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
+        ),
+        Vec::new(),
+    )
+    .expect("static scripted language profile is valid")
+}
+
 impl ScriptedLanguageAdapter {
     #[must_use]
     /// Creates an adapter that replays the supplied events on every start.
@@ -359,6 +374,10 @@ impl fmt::Debug for ScriptedLanguageAdapter {
 }
 
 impl LanguageAdapter for ScriptedLanguageAdapter {
+    fn describe(&self, _model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
+        Ok(test_language_profile())
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,
@@ -426,6 +445,10 @@ impl fmt::Debug for FunctionalLanguageAdapter {
 }
 
 impl LanguageAdapter for FunctionalLanguageAdapter {
+    fn describe(&self, _model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
+        Ok(test_language_profile())
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,

@@ -12,7 +12,7 @@ use futures_util::StreamExt as _;
 use rsi_ai::{DeferredStatus, ModelRef, Registry};
 use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_openai::{OpenAiConfig, OpenAiResponsesAdapter};
-use rsi_ai_protocol::{ContentDelta, LanguageEvent, LanguageRequest, Message};
+use rsi_ai_protocol::{ContentDelta, LanguageEvent, LanguageModelLimits, LanguageRequest, Message};
 use rsi_ai_provider::ProviderRegistration;
 use rsi_ai_transport::ReqwestTransport;
 use serde_json::{Value, json};
@@ -99,7 +99,14 @@ async fn model(state: ServerState) -> (rsi_ai::LanguageModel, ServerState) {
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
 
-    let config = OpenAiConfig::new(format!("http://{address}")).expect("config");
+    let config = OpenAiConfig::new(format!("http://{address}"))
+        .and_then(|config| {
+            config.with_model_profile(
+                "gpt-5",
+                LanguageModelLimits::new(200_000, 4_096, 32_768).expect("model limits"),
+            )
+        })
+        .expect("config");
     let transport = Arc::new(ReqwestTransport::new().expect("transport"));
     let registration = ProviderRegistration::builder("openai", "openai")
         .expect("registration")

@@ -2,8 +2,8 @@ use bytes::Bytes;
 use futures_util::stream;
 use rsi_ai_protocol::{DispatchStatus, ErrorKind, ErrorPhase};
 use rsi_ai_transport::{
-    ByteStream, TransportError, provider_http_error, transport_body_error,
-    transport_json_response_error, transport_stream_error,
+    ByteStream, TransportError, provider_http_error, reclassify_context_limit,
+    transport_body_error, transport_json_response_error, transport_stream_error,
 };
 
 fn body(value: &'static str) -> ByteStream {
@@ -29,6 +29,50 @@ async fn shared_http_error_mapping_preserves_provider_code_and_sanitizes_summary
 }
 
 #[tokio::test]
+async fn shared_http_error_mapping_is_status_driven_and_preserves_provider_codes() {
+    let ordinary_invalid_request = provider_http_error(
+        400,
+        body(r#"{"error":{"message":"bad request","code":"invalid_parameter"}}"#),
+        ErrorPhase::FirstEvent,
+        "provider rejected the request",
+    )
+    .await;
+    assert_eq!(ordinary_invalid_request.kind(), ErrorKind::InvalidRequest);
+
+    let misleading_code = provider_http_error(
+        404,
+        body(r#"{"error":{"message":"missing","code":"context_length_exceeded"}}"#),
+        ErrorPhase::FirstEvent,
+        "provider rejected the request",
+    )
+    .await;
+    assert_eq!(misleading_code.kind(), ErrorKind::NotFound);
+    assert_eq!(
+        misleading_code.provider_code(),
+        Some("context_length_exceeded")
+    );
+}
+
+#[tokio::test]
+async fn shared_context_limit_classification_preserves_validated_error_facts() {
+    let error = provider_http_error(
+        422,
+        body(r#"{"error":{"message":"too long","code":"context_length_exceeded"}}"#),
+        ErrorPhase::FirstEvent,
+        "provider rejected the request",
+    )
+    .await
+    .with_retry_after_ms(17);
+    let classified = reclassify_context_limit(error);
+
+    assert_eq!(classified.kind(), ErrorKind::ContextLimit);
+    assert_eq!(classified.status(), Some(422));
+    assert_eq!(classified.provider_code(), Some("context_length_exceeded"));
+    assert_eq!(classified.retry_after_ms(), Some(17));
+    assert_eq!(classified.safe_summary(), "too long");
+}
+
+#[tokio::test]
 async fn shared_http_error_mapping_distinguishes_quota_and_expired_remote_work() {
     let quota = provider_http_error(
         402,
@@ -47,6 +91,20 @@ async fn shared_http_error_mapping_distinguishes_quota_and_expired_remote_work()
     )
     .await;
     assert_eq!(expired.kind(), ErrorKind::RemoteExpired);
+}
+
+#[tokio::test]
+async fn shared_http_error_mapping_never_panics_on_an_invalid_status_argument() {
+    let error = provider_http_error(
+        42,
+        body(r#"{"error":{"message":"not HTTP"}}"#),
+        ErrorPhase::FirstEvent,
+        "provider rejected the request",
+    )
+    .await;
+
+    assert_eq!(error.kind(), ErrorKind::Transport);
+    assert_eq!(error.status(), None);
 }
 
 #[test]

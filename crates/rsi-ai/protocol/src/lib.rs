@@ -15,7 +15,7 @@ pub use error::{AiError, DispatchStatus, ErrorKind, ErrorPhase, sanitize_error_s
 pub use language::{
     ContentBlock, ContentDelta, ContentStart, FinishReason, LanguageAssembler,
     LanguageAssemblyError, LanguageEvent, LanguageOutput, LanguagePartialOutput, ProviderExtension,
-    Source, StreamError, TokenUsage, ToolCall, Warning,
+    Source, StreamError, TokenUsage, ToolCall, ToolCallKind, Warning,
 };
 pub use media::{
     ImageAssembler, ImageEvent, ImageOutput, ImageRequest, MAX_IMAGE_OUTPUTS, MediaOutput,
@@ -28,11 +28,14 @@ pub use realtime::{
     RealtimeValidator,
 };
 pub use semantic::{
-    HostedTool, LanguageRequest, LanguageSettings, MAX_AUDIO_BYTES, MAX_BLOCKS_PER_MESSAGE,
-    MAX_DESCRIPTION_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION, MAX_MESSAGES,
-    MAX_STOP_SEQUENCE_BYTES, MAX_STOP_SEQUENCES, MediaDescriptor, MediaKind, Message,
-    MessageContent, MessageRole, ReasoningEffort, ResponseFormat, SemanticError, ToolChoice,
-    ToolDefinition,
+    FreeformFormat, FreeformToolDefinition, HostedTool, ImageToolResultCapability,
+    ImageToolResultMode, LanguageModelLimits, LanguageModelProfiles, LanguageProfile,
+    LanguageRequest, LanguageSettings, MAX_ACCEPTED_PROVIDER_EXTENSIONS, MAX_AUDIO_BYTES,
+    MAX_BLOCKS_PER_MESSAGE, MAX_DESCRIPTION_BYTES, MAX_FREEFORM_GRAMMAR_BYTES, MAX_IMAGE_BYTES,
+    MAX_IMAGE_DIMENSION, MAX_LANGUAGE_MODEL_PROFILES, MAX_MESSAGES, MAX_STOP_SEQUENCE_BYTES,
+    MAX_STOP_SEQUENCES, MediaDescriptor, MediaKind, Message, MessageContent, MessageRole,
+    ProviderExtensionFormat, ReasoningEffort, ResponseFormat, SemanticError, ToolChoice,
+    ToolDefinition, ToolDialect,
 };
 pub use validation::identifier as validate_identifier;
 pub use wire::{BlobAssembler, WireError, WireFrame, decode_wire_frame, encode_wire_frame};

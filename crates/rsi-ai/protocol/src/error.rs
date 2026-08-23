@@ -42,6 +42,8 @@ pub enum ErrorKind {
     RateLimited,
     /// The account has exhausted a billing or usage quota.
     Quota,
+    /// The provider rejected the request because its model context limit was exceeded.
+    ContextLimit,
     /// A finite operation deadline elapsed.
     Timeout,
     /// The transport failed without a valid provider response.
@@ -73,6 +75,7 @@ impl ErrorKind {
             Self::NotFound => "provider.not_found",
             Self::RateLimited => "provider.rate_limited",
             Self::Quota => "provider.quota",
+            Self::ContextLimit => "provider.context_limit",
             Self::Timeout => "provider.timeout",
             Self::Transport => "provider.transport",
             Self::Server => "provider.server",
@@ -95,6 +98,7 @@ impl ErrorKind {
             "provider.not_found" => Self::NotFound,
             "provider.rate_limited" => Self::RateLimited,
             "provider.quota" => Self::Quota,
+            "provider.context_limit" => Self::ContextLimit,
             "provider.timeout" => Self::Timeout,
             "provider.transport" => Self::Transport,
             "provider.server" => Self::Server,
@@ -150,7 +154,7 @@ pub enum DispatchStatus {
 }
 
 /// Safe, serializable provider failure facts. Policy decides retryability.
-#[derive(Clone, Debug, Eq, Error, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Error, PartialEq, Serialize)]
 #[error("{safe_summary}")]
 #[serde(deny_unknown_fields)]
 pub struct AiError {
@@ -162,6 +166,42 @@ pub struct AiError {
     retry_after_ms: Option<u64>,
     request_id: Option<String>,
     safe_summary: String,
+}
+
+impl<'de> Deserialize<'de> for AiError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireError {
+            kind: ErrorKind,
+            phase: ErrorPhase,
+            dispatch_status: DispatchStatus,
+            status: Option<u16>,
+            provider_code: Option<String>,
+            retry_after_ms: Option<u64>,
+            request_id: Option<String>,
+            safe_summary: String,
+        }
+
+        let wire = WireError::deserialize(deserializer)?;
+        let error = Self {
+            kind: wire.kind,
+            phase: wire.phase,
+            dispatch_status: wire.dispatch_status,
+            status: wire.status,
+            provider_code: wire.provider_code,
+            retry_after_ms: wire.retry_after_ms,
+            request_id: wire.request_id,
+            safe_summary: wire.safe_summary,
+        };
+        error
+            .validate()
+            .map(|()| error)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl AiError {
@@ -196,6 +236,13 @@ impl AiError {
 
     pub const fn dispatch_status(&self) -> DispatchStatus {
         self.dispatch_status
+    }
+
+    /// Reclassifies an already-validated error without rebuilding or dropping its facts.
+    #[must_use]
+    pub const fn with_kind(mut self, kind: ErrorKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Returns the validated HTTP status, when the provider exposed one.
@@ -241,11 +288,13 @@ impl AiError {
         Ok(())
     }
 
-    /// Attaches an HTTP status observed at the provider seam.
-    #[must_use]
-    pub const fn with_status(mut self, status: u16) -> Self {
+    /// Attaches a validated HTTP status observed at the provider seam.
+    pub fn with_status(mut self, status: u16) -> Result<Self, ErrorFactsError> {
+        if !(100..=599).contains(&status) {
+            return Err(ErrorFactsError("status must be an HTTP status".to_owned()));
+        }
         self.status = Some(status);
-        self
+        Ok(self)
     }
 
     /// Attaches a provider-requested retry delay.

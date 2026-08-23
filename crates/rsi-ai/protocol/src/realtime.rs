@@ -13,13 +13,41 @@ pub enum RealtimeAudioFormat {
 }
 
 /// Configuration frozen when opening one Realtime session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RealtimeRequest {
     voice: String,
     instructions: Option<String>,
     input_format: RealtimeAudioFormat,
     output_format: RealtimeAudioFormat,
+}
+
+impl<'de> Deserialize<'de> for RealtimeRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireRequest {
+            voice: String,
+            instructions: Option<String>,
+            input_format: RealtimeAudioFormat,
+            output_format: RealtimeAudioFormat,
+        }
+
+        let wire = WireRequest::deserialize(deserializer)?;
+        let request = Self {
+            voice: wire.voice,
+            instructions: wire.instructions,
+            input_format: wire.input_format,
+            output_format: wire.output_format,
+        };
+        request
+            .validate()
+            .map(|()| request)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RealtimeRequest {

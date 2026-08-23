@@ -78,6 +78,7 @@ async fn media_generation_preserves_structured_provider_error_facts() {
     )
     .expect("error")
     .with_status(503)
+    .expect("valid HTTP status")
     .with_retry_after_ms(900);
     let registry = Registry::builder(CredentialManager::builder().build())
         .register(
@@ -287,43 +288,21 @@ async fn interactive_realtime_script_waits_for_response_request() {
     ));
 }
 
-#[tokio::test]
-async fn deserialized_invalid_requests_are_rejected_before_adapter_prepare() {
+#[test]
+fn invalid_wire_requests_cannot_reach_adapter_prepare() {
     let image = ScriptedImageAdapter::new(Vec::new());
-    let transcription = ScriptedTranscriptionAdapter::new(Vec::new());
-    let speech = ScriptedSpeechAdapter::new(Vec::new());
     let realtime = ScriptedRealtimeAdapter::new(Vec::new());
-    let registry = registry(
-        image.clone(),
-        transcription.clone(),
-        speech.clone(),
-        realtime.clone(),
-    );
 
-    let invalid_image: ImageRequest = serde_json::from_value(serde_json::json!({
+    serde_json::from_value::<ImageRequest>(serde_json::json!({
         "prompt": "dot", "count": 0, "inputs": [], "mask": null
     }))
-    .expect("wire shape");
-    let error = registry
-        .image(ModelRef::new("multimedia", "image-v1").expect("model"))
-        .expect("image")
-        .prepare(invalid_image)
-        .await
-        .expect_err("invalid image request");
-    assert_eq!(error.code(), "request.invalid");
+    .expect_err("invalid image wire must fail before a typed request exists");
     assert_eq!(image.prepare_count(), 0);
 
-    let invalid_realtime: RealtimeRequest = serde_json::from_value(serde_json::json!({
+    serde_json::from_value::<RealtimeRequest>(serde_json::json!({
         "voice": "not a voice", "instructions": null,
         "input_format": "pcm16", "output_format": "pcm16"
     }))
-    .expect("wire shape");
-    let error = registry
-        .realtime(ModelRef::new("multimedia", "realtime-v1").expect("model"))
-        .expect("realtime")
-        .prepare(invalid_realtime)
-        .await
-        .expect_err("invalid realtime request");
-    assert_eq!(error.code(), "request.invalid");
+    .expect_err("invalid Realtime wire must fail before a typed request exists");
     assert_eq!(realtime.prepare_count(), 0);
 }
