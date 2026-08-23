@@ -1,1240 +1,1103 @@
-use std::collections::BTreeMap;
+use crate::listener_registry::{ListenerBinding, ListenerRegistry};
+use crate::service::{AdmissionLease, LeaseGuard, ProviderBinding};
+use crate::{
+    CallId, Cleanup, CleanupReport, ConfigValue, ContractId, ContractVersion, DispatchMode,
+    EventHandler, EventKey, EventListenerId, EventOptions, EventOutcome, EventReceipt,
+    FactoryIdentity, FiberGeneration, FiberId, InvocationContext, IsolationId, MetaError,
+    PluginDescriptor, PluginFactory, Result, ServiceCall, ServiceEndpoint, ServiceHandle,
+    ServiceKey,
+};
+use futures_util::FutureExt as _;
+use futures_util::future::{BoxFuture, join_all};
+use futures_util::stream::{FuturesUnordered, StreamExt as _};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
-use rsi_meta_loader::{
-    LoadedPlugin, PluginLoader, PluginMailboxOptions, PluginPackage, StagedPlugin,
-};
-use rsi_meta_plugin::{CallOutcome, Lane};
-use serde_json::{Value, json};
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+mod configuration;
+mod context_api;
+mod context_scope;
+mod declaration_index;
+mod dispatch;
+mod lifecycle;
+mod limits;
+mod reconciliation_queue;
+mod service_bridge;
 
-#[cfg(test)]
-use crate::frame::durable_command_unavailable;
-use crate::frame::{DurablePluginCommand, LifecyclePhase, PluginFrame, PluginFrameBody};
-use crate::model::{GenerationLease, InstanceId, ServiceKey};
-use crate::protocol::{
-    Command, CommandEnvelope, CommandOutcomeEnvelope, StreamEnvelope, StreamId, StreamKind,
-};
-use crate::{HostError, Result, STREAM_BYTE_BUDGET};
+use context_api::binding_identities;
+pub(crate) use context_scope::InterceptLayers;
+use declaration_index::DeclarationIndex;
+pub use limits::RuntimeLimits;
 
-const DATA_QUEUE_CAPACITY: usize = 128;
-const LIFECYCLE_QUEUE_CAPACITY: usize = 4;
-const STREAM_EVENT_CAPACITY: usize = 64;
-const MAX_STREAMS_PER_GENERATION: usize = 128;
-pub(crate) const RUNTIME_TICK_INTERVAL: Duration = Duration::from_millis(250);
-const PLUGIN_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(30);
+const ROOT_FIBER: FiberId = FiberId(0);
 
-const OP_OPEN: &str = "open";
-const OP_CREDIT: &str = "credit";
-const OP_HALF_CLOSE: &str = "half_close";
-const OP_CANCEL: &str = "cancel";
-const EVENT_CREDIT: &str = "credit";
-const EVENT_END: &str = "end";
-const EVENT_CANCEL: &str = "cancel";
-
-pub(crate) const STATE_SERVICE: &str = "state.cas";
-pub(crate) const TICK_SERVICE: &str = "runtime.tick";
-
-#[derive(Debug)]
-pub(crate) struct HostServiceCall {
-    pub composition_id: String,
-    pub instance_id: InstanceId,
-    pub request_id: String,
-    pub service: String,
-    pub operation: String,
-    pub payload: Value,
-    pub reply: oneshot::Sender<Result<PluginFrame>>,
+/// Why a non-active Fiber cannot currently resolve and activate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingReason {
+    /// No provider is published in the selected isolation slot.
+    MissingService {
+        /// Missing logical service key.
+        service: ServiceKey,
+        /// Isolation slot selected by the Fiber Context.
+        isolation: IsolationId,
+    },
+    /// A provider exists but does not match the exact declared contract.
+    ContractMismatch {
+        /// Logical service key.
+        service: ServiceKey,
+        /// Required contract identity.
+        expected: ContractId,
+        /// Required exact version.
+        expected_version: ContractVersion,
+        /// Published contract identity.
+        actual: ContractId,
+        /// Published exact version.
+        actual_version: ContractVersion,
+    },
+    /// Reachable pending declarations form a dependency cycle.
+    DependencyCycle {
+        /// Ordered service path that closes the cycle.
+        services: Vec<ServiceKey>,
+    },
 }
 
-pub(crate) struct PluginCommandRequest {
-    pub composition_id: String,
-    pub instance_id: InstanceId,
-    pub generation: u64,
-    pub envelope: CommandEnvelope,
-    pub reply: Option<oneshot::Sender<Result<CommandOutcomeEnvelope>>>,
+/// Observable lifecycle state of one Fiber.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiberState {
+    /// Dependency convergence has not produced an activatable snapshot.
+    Pending(Vec<PendingReason>),
+    /// One generation is staging owned resources.
+    Loading,
+    /// The staged generation is published.
+    Active,
+    /// The latest activation or retirement transaction failed.
+    Failed(String),
+    /// Publications are withdrawn and owned resources are retiring.
+    Unloading,
+    /// Final teardown completed and the Fiber left the registry.
+    Disposed,
 }
 
-#[derive(Debug)]
-pub(crate) struct RuntimeFault {
-    pub instance: InstanceId,
-    pub generation: u64,
-    pub reason: String,
+impl FiberState {
+    fn is_transitioning(&self) -> bool {
+        matches!(self, Self::Loading | Self::Unloading)
+    }
 }
 
+/// Immutable observation of one Fiber at one Runtime revision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FiberSnapshot {
+    /// Runtime-local Fiber identity.
+    pub id: FiberId,
+    /// Latest assigned activation generation.
+    pub generation: FiberGeneration,
+    /// Factory identity captured during preparation.
+    pub factory: FactoryIdentity,
+    /// Current lifecycle state.
+    pub state: FiberState,
+}
+
+/// Point-in-time observation of Runtime lifecycle and registered Fibers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeSnapshot {
+    /// Monotonic registry revision.
+    pub revision: u64,
+    /// Whether shutdown admission has closed.
+    pub shutting_down: bool,
+    /// First terminal reason, when the Runtime has fenced new work.
+    pub terminal: Option<String>,
+    /// Fiber snapshots ordered by Fiber identity.
+    pub fibers: Vec<FiberSnapshot>,
+}
+
+/// Cloneable owner of plugin composition, admission, convergence, and teardown.
 #[derive(Clone)]
-pub(crate) struct RuntimeHandle {
-    instance: InstanceId,
-    generation: u64,
-    max_frame_bytes: usize,
-    lifecycle: mpsc::Sender<LifecycleCommand>,
-    control: mpsc::Sender<ControlCommand>,
-    disconnects: mpsc::Sender<ClientDisconnect>,
-    data: mpsc::Sender<DataCommand>,
-    retired: watch::Receiver<bool>,
-    stopped: watch::Receiver<bool>,
-    thread: Arc<StdMutex<Option<JoinHandle<()>>>>,
-    healthy: Arc<AtomicBool>,
-    fault_reason: Arc<StdMutex<Option<String>>>,
+pub struct Runtime {
+    inner: Arc<RuntimeInner>,
 }
 
-impl fmt::Debug for RuntimeHandle {
+impl fmt::Debug for Runtime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.inner.state.lock().expect("runtime state poisoned");
         formatter
-            .debug_struct("RuntimeHandle")
-            .field("instance", &self.instance)
-            .field("generation", &self.generation)
+            .debug_struct("Runtime")
+            .field("revision", &state.revision)
+            .field("fibers", &state.fibers.len())
+            .field(
+                "shutting_down",
+                &self.inner.shutting_down.load(Ordering::Acquire),
+            )
             .finish_non_exhaustive()
     }
 }
 
-impl RuntimeHandle {
-    pub(crate) fn instance(&self) -> &InstanceId {
-        &self.instance
-    }
+struct RuntimeInner {
+    limits: RuntimeLimits,
+    state: Mutex<RuntimeState>,
+    shutting_down: AtomicBool,
+    shutdown_result: Mutex<Option<CleanupReport>>,
+    shutdown_complete: Notify,
+    terminal_cancellation: CancellationToken,
+    service_call_admission: Arc<Semaphore>,
+    next_fiber: AtomicU64,
+    next_generation: AtomicU64,
+    next_isolation: AtomicU64,
+    next_listener: AtomicU64,
+    next_call: AtomicU64,
+}
 
-    pub(crate) fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
-    }
+struct RuntimeState {
+    revision: u64,
+    fibers: BTreeMap<FiberId, Arc<Fiber>>,
+    dependents: HashMap<ServiceKey, BTreeSet<FiberId>>,
+    declarations: DeclarationIndex,
+    providers: HashMap<ServiceSlot, Arc<ProviderBinding>>,
+    listeners: HashMap<EventKey, ListenerRegistry>,
+    listener_events: HashMap<EventListenerId, EventKey>,
+    staged_listeners: HashMap<(FiberId, FiberGeneration), Vec<ListenerBinding>>,
+    pending_reconciliations: BTreeSet<FiberId>,
+    reconciliation_worker_running: bool,
+    terminal: Option<String>,
+}
 
-    pub(crate) fn fault_reason(&self) -> Option<String> {
-        self.fault_reason
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ServiceSlot {
+    key: ServiceKey,
+    isolation: IsolationId,
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn start(
-        plugin_loader: &PluginLoader,
-        staged: &StagedPlugin,
-        composition_id: String,
-        instance: InstanceId,
-        generation: u64,
-        capabilities: Vec<String>,
-        uses_state_service: bool,
-        uses_runtime_tick: bool,
-        outbound_routes: BTreeMap<ServiceKey, OutboundRoute>,
-        plugin_commands: mpsc::Sender<PluginCommandRequest>,
-        host_services: mpsc::Sender<HostServiceCall>,
-        runtime_faults: mpsc::Sender<RuntimeFault>,
-        runtime_ticks: watch::Receiver<u64>,
-    ) -> Result<Self> {
-        let mailbox_options = PluginMailboxOptions::default();
-        let max_frame_bytes = mailbox_options.max_frame_bytes;
-        let (loaded, mailbox) = plugin_loader.load_queued(staged, mailbox_options)?;
-        let (control_output, data_output) = mailbox.into_lanes();
-        let (lifecycle, lifecycle_receiver) = mpsc::channel(LIFECYCLE_QUEUE_CAPACITY);
-        let (control, control_receiver) = mpsc::channel(128);
-        let (disconnects, disconnect_receiver) = mpsc::channel(MAX_STREAMS_PER_GENERATION);
-        let (data, data_receiver) = mpsc::channel(DATA_QUEUE_CAPACITY);
-        let (retired_sender, retired) = watch::channel(false);
-        let (stopped_sender, stopped) = watch::channel(false);
-        let healthy = Arc::new(AtomicBool::new(true));
-        let fault_reason = Arc::new(StdMutex::new(None));
-        let actor = RuntimeActor {
-            composition_id,
-            instance: instance.clone(),
-            generation,
-            capabilities,
-            uses_state_service,
-            uses_runtime_tick,
-            phase: RuntimePhase::Created,
-            loaded,
-            lifecycle_receiver,
-            control_receiver,
-            disconnect_receiver,
-            data_receiver,
-            self_control: control.downgrade(),
-            self_data: data.downgrade(),
-            control_output,
-            data_output,
-            control_output_open: true,
-            data_output_open: true,
-            streams: BTreeMap::new(),
-            outbound_routes,
-            outbound_streams: BTreeMap::new(),
-            retired_sender,
-            plugin_commands,
-            host_services,
-            max_frame_bytes,
-            stopped_sender,
-            healthy: Arc::clone(&healthy),
-            fault_reason: Arc::clone(&fault_reason),
-            runtime_faults,
-            pending_runtime_fault: None,
-            stop_replies: Vec::new(),
-            prepare_reply: None,
-            runtime_ticks,
-        };
-        let event_loop = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(|source| HostError::PluginRuntimeStart {
-                instance: instance.clone(),
-                source,
-            })?;
-        let runtime_thread = std::thread::Builder::new()
-            .name(format!("rsi-meta-runtime-{generation}"))
-            .spawn(move || event_loop.block_on(actor.run()))
-            .map_err(|source| HostError::PluginRuntimeStart {
-                instance: instance.clone(),
-                source,
-            })?;
+struct Fiber {
+    id: FiberId,
+    runtime: Weak<RuntimeInner>,
+    parent: Option<Owner>,
+    base_context: ContextScope,
+    configuration: AsyncMutex<()>,
+    transition: AsyncMutex<()>,
+    data: Mutex<FiberData>,
+    watch: watch::Sender<FiberSnapshot>,
+}
+
+struct FiberData {
+    factory: Arc<dyn PluginFactory>,
+    descriptor: PluginDescriptor,
+    config: ConfigValue,
+    target_revision: u64,
+    generation: FiberGeneration,
+    state: FiberState,
+    disposed: bool,
+    disposal_report: Option<CleanupReport>,
+    active: Option<GenerationData>,
+    last_attempt: Option<ActivationAttempt>,
+}
+
+type BindingIdentities = BTreeMap<ServiceKey, (FiberId, FiberGeneration)>;
+type ActivationAttempt = (u64, BindingIdentities);
+
+struct GenerationData {
+    generation: FiberGeneration,
+    bindings: BTreeMap<ServiceKey, Arc<ProviderBinding>>,
+    effects: Vec<EffectRecord>,
+    services: Vec<Arc<ProviderBinding>>,
+    listeners: Vec<EventListenerId>,
+    children: Vec<FiberId>,
+    lease: Arc<AdmissionLease>,
+    published: bool,
+    target_revision: u64,
+}
+
+struct EffectRecord {
+    label: String,
+    cleanup: Cleanup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Owner {
+    fiber: FiberId,
+    generation: FiberGeneration,
+}
+
+#[derive(Clone, Debug)]
+struct CallTrace {
+    origin: FiberId,
+    parent_call: Option<CallId>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContextScope {
+    isolation: Arc<BTreeMap<ServiceKey, IsolationId>>,
+    intercepts: Arc<BTreeMap<ServiceKey, Arc<InterceptLayers>>>,
+    trace: Option<CallTrace>,
+}
+
+/// Immutable scoped capability used to apply plugins and access owned resources.
+#[derive(Clone)]
+pub struct Context {
+    runtime: Runtime,
+    owner: Option<Owner>,
+    isolation: Arc<BTreeMap<ServiceKey, IsolationId>>,
+    intercepts: Arc<BTreeMap<ServiceKey, Arc<InterceptLayers>>>,
+    trace: Option<CallTrace>,
+}
+
+impl fmt::Debug for Context {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Context")
+            .field("owner", &self.owner)
+            .field("isolation", &self.isolation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Cloneable management handle for one independently owned Fiber.
+#[derive(Clone)]
+pub struct FiberHandle {
+    runtime: Runtime,
+    fiber: Arc<Fiber>,
+}
+
+/// Opaque proof that descriptor validation and configuration normalization
+/// completed successfully exactly once.
+pub struct PreparedPlugin {
+    factory: Arc<dyn PluginFactory>,
+    descriptor: PluginDescriptor,
+    config: ConfigValue,
+}
+
+impl fmt::Debug for PreparedPlugin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedPlugin")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Runtime {
+    /// Creates an empty Runtime after validating every nonzero capacity and deadline.
+    pub fn new(limits: RuntimeLimits) -> Result<Self> {
+        limits.validate()?;
+        let service_call_admission =
+            Arc::new(Semaphore::new(limits.maximum_concurrent_service_calls));
         Ok(Self {
-            instance,
-            generation,
-            max_frame_bytes,
-            lifecycle,
-            control,
-            disconnects,
-            data,
-            retired,
-            stopped,
-            thread: Arc::new(StdMutex::new(Some(runtime_thread))),
-            healthy,
-            fault_reason,
+            inner: Arc::new(RuntimeInner {
+                limits,
+                state: Mutex::new(RuntimeState {
+                    revision: 0,
+                    fibers: BTreeMap::new(),
+                    dependents: HashMap::new(),
+                    declarations: DeclarationIndex::default(),
+                    providers: HashMap::new(),
+                    listeners: HashMap::new(),
+                    listener_events: HashMap::new(),
+                    staged_listeners: HashMap::new(),
+                    pending_reconciliations: BTreeSet::new(),
+                    reconciliation_worker_running: false,
+                    terminal: None,
+                }),
+                shutting_down: AtomicBool::new(false),
+                shutdown_result: Mutex::new(None),
+                shutdown_complete: Notify::new(),
+                terminal_cancellation: CancellationToken::new(),
+                service_call_admission,
+                next_fiber: AtomicU64::new(0),
+                next_generation: AtomicU64::new(0),
+                next_isolation: AtomicU64::new(0),
+                next_listener: AtomicU64::new(0),
+                next_call: AtomicU64::new(0),
+            }),
         })
     }
 
-    pub(crate) async fn prepare(&self, config: Value) -> Result<()> {
-        let (reply, response) = oneshot::channel();
-        self.lifecycle(
-            LifecycleCommand::Prepare { config, reply },
-            response,
-            "prepared",
-        )
-        .await
-    }
-
-    pub(crate) async fn abort_and_stop(&self) {
-        let (reply, response) = oneshot::channel();
-        let _ = self
-            .lifecycle(LifecycleCommand::Abort { reply }, response, "abort")
-            .await;
-        let _ = self.stop().await;
-    }
-
-    /// A durable commit cannot be rolled back, so failure of this acknowledgement
-    /// requires the owning host to fail closed and recover in a fresh process.
-    pub(crate) async fn committed(&self) -> Result<()> {
-        let (reply, response) = oneshot::channel();
-        self.lifecycle(LifecycleCommand::Commit { reply }, response, "committed")
-            .await
-    }
-
-    pub(crate) async fn retire(&self) -> Result<()> {
-        let (reply, response) = oneshot::channel();
-        self.lifecycle(LifecycleCommand::Retire { reply }, response, "retired")
-            .await
-    }
-
-    async fn lifecycle(
-        &self,
-        command: LifecycleCommand,
-        response: oneshot::Receiver<Result<()>>,
-        phase: &'static str,
-    ) -> Result<()> {
-        tokio::time::timeout(PLUGIN_LIFECYCLE_TIMEOUT, async {
-            self.lifecycle
-                .send(command)
-                .await
-                .map_err(|_| HostError::PluginRuntimeClosed {
-                    instance: self.instance.clone(),
-                })?;
-            response.await.map_err(|_| HostError::PluginRuntimeClosed {
-                instance: self.instance.clone(),
-            })?
-        })
-        .await
-        .map_err(|_| HostError::PluginLifecycleTimeout {
-            instance: self.instance.clone(),
-            phase,
-        })?
-    }
-
-    pub(crate) fn open_stream(
-        &self,
-        consumer: &InstanceId,
-        service: ServiceKey,
-    ) -> Result<StreamPort> {
-        self.open_stream_with_payload(service, json!({"consumer": consumer.0, "sequence": 0}))
-    }
-
-    fn open_stream_with_payload(&self, service: ServiceKey, payload: Value) -> Result<StreamPort> {
-        if !self.healthy.load(Ordering::Acquire) {
-            return Err(HostError::PluginRuntimeClosed {
-                instance: self.instance.clone(),
-            });
+    /// Creates an unowned root Context retaining this Runtime.
+    pub fn root(&self) -> Context {
+        Context {
+            runtime: self.clone(),
+            owner: None,
+            isolation: Arc::new(BTreeMap::new()),
+            intercepts: Arc::new(BTreeMap::new()),
+            trace: None,
         }
-        let stream_id = StreamId::new(uuid::Uuid::now_v7().to_string())
-            .expect("UUIDv7 is a valid stream identifier");
-        let (events, receiver) = mpsc::channel(STREAM_EVENT_CAPACITY);
-        let send_credit = Arc::new(ByteCredit::new());
-        let terminal_fallback = Arc::new(TerminalFallback::default());
-        let runtime_terminal = Arc::new(AtomicBool::new(false));
-        let data_frame_overhead =
-            PluginFrame::service_data_request(stream_id.to_string(), service.as_str(), Vec::new())
-                .encode()?
-                .len();
-        let disconnect =
-            self.disconnects
-                .clone()
-                .try_reserve_owned()
-                .map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(_) => HostError::PluginQueueFull {
-                        instance: self.instance.clone(),
-                        lane: "control",
-                    },
-                    mpsc::error::TrySendError::Closed(_) => HostError::PluginRuntimeClosed {
-                        instance: self.instance.clone(),
-                    },
-                })?;
-        self.control
-            .try_send(ControlCommand::Open {
-                stream_id: stream_id.clone(),
-                service: service.clone(),
-                payload,
-                events,
-                send_credit: Arc::clone(&send_credit),
-                terminal_fallback: Arc::clone(&terminal_fallback),
-                runtime_terminal: Arc::clone(&runtime_terminal),
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => HostError::PluginQueueFull {
-                    instance: self.instance.clone(),
-                    lane: "control",
-                },
-                mpsc::error::TrySendError::Closed(_) => HostError::PluginRuntimeClosed {
-                    instance: self.instance.clone(),
-                },
-            })?;
-        Ok(StreamPort {
-            instance: self.instance.clone(),
-            stream_id,
-            service,
-            control: self.control.clone(),
-            disconnect: Some(disconnect),
-            data: self.data.clone(),
-            events: receiver,
-            send_credit,
-            terminal_fallback,
-            runtime_terminal,
-            max_frame_bytes: self.max_frame_bytes,
-            data_frame_overhead,
-            sequence: 0,
-            half_closed: false,
-            terminal: false,
+    }
+
+    /// Returns the immutable limits selected at construction.
+    pub fn limits(&self) -> &RuntimeLimits {
+        &self.inner.limits
+    }
+
+    /// Captures bounded membership, then reads each Fiber outside the registry lock.
+    pub fn snapshot(&self) -> RuntimeSnapshot {
+        let (revision, terminal, fibers) = {
+            let state = self.inner.state.lock().expect("runtime state poisoned");
+            (
+                state.revision,
+                state.terminal.clone(),
+                state.fibers.values().cloned().collect::<Vec<_>>(),
+            )
+        };
+        RuntimeSnapshot {
+            revision,
+            shutting_down: self.inner.shutting_down.load(Ordering::Acquire),
+            terminal,
+            fibers: fibers.into_iter().map(|fiber| fiber.snapshot()).collect(),
+        }
+    }
+
+    /// Permanently fences new admission with the first supplied reason.
+    ///
+    /// This is intended for trusted execution adapters that detect a condition
+    /// unsafe to isolate within the process.
+    pub fn mark_terminal(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.inner
+            .state
+            .lock()
+            .expect("runtime state poisoned")
+            .terminal
+            .get_or_insert(reason);
+        self.inner.terminal_cancellation.cancel();
+    }
+
+    fn ensure_admitting(&self) -> Result<()> {
+        let state = self.inner.state.lock().expect("runtime state poisoned");
+        if let Some(reason) = state.terminal.clone() {
+            return Err(MetaError::RuntimeTerminal(reason));
+        }
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(MetaError::RuntimeShuttingDown);
+        }
+        Ok(())
+    }
+
+    fn next_generation(&self) -> FiberGeneration {
+        FiberGeneration(self.inner.next_generation.fetch_add(1, Ordering::AcqRel) + 1)
+    }
+
+    /// Validates a descriptor and normalizes bounded configuration exactly once.
+    ///
+    /// The returned proof can be consumed by [`Context::apply_prepared`] without
+    /// invoking factory normalization again.
+    pub fn prepare(
+        &self,
+        factory: Arc<dyn PluginFactory>,
+        config: ConfigValue,
+    ) -> Result<PreparedPlugin> {
+        self.ensure_admitting()?;
+        let descriptor = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let descriptor = factory.descriptor().clone();
+            descriptor.validate()?;
+            Ok::<_, MetaError>(descriptor)
+        }))
+        .map_err(|_| MetaError::Activation("plugin descriptor validation panicked".to_owned()))??;
+        let config =
+            Self::normalize_config(&factory, config, self.inner.limits.maximum_config_bytes)?;
+        Ok(PreparedPlugin {
+            factory,
+            descriptor,
+            config,
         })
     }
 
-    pub(crate) async fn wait_retired(&self) -> Result<()> {
-        let mut retired = self.retired.clone();
-        tokio::time::timeout(PLUGIN_LIFECYCLE_TIMEOUT, async {
-            while !*retired.borrow() {
-                if retired.changed().await.is_err() {
-                    return Err(HostError::PluginRuntimeClosed {
-                        instance: self.instance.clone(),
+    #[allow(clippy::too_many_lines)] // Validation proof consumption and atomic ownership insertion stay adjacent.
+    async fn apply_prepared(
+        &self,
+        parent: &Context,
+        prepared: PreparedPlugin,
+    ) -> Result<FiberHandle> {
+        self.ensure_admitting()?;
+        let PreparedPlugin {
+            factory,
+            descriptor,
+            config,
+        } = prepared;
+        let declared_services = descriptor
+            .provides
+            .iter()
+            .map(|provision| provision.key.clone())
+            .collect::<Vec<_>>();
+        let required_services = descriptor
+            .requires
+            .iter()
+            .map(|requirement| requirement.key.clone())
+            .collect::<Vec<_>>();
+
+        let id = FiberId(self.inner.next_fiber.fetch_add(1, Ordering::AcqRel) + 1);
+        let initial = FiberSnapshot {
+            id,
+            generation: FiberGeneration(0),
+            factory: descriptor.identity.clone(),
+            state: FiberState::Pending(Vec::new()),
+        };
+        let (watch, _) = watch::channel(initial);
+        let base_context = ContextScope {
+            isolation: Arc::clone(&parent.isolation),
+            intercepts: Arc::clone(&parent.intercepts),
+            trace: parent.trace.clone(),
+        };
+        let fiber = Arc::new(Fiber {
+            id,
+            runtime: Arc::downgrade(&self.inner),
+            parent: parent.owner,
+            base_context,
+            configuration: AsyncMutex::new(()),
+            transition: AsyncMutex::new(()),
+            data: Mutex::new(FiberData {
+                factory,
+                descriptor,
+                config,
+                target_revision: 1,
+                generation: FiberGeneration(0),
+                state: FiberState::Pending(Vec::new()),
+                disposed: false,
+                disposal_report: None,
+                active: None,
+                last_attempt: None,
+            }),
+            watch,
+        });
+
+        {
+            let mut state = self.inner.state.lock().expect("runtime state poisoned");
+            if let Some(reason) = state.terminal.clone() {
+                return Err(MetaError::RuntimeTerminal(reason));
+            }
+            if self.inner.shutting_down.load(Ordering::Acquire) {
+                return Err(MetaError::RuntimeShuttingDown);
+            }
+            if state.fibers.len() >= self.inner.limits.maximum_fibers {
+                return Err(MetaError::CapacityExhausted { resource: "fibers" });
+            }
+            if let Some(owner) = parent.owner {
+                let parent_fiber =
+                    state
+                        .fibers
+                        .get(&owner.fiber)
+                        .cloned()
+                        .ok_or(MetaError::StaleContext {
+                            fiber: owner.fiber,
+                            generation: owner.generation,
+                        })?;
+                let mut data = parent_fiber.data.lock().expect("fiber state poisoned");
+                if data.generation != owner.generation
+                    || !matches!(data.state, FiberState::Loading | FiberState::Active)
+                {
+                    return Err(MetaError::StaleContext {
+                        fiber: owner.fiber,
+                        generation: owner.generation,
                     });
                 }
+                data.active
+                    .as_mut()
+                    .ok_or(MetaError::StaleContext {
+                        fiber: owner.fiber,
+                        generation: owner.generation,
+                    })?
+                    .children
+                    .push(id);
             }
-            Ok(())
-        })
-        .await
-        .map_err(|_| HostError::PluginLifecycleTimeout {
-            instance: self.instance.clone(),
-            phase: "retired",
-        })?
+            for service in &required_services {
+                state
+                    .dependents
+                    .entry(service.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            state.declarations.insert(
+                id,
+                &fiber.base_context,
+                &fiber.data.lock().expect("fiber state poisoned").descriptor,
+            );
+            state.fibers.insert(id, Arc::clone(&fiber));
+            state.revision += 1;
+        }
+        let (mut sender, receiver) = oneshot::channel();
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let reconciliation_runtime = runtime.clone();
+            let mut reconciliation = tokio::spawn(async move {
+                reconciliation_runtime.reconcile_fiber(id).await;
+            });
+            tokio::select! {
+                biased;
+                () = sender.closed() => {
+                    reconciliation.abort();
+                    let _ = reconciliation.await;
+                    let _ = runtime.dispose_fiber(id).await;
+                }
+                _ = &mut reconciliation => {
+                    if matches!(fiber.snapshot().state, FiberState::Pending(_)) {
+                        // A pending declaration may complete another pending
+                        // fiber's cycle diagnostics. Active publication already
+                        // notifies consumers with its actual provided services.
+                        runtime.notify_service_changes(&declared_services, Some(id));
+                    }
+                    let handle = FiberHandle {
+                        runtime: runtime.clone(),
+                        fiber,
+                    };
+                    let (acknowledge, acknowledged) = oneshot::channel();
+                    let rollback_runtime = Arc::downgrade(&runtime.inner);
+                    if sender.send((handle, acknowledge)).is_err() {
+                        let _ = runtime.dispose_fiber(id).await;
+                    } else {
+                        drop(runtime);
+                        if acknowledged.await.is_err()
+                            && let Some(inner) = rollback_runtime.upgrade()
+                        {
+                            let _ = Runtime { inner }.dispose_fiber(id).await;
+                        }
+                    }
+                }
+            }
+        });
+        let (handle, acknowledge) = receiver.await.map_err(|_| {
+            MetaError::Activation("runtime-owned plugin application task failed".to_owned())
+        })?;
+        acknowledge.send(()).map_err(|()| {
+            MetaError::Activation("plugin application ownership transfer failed".to_owned())
+        })?;
+        Ok(handle)
     }
 
-    pub(crate) async fn stop(&self) -> Result<()> {
-        let (reply, response) = oneshot::channel();
-        let result = tokio::time::timeout(PLUGIN_LIFECYCLE_TIMEOUT, async {
-            if self
-                .lifecycle
-                .send(LifecycleCommand::Stop { reply })
+    fn owner_fiber(&self, owner: Owner) -> Result<Arc<Fiber>> {
+        {
+            let state = self.inner.state.lock().expect("runtime state poisoned");
+            state.fibers.get(&owner.fiber).cloned()
+        }
+        .ok_or(MetaError::StaleContext {
+            fiber: owner.fiber,
+            generation: owner.generation,
+        })
+    }
+
+    fn validate_owner_data(owner: Owner, data: &FiberData, allow_loading: bool) -> Result<()> {
+        let valid_state = matches!(data.state, FiberState::Active)
+            || (allow_loading && matches!(data.state, FiberState::Loading))
+            || matches!(data.state, FiberState::Unloading);
+        if data.generation != owner.generation || !valid_state {
+            return Err(MetaError::StaleContext {
+                fiber: owner.fiber,
+                generation: owner.generation,
+            });
+        }
+        Ok(())
+    }
+
+    fn resolve_bindings(
+        &self,
+        fiber: &Fiber,
+    ) -> std::result::Result<BTreeMap<ServiceKey, Arc<ProviderBinding>>, Vec<PendingReason>> {
+        let descriptor = {
+            let data = fiber.data.lock().expect("fiber state poisoned");
+            data.descriptor.clone()
+        };
+        let mut bindings = BTreeMap::new();
+        let mut pending = Vec::new();
+        // One registry lock is one dependency snapshot. An activation must
+        // never observe requirements from different publication revisions.
+        let state = self.inner.state.lock().expect("runtime state poisoned");
+        for requirement in descriptor.requires {
+            let isolation = Self::isolation_for(&fiber.base_context.isolation, &requirement.key);
+            let binding = state
+                .providers
+                .get(&ServiceSlot {
+                    key: requirement.key.clone(),
+                    isolation,
+                })
+                .cloned();
+            let Some(binding) = binding else {
+                pending.push(PendingReason::MissingService {
+                    service: requirement.key,
+                    isolation,
+                });
+                continue;
+            };
+            if binding.contract != requirement.contract || binding.version != requirement.version {
+                pending.push(PendingReason::ContractMismatch {
+                    service: requirement.key,
+                    expected: requirement.contract,
+                    expected_version: requirement.version,
+                    actual: binding.contract.clone(),
+                    actual_version: binding.version,
+                });
+                continue;
+            }
+            bindings.insert(requirement.key, binding);
+        }
+        drop(state);
+        if !pending.is_empty()
+            && let Some(services) = self.dependency_cycle(fiber.id)
+        {
+            pending.push(PendingReason::DependencyCycle { services });
+        }
+        if pending.is_empty() {
+            Ok(bindings)
+        } else {
+            Err(pending)
+        }
+    }
+
+    fn reconcile_fiber(&self, id: FiberId) -> BoxFuture<'static, ()> {
+        let runtime = self.clone();
+        Box::pin(async move {
+            let fiber = {
+                let state = runtime.inner.state.lock().expect("runtime state poisoned");
+                state.fibers.get(&id).cloned()
+            };
+            let Some(fiber) = fiber else {
+                return;
+            };
+            let _transition = fiber.transition.lock().await;
+            if std::panic::AssertUnwindSafe(runtime.reconcile_fiber_inner(&fiber))
+                .catch_unwind()
                 .await
                 .is_err()
             {
-                self.wait_stopped().await;
-                return Ok(());
+                let published = fiber
+                    .data
+                    .lock()
+                    .expect("fiber state poisoned")
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.published);
+                let cleanup = if published {
+                    std::panic::AssertUnwindSafe(runtime.unload_generation(&fiber))
+                        .catch_unwind()
+                        .await
+                } else {
+                    std::panic::AssertUnwindSafe(runtime.rollback_loading(&fiber))
+                        .catch_unwind()
+                        .await
+                };
+                let message = match cleanup {
+                    Ok(report) if report.is_clean() => "plugin activation panicked".to_owned(),
+                    Ok(report) => format!(
+                        "plugin activation panicked; cleanup also failed: {:?}",
+                        report.failures
+                    ),
+                    Err(_) => "plugin activation and cleanup panicked".to_owned(),
+                };
+                fiber.set_state(FiberState::Failed(message));
             }
-            response.await.map_err(|_| HostError::PluginRuntimeClosed {
-                instance: self.instance.clone(),
-            })
         })
-        .await
-        .map_err(|_| HostError::PluginLifecycleTimeout {
-            instance: self.instance.clone(),
-            phase: "stopped",
-        })?;
-        if result.is_ok() {
-            self.join_thread().await?;
-        }
-        result
     }
 
-    async fn wait_stopped(&self) {
-        let mut stopped = self.stopped.clone();
-        while !*stopped.borrow() {
-            if stopped.changed().await.is_err() {
+    async fn reconcile_fiber_inner(&self, fiber: &Arc<Fiber>) {
+        let (disposed, active_bindings, active_revision, target_revision, last_attempt) = {
+            let data = fiber.data.lock().expect("fiber state poisoned");
+            (
+                data.disposed,
+                data.active
+                    .as_ref()
+                    .map(|active| binding_identities(&active.bindings)),
+                data.active.as_ref().map(|active| active.target_revision),
+                data.target_revision,
+                data.last_attempt.clone(),
+            )
+        };
+        if disposed {
+            // Disposal owns teardown and its report. A concurrent reconciliation
+            // must release the transition lock without consuming cleanup failures.
+            return;
+        }
+
+        let bindings = match self.resolve_bindings(fiber) {
+            Ok(bindings) => bindings,
+            Err(reasons) => {
+                if active_bindings.is_some() {
+                    let cleanup = self.unload_generation(fiber).await;
+                    if !cleanup.is_clean() {
+                        fiber.set_state(FiberState::Failed(format!(
+                            "dependency retirement cleanup failed: {:?}",
+                            cleanup.failures
+                        )));
+                        return;
+                    }
+                }
+                fiber.set_state(FiberState::Pending(reasons));
+                return;
+            }
+        };
+        let next_bindings = binding_identities(&bindings);
+        let should_activate = {
+            let data = fiber.data.lock().expect("fiber state poisoned");
+            match (&data.state, active_bindings.as_ref()) {
+                (FiberState::Active, Some(current)) => {
+                    current != &next_bindings || active_revision != Some(target_revision)
+                }
+                (FiberState::Failed(_), _) => {
+                    last_attempt.as_ref() != Some(&(target_revision, next_bindings.clone()))
+                }
+                (_, Some(current)) => current != &next_bindings,
+                _ => true,
+            }
+        };
+        if !should_activate {
+            return;
+        }
+        if active_bindings.is_some() {
+            let cleanup = self.unload_generation(fiber).await;
+            if !cleanup.is_clean() {
+                fiber.set_state(FiberState::Failed(format!(
+                    "reconfiguration cleanup failed: {:?}",
+                    cleanup.failures
+                )));
                 return;
             }
         }
+        self.activate_generation(fiber, bindings).await;
     }
 
-    async fn join_thread(&self) -> Result<()> {
-        let thread = self
-            .thread
-            .lock()
-            .expect("runtime thread mutex poisoned")
-            .take();
-        let Some(thread) = thread else {
-            return Ok(());
+    async fn activate_generation(
+        &self,
+        fiber: &Arc<Fiber>,
+        bindings: BTreeMap<ServiceKey, Arc<ProviderBinding>>,
+    ) {
+        let generation = self.next_generation();
+        let (factory, config, target_revision) = {
+            let mut data = fiber.data.lock().expect("fiber state poisoned");
+            let target_revision = data.target_revision;
+            let attempt = binding_identities(&bindings);
+            data.generation = generation;
+            data.state = FiberState::Loading;
+            data.active = Some(GenerationData {
+                generation,
+                bindings,
+                effects: Vec::new(),
+                services: Vec::new(),
+                listeners: Vec::new(),
+                children: Vec::new(),
+                lease: Arc::new(AdmissionLease::default()),
+                published: false,
+                target_revision,
+            });
+            data.last_attempt = Some((target_revision, attempt));
+            let snapshot = data.snapshot(fiber.id);
+            fiber.watch.send_replace(snapshot);
+            (
+                Arc::clone(&data.factory),
+                data.config.clone(),
+                data.target_revision,
+            )
         };
-        tokio::task::spawn_blocking(move || thread.join())
-            .await
-            .map_err(|_| HostError::PluginRuntimeClosed {
-                instance: self.instance.clone(),
-            })?
-            .map_err(|_| HostError::PluginRuntimeClosed {
-                instance: self.instance.clone(),
-            })
-    }
-}
-
-pub(crate) async fn abort_prepared_reverse(handles: &[RuntimeHandle]) {
-    for handle in handles.iter().rev() {
-        handle.abort_and_stop().await;
-    }
-}
-
-pub(crate) struct StreamPort {
-    instance: InstanceId,
-    stream_id: StreamId,
-    service: ServiceKey,
-    control: mpsc::Sender<ControlCommand>,
-    disconnect: Option<mpsc::OwnedPermit<ClientDisconnect>>,
-    data: mpsc::Sender<DataCommand>,
-    events: mpsc::Receiver<Result<StreamEnvelope>>,
-    send_credit: Arc<ByteCredit>,
-    terminal_fallback: Arc<TerminalFallback>,
-    runtime_terminal: Arc<AtomicBool>,
-    max_frame_bytes: usize,
-    data_frame_overhead: usize,
-    sequence: u64,
-    half_closed: bool,
-    terminal: bool,
-}
-
-impl fmt::Debug for StreamPort {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StreamPort")
-            .field("stream_id", &self.stream_id)
-            .field("service", &self.service)
-            .field("sequence", &self.sequence)
-            .field("half_closed", &self.half_closed)
-            .field("terminal", &self.terminal)
-            .finish_non_exhaustive()
-    }
-}
-
-impl StreamPort {
-    pub(crate) fn stream_id(&self) -> &str {
-        &self.stream_id
-    }
-
-    pub(crate) async fn send(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.half_closed || self.terminal {
-            return Err(HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
-            });
-        }
-        let encoded_bytes = self.data_frame_overhead.saturating_add(bytes.len());
-        if encoded_bytes > self.max_frame_bytes {
-            return Err(HostError::PluginFrameTooLarge {
-                instance: self.instance.clone(),
-                bytes: encoded_bytes,
-                maximum: self.max_frame_bytes,
-            });
-        }
-        let raw_bytes =
-            u64::try_from(bytes.len()).map_err(|_| HostError::StreamByteBudgetExceeded {
-                stream_id: self.stream_id.to_string(),
-                requested: u64::MAX,
-                available: STREAM_BYTE_BUDGET,
-            })?;
-        if raw_bytes > STREAM_BYTE_BUDGET {
-            return Err(HostError::StreamByteBudgetExceeded {
-                stream_id: self.stream_id.to_string(),
-                requested: raw_bytes,
-                available: STREAM_BYTE_BUDGET,
-            });
-        }
-        self.send_credit.consume(raw_bytes).await?;
-        self.sequence = self.sequence.checked_add(1).ok_or_else(|| {
-            HostError::InvalidEnvelope("service stream sequence exhausted u64".to_owned())
-        })?;
-        self.dispatch_data(bytes).await
-    }
-
-    pub(crate) async fn grant_credit(&mut self, bytes: u64) -> Result<()> {
-        if self.terminal {
-            return Err(HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
-            });
-        }
-        if bytes > STREAM_BYTE_BUDGET {
-            return Err(HostError::StreamByteBudgetExceeded {
-                stream_id: self.stream_id.to_string(),
-                requested: bytes,
-                available: STREAM_BYTE_BUDGET,
-            });
-        }
-        let (reply, response) = oneshot::channel();
-        self.control
-            .send(ControlCommand::GrantCredit {
-                stream_id: self.stream_id.clone(),
-                bytes,
-                reply,
-            })
-            .await
-            .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
-            })?;
-        response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.to_string(),
-        })?
-    }
-
-    pub(crate) async fn half_close(&mut self) -> Result<()> {
-        if self.half_closed || self.terminal {
-            return Err(HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
-            });
-        }
-        self.sequence = self.sequence.checked_add(1).ok_or_else(|| {
-            HostError::InvalidEnvelope("service stream sequence exhausted u64".to_owned())
-        })?;
-        let (reply, response) = oneshot::channel();
-        self.control
-            .send(ControlCommand::HalfClose {
-                stream_id: self.stream_id.clone(),
-                sequence: self.sequence,
-                reply,
-            })
-            .await
-            .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
-            })?;
-        response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.to_string(),
-        })??;
-        self.half_closed = true;
-        Ok(())
-    }
-
-    pub(crate) async fn cancel(&mut self, reason: String) -> Result<()> {
-        if self.terminal {
-            return Ok(());
-        }
-        let (reply, response) = oneshot::channel();
-        self.control
-            .send(ControlCommand::Cancel {
-                stream_id: self.stream_id.clone(),
-                reason,
-                reply: Some(reply),
-            })
-            .await
-            .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
-            })?;
-        response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.to_string(),
-        })??;
-        self.terminal = true;
-        drop(self.disconnect.take());
-        self.send_credit.close();
-        Ok(())
-    }
-
-    pub(crate) async fn recv(&mut self) -> Option<Result<StreamEnvelope>> {
-        let result = match self.events.recv().await {
-            Some(result) => Some(result),
-            None => self.terminal_fallback.take().map(Ok),
+        let context = fiber.context(generation);
+        let activation = factory.activate(context, config);
+        let result = tokio::time::timeout(self.inner.limits.transition_timeout, activation).await;
+        let activation_error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some(MetaError::Timeout("plugin activation").to_string()),
         };
-        if result.as_ref().is_some_and(|result| {
-            result
-                .as_ref()
-                .is_ok_and(|frame| matches!(frame.kind, StreamKind::End | StreamKind::Cancel))
-        }) {
-            self.terminal = true;
-            drop(self.disconnect.take());
-            self.send_credit.close();
+        if let Some(error) = activation_error {
+            let cleanup = self.rollback_loading(fiber).await;
+            let error = if cleanup.is_clean() {
+                error
+            } else {
+                format!(
+                    "{error}; activation rollback failed: {:?}",
+                    cleanup.failures
+                )
+            };
+            fiber.set_state(FiberState::Failed(error));
+            return;
         }
-        result
+
+        if let Err(error) = self.publish_generation(fiber, generation, target_revision) {
+            let cleanup = self.rollback_loading(fiber).await;
+            let error = if cleanup.is_clean() {
+                error.to_string()
+            } else {
+                format!(
+                    "{error}; publication rollback failed: {:?}",
+                    cleanup.failures
+                )
+            };
+            fiber.set_state(FiberState::Failed(error));
+        }
     }
 
-    async fn dispatch_data(&self, payload: &[u8]) -> Result<()> {
-        let frame = PluginFrame::service_data_request(
-            self.stream_id.to_string(),
-            self.service.as_str(),
-            payload,
-        );
-        let (reply, response) = oneshot::channel();
-        self.data
-            .send(DataCommand::Dispatch {
-                stream_id: self.stream_id.clone(),
-                frame,
-                reply,
-            })
-            .await
-            .map_err(|_| HostError::StreamClosed {
-                stream_id: self.stream_id.to_string(),
+    fn publish_generation(
+        &self,
+        fiber: &Arc<Fiber>,
+        generation: FiberGeneration,
+        target_revision: u64,
+    ) -> Result<()> {
+        let mut state = self.inner.state.lock().expect("runtime state poisoned");
+        if let Some(reason) = state.terminal.clone() {
+            return Err(MetaError::RuntimeTerminal(reason));
+        }
+        let mut data = fiber.data.lock().expect("fiber state poisoned");
+        if data.disposed || data.generation != generation || data.target_revision != target_revision
+        {
+            return Err(MetaError::StaleContext {
+                fiber: fiber.id,
+                generation,
+            });
+        }
+        let services = {
+            let active = data.active.as_ref().ok_or(MetaError::StaleContext {
+                fiber: fiber.id,
+                generation,
             })?;
-        response.await.map_err(|_| HostError::StreamClosed {
-            stream_id: self.stream_id.to_string(),
-        })?
-    }
-}
-
-#[derive(Debug, Default)]
-struct TerminalFallback {
-    frame: StdMutex<Option<StreamEnvelope>>,
-}
-
-impl TerminalFallback {
-    fn store(&self, frame: StreamEnvelope) {
-        let mut slot = self.frame.lock().expect("terminal fallback mutex poisoned");
-        if slot.is_none() {
-            *slot = Some(frame);
-        }
-    }
-
-    fn take(&self) -> Option<StreamEnvelope> {
-        self.frame
-            .lock()
-            .expect("terminal fallback mutex poisoned")
-            .take()
-    }
-}
-
-impl Drop for StreamPort {
-    fn drop(&mut self) {
-        if !self.terminal && !self.runtime_terminal.load(Ordering::Acquire) {
-            // `open_stream` reserves this slot before returning the port, so
-            // drop can enqueue synchronously from any thread without blocking,
-            // allocating, or depending on a Tokio runtime.
-            if let Some(disconnect) = self.disconnect.take() {
-                disconnect.send(ClientDisconnect {
-                    stream_id: self.stream_id.clone(),
-                    reason: "client_disconnected".to_owned(),
+            active.services.clone()
+        };
+        for binding in &services {
+            let slot = ServiceSlot {
+                key: binding.key.clone(),
+                isolation: Self::isolation_for(&fiber.base_context.isolation, &binding.key),
+            };
+            if state.providers.contains_key(&slot) {
+                return Err(MetaError::DuplicateProvider {
+                    service: binding.key.clone(),
                 });
             }
-            self.send_credit.close();
         }
-    }
-}
-
-#[derive(Debug)]
-struct ByteCredit {
-    permits: Arc<Semaphore>,
-}
-
-impl ByteCredit {
-    fn new() -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(0)),
-        }
-    }
-
-    fn add(&self, bytes: u64) -> Result<()> {
-        // Only the generation actor calls `add`, so read-check-add is one serialized
-        // state transition. `consume` may run concurrently, but can only lower the
-        // observed permit count and therefore cannot exceed the byte-credit ceiling.
-        if self.permits.is_closed() {
-            return Err(HostError::StreamClosed {
-                stream_id: "closed".to_owned(),
+        if state.providers.len() + services.len() > self.inner.limits.maximum_services {
+            return Err(MetaError::CapacityExhausted {
+                resource: "services",
             });
         }
-        let permits = usize::try_from(bytes).map_err(|_| HostError::StreamByteBudgetExceeded {
-            stream_id: "plugin_credit".to_owned(),
-            requested: bytes,
-            available: STREAM_BYTE_BUDGET,
-        })?;
-        let available = u64::try_from(self.permits.available_permits()).unwrap_or(u64::MAX);
-        if available
-            .checked_add(bytes)
-            .is_none_or(|total| total > STREAM_BYTE_BUDGET)
-        {
-            return Err(HostError::StreamByteBudgetExceeded {
-                stream_id: "plugin_credit".to_owned(),
-                requested: bytes,
-                available: STREAM_BYTE_BUDGET.saturating_sub(available),
-            });
-        }
-        self.permits.add_permits(permits);
-        Ok(())
-    }
-
-    async fn consume(&self, bytes: u64) -> Result<()> {
-        let permits = u32::try_from(bytes).map_err(|_| HostError::StreamByteBudgetExceeded {
-            stream_id: "send".to_owned(),
-            requested: bytes,
-            available: STREAM_BYTE_BUDGET,
-        })?;
-        let permit = Arc::clone(&self.permits)
-            .acquire_many_owned(permits)
-            .await
-            .map_err(|_| HostError::StreamClosed {
-                stream_id: "send".to_owned(),
-            })?;
-        permit.forget();
-        Ok(())
-    }
-
-    fn close(&self) {
-        self.permits.close();
-    }
-}
-
-enum LifecycleCommand {
-    Prepare {
-        config: Value,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Commit {
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Retire {
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Abort {
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Stop {
-        reply: oneshot::Sender<()>,
-    },
-}
-
-enum ControlCommand {
-    Open {
-        stream_id: StreamId,
-        service: ServiceKey,
-        payload: Value,
-        events: mpsc::Sender<Result<StreamEnvelope>>,
-        send_credit: Arc<ByteCredit>,
-        terminal_fallback: Arc<TerminalFallback>,
-        runtime_terminal: Arc<AtomicBool>,
-    },
-    GrantCredit {
-        stream_id: StreamId,
-        bytes: u64,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    HalfClose {
-        stream_id: StreamId,
-        sequence: u64,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Cancel {
-        stream_id: StreamId,
-        reason: String,
-        reply: Option<oneshot::Sender<Result<()>>>,
-    },
-    HostServiceResponse(PluginFrame),
-    PluginCommandResponse(PluginFrame),
-}
-
-struct ClientDisconnect {
-    stream_id: StreamId,
-    reason: String,
-}
-
-enum DataCommand {
-    Dispatch {
-        stream_id: StreamId,
-        frame: PluginFrame,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    OutboundEvent(PluginFrame),
-    OutboundClosed {
-        request_id: String,
-    },
-}
-
-struct OutboundRoute {
-    provider: InstanceId,
-    runtime: RuntimeHandle,
-    _lease: GenerationLease,
-}
-
-enum OutboundBridgeCommand {
-    Data(Vec<u8>),
-    Control { operation: String, payload: Value },
-}
-
-mod actor;
-mod bridge;
-
-#[cfg(test)]
-use actor::runtime_tick_enabled;
-use actor::{RuntimeActor, RuntimePhase};
-use bridge::run_outbound_bridge;
-
-pub(crate) struct PreparedRuntimeInstance {
-    pub instance: InstanceId,
-    pub package: PluginPackage,
-    pub staged: StagedPlugin,
-    pub resolved_config: Value,
-    pub redacted_config: Value,
-    pub config_audit_hash: rsi_meta_loader::ContentHash,
-    pub capabilities: Vec<String>,
-    pub process_fixed: bool,
-    pub uses_state_service: bool,
-    pub uses_runtime_tick: bool,
-    pub config_schema_path: Option<std::path::PathBuf>,
-    pub config_schema_hash: Option<rsi_meta_loader::ContentHash>,
-    pub config_schema: Option<Value>,
-}
-
-impl fmt::Debug for PreparedRuntimeInstance {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedRuntimeInstance")
-            .field("instance", &self.instance)
-            .field("package", &self.package.manifest().package)
-            .field("redacted_config", &self.redacted_config)
-            .field("config_audit_hash", &self.config_audit_hash)
-            .field("capabilities", &self.capabilities)
-            .field("process_fixed", &self.process_fixed)
-            .field("uses_state_service", &self.uses_state_service)
-            .field("config_schema_path", &self.config_schema_path)
-            .field("config_schema_hash", &self.config_schema_hash)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct RuntimeLaunchContext {
-    pub plugin_commands: mpsc::Sender<PluginCommandRequest>,
-    pub host_services: mpsc::Sender<HostServiceCall>,
-    pub runtime_faults: mpsc::Sender<RuntimeFault>,
-    pub runtime_ticks: watch::Receiver<u64>,
-}
-
-pub(crate) async fn launch_and_prepare(
-    loader: &PluginLoader,
-    composition_id: &str,
-    routing: &crate::model::RoutingSnapshot,
-    instances: &BTreeMap<InstanceId, PreparedRuntimeInstance>,
-    waves: &[Vec<InstanceId>],
-    context: &RuntimeLaunchContext,
-) -> Result<Vec<RuntimeHandle>> {
-    prepare_waves(
-        waves,
-        |instance_id| async move {
-            let Some(instance) = instances.get(&instance_id) else {
-                return Ok(None);
+        for binding in &services {
+            let slot = ServiceSlot {
+                key: binding.key.clone(),
+                isolation: Self::isolation_for(&fiber.base_context.isolation, &binding.key),
             };
-            let generation = routing
-                .generation(&instance_id)
-                .ok_or_else(|| HostError::UnknownInstance(instance_id.clone()))?;
-            if generation.runtime_opt().is_some() {
-                return Ok(None);
-            }
-            let outbound_routes = routing
-                .routes
-                .iter()
-                .filter(|(key, _)| key.consumer == instance_id)
-                .map(|(key, target)| {
-                    let runtime = target.generation.runtime()?.clone();
-                    Ok((
-                        key.service.clone(),
-                        OutboundRoute {
-                            provider: target.provider.clone(),
-                            runtime,
-                            _lease: target.generation.dependency_lease(),
-                        },
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>>>()?;
-            let runtime = RuntimeHandle::start(
-                loader,
-                &instance.staged,
-                composition_id.to_owned(),
-                instance.instance.clone(),
-                generation.id,
-                instance.capabilities.clone(),
-                instance.uses_state_service,
-                instance.uses_runtime_tick,
-                outbound_routes,
-                context.plugin_commands.clone(),
-                context.host_services.clone(),
-                context.runtime_faults.clone(),
-                context.runtime_ticks.clone(),
-            )?;
-            if let Err(error) = runtime.prepare(instance.resolved_config.clone()).await {
-                runtime.abort_and_stop().await;
-                return Err(error);
-            }
-            if let Err(error) = generation.attach_runtime(runtime.clone()) {
-                runtime.abort_and_stop().await;
-                return Err(error);
-            }
-            Ok(Some(runtime))
-        },
-        |prepared| async move { abort_prepared_reverse(&prepared).await },
-    )
-    .await
-}
-
-async fn prepare_waves<T, E, Prepare, PrepareFuture, Abort, AbortFuture>(
-    waves: &[Vec<InstanceId>],
-    mut prepare: Prepare,
-    abort_reverse: Abort,
-) -> std::result::Result<Vec<T>, E>
-where
-    Prepare: FnMut(InstanceId) -> PrepareFuture,
-    PrepareFuture: std::future::Future<Output = std::result::Result<Option<T>, E>>,
-    Abort: FnOnce(Vec<T>) -> AbortFuture,
-    AbortFuture: std::future::Future<Output = ()>,
-{
-    let mut prepared = Vec::new();
-    let mut abort_reverse = Some(abort_reverse);
-    for wave in waves {
-        let results = futures_util::future::join_all(wave.iter().cloned().map(&mut prepare)).await;
-        let mut failure = None;
-        for result in results {
-            match result {
-                Ok(Some(runtime)) => prepared.push(runtime),
-                Err(error) if failure.is_none() => failure = Some(error),
-                Ok(None) | Err(_) => {}
-            }
+            state.providers.insert(slot, Arc::clone(binding));
         }
-        if let Some(error) = failure {
-            abort_reverse
-                .take()
-                .expect("prepare failure aborts at most once")(prepared)
-            .await;
-            return Err(error);
+        let staged = state
+            .staged_listeners
+            .remove(&(fiber.id, generation))
+            .unwrap_or_default();
+        for listener in staged {
+            let listeners = state.listeners.entry(listener.event.clone()).or_default();
+            listeners.insert(listener);
         }
-    }
-    Ok(prepared)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn consumed_permits_are_immediately_available_for_new_credit() {
-        let credit = ByteCredit::new();
-        credit
-            .add(STREAM_BYTE_BUDGET)
-            .expect("grant the complete stream budget");
-
-        let consumed = Arc::clone(&credit.permits)
-            .acquire_owned()
-            .await
-            .expect("consume one byte");
-        consumed.forget();
-
-        credit
-            .add(1)
-            .expect("the consumed byte must be available immediately");
+        data.active
+            .as_mut()
+            .expect("active generation exists")
+            .published = true;
+        data.state = FiberState::Active;
+        let snapshot = data.snapshot(fiber.id);
+        fiber.watch.send_replace(snapshot);
+        state.revision += 1;
+        let changed: Vec<ServiceKey> = services.iter().map(|binding| binding.key.clone()).collect();
+        drop(data);
+        drop(state);
+        self.notify_service_changes(&changed, Some(fiber.id));
+        Ok(())
     }
 
-    #[test]
-    fn durable_command_outside_committed_phase_gets_an_explicit_failure() {
-        let frame = durable_command_unavailable("hmr-content-id".to_owned());
-        assert_eq!(
-            frame.body,
-            PluginFrameBody::ServiceEvent {
-                request_id: Some("hmr-content-id".to_owned()),
-                service: "control.apply-manifest".to_owned(),
-                event: "failed".to_owned(),
-                payload: json!({"code": "command_unavailable_during_lifecycle"}),
-            }
-        );
+    fn isolation_for(
+        isolations: &BTreeMap<ServiceKey, IsolationId>,
+        key: &ServiceKey,
+    ) -> IsolationId {
+        isolations.get(key).copied().unwrap_or(IsolationId(0))
     }
 
-    fn idle_runtime_handle() -> (
-        RuntimeHandle,
-        mpsc::Receiver<LifecycleCommand>,
-        watch::Sender<bool>,
-    ) {
-        let (lifecycle, receiver) = mpsc::channel(1);
-        let (control, _) = mpsc::channel(1);
-        let (disconnects, _) = mpsc::channel(1);
-        let (data, _) = mpsc::channel(1);
-        let (retired_sender, retired) = watch::channel(false);
-        let (_, stopped) = watch::channel(false);
-        (
-            RuntimeHandle {
-                instance: InstanceId::new("timeout-probe"),
-                generation: 1,
-                max_frame_bytes: 1024 * 1024,
-                lifecycle,
-                control,
-                disconnects,
-                data,
-                retired,
-                stopped,
-                thread: Arc::new(StdMutex::new(None)),
-                healthy: Arc::new(AtomicBool::new(true)),
-                fault_reason: Arc::new(StdMutex::new(None)),
+    fn add_effect(&self, owner: Owner, label: String, cleanup: Cleanup) -> Result<()> {
+        let fiber = self.owner_fiber(owner)?;
+        let mut data = fiber.data.lock().expect("fiber state poisoned");
+        Self::validate_owner_data(owner, &data, true)?;
+        if !matches!(data.state, FiberState::Loading | FiberState::Active) {
+            return Err(MetaError::StaleContext {
+                fiber: owner.fiber,
+                generation: owner.generation,
+            });
+        }
+        let active = data.active.as_mut().ok_or(MetaError::StaleContext {
+            fiber: owner.fiber,
+            generation: owner.generation,
+        })?;
+        if active.effects.len() >= self.inner.limits.maximum_effects_per_fiber {
+            return Err(MetaError::CapacityExhausted {
+                resource: "effects",
+            });
+        }
+        active.effects.push(EffectRecord { label, cleanup });
+        Ok(())
+    }
+
+    fn provide(
+        &self,
+        context: &Context,
+        key: ServiceKey,
+        contract: ContractId,
+        version: ContractVersion,
+        endpoint: Arc<dyn ServiceEndpoint>,
+    ) -> Result<()> {
+        let owner = context.owner.ok_or_else(|| {
+            MetaError::InvalidInput("the root context cannot provide a service".to_owned())
+        })?;
+        let fiber = self.owner_fiber(owner)?;
+        let mut data = fiber.data.lock().expect("fiber state poisoned");
+        Self::validate_owner_data(owner, &data, true)?;
+        if !matches!(data.state, FiberState::Loading) {
+            return Err(MetaError::InvalidInput(
+                "services may only be provided during plugin activation".to_owned(),
+            ));
+        }
+        let provision = data
+            .descriptor
+            .provides
+            .iter()
+            .find(|provision| provision.key == key)
+            .ok_or_else(|| MetaError::UndeclaredProvision {
+                service: key.clone(),
+            })?;
+        if provision.contract != contract || provision.version != version {
+            return Err(MetaError::ContractMismatch {
+                service: key,
+                expected_id: provision.contract.clone(),
+                expected_version: provision.version,
+                actual_id: contract,
+                actual_version: version,
+            });
+        }
+        let active = data.active.as_mut().expect("loading generation exists");
+        if active.services.iter().any(|binding| binding.key == key) {
+            return Err(MetaError::DuplicateProvider { service: key });
+        }
+        active.services.push(Arc::new(ProviderBinding {
+            key,
+            contract,
+            version,
+            provider: owner.fiber,
+            generation: owner.generation,
+            endpoint,
+            lease: Arc::clone(&active.lease),
+        }));
+        Ok(())
+    }
+
+    fn add_listener(
+        &self,
+        context: &Context,
+        event: EventKey,
+        handler: Arc<dyn EventHandler>,
+        options: EventOptions,
+    ) -> Result<EventListenerId> {
+        let owner = context.owner.ok_or_else(|| {
+            MetaError::InvalidInput("the root context cannot own a listener".to_owned())
+        })?;
+        let id = EventListenerId(self.inner.next_listener.fetch_add(1, Ordering::AcqRel) + 1);
+        let mut state = self.inner.state.lock().expect("runtime state poisoned");
+        let fiber = state
+            .fibers
+            .get(&owner.fiber)
+            .cloned()
+            .ok_or(MetaError::StaleContext {
+                fiber: owner.fiber,
+                generation: owner.generation,
+            })?;
+        if state.listener_events.len() >= self.inner.limits.maximum_event_listeners {
+            return Err(MetaError::CapacityExhausted {
+                resource: "event listeners",
+            });
+        }
+        let mut data = fiber.data.lock().expect("fiber state poisoned");
+        if data.generation != owner.generation
+            || !matches!(data.state, FiberState::Loading | FiberState::Active)
+        {
+            return Err(MetaError::StaleContext {
+                fiber: owner.fiber,
+                generation: owner.generation,
+            });
+        }
+        let loading = matches!(data.state, FiberState::Loading);
+        let active = data.active.as_mut().ok_or(MetaError::StaleContext {
+            fiber: owner.fiber,
+            generation: owner.generation,
+        })?;
+        active.listeners.push(id);
+        let listener = ListenerBinding {
+            id,
+            event: event.clone(),
+            owner: owner.fiber,
+            generation: owner.generation,
+            scope: ContextScope {
+                isolation: Arc::clone(&context.isolation),
+                intercepts: Arc::clone(&context.intercepts),
+                trace: context.trace.clone(),
             },
-            receiver,
-            retired_sender,
-        )
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn lifecycle_acknowledgements_have_a_hard_deadline() {
-        let (runtime, mut control, _retired) = idle_runtime_handle();
-        let prepare = tokio::spawn(async move { runtime.prepare(json!({})).await });
-        let pending_command = control.recv().await.expect("prepare command");
-        tokio::time::advance(PLUGIN_LIFECYCLE_TIMEOUT).await;
-        let error = prepare
-            .await
-            .expect("prepare task")
-            .expect_err("missing Prepared must time out");
-        assert!(matches!(
-            error,
-            HostError::PluginLifecycleTimeout {
-                phase: "prepared",
-                ..
-            }
-        ));
-        drop(pending_command);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn lifecycle_deadline_includes_queue_admission() {
-        let (runtime, _lifecycle, _retired) = idle_runtime_handle();
-        let (reply, _response) = oneshot::channel();
-        assert!(
-            runtime
-                .lifecycle
-                .try_send(LifecycleCommand::Commit { reply })
-                .is_ok()
-        );
-        let prepare = tokio::spawn(async move { runtime.prepare(json!({})).await });
-        tokio::time::advance(PLUGIN_LIFECYCLE_TIMEOUT).await;
-        let error = prepare
-            .await
-            .expect("prepare task")
-            .expect_err("full lifecycle queue must time out");
-        assert!(matches!(
-            error,
-            HostError::PluginLifecycleTimeout {
-                phase: "prepared",
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn committed_reports_a_closed_runtime() {
-        let (runtime, lifecycle, _retired) = idle_runtime_handle();
-        drop(lifecycle);
-        let error = runtime
-            .committed()
-            .await
-            .expect_err("closed runtime must reject commit acknowledgement");
-        assert!(matches!(error, HostError::PluginRuntimeClosed { .. }));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retirement_acknowledgements_have_a_hard_deadline() {
-        let (runtime, _control, _retired) = idle_runtime_handle();
-        let wait = tokio::spawn(async move { runtime.wait_retired().await });
-        tokio::time::advance(PLUGIN_LIFECYCLE_TIMEOUT).await;
-        let error = wait
-            .await
-            .expect("retirement task")
-            .expect_err("missing Retired must time out");
-        assert!(matches!(
-            error,
-            HostError::PluginLifecycleTimeout {
-                phase: "retired",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn runtime_ticks_continue_only_through_committed_retirement() {
-        assert!(!runtime_tick_enabled(true, RuntimePhase::Created));
-        assert!(!runtime_tick_enabled(true, RuntimePhase::Preparing));
-        assert!(!runtime_tick_enabled(true, RuntimePhase::Prepared));
-        assert!(runtime_tick_enabled(true, RuntimePhase::Committed));
-        assert!(runtime_tick_enabled(true, RuntimePhase::Retiring));
-        assert!(!runtime_tick_enabled(true, RuntimePhase::Faulted));
-        assert!(!runtime_tick_enabled(false, RuntimePhase::Committed));
-        assert!(!runtime_tick_enabled(false, RuntimePhase::Retiring));
-    }
-
-    #[test]
-    fn runtime_health_is_visible_to_generation_reuse() {
-        let (runtime, _control, _retired) = idle_runtime_handle();
-        assert!(runtime.is_healthy());
-        let generation = Arc::new(crate::model::Generation::new(
-            1,
-            InstanceId::new("timeout-probe"),
-        ));
-        generation
-            .attach_runtime(runtime.clone())
-            .expect("attach runtime");
-        generation.mark_admitting();
-        assert!(generation.try_admit_lease().is_some());
-        runtime.healthy.store(false, Ordering::Release);
-        assert!(!runtime.is_healthy());
-        assert!(
-            generation.try_admit_lease().is_none(),
-            "faulted runtime must stop new admission immediately"
-        );
-    }
-
-    #[tokio::test]
-    async fn independent_prepare_branches_enter_together_and_abort_in_reverse_order() {
-        let waves = vec![
-            vec![InstanceId::new("provider-a"), InstanceId::new("provider-b")],
-            vec![
-                InstanceId::new("consumer-ok"),
-                InstanceId::new("consumer-fail"),
-            ],
-        ];
-        let provider_gate = Arc::new(tokio::sync::Barrier::new(3));
-        let consumer_gate = Arc::new(tokio::sync::Barrier::new(3));
-        let (entered_sender, mut entered_receiver) = mpsc::unbounded_channel::<String>();
-        let (aborted_sender, mut aborted_receiver) = mpsc::unbounded_channel::<String>();
-        let runner = {
-            let provider_gate = Arc::clone(&provider_gate);
-            let consumer_gate = Arc::clone(&consumer_gate);
-            tokio::spawn(async move {
-                prepare_waves(
-                    &waves,
-                    move |instance| {
-                        let entered_sender = entered_sender.clone();
-                        let gate = if instance.0.starts_with("provider-") {
-                            Arc::clone(&provider_gate)
-                        } else {
-                            Arc::clone(&consumer_gate)
-                        };
-                        async move {
-                            entered_sender
-                                .send(instance.0.clone())
-                                .expect("record entered prepare");
-                            gate.wait().await;
-                            if instance.0 == "consumer-fail" {
-                                Err("prepare_failed")
-                            } else {
-                                Ok(Some(instance.0))
-                            }
-                        }
-                    },
-                    move |prepared| async move {
-                        for instance in prepared.into_iter().rev() {
-                            aborted_sender.send(instance).expect("record reverse abort");
-                        }
-                    },
-                )
-                .await
-            })
+            handler,
+            options,
+            lease: Arc::clone(&active.lease),
         };
-
-        let mut providers = vec![
-            entered_receiver
-                .recv()
-                .await
-                .expect("first provider entered"),
-            entered_receiver
-                .recv()
-                .await
-                .expect("second provider entered"),
-        ];
-        providers.sort();
-        assert_eq!(providers, ["provider-a", "provider-b"]);
-        provider_gate.wait().await;
-
-        let mut consumers = vec![
-            entered_receiver
-                .recv()
-                .await
-                .expect("first consumer entered"),
-            entered_receiver
-                .recv()
-                .await
-                .expect("second consumer entered"),
-        ];
-        consumers.sort();
-        assert_eq!(consumers, ["consumer-fail", "consumer-ok"]);
-        consumer_gate.wait().await;
-
-        assert_eq!(
-            runner.await.expect("wave runner task"),
-            Err("prepare_failed")
-        );
-        let aborted = vec![
-            aborted_receiver.recv().await.expect("abort consumer"),
-            aborted_receiver.recv().await.expect("abort provider b"),
-            aborted_receiver.recv().await.expect("abort provider a"),
-        ];
-        assert_eq!(aborted, ["consumer-ok", "provider-b", "provider-a"]);
-        assert!(aborted_receiver.try_recv().is_err());
+        state.listener_events.insert(id, event.clone());
+        if loading {
+            state
+                .staged_listeners
+                .entry((owner.fiber, owner.generation))
+                .or_default()
+                .push(listener);
+        } else {
+            state.listeners.entry(event).or_default().insert(listener);
+        }
+        state.revision += 1;
+        Ok(id)
     }
 
-    #[tokio::test]
-    async fn dropping_stream_outside_runtime_delivers_cancel_after_full_control_queue_drains() {
-        let (control, mut control_receiver) = mpsc::channel(1);
-        control
-            .send(ControlCommand::HostServiceResponse(
-                PluginFrame::service_event(None, "test", "filler", json!({})),
-            ))
-            .await
-            .expect("fill control queue");
-        let (data, _data_receiver) = mpsc::channel(1);
-        let (disconnects, mut disconnect_receiver) = mpsc::channel(MAX_STREAMS_PER_GENERATION);
-        assert_eq!(disconnects.max_capacity(), MAX_STREAMS_PER_GENERATION);
-        let disconnect = disconnects
-            .try_reserve_owned()
-            .expect("reserve bounded disconnect slot");
-        let (event_sender, events) = mpsc::channel(1);
-        let runtime_terminal = Arc::new(AtomicBool::new(false));
-        let port = StreamPort {
-            instance: InstanceId::new("provider"),
-            stream_id: StreamId::new("drop-stream").expect("valid stream id"),
-            service: ServiceKey::new("fixture.echo"),
-            control,
-            disconnect: Some(disconnect),
-            data,
-            events,
-            send_credit: Arc::new(ByteCredit::new()),
-            terminal_fallback: Arc::new(TerminalFallback::default()),
-            runtime_terminal,
-            max_frame_bytes: 1024 * 1024,
-            data_frame_overhead: 32,
-            sequence: 0,
-            half_closed: false,
-            terminal: false,
+    fn remove_listener(&self, context: &Context, id: EventListenerId) -> bool {
+        let Some(owner) = context.owner else {
+            return false;
         };
-        std::thread::spawn(move || drop(port))
-            .join()
-            .expect("drop stream outside the Tokio runtime");
-        let _ = control_receiver.recv().await.expect("queued filler");
-        let cancel = disconnect_receiver
-            .recv()
-            .await
-            .expect("disconnect cancellation");
-        assert_eq!(cancel.stream_id.as_str(), "drop-stream");
-        assert_eq!(cancel.reason, "client_disconnected");
-        drop(event_sender);
+        let mut state = self.inner.state.lock().expect("runtime state poisoned");
+        let Some(fiber) = state.fibers.get(&owner.fiber).cloned() else {
+            return false;
+        };
+        let mut data = fiber.data.lock().expect("fiber state poisoned");
+        if data.generation != owner.generation
+            || !matches!(data.state, FiberState::Loading | FiberState::Active)
+        {
+            return false;
+        }
+        let Some(event) = state.listener_events.get(&id).cloned() else {
+            return false;
+        };
+        let published = state
+            .listeners
+            .get_mut(&event)
+            .and_then(|listeners| listeners.remove(id));
+        let mut removed = published.as_ref().is_some_and(|listener| {
+            listener.owner == owner.fiber && listener.generation == owner.generation
+        });
+        if !removed && let Some(listener) = published {
+            state
+                .listeners
+                .entry(event.clone())
+                .or_default()
+                .insert(listener);
+        }
+        if !removed
+            && let Some(listeners) = state
+                .staged_listeners
+                .get_mut(&(owner.fiber, owner.generation))
+            && let Some(index) = listeners.iter().position(|listener| listener.id == id)
+        {
+            listeners.remove(index);
+            removed = true;
+        }
+        if removed {
+            state.listener_events.remove(&id);
+            if let Some(active) = data.active.as_mut() {
+                active.listeners.retain(|listener| *listener != id);
+            }
+            state.revision += 1;
+        }
+        removed
+    }
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new(RuntimeLimits::default()).expect("default runtime limits are valid")
     }
 }

@@ -1,2 +1,0 @@
-- These examples exercise [`rsi-meta`](../../crates/rsi-meta/README.md) through public CLI, manifest, lock, package, and daemon behavior.
-- Use product-scoped plugin and fixture paths. Verify instructions from the repository root and link the product docs for security and protocol details.

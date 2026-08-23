@@ -10,36 +10,24 @@ publish = false
 path = "src/lib.rs"
 doctest = false
 
-[features]
-default = ["config"]
-config = ["dep:jsonschema", "dep:keyring"]
-test-failpoints = []
-
-[[example]]
-name = "stage-failpoint-child"
-path = "tests/support/stage_failpoint_child.rs"
-required-features = ["test-failpoints"]
-
 [dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
 hex.workspace = true
-jsonschema = { version = "0.33", default-features = false, optional = true }
-keyring = { workspace = true, optional = true }
-libc.workspace = true
 libloading.workspace = true
+libc.workspace = true
+rsi-meta = { path = "../core" }
 rsi-meta-plugin = { path = "../plugin" }
-rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
-toml.workspace = true
-tracing.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
-tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
 
 [lints]
 workspace = true

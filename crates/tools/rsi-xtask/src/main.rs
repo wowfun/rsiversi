@@ -11,8 +11,6 @@ mod cargo_step;
 mod code_health;
 mod documentation;
 mod repository_root;
-mod rsi_agent;
-mod rsi_ai;
 mod rsi_meta;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,22 +76,7 @@ fn run() -> Result<(), String> {
         [product, command] if product == "rsi-meta" && command == "conformance" => {
             let repository = env::current_dir()
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
-            rsi_meta::run(&repository, rsi_meta::Command::Conformance)
-        }
-        [product, command] if product == "rsi-agent" && command == "conformance" => {
-            let repository = env::current_dir()
-                .map_err(|error| format!("could not determine repository root: {error}"))?;
-            rsi_agent::run(&repository)
-        }
-        [product, command] if product == "rsi-ai" && command == "conformance" => {
-            let repository = env::current_dir()
-                .map_err(|error| format!("could not determine repository root: {error}"))?;
-            rsi_ai::run(&repository)
-        }
-        [product, command] if product == "rsi-meta" && command == "release-demo" => {
-            let repository = env::current_dir()
-                .map_err(|error| format!("could not determine repository root: {error}"))?;
-            rsi_meta::run(&repository, rsi_meta::Command::ReleaseDemo)
+            rsi_meta::run(&repository)
         }
         [product, command] if product == "rsi-meta" && command == "code-health" => {
             let repository = env::current_dir()
@@ -110,7 +93,7 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("rsi-meta code-health:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-ai conformance | rsi-xtask rsi-agent conformance | rsi-xtask rsi-meta <code-health [--write]|conformance|release-demo>"
+            "usage: rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta <code-health [--write]|conformance>"
                 .into(),
         ),
     }

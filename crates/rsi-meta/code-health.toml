@@ -1,9 +1,10 @@
-version = 0
+version = 1
 hard_limit = 1200
 
 [regions]
-composition = 877
-loader = 828
-persistence = 1167
-routing = 1095
-runtime = 992
+abi = 197
+core = 117
+events = 46
+loader = 668
+runtime = 998
+service = 226

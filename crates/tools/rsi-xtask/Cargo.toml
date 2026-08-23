@@ -13,8 +13,6 @@ path = "src/main.rs"
 [dependencies]
 percent-encoding.workspace = true
 pulldown-cmark.workspace = true
-rsi-meta-loader = { path = "../../rsi-meta/loader" }
-rsi-meta-plugin = { path = "../../rsi-meta/plugin" }
 proc-macro2.workspace = true
 serde.workspace = true
 serde_json.workspace = true

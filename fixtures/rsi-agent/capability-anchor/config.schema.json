@@ -1,7 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rsi-agent.invalid/fixtures/capability-anchor-config-v0.json",
-  "title": "Agent capability anchor fixture configuration",
-  "type": "object",
-  "additionalProperties": false
-}

@@ -1,7 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rsi-agent.invalid/fixtures/echo-tools-config-v0.json",
-  "title": "Echo tools fixture configuration",
-  "type": "object",
-  "additionalProperties": false
-}

@@ -74,85 +74,12 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
         timeout-minutes: 30
       - name: Exercise the root workspace
-        if: runner.os == 'Linux'
         run: cargo test --locked --workspace --all-targets
-        timeout-minutes: 30
-      - name: Exercise the root workspace except the FD-intensive agent store
-        if: runner.os != 'Linux'
-        run: cargo test --locked --workspace --all-targets --exclude rsi-agent
-        timeout-minutes: 30
-      - name: Exercise the agent store under the macOS file-descriptor budget
-        if: runner.os != 'Linux'
-        run: cargo test --locked -p rsi-agent --all-targets -- --test-threads=4
         timeout-minutes: 30
       - name: Exercise agent protocol feature-unification boundary
         if: runner.os == 'Linux'
         timeout-minutes: 20
         run: cargo test --locked -p rsi-agent-protocol --all-targets --features serde_json/arbitrary_precision
-      - name: Exercise agent runtime with arbitrary-precision feature unification
-        if: runner.os == 'Linux'
-        timeout-minutes: 20
-        run: cargo test --locked -p rsi-agent --all-targets --features 'test-failpoints,serde_json/arbitrary_precision'
-      - name: Exercise agent persistence under a low file-descriptor limit
-        if: runner.os == 'Linux'
-        timeout-minutes: 20
-        shell: bash
-        run: |
-          ulimit -n 64
-          cargo test --locked -p rsi-agent --all-targets --features 'test-failpoints,serde_json/arbitrary_precision' -- --test-threads=4
-      - name: Exercise core crash-recovery boundaries
-        timeout-minutes: 20
-        run: cargo test --locked -p rsi-meta --all-targets --features test-failpoints
-      - name: Exercise loader crash-recovery boundaries
-        timeout-minutes: 20
-        run: cargo test --locked -p rsi-meta-loader --test staging_crash
-      - name: Exercise daemon acknowledgement boundaries
-        timeout-minutes: 20
-        run: cargo test --locked -p rsi-meta-cli --all-targets --features test-failpoints
-      - name: Exercise agent transcript recovery boundaries
-        if: runner.os != 'Linux'
-        timeout-minutes: 20
-        run: cargo test --locked -p rsi-agent --all-targets --features test-failpoints -- --test-threads=4
-
-  native-conformance:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            expected_arch: x86_64
-          - os: macos-15
-            expected_arch: arm64
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Verify runner architecture
-        run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
-      - name: Install Linux native dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
-        with:
-          toolchain: 1.97.0
-          components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: |
-            . -> target
-            plugins/rsi-ai -> target
-            fixtures/rsi-agent -> target
-      - name: Exercise rsi-meta native conformance
-        timeout-minutes: 45
-        run: cargo xtask rsi-meta conformance
-      - name: Exercise rsi-ai native conformance
-        timeout-minutes: 45
-        run: cargo xtask rsi-ai conformance
-      - name: Exercise rsi-agent native conformance
-        timeout-minutes: 45
-        run: cargo xtask rsi-agent conformance
 
   dependency-audit:
     runs-on: ubuntu-24.04
@@ -178,7 +105,6 @@ jobs:
     needs:
       - documentation
       - conformance
-      - native-conformance
       - dependency-audit
     runs-on: ubuntu-24.04
     steps:
@@ -186,10 +112,8 @@ jobs:
         env:
           DOCUMENTATION: ${{ needs.documentation.result }}
           CONFORMANCE: ${{ needs.conformance.result }}
-          NATIVE_CONFORMANCE: ${{ needs.native-conformance.result }}
           DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
         run: |
           test "$DOCUMENTATION" = success
           test "$CONFORMANCE" = success
-          test "$NATIVE_CONFORMANCE" = success
           test "$DEPENDENCY_AUDIT" = success

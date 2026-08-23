@@ -1,1263 +1,882 @@
-//! Validating, content-addressed loader for trusted native `rsi-meta` plugins.
+//! Native execution adapter and the Loader plugin for `rsi-meta`.
 //!
-//! Package manifests describe identity, contracts, and target-specific artifacts.
-//! Expected hashes come from the durable lock file instead of being duplicated
-//! in `plugin.toml`. A successful stage verifies both locked hashes before it
-//! publishes an immutable cache entry. Loaded dynamic libraries deliberately
-//! remain mapped until process exit.
-//!
-//! This workspace-private crate exposes an experimental v0 implementation
-//! surface and makes no cross-release compatibility promise.
+//! The core runtime never maps libraries or interprets platform artifacts.
+//! This crate validates and content-addresses an artifact, adapts its narrow C
+//! ABI to `PluginFactory`, and exposes catalog mutation through an ordinary
+//! `rsi.meta.loader` service.
 
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
-#![allow(unsafe_code)] // This crate is the audited native-loading boundary.
-#![warn(missing_debug_implementations)]
+#![allow(unsafe_code)] // Audited dynamic-library and C-ABI adapter.
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
-use std::ffi::OsString;
-use std::fmt;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::Arc;
-
-use rsi_meta_plugin::{ABI_MAJOR, ABI_MINOR, CallOutcome, HostApi, INIT_OK, Lane, PluginApi};
-#[cfg(test)]
-use rsi_meta_plugin::{
-    LANE_CONTROL, LANE_DATA, POST_FRAME_ACCEPTED, POST_FRAME_CLOSED, POST_FRAME_WOULD_BLOCK,
+use async_trait::async_trait;
+use libloading::Library;
+use rsi_meta::{
+    CleanupFuture, ConfigValue, Context, ContractVersion, FactoryIdentity, MetaError,
+    PluginDescriptor, PluginFactory, ProviderChannel, Result, ServiceEndpoint, ServiceFrame,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use sha2::{Digest, Sha256};
+use rsi_meta_plugin::{
+    ABI_MAJOR, ABI_MINOR, Buffer, HostApi, PLUGIN_ENTRY_SYMBOL, PluginApi, PluginEntryFn,
+    STATUS_OK, borrow_abi_input,
+};
+use serde_json::Value;
+use std::ffi::c_void;
+use std::fmt;
+use std::fs::File;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 use thiserror::Error;
 
-#[cfg(feature = "config")]
-mod config;
-mod mailbox;
-mod manifest_validation;
-mod mapping;
-mod resident;
-mod staged;
-#[cfg(all(feature = "test-failpoints", unix))]
-mod test_failpoints;
+mod catalog;
+mod loader_plugin;
+mod returned_buffer;
+mod worker;
 
-#[cfg(feature = "config")]
-pub use config::{
-    ConfigPrepareError, PreparedConfig, PreparedConfigSchema, compile_config_schema,
-    prepare_config, prepare_config_with_compiled_schema, prepare_config_with_schema,
+use catalog::StagedArtifact;
+pub use catalog::{CatalogOptions, NativeCatalog};
+pub use loader_plugin::{LoaderConfig, LoaderEntry, LoaderFactory};
+use returned_buffer::ReturnedPluginBuffer;
+use worker::{
+    CallbackCompletion, CallbackWaitError, CompletionOnDrop, run_bounded_callback,
+    spawn_native_worker,
 };
-pub use mailbox::{PluginLaneReceiver, PluginMailbox, PluginMailboxOptions, PostedFrame};
-use mailbox::{QueueHostContext, queue_post_frame};
-#[cfg(test)]
-use mailbox::{posted_payload_copies, reset_posted_payload_copies};
-use manifest_validation::{validate_manifest_shape, validate_relative_path};
-use resident::ResidentArtifact;
-#[cfg(test)]
-use resident::{ResidentArtifactKey, ResidentArtifactRegistry};
-pub use staged::StagedPlugin;
 
-pub const BUILD_TARGET: &str = env!("RSI_META_BUILD_TARGET");
-pub const MANIFEST_FORMAT_VERSION: u32 = 0;
+pub const LOADER_SERVICE_KEY: &str = "rsi.meta.loader";
+pub const LOADER_CONTRACT_ID: &str = "rsi.meta.loader.v1";
+pub const LOADER_CONTRACT_VERSION: ContractVersion = ContractVersion(1);
+pub const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 
-const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
-#[cfg(feature = "config")]
-pub(crate) const MAX_CONFIG_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum accepted size of one native plugin artifact.
-///
-/// This bounds both lock construction and content-addressed staging, including
-/// a source file that grows while it is being copied.
-#[doc(hidden)]
-pub const MAX_PLUGIN_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
-pub const MAX_RESIDENT_ARTIFACTS: usize = 128;
-pub const MAX_RESIDENT_MAPPED_BYTES: usize = 1024 * 1024 * 1024;
-pub const MAX_CACHE_ENTRIES: usize = 512;
-pub const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
-// Bound recovery work while leaving room to inspect crash-orphaned hash directories.
-const MAX_CACHE_SCAN_ENTRIES: usize = MAX_CACHE_ENTRIES * 8;
-
-/// A SHA-256 content digest.
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-pub struct ContentHash([u8; 32]);
-
-impl ContentHash {
-    pub fn digest(bytes: impl AsRef<[u8]>) -> Self {
-        Self(Sha256::digest(bytes.as_ref()).into())
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// Returns the lowercase hexadecimal representation used by lock files.
-    pub fn to_hex(self) -> String {
-        hex::encode(self.0)
-    }
+struct NativeModule {
+    api: PluginApi,
+    descriptor: PluginDescriptor,
+    library: Option<Library>,
+    artifact: Option<File>,
+    factory_gate: Mutex<()>,
+    factory_poisoned: AtomicBool,
 }
 
-impl fmt::Debug for ContentHash {
+// SAFETY: ABI callbacks are required to be thread-safe at the factory level;
+// the adapter-owned gates serialize factory and instance callbacks.
+unsafe impl Send for NativeModule {}
+// SAFETY: Same contract as the Send implementation above.
+unsafe impl Sync for NativeModule {}
+
+impl fmt::Debug for NativeModule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_tuple("ContentHash")
-            .field(&self.to_hex())
-            .finish()
-    }
-}
-
-impl fmt::Display for ContentHash {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.to_hex())
-    }
-}
-
-impl FromStr for ContentHash {
-    type Err = InvalidContentHash;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(InvalidContentHash);
-        }
-        let mut digest = [0_u8; 32];
-        hex::decode_to_slice(value, &mut digest).map_err(|_| InvalidContentHash)?;
-        Ok(Self(digest))
-    }
-}
-
-impl Serialize for ContentHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_hex())
-    }
-}
-
-impl<'de> Deserialize<'de> for ContentHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(de::Error::custom)
-    }
-}
-
-/// A string was not exactly one 32-byte hexadecimal digest.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-#[error("expected exactly 64 lowercase hexadecimal SHA-256 characters")]
-pub struct InvalidContentHash;
-
-/// ABI version offered by a host or required by a package.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApiVersion {
-    /// ABI-breaking major version.
-    pub major: u32,
-    /// Backward-compatible feature minor version.
-    pub minor: u32,
-}
-
-impl ApiVersion {
-    /// ABI version implemented by `rsi-meta-plugin` in this build.
-    pub const CURRENT: Self = Self {
-        major: ABI_MAJOR,
-        minor: ABI_MINOR,
-    };
-}
-
-/// Package identity from the manifest. It is not a mounted instance id.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PackageIdentity {
-    /// Stable package identity, distinct from any mount identity.
-    pub id: String,
-    pub version: String,
-    /// Whether changing this package requires a new host process.
-    #[serde(default)]
-    pub process_fixed: bool,
-}
-
-/// Minimum host ABI accepted by a package.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostApiRequirement {
-    /// Required ABI major version.
-    pub major: u32,
-    /// Minimum compatible ABI minor version.
-    pub minimum_minor: u32,
-}
-
-impl HostApiRequirement {
-    fn is_satisfied_by(self, available: ApiVersion) -> bool {
-        self.major == available.major && self.minimum_minor <= available.minor
-    }
-}
-
-/// One native library artifact for a Rust target triple.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactManifest {
-    pub target: String,
-    /// Package-relative native library path.
-    pub path: PathBuf,
-}
-
-/// One service contract injected into a plugin.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InjectionManifest {
-    /// Canonical service contract requested by the package.
-    pub contract: String,
-    /// Whether absence makes the instance inactive.
-    #[serde(default = "required_by_default")]
-    pub required: bool,
-}
-
-const fn required_by_default() -> bool {
-    true
-}
-
-/// Parsed `plugin.toml` package descriptor.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginManifest {
-    /// Exact plugin manifest format version.
-    pub format_version: u32,
-    pub package: PackageIdentity,
-    /// Minimum compatible host ABI.
-    pub host_api: HostApiRequirement,
-    pub artifacts: Vec<ArtifactManifest>,
-    /// Canonical services implemented by the package.
-    #[serde(default)]
-    pub provides: Vec<String>,
-    /// Canonical services injected by the host.
-    #[serde(default)]
-    pub injects: Vec<InjectionManifest>,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    /// Optional package-relative Draft 2020-12 configuration schema.
-    #[serde(default)]
-    pub config_schema: Option<PathBuf>,
-}
-
-impl PluginManifest {
-    /// Parses a manifest without selecting a host artifact.
-    ///
-    /// # Errors
-    ///
-    /// Returns the TOML decoder error when the source is malformed.
-    pub fn from_toml(source: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(source)
-    }
-}
-
-/// Manifest bytes and their parsed representation.
-#[derive(Clone, Debug)]
-pub struct PluginPackage {
-    manifest_path: PathBuf,
-    manifest_hash: ContentHash,
-    manifest: PluginManifest,
-}
-
-impl PluginPackage {
-    /// Reads and parses a package manifest. Locked hashes are checked by
-    /// [`PluginLoader::stage`], not by this inspection operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input, size, UTF-8, or manifest parsing error.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, LoaderError> {
-        let path = path.as_ref();
-        let bytes = read_file(path, "read plugin manifest", MAX_PLUGIN_MANIFEST_BYTES)?;
-        let manifest_hash = ContentHash::digest(&bytes);
-        Self::from_bytes(path, &bytes, manifest_hash)
-    }
-
-    fn open_locked(path: &Path, expected_hash: ContentHash) -> Result<Self, LoaderError> {
-        let bytes = read_file(path, "read plugin manifest", MAX_PLUGIN_MANIFEST_BYTES)?;
-        let manifest_hash = ContentHash::digest(&bytes);
-        if manifest_hash != expected_hash {
-            return Err(LoaderError::HashMismatch {
-                subject: HashSubject::Manifest,
-                path: path.to_path_buf(),
-                expected: expected_hash,
-                actual: manifest_hash,
-            });
-        }
-        Self::from_bytes(path, &bytes, manifest_hash)
-    }
-
-    fn from_bytes(
-        path: &Path,
-        bytes: &[u8],
-        manifest_hash: ContentHash,
-    ) -> Result<Self, LoaderError> {
-        let source = std::str::from_utf8(bytes).map_err(|source| LoaderError::ManifestUtf8 {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let manifest =
-            PluginManifest::from_toml(source).map_err(|source| LoaderError::ManifestToml {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        Ok(Self {
-            manifest_path: path.to_path_buf(),
-            manifest_hash,
-            manifest,
-        })
-    }
-
-    /// Returns the manifest path supplied to [`Self::open`].
-    pub fn manifest_path(&self) -> &Path {
-        &self.manifest_path
-    }
-
-    /// Returns the digest of exact manifest bytes.
-    pub const fn manifest_hash(&self) -> ContentHash {
-        self.manifest_hash
-    }
-
-    pub const fn manifest(&self) -> &PluginManifest {
-        &self.manifest
-    }
-}
-
-/// Digests pinned by one entry in `rsi-meta.lock`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExpectedHashes {
-    pub manifest: ContentHash,
-    pub artifact: ContentHash,
-}
-
-impl ExpectedHashes {
-    pub const fn new(manifest: ContentHash, artifact: ContentHash) -> Self {
-        Self { manifest, artifact }
-    }
-}
-
-/// Which locked object failed hash verification.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HashSubject {
-    Manifest,
-    Artifact,
-    CachedArtifact,
-}
-
-impl fmt::Display for HashSubject {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Manifest => formatter.write_str("plugin manifest"),
-            Self::Artifact => formatter.write_str("plugin artifact"),
-            Self::CachedArtifact => formatter.write_str("cached plugin artifact"),
-        }
-    }
-}
-
-/// Loader failure with enough context to reject a package deterministically.
-#[derive(Debug, Error)]
-pub enum LoaderError {
-    #[error("cannot {operation} `{path}`")]
-    Io {
-        operation: &'static str,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("plugin manifest `{path}` is not UTF-8")]
-    ManifestUtf8 {
-        path: PathBuf,
-        #[source]
-        source: std::str::Utf8Error,
-    },
-    #[error("cannot parse plugin manifest `{path}`")]
-    ManifestToml {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
-    #[error("unsupported plugin manifest version {found}; expected {expected}")]
-    UnsupportedManifestVersion { found: u32, expected: u32 },
-    #[error("package id is invalid or exceeds 255 UTF-8 bytes")]
-    InvalidPackageId,
-    #[error("package version must not be empty")]
-    EmptyPackageVersion,
-    #[error("manifest field `{field}` contains an empty value")]
-    EmptyManifestValue { field: &'static str },
-    #[error("manifest field `{field}` contains an invalid contract name")]
-    InvalidContractName { field: &'static str },
-    #[error("manifest field `{field}` contains duplicate `{value}`")]
-    DuplicateManifestValue { field: &'static str, value: String },
-    #[error("manifest field `{field}` contains {actual} entries; maximum is {maximum}")]
-    ManifestCollectionLimit {
-        field: &'static str,
-        actual: usize,
-        maximum: usize,
-    },
-    #[error(
-        "manifest path `{path}` in field `{field}` must be a non-empty relative path without traversal"
-    )]
-    UnsafeManifestPath { field: &'static str, path: PathBuf },
-    #[error(
-        "plugin requires host ABI {required_major}.{required_minor}, but host provides {available_major}.{available_minor}"
-    )]
-    IncompatibleHostApi {
-        required_major: u32,
-        required_minor: u32,
-        available_major: u32,
-        available_minor: u32,
-    },
-    #[error("plugin has no artifact for host target `{target}`; available targets: {available:?}")]
-    BadTarget {
-        target: String,
-        available: Vec<String>,
-    },
-    #[error("plugin has multiple artifacts for host target `{0}`")]
-    DuplicateTarget(String),
-    #[error("{subject} hash mismatch for `{path}`: expected {expected}, got {actual}")]
-    HashMismatch {
-        subject: HashSubject,
-        path: PathBuf,
-        expected: ContentHash,
-        actual: ContentHash,
-    },
-    #[error("cache entry `{0}` is not a regular, non-symlink file")]
-    InvalidCacheEntry(PathBuf),
-    #[error("plugin cache root `{0}` must be a private directory owned by this user")]
-    UnsafeCacheRoot(PathBuf),
-    #[error("cannot {operation} `{path}` because it is not a regular, non-symlink file")]
-    UnsafeInputFile {
-        operation: &'static str,
-        path: PathBuf,
-    },
-    #[error("cannot {operation} `{path}` because it exceeds {maximum_bytes} bytes")]
-    InputTooLarge {
-        operation: &'static str,
-        path: PathBuf,
-        maximum_bytes: usize,
-    },
-    #[error("host function table is incompatible with loader ABI {0:?}")]
-    InvalidHostTable(ApiVersion),
-    #[error("cannot map plugin library `{path}`")]
-    DynamicLoad {
-        path: PathBuf,
-        #[source]
-        source: Arc<libloading::Error>,
-    },
-    #[error("resident plugin library `{path}` does not export `rsi_meta_plugin_entry_v0`")]
-    MissingEntrySymbol {
-        path: PathBuf,
-        #[source]
-        source: Arc<libloading::Error>,
-    },
-    #[error("resident plugin artifact limit of {maximum} reached")]
-    ResidentArtifactLimit { maximum: usize },
-    #[error(
-        "resident plugin mapping budget of {maximum_bytes} bytes exceeded by {requested_bytes} bytes"
-    )]
-    ResidentMappedBytesLimit {
-        maximum_bytes: usize,
-        requested_bytes: usize,
-    },
-    #[error(
-        "plugin cache budget exceeded: {entries} entries/{bytes} bytes; maximum is {maximum_entries} entries/{maximum_bytes} bytes"
-    )]
-    CacheBudgetExceeded {
-        entries: usize,
-        bytes: usize,
-        maximum_entries: usize,
-        maximum_bytes: usize,
-    },
-    #[error("cannot prepare resident plugin artifact `{path}`: {message}")]
-    ResidentArtifactPreparation { path: PathBuf, message: String },
-    #[error("plugin entry point rejected initialization with status {0}")]
-    PluginInit(u32),
-    #[error("plugin returned an incompatible function table")]
-    IncompatiblePluginTable,
-    #[error("invalid plugin mailbox option: {0}")]
-    InvalidMailboxOptions(&'static str),
-}
-
-/// Validates packages for one host ABI/target and owns its CAS location.
-#[derive(Clone, Debug)]
-pub struct PluginLoader {
-    cache_root: PathBuf,
-    host_target: String,
-    host_api: ApiVersion,
-}
-
-impl PluginLoader {
-    pub fn new(
-        cache_root: impl Into<PathBuf>,
-        host_target: impl Into<String>,
-        host_api: ApiVersion,
-    ) -> Self {
-        Self {
-            cache_root: cache_root.into(),
-            host_target: host_target.into(),
-            host_api,
-        }
-    }
-
-    /// Constructs a loader for the current Cargo target and plugin ABI.
-    pub fn for_current_process(cache_root: impl Into<PathBuf>) -> Self {
-        Self::new(cache_root, BUILD_TARGET, ApiVersion::CURRENT)
-    }
-
-    pub fn cache_root(&self) -> &Path {
-        &self.cache_root
-    }
-
-    pub fn host_target(&self) -> &str {
-        &self.host_target
-    }
-
-    pub const fn host_api(&self) -> ApiVersion {
-        self.host_api
-    }
-
-    /// Validates package-owned metadata and returns the artifact selected for
-    /// this loader's exact target triple.
-    ///
-    /// # Errors
-    ///
-    /// Returns a manifest-shape, ABI, or target-selection error.
-    pub fn validate_manifest<'manifest>(
-        &self,
-        manifest: &'manifest PluginManifest,
-    ) -> Result<&'manifest ArtifactManifest, LoaderError> {
-        validate_manifest_shape(manifest)?;
-        if !manifest.host_api.is_satisfied_by(self.host_api) {
-            return Err(LoaderError::IncompatibleHostApi {
-                required_major: manifest.host_api.major,
-                required_minor: manifest.host_api.minimum_minor,
-                available_major: self.host_api.major,
-                available_minor: self.host_api.minor,
-            });
-        }
-
-        let mut matches = manifest
-            .artifacts
-            .iter()
-            .filter(|artifact| artifact.target == self.host_target);
-        let Some(artifact) = matches.next() else {
-            return Err(LoaderError::BadTarget {
-                target: self.host_target.clone(),
-                available: manifest
-                    .artifacts
-                    .iter()
-                    .map(|artifact| artifact.target.clone())
-                    .collect(),
-            });
-        };
-        if matches.next().is_some() {
-            return Err(LoaderError::DuplicateTarget(self.host_target.clone()));
-        }
-        Ok(artifact)
-    }
-
-    /// Verifies lock-file hashes, then atomically publishes the selected
-    /// artifact into the content-addressed cache.
-    ///
-    /// # Errors
-    ///
-    /// Returns an input, integrity, cache-security, or cache-publication error.
-    pub fn stage(
-        &self,
-        manifest_path: impl AsRef<Path>,
-        expected: ExpectedHashes,
-    ) -> Result<StagedPlugin, LoaderError> {
-        let package = PluginPackage::open_locked(manifest_path.as_ref(), expected.manifest)?;
-
-        let artifact = self.validate_manifest(&package.manifest)?.clone();
-        let source_artifact_path = resolve_package_relative_file(
-            &package.manifest_path,
-            &artifact.path,
-            "artifacts.path",
-            "resolve plugin artifact",
-        )?;
-        let mut source_artifact = open_regular_file(&source_artifact_path, "read plugin artifact")?;
-        let artifact_hash = hash_open_file(
-            &mut source_artifact,
-            &source_artifact_path,
-            "read plugin artifact",
-        )?;
-        if artifact_hash != expected.artifact {
-            return Err(LoaderError::HashMismatch {
-                subject: HashSubject::Artifact,
-                path: source_artifact_path.clone(),
-                expected: expected.artifact,
-                actual: artifact_hash,
-            });
-        }
-
-        ensure_private_cache_root(&self.cache_root)?;
-        let cached_artifact_path = self.cache_path(artifact_hash, &artifact.path);
-        let source_bytes = usize::try_from(
-            source_artifact
-                .metadata()
-                .map_err(|source| LoaderError::Io {
-                    operation: "inspect plugin artifact",
-                    path: source_artifact_path.clone(),
-                    source,
-                })?
-                .len(),
-        )
-        .unwrap_or(usize::MAX);
-        // Hold the process-shared maintenance lock through verification,
-        // publication, and pin acquisition. This closes both the cache-hit and
-        // newly-published windows before the staged artifact becomes visible.
-        let _cache_maintenance = maintain_cache_budget(
-            &self.cache_root,
-            artifact_hash,
-            &cached_artifact_path,
-            source_bytes,
-        )?;
-        publish_cache_entry(
-            &cached_artifact_path,
-            &source_artifact_path,
-            &mut source_artifact,
-            artifact_hash,
-        )?;
-        let cache_pin = CachePin::acquire(&self.cache_root, artifact_hash)?;
-
-        Ok(StagedPlugin {
-            package,
-            artifact,
-            cached_artifact_path,
-            artifact_hash,
-            cache_pin,
-        })
-    }
-
-    /// Maps and initializes a staged trusted plugin.
-    ///
-    /// Each unique artifact is mapped once into a bounded process-resident
-    /// registry. A mapping remains resident even when symbol lookup or instance
-    /// initialization fails, preventing an unprovable `dlclose` while native
-    /// initializers, threads, or copied code pointers might still exist.
-    ///
-    /// Raw host tables cross an explicit unsafe boundary:
-    ///
-    /// ```compile_fail
-    /// use rsi_meta_loader::{PluginLoader, StagedPlugin};
-    /// use rsi_meta_plugin::HostApi;
-    ///
-    /// fn load_raw(loader: &PluginLoader, staged: &StagedPlugin, host: HostApi) {
-    ///     let _ = loader.load(staged, host);
-    /// }
-    /// ```
-    ///
-    /// # Safety
-    ///
-    /// The host table's opaque context and callback must satisfy the lifetime,
-    /// concurrency, and unwind requirements of [`HostApi::new`] through the
-    /// loaded plugin's destroy callback. Prefer [`Self::load_queued`] when a raw
-    /// host callback is unnecessary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a mapping, ABI, symbol, or plugin-initialization error.
-    pub unsafe fn load(
-        &self,
-        staged: &StagedPlugin,
-        host_table: HostApi,
-    ) -> Result<LoadedPlugin, LoaderError> {
-        self.load_inner(staged, host_table, None)
-    }
-
-    /// Maps a plugin with a safe, bounded host callback adapter.
-    ///
-    /// Control and DATA frames have independent capacity. The callback copies
-    /// accepted bytes before returning and is callable from arbitrary plugin
-    /// threads. Core hosts should prefer this over constructing raw tables.
-    ///
-    /// # Errors
-    ///
-    /// Returns an option, mapping, ABI, symbol, or plugin-initialization error.
-    pub fn load_queued(
-        &self,
-        staged: &StagedPlugin,
-        options: PluginMailboxOptions,
-    ) -> Result<(LoadedPlugin, PluginMailbox), LoaderError> {
-        let options = options.validate()?;
-        let (control, control_receiver) = tokio::sync::mpsc::channel(options.control_capacity);
-        let (data, data_receiver) = tokio::sync::mpsc::channel(options.data_capacity);
-        let mut context = Box::new(QueueHostContext {
-            control,
-            data,
-            max_frame_bytes: options.max_frame_bytes,
-        });
-        let context_ptr = (&raw mut *context).cast::<core::ffi::c_void>();
-        // SAFETY: `load_inner` retains the boxed context at a stable address
-        // through plugin destruction. Its senders are thread-safe, copy every
-        // accepted slice synchronously, and the callback never unwinds.
-        let host_table = unsafe { HostApi::new(context_ptr, queue_post_frame) };
-        let loaded = self.load_inner(staged, host_table, Some(context))?;
-        Ok((
-            loaded,
-            PluginMailbox {
-                control: control_receiver,
-                data: data_receiver,
-            },
-        ))
-    }
-
-    fn load_inner(
-        &self,
-        staged: &StagedPlugin,
-        host_table: HostApi,
-        mut host_context: Option<Box<QueueHostContext>>,
-    ) -> Result<LoadedPlugin, LoaderError> {
-        ensure_private_cache_root(&self.cache_root)?;
-        self.validate_manifest(staged.manifest())?;
-
-        let table_version = ApiVersion {
-            major: host_table.abi_major,
-            minor: host_table.abi_minor,
-        };
-        if !host_table.is_compatible() || table_version != self.host_api {
-            return Err(LoaderError::InvalidHostTable(table_version));
-        }
-
-        let resident = self.resident_artifact(staged)?;
-        let host_table = Box::new(host_table);
-
-        let mut plugin_table = PluginApi::EMPTY;
-        // SAFETY: `host_table` has stable boxed storage retained by LoadedPlugin;
-        // `plugin_table` is writable for the full fixed table. The trusted entry
-        // point must obey the C ABI and may not retain the output pointer.
-        let status = unsafe {
-            (resident.entry)(
-                &raw const *host_table,
-                &raw mut plugin_table,
-                core::mem::size_of::<PluginApi>(),
-            )
-        };
-        if status != INIT_OK {
-            // A rejected plugin may retain both raw input pointers and use them
-            // from background cleanup. Without a validated destroy callback,
-            // retaining both allocations is the only safe raw-ABI lifetime.
-            let _ = Box::leak(host_table);
-            if let Some(context) = host_context.take() {
-                // The rejected plugin observed the callback pointer. Without a
-                // validated destroy callback, retaining this small allocation
-                // is the only way to rule out callback-context UAF.
-                let _ = Box::leak(context);
-            }
-            return Err(LoaderError::PluginInit(status));
-        }
-        if !plugin_table.is_compatible() {
-            // Nothing in an incompatible table is callable, including its
-            // apparent `destroy` pointer. The trusted plugin may have leaked
-            // an initialization allocation, but invoking an unvalidated ABI
-            // would be memory-unsafe. Process exit reclaims both allocation
-            // and the deliberately resident library mapping.
-            let _ = Box::leak(host_table);
-            if let Some(context) = host_context.take() {
-                let _ = Box::leak(context);
-            }
-            return Err(LoaderError::IncompatiblePluginTable);
-        }
-
-        Ok(LoadedPlugin {
-            staged: staged.clone(),
-            resident,
-            host_table,
-            _host_context: host_context,
-            plugin_table,
-            shutdown: false,
-            destroyed: false,
-        })
-    }
-
-    fn cache_path(&self, hash: ContentHash, artifact_path: &Path) -> PathBuf {
-        let mut file_name = OsString::from("artifact");
-        if let Some(extension) = artifact_path.extension() {
-            file_name.push(".");
-            file_name.push(extension);
-        }
-        self.cache_root
-            .join("sha256")
-            .join(hash.to_hex())
-            .join(file_name)
-    }
-}
-
-/// Live plugin instance. Safe methods serialize calls through `&mut self`.
-pub struct LoadedPlugin {
-    staged: StagedPlugin,
-    resident: Arc<ResidentArtifact>,
-    // The plugin may retain the pointer supplied to its entry point.
-    host_table: Box<HostApi>,
-    // Present for the safe queued adapter and retained through destroy.
-    _host_context: Option<Box<QueueHostContext>>,
-    plugin_table: PluginApi,
-    shutdown: bool,
-    destroyed: bool,
-}
-
-// SAFETY: The ABI requires a plugin handle to support serialized callbacks
-// after being moved between host threads. Safe methods require `&mut self`, so
-// callback/lifecycle invocation cannot be concurrent through this wrapper.
-// Host callbacks independently require a thread-safe context at construction.
-unsafe impl Send for LoadedPlugin {}
-
-impl fmt::Debug for LoadedPlugin {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LoadedPlugin")
-            .field("package", &self.staged.manifest().package)
-            .field("cached_artifact_path", &self.staged.cached_artifact_path)
-            .field(
-                "host_abi",
-                &(self.host_table.abi_major, self.host_table.abi_minor),
-            )
-            .field("shutdown", &self.shutdown)
+            .debug_struct("NativeModule")
+            .field("abi", &(self.api.abi_major, self.api.abi_minor))
             .finish_non_exhaustive()
     }
 }
 
-impl LoadedPlugin {
-    pub const fn staged(&self) -> &StagedPlugin {
-        &self.staged
-    }
-
-    /// Reports whether two instances reuse the exact process-resident mapping.
-    #[doc(hidden)]
-    pub fn shares_resident_artifact_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.resident, &other.resident)
-    }
-
-    /// Delivers one borrowed control- or data-lane frame.
-    pub fn dispatch(&mut self, lane: Lane, payload: &[u8]) -> CallOutcome {
-        if self.shutdown || self.destroyed {
-            return CallOutcome::Closed;
+impl NativeModule {
+    /// # Safety
+    ///
+    /// The library is trusted native code and must uphold every contract in
+    /// `rsi_meta_plugin.h`, including callback lifetime and no unwinding.
+    unsafe fn load(
+        artifact: StagedArtifact,
+        digest: String,
+    ) -> std::result::Result<Self, LoaderError> {
+        let path = artifact.loader_path();
+        // SAFETY: Caller accepts execution of this verified trusted artifact.
+        let library = unsafe { Library::new(&path) }?;
+        // SAFETY: Symbol type and name are the complete v1 entry contract.
+        let entry = unsafe { library.get::<PluginEntryFn>(PLUGIN_ENTRY_SYMBOL) }?;
+        let mut api = PluginApi::EMPTY;
+        // SAFETY: api is writable for the checked capacity during this call.
+        let status = unsafe { entry(&raw mut api, size_of::<PluginApi>()) };
+        if status != STATUS_OK {
+            destroy_partial_factory(&api);
+            return Err(LoaderError::PluginEntry { status });
         }
-        let Some(dispatch) = self.plugin_table.on_frame else {
-            return CallOutcome::Failed;
+        if !api.is_compatible() {
+            destroy_partial_factory(&api);
+            return Err(LoaderError::IncompatibleAbi {
+                host_major: ABI_MAJOR,
+                host_minor: ABI_MINOR,
+                plugin_major: api.abi_major,
+                plugin_minor: api.abi_minor,
+            });
+        }
+        let mut module = Self {
+            api,
+            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("unread", "0")),
+            library: Some(library),
+            artifact: Some(artifact.file),
+            factory_gate: Mutex::new(()),
+            factory_poisoned: AtomicBool::new(false),
         };
-        // SAFETY: Compatibility validation established a live handle and
-        // callback. The borrow remains readable for this call and cannot be
-        // retained by an ABI-conforming plugin.
+        let mut descriptor = module.read_descriptor()?;
+        descriptor.identity = FactoryIdentity::Artifact {
+            plugin: descriptor.identity.to_string(),
+            sha256: digest,
+        };
+        module.descriptor = descriptor;
+        Ok(module)
+    }
+
+    fn read_descriptor(&self) -> std::result::Result<PluginDescriptor, LoaderError> {
+        let _gate = self.lock_factory("descriptor")?;
+        let mut output = Buffer::EMPTY;
+        // SAFETY: The validated callback owns a live factory; output is writable.
         let status = unsafe {
-            dispatch(
-                self.plugin_table.plugin_handle,
-                lane.as_raw(),
-                payload.as_ptr(),
-                payload.len(),
+            self.api.descriptor.expect("validated API")(self.api.factory_handle, &raw mut output)
+        };
+        let bytes = self.take_buffer(status, output, MAX_DESCRIPTOR_BYTES, "descriptor")?;
+        serde_json::from_slice(&bytes).map_err(LoaderError::InvalidDescriptor)
+    }
+
+    fn transform_config(&self, config: &Value) -> std::result::Result<Value, LoaderError> {
+        let _gate = self.lock_factory("validate_config")?;
+        let input = serde_json::to_vec(&config)?;
+        if input.len() > MAX_DESCRIPTOR_BYTES {
+            return Err(LoaderError::InvalidInput(
+                "plugin config is too large".to_owned(),
+            ));
+        }
+        let mut output = Buffer::EMPTY;
+        // SAFETY: Validated callback, live factory, borrowed input, writable output.
+        let status = unsafe {
+            self.api.validate_config.expect("validated API")(
+                self.api.factory_handle,
+                input.as_ptr(),
+                input.len(),
+                &raw mut output,
             )
         };
-        CallOutcome::from_raw(status)
+        let bytes = self.take_buffer(status, output, MAX_DESCRIPTOR_BYTES, "validate_config")?;
+        serde_json::from_slice(&bytes).map_err(LoaderError::InvalidDescriptor)
     }
 
-    /// Requests idempotent graceful shutdown. Destruction remains owned by Drop.
-    pub fn shutdown(&mut self) -> CallOutcome {
-        if self.destroyed || self.shutdown {
-            return CallOutcome::Ok;
-        }
-        let outcome = if let Some(shutdown) = self.plugin_table.shutdown {
-            // SAFETY: This is a live validated handle; `&mut self` prevents safe
-            // concurrent lifecycle calls through this wrapper.
-            CallOutcome::from_raw(unsafe { shutdown(self.plugin_table.plugin_handle) })
-        } else {
-            CallOutcome::Ok
+    fn create(
+        self: &Arc<Self>,
+        config: &Value,
+        completed: &CallbackCompletion,
+    ) -> std::result::Result<NativeInstance, LoaderError> {
+        let _gate = self.lock_factory("create")?;
+        let _completion = CompletionOnDrop(completed);
+        let input = serde_json::to_vec(&config)?;
+        let mut instance = core::ptr::null_mut();
+        let mut error = Buffer::EMPTY;
+        // SAFETY: Validated callback, live factory, borrowed input, writable outputs.
+        let status = unsafe {
+            self.api.create.expect("validated API")(
+                self.api.factory_handle,
+                input.as_ptr(),
+                input.len(),
+                &raw mut instance,
+                &raw mut error,
+            )
         };
-        if matches!(outcome, CallOutcome::Ok | CallOutcome::Closed) {
-            self.shutdown = true;
+        if status != STATUS_OK || instance.is_null() {
+            let message = self
+                .take_buffer(status, error, MAX_DESCRIPTOR_BYTES, "create")
+                .err()
+                .map_or_else(
+                    || "plugin returned a null instance".to_owned(),
+                    |error| error.to_string(),
+                );
+            if !instance.is_null() {
+                // SAFETY: The ABI transfers every non-null create output to
+                // the host, including failure returns, and this runs once.
+                unsafe {
+                    self.api.destroy_instance.expect("validated API")(instance);
+                }
+            }
+            return Err(LoaderError::Callback {
+                operation: "create",
+                message,
+            });
         }
-        outcome
+        if error.capacity != 0 {
+            // SAFETY: The plugin owns the optional buffer and this is its release callback.
+            unsafe { self.api.release_buffer.expect("validated API")(error) };
+        }
+        Ok(NativeInstance {
+            module: Arc::clone(self),
+            handle: instance,
+            call_gate: Mutex::new(()),
+            poisoned: AtomicBool::new(false),
+            destroyed: AtomicBool::new(false),
+        })
     }
 
-    fn destroy(&mut self) {
-        if self.destroyed {
+    fn lock_factory(
+        &self,
+        operation: &'static str,
+    ) -> std::result::Result<std::sync::MutexGuard<'_, ()>, LoaderError> {
+        if self.factory_poisoned.load(Ordering::Acquire) {
+            return Err(LoaderError::Callback {
+                operation,
+                message: "factory was poisoned by a timed-out callback".to_owned(),
+            });
+        }
+        let guard = self
+            .factory_gate
+            .lock()
+            .map_err(|_| LoaderError::Callback {
+                operation,
+                message: "factory callback lock was poisoned".to_owned(),
+            })?;
+        if self.factory_poisoned.load(Ordering::Acquire) {
+            return Err(LoaderError::Callback {
+                operation,
+                message: "factory was poisoned by a timed-out callback".to_owned(),
+            });
+        }
+        Ok(guard)
+    }
+
+    fn poison_factory(&self) {
+        self.factory_poisoned.store(true, Ordering::Release);
+    }
+
+    fn take_buffer(
+        &self,
+        status: u32,
+        output: Buffer,
+        maximum: usize,
+        operation: &'static str,
+    ) -> std::result::Result<Vec<u8>, LoaderError> {
+        let output =
+            ReturnedPluginBuffer::new(output, self.api.release_buffer.expect("validated API"));
+        let bytes = output.copy(maximum, operation)?;
+        if status == STATUS_OK {
+            Ok(bytes)
+        } else {
+            Err(LoaderError::Callback {
+                operation,
+                message: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        }
+    }
+}
+
+fn destroy_partial_factory(api: &PluginApi) {
+    if !api.factory_handle.is_null()
+        && let Some(destroy) = api.destroy_factory
+    {
+        // SAFETY: The ABI transfers a partially published factory when it
+        // publishes both the handle and matching destructor, even on failure.
+        unsafe { destroy(api.factory_handle) };
+    }
+}
+
+impl Drop for NativeModule {
+    fn drop(&mut self) {
+        let Some(library) = self.library.take() else {
+            return;
+        };
+        let resources = Arc::new(Mutex::new(Some(FactoryResources {
+            api: self.api,
+            _library: library,
+            _artifact: self.artifact.take(),
+        })));
+        let worker_resources = Arc::clone(&resources);
+        let spawn = std::thread::Builder::new()
+            .name("rsi-meta-native-destroy-factory".to_owned())
+            .spawn(move || {
+                let resources = worker_resources
+                    .lock()
+                    .expect("factory destruction state poisoned")
+                    .take()
+                    .expect("factory destruction runs once");
+                // SAFETY: NativeModule exclusively owned the factory. The
+                // resource bundle keeps the library mapped through callback exit.
+                unsafe {
+                    resources.api.destroy_factory.expect("validated API")(
+                        resources.api.factory_handle,
+                    );
+                }
+                drop(resources);
+            });
+        if spawn.is_err() {
+            // Thread creation failure cannot justify running foreign code on an
+            // arbitrary dropping thread. Leak the still-live mapping safely.
+            std::mem::forget(resources);
+        }
+    }
+}
+
+struct FactoryResources {
+    api: PluginApi,
+    _library: Library,
+    _artifact: Option<File>,
+}
+
+// SAFETY: The ABI requires factory destruction to be callable from any host
+// thread. The bundle retains the library and pinned artifact until it returns.
+unsafe impl Send for FactoryResources {}
+
+pub struct NativeFactory {
+    module: Arc<NativeModule>,
+    descriptor: PluginDescriptor,
+    callback_timeout: Duration,
+}
+
+impl fmt::Debug for NativeFactory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeFactory")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl PluginFactory for NativeFactory {
+    fn descriptor(&self) -> &PluginDescriptor {
+        &self.descriptor
+    }
+
+    fn validate_config(&self, config: ConfigValue) -> Result<ConfigValue> {
+        let module = Arc::clone(&self.module);
+        if module.factory_poisoned.load(Ordering::Acquire) {
+            return Err(MetaError::Activation(
+                "native factory was poisoned by a timed-out callback".to_owned(),
+            ));
+        }
+        let timeout = self.callback_timeout;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker_module = Arc::clone(&module);
+        std::thread::Builder::new()
+            .name("rsi-meta-native-validate".to_owned())
+            .spawn(move || {
+                let _ = sender.send(worker_module.transform_config(&config));
+            })
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result.map_err(|error| MetaError::Activation(error.to_string())),
+            Err(RecvTimeoutError::Timeout) => {
+                module.poison_factory();
+                Err(MetaError::Timeout("native config validation"))
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(MetaError::Activation(
+                "native config validation worker disconnected".to_owned(),
+            )),
+        }
+    }
+
+    async fn activate(&self, context: Context, config: ConfigValue) -> Result<()> {
+        let module = Arc::clone(&self.module);
+        let worker_module = Arc::clone(&module);
+        let completed = Arc::new(CallbackCompletion::new());
+        let worker_completed = Arc::clone(&completed);
+        let callback_result_rx = spawn_native_worker("rsi-meta-native-create", move || {
+            let result = worker_module.create(&config, &worker_completed);
+            worker_completed.complete();
+            result
+        })
+        .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let timeout = self.callback_timeout;
+        let timeout_module = Arc::clone(&module);
+        let timeout_runtime = context.runtime().clone();
+        let on_timeout: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            timeout_module.poison_factory();
+            timeout_runtime.mark_terminal("trusted native plugin create callback timed out");
+        });
+        let callback_result = match run_bounded_callback(
+            callback_result_rx,
+            Arc::clone(&completed),
+            timeout,
+            on_timeout,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(CallbackWaitError::TimedOut) => {
+                return Err(MetaError::Timeout("native create callback"));
+            }
+            Err(CallbackWaitError::Disconnected(error)) => {
+                return Err(MetaError::Activation(error.to_string()));
+            }
+        };
+        let instance = match callback_result {
+            Ok(instance) => Arc::new(instance),
+            Err(error) => return Err(MetaError::Activation(error.to_string())),
+        };
+        for provision in &self.descriptor.provides {
+            context.provide(
+                provision.key.clone(),
+                provision.contract.clone(),
+                provision.version,
+                Arc::new(NativeEndpoint {
+                    instance: Arc::downgrade(&instance),
+                    service: provision.key.clone(),
+                    callback_timeout: self.callback_timeout,
+                }),
+            )?;
+        }
+        context.defer(
+            "native instance",
+            Box::new(move || {
+                Box::pin(async move {
+                    let destruction =
+                        spawn_native_worker("rsi-meta-native-destroy-instance", move || {
+                            instance.destroy_once();
+                        })
+                        .map_err(|error| error.to_string())?;
+                    match tokio::time::timeout(timeout, destruction).await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(format!("native destruction worker failed: {error}")),
+                        Err(_) => Err("native instance destruction timed out".to_owned()),
+                    }
+                }) as CleanupFuture
+            }),
+        )
+    }
+}
+
+struct NativeInstance {
+    module: Arc<NativeModule>,
+    handle: *mut c_void,
+    call_gate: Mutex<()>,
+    poisoned: AtomicBool,
+    destroyed: AtomicBool,
+}
+
+// SAFETY: The adapter-owned call gate serializes access to the opaque mutable
+// instance even if a core future is canceled or times out.
+unsafe impl Send for NativeInstance {}
+// SAFETY: Access to the opaque handle is serialized by `call_gate`; every
+// blocking callback owns an Arc that retains the instance and module.
+unsafe impl Sync for NativeInstance {}
+
+impl NativeInstance {
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
+    fn destroy_once(&self) {
+        // The cleanup task may outlive the core admission lease after a timed-
+        // out callback. Join the adapter-owned instance gate before claiming
+        // destruction so foreign mutable access and destruction never overlap.
+        let _gate = self
+            .call_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.destroyed.swap(true, Ordering::AcqRel) {
             return;
         }
-        if !self.shutdown {
-            let outcome = self.shutdown();
-            if !matches!(outcome, CallOutcome::Ok | CallOutcome::Closed) {
-                tracing::error!(?outcome, "plugin shutdown failed during destruction");
-            }
+        // SAFETY: This instance handle came from create, the call gate proves
+        // every serialized callback has returned, and the atomic claim gives
+        // this callback its one destruction invocation.
+        unsafe {
+            self.module.api.destroy_instance.expect("validated API")(self.handle);
         }
-        if let Some(destroy) = self.plugin_table.destroy {
-            // SAFETY: Compatibility validation established this callback and
-            // `destroyed` ensures it is invoked at most once for the handle.
-            let outcome =
-                CallOutcome::from_raw(unsafe { destroy(self.plugin_table.plugin_handle) });
-            if !matches!(outcome, CallOutcome::Ok | CallOutcome::Closed) {
-                tracing::error!(?outcome, "plugin destroy callback failed");
-            }
-        }
-        self.plugin_table.plugin_handle = std::ptr::null_mut();
-        self.destroyed = true;
     }
 }
 
-impl Drop for LoadedPlugin {
+impl Drop for NativeInstance {
     fn drop(&mut self) {
-        self.destroy();
+        if self.destroyed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let resources = Arc::new(Mutex::new(Some(InstanceResources {
+            module: Arc::clone(&self.module),
+            handle: self.handle,
+        })));
+        let worker_resources = Arc::clone(&resources);
+        let spawn = std::thread::Builder::new()
+            .name("rsi-meta-native-destroy-instance".to_owned())
+            .spawn(move || {
+                let resources = worker_resources
+                    .lock()
+                    .expect("instance destruction state poisoned")
+                    .take()
+                    .expect("fallback instance destruction runs once");
+                // SAFETY: Drop atomically claimed the create-owned handle once;
+                // the resource bundle keeps its callback code mapped.
+                unsafe {
+                    resources
+                        .module
+                        .api
+                        .destroy_instance
+                        .expect("validated API")(resources.handle);
+                }
+            });
+        if spawn.is_err() {
+            // Foreign code must not run on an arbitrary dropping thread. Keep
+            // both the handle and its mapped callback code alive instead.
+            std::mem::forget(resources);
+        }
     }
 }
 
-/// Resolves a manifest-declared file through a physical parent path confined
-/// to the package directory. The final component remains subject to the
-/// caller's no-follow open.
-#[doc(hidden)]
-pub fn resolve_package_relative_file(
-    manifest_path: &Path,
-    relative: &Path,
-    field: &'static str,
-    operation: &'static str,
-) -> Result<PathBuf, LoaderError> {
-    validate_relative_path(field, relative)?;
-    let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    storage::resolve_confined_file(package_root, relative, field, operation)
+struct InstanceResources {
+    module: Arc<NativeModule>,
+    handle: *mut c_void,
 }
 
-mod storage;
+// SAFETY: The ABI requires instance destruction after serialized callbacks to
+// be callable from any host thread. The module Arc retains the callback code.
+unsafe impl Send for InstanceResources {}
 
-pub(crate) use storage::read_file;
-use storage::{
-    CachePin, ensure_private_cache_root, hash_open_file, maintain_cache_budget, open_regular_file,
-    publish_cache_entry,
-};
-pub use storage::{hash_regular_file, read_bounded_file, read_bounded_file_following_symlinks};
+struct NativeEndpoint {
+    instance: Weak<NativeInstance>,
+    service: rsi_meta::ServiceKey,
+    callback_timeout: Duration,
+}
+
+impl fmt::Debug for NativeEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeEndpoint")
+            .field("service", &self.service)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl ServiceEndpoint for NativeEndpoint {
+    async fn serve(
+        &self,
+        invocation: rsi_meta::InvocationContext,
+        mut channel: ProviderChannel,
+    ) -> Result<()> {
+        while let Some(request) = channel.recv().await {
+            let instance = self
+                .instance
+                .upgrade()
+                .ok_or_else(|| MetaError::Service("native instance is retiring".to_owned()))?;
+            let service = self.service.to_string();
+            let provider_context = invocation.provider_context().clone();
+            let maximum = provider_context.runtime().limits().maximum_frame_bytes;
+            let runtime = provider_context.runtime().clone();
+            let runtime_handle = tokio::runtime::Handle::current();
+            let completed = Arc::new(CallbackCompletion::new());
+            let worker_completed = Arc::clone(&completed);
+            let worker_instance = Arc::clone(&instance);
+            let callback_result_rx = spawn_native_worker("rsi-meta-native-call", move || {
+                let result = call_native(
+                    &worker_instance,
+                    &worker_completed,
+                    runtime_handle,
+                    provider_context,
+                    maximum,
+                    &service,
+                    request.as_bytes(),
+                );
+                worker_completed.complete();
+                result
+            })
+            .map_err(|error| MetaError::Service(error.to_string()))?;
+            let timeout_instance = Arc::clone(&instance);
+            let timeout_runtime = runtime.clone();
+            let on_timeout: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                timeout_instance.poison();
+                timeout_runtime.mark_terminal("trusted native plugin service callback timed out");
+            });
+            let callback_result = match run_bounded_callback(
+                callback_result_rx,
+                Arc::clone(&completed),
+                self.callback_timeout,
+                on_timeout,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(CallbackWaitError::TimedOut) => {
+                    return Err(MetaError::Timeout("native service callback"));
+                }
+                Err(CallbackWaitError::Disconnected(error)) => {
+                    return Err(MetaError::Service(error.to_string()));
+                }
+            };
+            let response = match callback_result {
+                Ok(bytes) => bytes,
+                Err(error) => return Err(MetaError::Service(error.to_string())),
+            };
+            channel.send(ServiceFrame::new(response)).await?;
+        }
+        Ok(())
+    }
+}
+
+struct HostCallContext {
+    runtime: tokio::runtime::Handle,
+    context: Context,
+    maximum_frame_bytes: usize,
+}
+
+unsafe extern "C" fn host_call_service(
+    handle: *mut c_void,
+    service_ptr: *const u8,
+    service_len: usize,
+    request_ptr: *const u8,
+    request_len: usize,
+    output: *mut Buffer,
+) -> u32 {
+    if handle.is_null()
+        || output.is_null()
+        || (service_ptr.is_null() && service_len != 0)
+        || (request_ptr.is_null() && request_len != 0)
+    {
+        return rsi_meta_plugin::STATUS_INVALID_ARGUMENT;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: The caller borrows these pointers for this synchronous call.
+        let service = unsafe { borrow_abi_input(service_ptr, service_len) };
+        let service = std::str::from_utf8(service).map_err(|error| error.to_string())?;
+        // SAFETY: The caller borrows these pointers for this synchronous call.
+        let request = unsafe { borrow_abi_input(request_ptr, request_len) };
+        // SAFETY: call_native owns this exact context for the callback duration.
+        let host = unsafe { &*(handle.cast::<HostCallContext>()) };
+        if request.len() > host.maximum_frame_bytes {
+            return Err("outbound service request exceeds the host frame limit".to_owned());
+        }
+        host.runtime.block_on(async {
+            host.context
+                .service(service)
+                .map_err(|error| error.to_string())?
+                .open()
+                .map_err(|error| error.to_string())?
+                .unary(ServiceFrame::new(request.to_vec()))
+                .await
+                .map(ServiceFrame::into_bytes)
+                .map_err(|error| error.to_string())
+        })
+    }));
+    let (status, bytes) = match result {
+        Ok(Ok(bytes)) => (STATUS_OK, bytes),
+        Ok(Err(error)) => (rsi_meta_plugin::STATUS_FAILED, error.into_bytes()),
+        Err(_) => (
+            rsi_meta_plugin::STATUS_PANICKED,
+            b"host service bridge panicked".to_vec(),
+        ),
+    };
+    // SAFETY: output is non-null and exclusively borrowed for this call.
+    unsafe { output.write(Buffer::from_vec(bytes)) };
+    status
+}
+
+unsafe extern "C" fn release_host_buffer(buffer: Buffer) {
+    // SAFETY: Host bridge buffers are allocated by Buffer::from_vec here.
+    unsafe { buffer.reclaim() };
+}
+
+fn call_native(
+    instance: &NativeInstance,
+    completed: &CallbackCompletion,
+    runtime: tokio::runtime::Handle,
+    context: Context,
+    maximum_frame_bytes: usize,
+    service: &str,
+    request: &[u8],
+) -> std::result::Result<Vec<u8>, LoaderError> {
+    if instance.poisoned.load(Ordering::Acquire) {
+        return Err(LoaderError::Callback {
+            operation: "call",
+            message: "instance was poisoned by a timed-out callback".to_owned(),
+        });
+    }
+    let _gate = instance
+        .call_gate
+        .lock()
+        .map_err(|_| LoaderError::Callback {
+            operation: "call",
+            message: "instance callback lock was poisoned".to_owned(),
+        })?;
+    let _completion = CompletionOnDrop(completed);
+    if instance.poisoned.load(Ordering::Acquire) {
+        return Err(LoaderError::Callback {
+            operation: "call",
+            message: "instance was poisoned by a timed-out callback".to_owned(),
+        });
+    }
+    let mut host_context = HostCallContext {
+        runtime,
+        context,
+        maximum_frame_bytes,
+    };
+    let host_api = HostApi {
+        abi_major: ABI_MAJOR,
+        abi_minor: ABI_MINOR,
+        struct_size: HostApi::STRUCT_SIZE,
+        reserved: 0,
+        host_handle: (&raw mut host_context).cast(),
+        call_service: Some(host_call_service),
+        release_buffer: Some(release_host_buffer),
+    };
+    let mut output = Buffer::EMPTY;
+    // SAFETY: Instance/module are live, host context and inputs are borrowed for
+    // this synchronous call, and output is writable.
+    let status = unsafe {
+        instance.module.api.call.expect("validated API")(
+            instance.handle,
+            &raw const host_api,
+            service.as_ptr(),
+            service.len(),
+            request.as_ptr(),
+            request.len(),
+            &raw mut output,
+        )
+    };
+    instance
+        .module
+        .take_buffer(status, output, maximum_frame_bytes, "call")
+}
+
+#[derive(Debug, Error)]
+pub enum LoaderError {
+    #[error("native operation timed out: {0}")]
+    Timeout(&'static str),
+    #[error("invalid loader input: {0}")]
+    InvalidInput(String),
+    #[error("native artifact exceeds the {MAX_ARTIFACT_BYTES}-byte limit")]
+    ArtifactTooLarge,
+    #[error("content-addressed cache collision at {0}")]
+    CacheCollision(PathBuf),
+    #[error("native plugin entry failed with status {status}")]
+    PluginEntry { status: u32 },
+    #[error(
+        "native plugin ABI is incompatible (host {host_major}.{host_minor}, plugin {plugin_major}.{plugin_minor})"
+    )]
+    IncompatibleAbi {
+        host_major: u32,
+        host_minor: u32,
+        plugin_major: u32,
+        plugin_minor: u32,
+    },
+    #[error("native {operation} callback failed: {message}")]
+    Callback {
+        operation: &'static str,
+        message: String,
+    },
+    #[error("native descriptor is invalid: {0}")]
+    InvalidDescriptor(serde_json::Error),
+    #[error("native library error: {0}")]
+    Library(#[from] libloading::Error),
+    #[error("native artifact I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("native JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static DESTROYED_PARTIAL_INSTANCES: AtomicUsize = AtomicUsize::new(0);
+    static DESTROYED_SLOW_INSTANCES: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
-    fn oversized_frame_is_a_rejected_attempt_not_a_closed_lane() {
-        let (control, mut control_receiver) = tokio::sync::mpsc::channel(1);
-        let (data, _data_receiver) = tokio::sync::mpsc::channel(1);
-        let mut context = QueueHostContext {
-            control,
-            data,
-            max_frame_bytes: 4,
-        };
-        let oversized = [0_u8; 5];
-        let small = [0_u8; 4];
+    fn callback_completion_and_timeout_have_one_winner() {
+        let completed = CallbackCompletion::new();
+        assert!(completed.complete());
+        assert!(!completed.time_out());
+        assert!(!completed.is_timed_out());
 
-        assert_eq!(
-            // SAFETY: `context` and both input slices remain alive for each
-            // synchronous callback and the receiver keeps the lane open.
-            unsafe {
-                queue_post_frame(
-                    (&raw mut context).cast(),
-                    LANE_CONTROL,
-                    oversized.as_ptr(),
-                    oversized.len(),
-                )
-            },
-            POST_FRAME_WOULD_BLOCK
-        );
-        assert_eq!(
-            // SAFETY: Same stable callback context and borrowed-slice contract.
-            unsafe {
-                queue_post_frame(
-                    (&raw mut context).cast(),
-                    LANE_CONTROL,
-                    small.as_ptr(),
-                    small.len(),
-                )
-            },
-            POST_FRAME_ACCEPTED
-        );
-        assert_eq!(control_receiver.try_recv().unwrap().payload(), small);
+        let timed_out = CallbackCompletion::new();
+        assert!(timed_out.time_out());
+        assert!(!timed_out.complete());
+        assert!(timed_out.is_timed_out());
     }
 
-    #[test]
-    fn rejected_frame_does_not_copy_plugin_memory() {
-        let (control, control_receiver) = tokio::sync::mpsc::channel(1);
-        let (data, data_receiver) = tokio::sync::mpsc::channel(1);
-        let mut context = QueueHostContext {
-            control,
-            data,
-            max_frame_bytes: 4,
-        };
-        let payload = [1_u8; 4];
-        reset_posted_payload_copies();
-
-        assert_eq!(
-            // SAFETY: The callback context and payload remain alive throughout
-            // this synchronous call and both lane receivers are open.
-            unsafe {
-                queue_post_frame(
-                    (&raw mut context).cast(),
-                    LANE_CONTROL,
-                    payload.as_ptr(),
-                    payload.len(),
-                )
-            },
-            POST_FRAME_ACCEPTED
-        );
-        assert_eq!(posted_payload_copies(), 1);
-
-        assert_eq!(
-            // SAFETY: Same stable callback context and borrowed-slice contract.
-            unsafe {
-                queue_post_frame(
-                    (&raw mut context).cast(),
-                    LANE_CONTROL,
-                    payload.as_ptr(),
-                    payload.len(),
-                )
-            },
-            POST_FRAME_WOULD_BLOCK
-        );
-        assert_eq!(posted_payload_copies(), 1);
-
-        assert_eq!(
-            // SAFETY: An invalid lane is rejected before accessing the valid
-            // borrowed payload.
-            unsafe {
-                queue_post_frame(
-                    (&raw mut context).cast(),
-                    u32::MAX,
-                    payload.as_ptr(),
-                    payload.len(),
-                )
-            },
-            POST_FRAME_CLOSED
-        );
-        assert_eq!(posted_payload_copies(), 1);
-
-        drop(data_receiver);
-        assert_eq!(
-            // SAFETY: Same stable callback context and borrowed-slice contract.
-            unsafe {
-                queue_post_frame(
-                    (&raw mut context).cast(),
-                    LANE_DATA,
-                    payload.as_ptr(),
-                    payload.len(),
-                )
-            },
-            POST_FRAME_CLOSED
-        );
-        assert_eq!(posted_payload_copies(), 1);
-
-        drop(control_receiver);
-    }
-
-    #[test]
-    fn resident_registry_reuses_keys_and_enforces_its_hard_limit() {
-        let registry = ResidentArtifactRegistry::new(1, 1024);
-        let first = ResidentArtifactKey {
-            target: "test-target".to_owned(),
-            host_api: ApiVersion::CURRENT,
-            hash: ContentHash::digest(b"first"),
-        };
-        let second = ResidentArtifactKey {
-            target: "test-target".to_owned(),
-            host_api: ApiVersion::CURRENT,
-            hash: ContentHash::digest(b"second"),
-        };
-
-        let first_cell = registry.cell(first.clone(), 16).unwrap();
-        for _ in 0..10_000 {
-            assert!(Arc::ptr_eq(
-                &first_cell,
-                &registry
-                    .cell(first.clone(), 16)
-                    .expect("same key must reuse its slot")
-            ));
+    unsafe extern "C" fn create_partial_failure(
+        _: *mut c_void,
+        _: *const u8,
+        _: usize,
+        instance_out: *mut *mut c_void,
+        error_out: *mut Buffer,
+    ) -> u32 {
+        // SAFETY: The test passes writable out-pointers for this callback.
+        unsafe {
+            instance_out.write(Box::into_raw(Box::new(7_u8)).cast());
+            error_out.write(Buffer::from_vec(b"create failed".to_vec()));
         }
-        let state = registry
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.mapped_bytes, 16);
-        drop(state);
-        assert!(matches!(
-            registry.cell(second, 16),
-            Err(LoaderError::ResidentArtifactLimit { maximum: 1 })
-        ));
+        rsi_meta_plugin::STATUS_FAILED
+    }
+
+    unsafe extern "C" fn destroy_partial_instance(instance: *mut c_void) {
+        DESTROYED_PARTIAL_INSTANCES.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: `create_partial_failure` allocated this exact byte once.
+        drop(unsafe { Box::from_raw(instance.cast::<u8>()) });
+    }
+
+    unsafe extern "C" fn release_test_buffer(buffer: Buffer) {
+        // SAFETY: The callback receives a buffer created by `Buffer::from_vec`.
+        unsafe { buffer.reclaim() };
+    }
+
+    unsafe extern "C" fn destroy_slow_instance(instance: *mut c_void) {
+        std::thread::sleep(Duration::from_millis(200));
+        DESTROYED_SLOW_INSTANCES.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: The test allocated this exact byte once.
+        drop(unsafe { Box::from_raw(instance.cast::<u8>()) });
     }
 
     #[test]
-    fn resident_registry_enforces_aggregate_mapping_bytes() {
-        let registry = ResidentArtifactRegistry::new(8, 31);
-        let key = |value: &[u8]| ResidentArtifactKey {
-            target: "test-target".to_owned(),
-            host_api: ApiVersion::CURRENT,
-            hash: ContentHash::digest(value),
+    fn fallback_instance_drop_offloads_foreign_destruction() {
+        DESTROYED_SLOW_INSTANCES.store(0, Ordering::Relaxed);
+        let instance = NativeInstance {
+            module: Arc::new(NativeModule {
+                api: PluginApi {
+                    destroy_instance: Some(destroy_slow_instance),
+                    ..PluginApi::EMPTY
+                },
+                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("slow-drop", "1")),
+                library: None,
+                artifact: None,
+                factory_gate: Mutex::new(()),
+                factory_poisoned: AtomicBool::new(false),
+            }),
+            handle: Box::into_raw(Box::new(1_u8)).cast(),
+            call_gate: Mutex::new(()),
+            poisoned: AtomicBool::new(false),
+            destroyed: AtomicBool::new(false),
         };
 
-        registry.cell(key(b"first"), 16).unwrap();
-        assert!(matches!(
-            registry.cell(key(b"second"), 16),
-            Err(LoaderError::ResidentMappedBytesLimit {
-                maximum_bytes: 31,
-                requested_bytes: 32,
-            })
-        ));
-    }
-
-    #[test]
-    fn cache_maintenance_evicts_only_unpinned_entries_before_publication() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("cache");
-        ensure_private_cache_root(&cache).unwrap();
-        let hash_root = cache.join("sha256");
-        std::fs::create_dir_all(&hash_root).unwrap();
-        let mut hashes = Vec::new();
-        for index in 0..MAX_CACHE_ENTRIES {
-            let hash = ContentHash::digest(index.to_be_bytes());
-            let directory = hash_root.join(hash.to_hex());
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::write(directory.join("artifact.so"), [0_u8]).unwrap();
-            hashes.push(hash);
-        }
-        let pinned = CachePin::acquire(&cache, hashes[0]).unwrap();
-        let incoming = ContentHash::digest(b"incoming");
-        let incoming_path = hash_root.join(incoming.to_hex()).join("artifact.so");
-        let guard = maintain_cache_budget(&cache, incoming, &incoming_path, 1).unwrap();
-        assert!(hash_root.join(hashes[0].to_hex()).is_dir());
-        assert_eq!(
-            std::fs::read_dir(&hash_root).unwrap().count(),
-            MAX_CACHE_ENTRIES - 1
+        let started = std::time::Instant::now();
+        drop(instance);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "fallback Drop ran foreign destruction inline"
         );
-        drop(guard);
-        drop(pinned);
-    }
-
-    #[test]
-    fn pinned_cache_bytes_cause_explicit_quota_rejection() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("cache");
-        ensure_private_cache_root(&cache).unwrap();
-        let hash_root = cache.join("sha256");
-        std::fs::create_dir_all(&hash_root).unwrap();
-        let entry_bytes = MAX_CACHE_BYTES / 4;
-        let mut pins = Vec::new();
-        for index in 0_u64..4 {
-            let hash = ContentHash::digest(index.to_be_bytes());
-            let directory = hash_root.join(hash.to_hex());
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::File::create(directory.join("artifact.so"))
-                .unwrap()
-                .set_len(entry_bytes as u64)
-                .unwrap();
-            pins.push(CachePin::acquire(&cache, hash).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while DESTROYED_SLOW_INSTANCES.load(Ordering::Relaxed) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
         }
-        assert!(matches!(
-            maintain_cache_budget(
-                &cache,
-                ContentHash::digest(b"incoming"),
-                &hash_root
-                    .join(ContentHash::digest(b"incoming").to_hex())
-                    .join("artifact.so"),
-                1,
-            ),
-            Err(LoaderError::CacheBudgetExceeded {
-                maximum_entries: MAX_CACHE_ENTRIES,
-                maximum_bytes: MAX_CACHE_BYTES,
-                ..
-            })
-        ));
-        drop(pins);
-    }
-
-    const CACHE_PIN_CHILD_ENV: &str = "RSI_META_LOADER_TEST_CACHE_PIN_CHILD";
-
-    #[test]
-    #[ignore = "subprocess helper for cross-process cache pin coverage"]
-    fn cross_process_cache_pin_child() {
-        let Some(encoded) = std::env::var_os(CACHE_PIN_CHILD_ENV) else {
-            return;
-        };
-        let encoded = encoded.into_string().expect("UTF-8 child configuration");
-        let (cache, rest) = encoded.split_once('\n').expect("cache root separator");
-        let (hash, address) = rest.split_once('\n').expect("hash separator");
-        let hash = hash.parse::<ContentHash>().expect("content hash");
-        let _pin = CachePin::acquire(Path::new(cache), hash).expect("acquire child cache pin");
-        let mut gate = std::net::TcpStream::connect(address).expect("connect parent gate");
-        std::io::Write::write_all(&mut gate, &[1]).expect("announce acquired pin");
-        let mut release = [0_u8; 1];
-        std::io::Read::read_exact(&mut gate, &mut release).expect("wait for release");
+        assert_eq!(DESTROYED_SLOW_INSTANCES.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    fn cache_maintenance_honors_a_pin_owned_by_another_process() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("cache");
-        ensure_private_cache_root(&cache).unwrap();
-        let hash_root = cache.join("sha256");
-        std::fs::create_dir_all(&hash_root).unwrap();
-        let mut hashes = Vec::new();
-        for index in 0..MAX_CACHE_ENTRIES {
-            let hash = ContentHash::digest(index.to_be_bytes());
-            let directory = hash_root.join(hash.to_hex());
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::write(directory.join("artifact.so"), [0_u8]).unwrap();
-            hashes.push(hash);
-        }
-        let local_pins = hashes[1..]
-            .iter()
-            .map(|hash| CachePin::acquire(&cache, *hash).unwrap())
-            .collect::<Vec<_>>();
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let child_config = format!(
-            "{}\n{}\n{}",
-            cache.display(),
-            hashes[0],
-            listener.local_addr().unwrap()
+    fn failed_create_destroys_a_nonnull_partial_instance() {
+        DESTROYED_PARTIAL_INSTANCES.store(0, Ordering::Relaxed);
+        let module = Arc::new(NativeModule {
+            api: PluginApi {
+                create: Some(create_partial_failure),
+                destroy_instance: Some(destroy_partial_instance),
+                release_buffer: Some(release_test_buffer),
+                ..PluginApi::EMPTY
+            },
+            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("partial", "1")),
+            library: None,
+            artifact: None,
+            factory_gate: Mutex::new(()),
+            factory_poisoned: AtomicBool::new(false),
+        });
+
+        let completed = CallbackCompletion::new();
+        let error = module
+            .create(&Value::Null, &completed)
+            .err()
+            .expect("create must fail");
+        assert!(!completed.is_timed_out());
+        assert!(
+            !completed.complete(),
+            "create published completion before return"
         );
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "tests::cross_process_cache_pin_child",
-            ])
-            .env(CACHE_PIN_CHILD_ENV, child_config)
-            .spawn()
-            .expect("spawn cache pin child");
-        let (mut gate, _) = listener.accept().expect("accept child gate");
-        let mut ready = [0_u8; 1];
-        std::io::Read::read_exact(&mut gate, &mut ready).expect("wait for acquired pin");
-
-        let incoming = ContentHash::digest(b"cross-process-incoming");
-        let result = maintain_cache_budget(
-            &cache,
-            incoming,
-            &hash_root.join(incoming.to_hex()).join("artifact.so"),
-            1,
-        );
-
-        std::io::Write::write_all(&mut gate, &[1]).expect("release child pin");
-        assert!(child.wait().expect("wait for child").success());
-        assert!(matches!(
-            result,
-            Err(LoaderError::CacheBudgetExceeded { .. })
-        ));
-        assert!(hash_root.join(hashes[0].to_hex()).is_dir());
-        drop(local_pins);
-    }
-
-    #[test]
-    fn cache_budget_counts_a_missing_target_inside_an_existing_hash_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("cache");
-        ensure_private_cache_root(&cache).unwrap();
-        let incoming = ContentHash::digest(b"same bytes, different artifact extension");
-        let directory = cache.join("sha256").join(incoming.to_hex());
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::File::create(directory.join("artifact.so"))
-            .unwrap()
-            .set_len(MAX_CACHE_BYTES as u64)
-            .unwrap();
-
-        assert!(matches!(
-            maintain_cache_budget(&cache, incoming, &directory.join("artifact.dylib"), 1),
-            Err(LoaderError::CacheBudgetExceeded {
-                maximum_entries: MAX_CACHE_ENTRIES,
-                maximum_bytes: MAX_CACHE_BYTES,
-                ..
-            })
-        ));
+        assert!(error.to_string().contains("create failed"), "{error}");
+        assert_eq!(DESTROYED_PARTIAL_INSTANCES.load(Ordering::Relaxed), 1);
     }
 }

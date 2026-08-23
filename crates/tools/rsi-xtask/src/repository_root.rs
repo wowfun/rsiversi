@@ -37,12 +37,8 @@ mod tests {
     fn preserves_the_callers_command_name_in_failures() {
         let repository = tempfile::tempdir().unwrap();
         assert_eq!(
-            require(repository.path(), "rsi-agent conformance"),
-            Err("rsi-agent conformance must run from the repository root".to_owned())
-        );
-        assert_eq!(
-            require(repository.path(), "rsi-meta release-demo"),
-            Err("rsi-meta release-demo must run from the repository root".to_owned())
+            require(repository.path(), "custom command"),
+            Err("custom command must run from the repository root".to_owned())
         );
     }
 }

@@ -1,7 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rsi-meta.invalid/fixtures/echo-bidi-config-v0.json",
-  "title": "Echo fixture configuration",
-  "type": "object",
-  "additionalProperties": false
-}

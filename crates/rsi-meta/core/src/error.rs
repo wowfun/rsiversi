@@ -1,143 +1,108 @@
-use std::collections::BTreeMap;
+use crate::{ContractId, ContractVersion, FiberGeneration, FiberId, ServiceKey};
 
-use crate::model::{InstanceId, ServiceKey};
+/// Result type returned by the `rsi-meta` foundation.
+pub type Result<T> = std::result::Result<T, MetaError>;
 
-/// Errors at the embedded host interface.
-#[derive(Debug, thiserror::Error)]
-pub enum HostError {
-    #[error("I/O error at {path}: {source}")]
-    Io {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
+/// Closed failure taxonomy for composition, lifecycle, service, and event operations.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum MetaError {
+    /// New work was rejected because shutdown admission has closed.
+    #[error("runtime is shutting down")]
+    RuntimeShuttingDown,
+    /// New work was rejected after an unrecoverable runtime condition.
+    #[error("runtime is terminal: {0}")]
+    RuntimeTerminal(String),
+    /// The named Fiber has completed disposal.
+    #[error("fiber {fiber:?} is disposed")]
+    FiberDisposed {
+        /// Runtime-local Fiber identity.
+        fiber: FiberId,
     },
-    #[error("failed to parse {format} document {path}: {message}")]
-    DocumentParse {
-        path: std::path::PathBuf,
-        format: &'static str,
-        message: String,
+    /// A Context names a Fiber generation that no longer owns live state.
+    #[error("stale fiber context {fiber:?}/{generation:?}")]
+    StaleContext {
+        /// Runtime-local Fiber identity.
+        fiber: FiberId,
+        /// Generation captured by the stale Context.
+        generation: FiberGeneration,
     },
-    #[error("composition manifest is invalid: {0}")]
-    InvalidManifest(String),
-    #[error("composition lock does not match the manifest: {0}")]
-    LockMismatch(String),
-    #[error("candidate lock path already exists: {path}")]
-    LockAlreadyExists { path: std::path::PathBuf },
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error(
-        "SQLite store schema version {found} is unsupported; this build requires version {supported}"
-    )]
-    UnsupportedStoreSchema { found: u32, supported: u32 },
-    #[error("plugin package validation failed: {0}")]
-    Loader(#[from] rsi_meta_loader::LoaderError),
-    #[error("JSON serialization error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("plugin frame error: {0}")]
-    PluginFrame(#[from] rsi_meta_plugin::FrameError),
-    #[error("registry actor is no longer available")]
-    RegistryClosed,
-    #[error("registry actor dropped a command response")]
-    ResponseDropped,
-    #[error("shutdown did not finish before its deadline")]
-    ShutdownDeadline,
-    #[error("unsupported protocol {protocol:?} version {version}")]
-    UnsupportedProtocol { protocol: String, version: u32 },
-    #[error("invalid command envelope: {0}")]
-    InvalidEnvelope(String),
-    #[error("command id {command_id:?} was already used for a different command")]
-    CommandIdConflict { command_id: String },
-    #[error("operation rejected with {code}: {message}")]
-    OperationRejected {
-        code: String,
-        message: String,
-        details: BTreeMap<String, serde_json::Value>,
-    },
-    #[error("instance {0} is not present in the routing snapshot")]
-    UnknownInstance(InstanceId),
-    #[error("instance {instance} is inactive")]
-    InstanceInactive { instance: InstanceId },
-    #[error("instance {consumer} did not declare required service {service}")]
-    UndeclaredService {
-        consumer: InstanceId,
+    /// A plugin requested a service absent from its declared requirements.
+    #[error("service {service} was not declared as a requirement")]
+    UndeclaredRequirement {
+        /// Undeclared service key.
         service: ServiceKey,
     },
-    #[error("service {service} is unresolved for instance {consumer}")]
-    UnresolvedService {
-        consumer: InstanceId,
+    /// A plugin published a service absent from its declared provisions.
+    #[error("service {service} was not declared as a provision")]
+    UndeclaredProvision {
+        /// Undeclared service key.
         service: ServiceKey,
     },
-    #[error("operation is not implemented in platform v0: {0}")]
-    Unsupported(&'static str),
-    #[error("event subscriber lagged by {skipped} events; resubscribe from the last cursor")]
-    SubscriberLagged { skipped: u64 },
-    #[error(
-        "event cursor {requested} expired; the minimum resumable cursor is {minimum_available}"
-    )]
-    EventCursorExpired {
-        requested: u64,
-        minimum_available: u64,
+    /// No bound provider is available for the declared requirement.
+    #[error("service {service} is not bound")]
+    ServiceUnavailable {
+        /// Unavailable service key.
+        service: ServiceKey,
     },
-    #[error("plugin state quota {quota} exceeded: requested {requested}, maximum {maximum}")]
-    StateQuotaExceeded {
-        quota: &'static str,
-        requested: usize,
+    /// A captured service handle no longer names the caller's active binding.
+    #[error("service {service} handle is stale")]
+    StaleService {
+        /// Service key carried by the stale handle.
+        service: ServiceKey,
+    },
+    /// The provider in a resolved slot does not satisfy the exact requirement contract.
+    #[error(
+        "service contract mismatch for {service}: expected {expected_id}@{expected_version:?}, got {actual_id}@{actual_version:?}"
+    )]
+    ContractMismatch {
+        /// Service slot whose contracts differ.
+        service: ServiceKey,
+        /// Required contract identity.
+        expected_id: ContractId,
+        /// Required exact contract version.
+        expected_version: ContractVersion,
+        /// Published contract identity.
+        actual_id: ContractId,
+        /// Published exact contract version.
+        actual_version: ContractVersion,
+    },
+    /// Another provider already occupies the same service and isolation slot.
+    #[error("service slot already has a provider: {service}")]
+    DuplicateProvider {
+        /// Conflicting service key.
+        service: ServiceKey,
+    },
+    /// An encoded frame, configuration, or value exceeds its owning byte bound.
+    #[error("payload exceeds the configured {maximum}-byte limit")]
+    PayloadTooLarge {
+        /// Maximum permitted encoded bytes.
         maximum: usize,
     },
-    #[error("native runtime for instance {instance} is closed")]
-    PluginRuntimeClosed { instance: InstanceId },
-    #[error("cannot start native runtime thread for instance {instance}: {source}")]
-    PluginRuntimeStart {
-        instance: InstanceId,
-        #[source]
-        source: std::io::Error,
+    /// A bounded registry or admission pool has no remaining capacity.
+    #[error("bounded runtime capacity exhausted: {resource}")]
+    CapacityExhausted {
+        /// Stable name of the exhausted resource class.
+        resource: &'static str,
     },
-    #[error("native runtime for instance {instance} is not committed")]
-    PluginRuntimeNotCommitted { instance: InstanceId },
-    #[error("native plugin {instance} {lane} lane is at capacity")]
-    PluginQueueFull {
-        instance: InstanceId,
-        lane: &'static str,
-    },
-    #[error("native plugin {instance} failed {operation}: {outcome}")]
-    PluginCallFailed {
-        instance: InstanceId,
-        operation: String,
-        outcome: String,
-    },
-    #[error("native plugin {instance} rejected prepare with {code}: {message}")]
-    PluginPrepareFailed {
-        instance: InstanceId,
-        code: String,
-        message: String,
-    },
-    #[error("native plugin {instance} did not acknowledge {phase} within the lifecycle deadline")]
-    PluginLifecycleTimeout {
-        instance: InstanceId,
-        phase: &'static str,
-    },
-    #[error("host terminated after durable commit because runtime publication failed: {message}")]
-    PostCommitLifecycleFailure { message: String },
-    #[error("native plugin {instance} frame has {bytes} bytes, maximum is {maximum}")]
-    PluginFrameTooLarge {
-        instance: InstanceId,
-        bytes: usize,
-        maximum: usize,
-    },
-    #[error("service stream {stream_id} is closed")]
-    StreamClosed { stream_id: String },
-    #[error(
-        "service stream {stream_id} byte budget exceeded: requested {requested}, available {available}"
-    )]
-    StreamByteBudgetExceeded {
-        stream_id: String,
-        requested: u64,
-        available: u64,
-    },
-    #[error("failed to restore previous manifest/lock pair for command {command_id}: {message}")]
-    PairRestoreFailed { command_id: String, message: String },
-    #[error("plugin configuration preparation failed: {0}")]
-    PluginConfig(#[from] rsi_meta_loader::ConfigPrepareError),
+    /// Plugin configuration normalization rejected its input or output.
+    #[error("plugin configuration is invalid: {0}")]
+    InvalidConfig(String),
+    /// Plugin preparation, activation, or Runtime-owned task execution failed.
+    #[error("plugin activation failed: {0}")]
+    Activation(String),
+    /// A service stream or endpoint failed.
+    #[error("service call failed: {0}")]
+    Service(String),
+    /// Event dispatch or one of its listeners failed.
+    #[error("event dispatch failed: {0}")]
+    Event(String),
+    /// A named bounded operation exceeded its configured deadline.
+    #[error("operation timed out: {0}")]
+    Timeout(&'static str),
+    /// Cooperative cancellation stopped an operation before completion.
+    #[error("operation was cancelled")]
+    Cancelled,
+    /// Caller or adapter input violates a public structural contract.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
-
-pub type Result<T, E = HostError> = std::result::Result<T, E>;

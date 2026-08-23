@@ -1,50 +1,45 @@
-//! Embedded composition host.
+//! Process-local foundation for composable plugins.
 //!
-//! [`CompositionProject`] validates and locks offline candidates without opening
-//! durable host state. [`CompositionHost`] is the online caller-facing interface;
-//! graph mutation, durable operation handling, route publication, and generation
-//! retirement stay behind it so callers cannot observe a partially committed graph.
+//! The public interface is intentionally smaller than the implementation it
+//! controls: [`Runtime`] owns convergence, [`Context`] carries scope, and each
+//! call to [`Context::apply`] creates one independently owned [`FiberHandle`].
+//! Package discovery, persistence, file watching, and product semantics belong
+//! in plugins or callers.
 //!
-//! This is an experimental v0 API with no cross-release compatibility promise.
+//! Async operations must be polled inside a Tokio runtime with time enabled;
+//! they use Tokio-owned tasks, channels, cancellation, and deadlines. Cloned
+//! contexts and handles retain the runtime allocation, so dropping another
+//! [`Runtime`] clone does not invalidate them. Call [`Runtime::shutdown`] when
+//! deterministic teardown and its [`CleanupReport`] are required.
 
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
-mod composition;
-mod domain;
+mod cleanup;
 mod error;
-mod frame;
-mod host;
-mod model;
-mod persistence;
-mod protocol;
-mod recovery;
-mod resolver;
+mod events;
+mod ids;
+mod listener_registry;
+mod plugin;
 mod runtime;
-#[cfg(feature = "test-failpoints")]
-mod test_failpoints;
-mod workspace;
+mod service;
 
-pub use domain::{
-    ApplyRequest, ApplyResult, CompositionChangeSource, CompositionDigest, CompositionProject,
-    CompositionWorkspace, EventPage, HostEvent, HostEventRecord, HostSnapshot, InstallRequest,
-    InstallResult, LockResult, OperationId, PluginInspection, ShutdownReceipt, TokenRotation,
+pub use cleanup::{CleanupFailure, CleanupReport};
+pub use error::{MetaError, Result};
+pub use events::{DispatchMode, EventHandler, EventOptions, EventOutcome, EventReceipt};
+pub use ids::{
+    CallId, ContractId, ContractVersion, EventKey, EventListenerId, FiberGeneration, FiberId,
+    IsolationId, ServiceKey,
 };
-pub use error::{HostError, Result};
-pub use host::{CompositionHost, EventStream, OpenOptions, ServiceOpenRequest, ServiceStream};
-pub use model::{
-    BindingSnapshot, CompositionLock, CompositionManifest, CompositionMetadata, CompositionMode,
-    Diagnostic, DiagnosticSeverity, GraphRevision, GraphSnapshot, InactiveReason, InstanceId,
-    InstanceSnapshot, InstanceSpec, InstanceStatus, LockedPackage, PackageId, PackageSource,
-    RetirementPhase, RetiringInstanceSnapshot, ScopeId, ScopeSpec, ServiceKey, ServiceRequirement,
-    ValidationReport,
+pub use plugin::{
+    Cleanup, CleanupFuture, ConfigValue, FactoryIdentity, PluginDescriptor, PluginFactory,
+    Provision, Requirement,
 };
-pub use protocol::{
-    MAX_WIRE_ID_BYTES, STREAM_PROTOCOL, STREAM_VERSION, StreamEnvelope, StreamId, StreamKind,
+pub use runtime::{
+    Context, FiberHandle, FiberSnapshot, FiberState, PendingReason, PreparedPlugin, Runtime,
+    RuntimeLimits, RuntimeSnapshot,
 };
-pub use rsi_meta_loader::ContentHash;
-pub use rsi_meta_plugin::STREAM_BYTE_BUDGET;
-
-/// Link marker used only by explicit process-crash conformance builds.
-#[cfg(feature = "test-failpoints")]
-#[doc(hidden)]
-pub const __TEST_CRASH_GATE_MARKER: &str = test_failpoints::CRASH_GATE_ENV;
+pub use service::{
+    InvocationContext, ProviderChannel, ServiceCall, ServiceEndpoint, ServiceFrame, ServiceHandle,
+};

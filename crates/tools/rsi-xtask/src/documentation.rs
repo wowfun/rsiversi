@@ -506,10 +506,9 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
             Component::Normal(first),
             Component::Normal(second),
             Component::Normal(_),
-        ] if (*first == OsStr::new("plugins") || *first == OsStr::new("fixtures"))
-            && (*second == OsStr::new("rsi-agent")
-                || *second == OsStr::new("rsi-ai")
-                || *second == OsStr::new("rsi-meta")) =>
+        ] if (*first == OsStr::new("plugins")
+            && (*second == OsStr::new("rsi-agent") || *second == OsStr::new("rsi-meta")))
+            || (*first == OsStr::new("fixtures") && *second == OsStr::new("rsi-meta")) =>
         {
             true
         }
@@ -1088,19 +1087,11 @@ mod tests {
     }
 
     #[test]
-    fn rsi_agent_packages_use_the_product_and_fixture_documentation_classes() {
+    fn active_package_locations_use_their_documentation_classes() {
         let repository = Path::new("/repo");
         assert!(is_recognized_package_path(
             repository,
-            Path::new("/repo/crates/rsi-agent/core")
-        ));
-        assert!(is_recognized_package_path(
-            repository,
             Path::new("/repo/crates/rsi-agent/protocol")
-        ));
-        assert!(is_recognized_package_path(
-            repository,
-            Path::new("/repo/fixtures/rsi-agent/scripted-model")
         ));
         assert!(is_recognized_package_path(
             repository,
@@ -1108,7 +1099,11 @@ mod tests {
         ));
         assert!(is_recognized_package_path(
             repository,
-            Path::new("/repo/plugins/rsi-ai/openai")
+            Path::new("/repo/crates/rsi-meta/core")
+        ));
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/fixtures/rsi-meta/echo-bidi")
         ));
         assert!(!is_recognized_package_path(
             repository,

@@ -13,7 +13,7 @@ use syn::{Meta, Token};
 
 const BASELINE_PATH: &str = "crates/rsi-meta/code-health.toml";
 const HARD_LIMIT: usize = 1_200;
-const REGIONS: [&str; 5] = ["composition", "routing", "runtime", "persistence", "loader"];
+const REGIONS: [&str; 6] = ["core", "runtime", "service", "events", "loader", "abi"];
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -77,7 +77,7 @@ pub fn run(repository: &Path, write: bool) -> Result<(), String> {
             maxima.clone()
         };
         let baseline = Baseline {
-            version: 0,
+            version: 1,
             hard_limit: HARD_LIMIT,
             regions,
         };
@@ -131,7 +131,7 @@ fn read_baseline(path: &Path) -> Result<Baseline, String> {
 }
 
 fn validate_baseline_shape(baseline: &Baseline) -> Result<(), String> {
-    if baseline.version != 0 {
+    if baseline.version != 1 {
         return Err(format!(
             "unsupported code-health baseline version {}",
             baseline.version
@@ -150,7 +150,9 @@ fn validate_baseline_shape(baseline: &Baseline) -> Result<(), String> {
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     if actual != expected {
-        return Err("code-health baseline must contain exactly the five owned regions".to_owned());
+        return Err(
+            "code-health baseline must contain exactly the six foundation regions".to_owned(),
+        );
     }
     Ok(())
 }
@@ -159,6 +161,7 @@ fn measure_repository(repository: &Path) -> Result<Vec<Measurement>, String> {
     let mut paths = Vec::new();
     collect_rust_files(&repository.join("crates/rsi-meta/core/src"), &mut paths)?;
     collect_rust_files(&repository.join("crates/rsi-meta/loader/src"), &mut paths)?;
+    collect_rust_files(&repository.join("crates/rsi-meta/plugin/src"), &mut paths)?;
     paths.sort();
     let excluded_modules = test_only_module_files(&paths)?;
     paths
@@ -231,19 +234,16 @@ fn classify(path: &Path) -> &'static str {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if normalized.starts_with("crates/rsi-meta/loader/src/") {
         "loader"
+    } else if normalized.starts_with("crates/rsi-meta/plugin/src/") {
+        "abi"
     } else if normalized.contains("/runtime/") || normalized.ends_with("/runtime.rs") {
         "runtime"
-    } else if normalized.ends_with("/persistence.rs") {
-        "persistence"
-    } else if normalized.contains("/host/")
-        || normalized.ends_with("/model.rs")
-        || normalized.ends_with("/resolver.rs")
-        || normalized.ends_with("/protocol.rs")
-        || normalized.ends_with("/frame.rs")
-    {
-        "routing"
+    } else if normalized.contains("/service/") || normalized.ends_with("/service.rs") {
+        "service"
+    } else if normalized.ends_with("/events.rs") {
+        "events"
     } else {
-        "composition"
+        "core"
     }
 }
 
@@ -329,39 +329,54 @@ fn cfg_excludes_production(attrs: &[syn::Attribute]) -> bool {
         if !list.path.is_ident("cfg") {
             return false;
         }
-        syn::parse2::<Meta>(list.tokens.clone()).is_ok_and(|meta| !cfg_enabled_in_production(&meta))
+        syn::parse2::<Meta>(list.tokens.clone())
+            .is_ok_and(|meta| !cfg_possibility(&meta).can_be_true)
     })
 }
 
-fn cfg_enabled_in_production(meta: &Meta) -> bool {
+#[derive(Clone, Copy)]
+struct CfgPossibility {
+    can_be_true: bool,
+    can_be_false: bool,
+}
+
+fn cfg_possibility(meta: &Meta) -> CfgPossibility {
     match meta {
-        Meta::Path(path) => !path.is_ident("test"),
-        Meta::NameValue(value) => {
-            if !value.path.is_ident("feature") {
-                return true;
-            }
-            !matches!(
-                &value.value,
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(feature),
-                    ..
-                }) if feature.value() == "test-failpoints"
-            )
-        }
+        Meta::Path(path) if path.is_ident("test") => CfgPossibility {
+            can_be_true: false,
+            can_be_false: true,
+        },
+        Meta::Path(_) | Meta::NameValue(_) => CfgPossibility {
+            can_be_true: true,
+            can_be_false: true,
+        },
         Meta::List(list) => {
             let nested = Punctuated::<Meta, Token![,]>::parse_terminated
                 .parse2(list.tokens.clone())
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .iter()
+                .map(cfg_possibility)
+                .collect::<Vec<_>>();
             if list.path.is_ident("all") {
-                nested.iter().all(cfg_enabled_in_production)
+                CfgPossibility {
+                    can_be_true: nested.iter().all(|value| value.can_be_true),
+                    can_be_false: nested.iter().any(|value| value.can_be_false),
+                }
             } else if list.path.is_ident("any") {
-                nested.iter().any(cfg_enabled_in_production)
-            } else if list.path.is_ident("not") {
-                nested
-                    .first()
-                    .is_none_or(|meta| !cfg_enabled_in_production(meta))
+                CfgPossibility {
+                    can_be_true: nested.iter().any(|value| value.can_be_true),
+                    can_be_false: nested.iter().all(|value| value.can_be_false),
+                }
+            } else if list.path.is_ident("not") && nested.len() == 1 {
+                CfgPossibility {
+                    can_be_true: nested[0].can_be_false,
+                    can_be_false: nested[0].can_be_true,
+                }
             } else {
-                true
+                CfgPossibility {
+                    can_be_true: true,
+                    can_be_false: true,
+                }
             }
         }
     }
@@ -411,7 +426,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn excludes_cfg_test_items_comments_and_blank_lines() {
+    fn excludes_only_guaranteed_test_items_comments_and_blank_lines() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sample.rs");
         fs::write(
@@ -419,19 +434,15 @@ mod tests {
             "// comment\n\npub fn kept() {\n    let value = 1; // inline\n}\n\n#[cfg(test)]\nmod tests {\n    fn excluded() {}\n}\n#[cfg(feature = \"test-failpoints\")]\nfn failpoint() {}\n#[cfg(not(feature = \"test-failpoints\"))]\nfn production() {}\n",
         )
         .unwrap();
-        assert_eq!(effective_lines(&path).unwrap(), 5);
+        assert_eq!(effective_lines(&path).unwrap(), 7);
     }
 
     #[test]
-    fn excludes_files_owned_only_by_a_test_failpoint_module() {
+    fn excludes_files_owned_only_by_a_cfg_test_module() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("lib.rs");
-        let gated = directory.path().join("test_failpoints.rs");
-        fs::write(
-            &root,
-            "#[cfg(feature = \"test-failpoints\")]\nmod test_failpoints;\n",
-        )
-        .unwrap();
+        let gated = directory.path().join("test_support.rs");
+        fs::write(&root, "#[cfg(test)]\nmod test_support;\n").unwrap();
         fs::write(&gated, "pub fn gate() {}\n").unwrap();
 
         let excluded = test_only_module_files(&[root, gated.clone()]).unwrap();

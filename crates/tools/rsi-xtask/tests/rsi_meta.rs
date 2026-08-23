@@ -17,16 +17,14 @@ fn stderr(output: &Output) -> String {
 fn rsi_meta_commands_are_recognized_and_require_the_repository_root() {
     let directory = tempfile::tempdir().unwrap();
 
-    for subcommand in ["conformance", "release-demo"] {
-        let output = run(directory.path(), &["rsi-meta", subcommand]);
-        assert!(!output.status.success());
-        let error = stderr(&output);
-        assert!(
-            error.contains("must run from the repository root"),
-            "unexpected {subcommand} error: {error}"
-        );
-        assert!(!error.contains("usage: rsi-xtask"));
-    }
+    let output = run(directory.path(), &["rsi-meta", "conformance"]);
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains("must run from the repository root"),
+        "unexpected conformance error: {error}"
+    );
+    assert!(!error.contains("usage: rsi-xtask"));
 }
 
 #[test]
