@@ -1,36 +1,11 @@
 # RSIversi monorepo architecture
 
-## Product ownership
+The repository is a family of independently usable products. Each product owns its public contract, trust boundary, and verification policy; the root owns only one-way dependency direction and workspace governance.
 
-The repository is a product family, not one product split into packages. A product owns an independently usable capability, current contract, architecture, trust boundary, and verification policy. The root [product table](../README.md#products) is the human-maintained entry point; the product subtree owns the facts behind each entry.
+[`rsi-meta`](../crates/rsi-meta/README.md) is the lowest active runtime layer. It owns process-local plugin composition through `Runtime`, `Context`, and Fiber, plus an adapter-neutral `PluginFactory` seam. Native ABI and library mapping live outside core.
 
-The implemented products are ordered by dependency:
+[`rsi-ai`](../crates/rsi-ai/README.md) is an independent provider-neutral AI SDK. It owns semantic capability protocols, provider authoring, exact routing, and standalone transports. It has no active dependency on `rsi-meta`; a future integration must be an ordinary plugin rather than a privileged wrapper.
 
-1. [`rsi-meta`](../crates/rsi-meta/README.md) is the trusted native plugin composition platform. It owns service composition, routing, and provider lifecycle, but not agent semantics.
-2. [`rsi-ai`](../crates/rsi-ai/README.md) is the provider-neutral AI integration product. It owns five semantic capability contracts, standalone exact routing, concrete provider adapters, and their `rsi-meta` service wrapper, but not agent history or provider composition policy.
-3. [`rsi-agent`](../crates/rsi-agent/README.md) is the durable agent-turn runtime. It consumes `rsi-ai` and tool services through `rsi-meta`, owns model-visible history, retry scheduling, artifact durability, and loop semantics, and deliberately leaves provider routing and user interfaces outside its boundary.
+[`rsi-agent-protocol`](../crates/rsi-agent/protocol/README.md) owns the current agent/tool wire contract. No online `rsi-agent` runtime or coding-tools plugin is present: the obsolete implementations were removed rather than retained as a second architectural truth. A future runtime must be built over the public plugin foundation without restoring the removed CompositionHost boundary; historical rationale remains in Agent Notes and Git history.
 
-The layer boundary is one-way: `rsi-ai` uses `rsi-meta` only in its adapter package, while `rsi-agent` consumes the public `rsi-ai` protocol and `rsi-meta` host interface. `rsi-meta` has no knowledge of agents, transcripts, AI semantics, or tools. Concrete AI provider packages do not depend on `rsi-agent`.
-
-## Source and asset layout
-
-Product components live at `crates/<product>/<component>`. Cargo package names remain globally meaningful even when component directory names are short. Repository-only tools live under `crates/tools/`.
-
-Non-crate assets stay in repositories of their own kind and use a product namespace:
-
-```text
-schemas/<product>/
-plugins/<product>/
-fixtures/<product>/
-examples/<product>/
-```
-
-This keeps schemas, standalone workspaces, conformance artifacts, and runnable examples discoverable by kind without making the root their behavioral owner. Each product namespace links back to its product instructions.
-
-The root Cargo workspace discovers `crates/*/*`. A product `docs/` directory at that depth is explicitly excluded because it is not a Cargo package. Each standalone plugin or fixture workspace retains one manifest and lockfile and is exercised by the owning product's conformance workflow; a product namespace may group several cooperating fixture packages into one such workspace.
-
-## Documentation and decisions
-
-The root README navigates products. A product README states the product's current contract and links its components. Product docs own cross-package system behavior. Package READMEs own one Cargo package. Schemas and source own exact declarations. [Agent Notes](../.agents/notes/README.md) own durable decision rationale.
-
-Each subtree `AGENTS.md` contains only rules introduced by that boundary. Descendants inherit their ancestors and link to the authoritative rule instead of copying it.
+Product components live at `crates/<product>/<component>`. Non-crate assets use the matching namespace below `schemas/`, `plugins/`, `fixtures/`, or `examples/`. Repository-only tools live below `crates/tools/`. Current behavior is documented at its owning product or package rather than duplicated at root.

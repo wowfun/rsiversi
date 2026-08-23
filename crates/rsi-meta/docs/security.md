@@ -1,29 +1,55 @@
 # rsi-meta security boundary
 
-## Native trust domain
+Core trusts validated safe-Rust inputs and bounds every registry, frame,
+channel, plugin configuration and overlay, activation, call, and shutdown
+operation. Both input and normalized plugin configurations are checked before
+the Runtime retains them. Service requirements and provisions use exact
+contract identity and version. Context ownership and Fiber generation are
+validated whenever a structural operation or service call crosses the runtime
+seam. Independent Fiber reconciliation and live service calls have explicit
+Runtime-wide concurrency limits; per-call channel limits are not treated as a
+global memory bound. Provider closure and its admitted-callback count are one
+atomic state, so an ordinary callback racing closure either commits its count
+first or observes the closed gate. Cleanup-time calls from retiring dependents
+remain ordered by the joined convergence transaction.
 
-Native plugins are trusted host-level code. Capabilities restrict requests made through host handles, but they do not stop plugin code from reading process memory, accessing the operating system, starting threads, aborting, or corrupting the daemon. `rsi-meta` does not provide a process sandbox or Wasm isolation mode.
+Native plugins are trusted process code. Hashing proves which top-level bytes were mapped; it does not sandbox them or recursively authenticate operating-system dynamic dependencies. A plugin can read memory, access the operating system, spawn threads, corrupt state, or abort. Only fully trusted artifacts belong in `NativeCatalog`.
 
-The [loader](../loader/README.md) validates package identity, target, hashes, file types, ownership-sensitive inputs, and configuration before mapping a library. The lock pins the selected top-level library, not every dynamic dependency that the operating-system loader may resolve; deployments must treat that dependency environment as trusted. These checks establish package integrity; they do not turn native code into an untrusted security boundary.
+`NativeCatalog` accepts a caller-selected source path; its cache directory is a
+content-addressed staging destination, not a source allowlist. Possession of the
+Loader service is therefore authority to select and execute trusted native code
+with the host process's permissions. Products that need an artifact policy must
+place it in front of that service rather than treating the cache as a sandbox.
 
-## Local transports
+The catalog rejects symlinks and special files and verifies a bounded regular
+file. Unix maps a private unlinked copy of the verified bytes, so later
+replacement or in-place mutation of the durable cache path cannot change the
+staged content. The private descriptor remains writable to trusted code with
+the host process's authority; this does not weaken the stated trust boundary,
+because native plugins can already mutate arbitrary process resources. Windows
+retains the verified cache handle with restrictive sharing; native Windows
+behavior is not inferred from Unix evidence.
 
-The daemon accepts Unix sockets and loopback HTTP/WebSocket only. It rejects non-loopback binds before opening durable host state or creating credentials.
+The ABI validates table sizes, versions, mandatory pointers, returned-buffer structure, output bounds, UTF-8/JSON at owning boundaries, and allocator ownership. An allocator-matched guard releases every plugin-returned buffer exactly once after either copying or rejection. Every unsafe operation in `rsi-meta-plugin` and `rsi-meta-loader` documents pointer, lifetime, serialization, or mapping requirements. Core contains no unsafe code.
 
-The runtime directory and Unix socket must be owned by the effective user with restrictive modes. The server checks peer credentials; clients verify that the socket is a non-symlink socket with the expected owner and mode. Unix transport remains the recovery path after bearer-token rotation.
+A native callback that exceeds its deadline cannot be forcibly stopped safely.
+The adapter-owned factory or instance gate remains held, is permanently
+poisoned, marks the Runtime terminal, rejects new admission, and keeps the
+instance and library alive until the foreign callback returns. Native
+callbacks use dedicated operating-system threads so a permanently blocked
+callback cannot exhaust Tokio's process-wide blocking pool. This deliberately
+trades one thread per in-flight native callback for isolation; destruction is
+offloaded for the same reason. Runtime-owned service callbacks are bounded by
+`maximum_concurrent_service_calls` (1,024 by default), activation work by
+`maximum_concurrent_reconciliations` (32 by default), and Loader initial
+preflight by eight. Direct concurrent `NativeCatalog` or factory callers own
+their own admission bound. Deployments must budget OS-thread stacks for the
+configured concurrency; a callback that hangs can retain its thread forever.
+The runtime's terminal fence bounds subsequent admission, but trusted native
+code can still create arbitrary process resources.
 
-HTTP and WebSocket requests other than anonymous health/version endpoints require an exact bearer token. Native clients may omit `Origin`; a supplied origin must exactly match the configured allowlist.
-
-## Credentials and secrets
-
-The token file is an owner-checked, non-symlink regular file published through a durable same-directory replacement. Rotation allocates a durable generation before changing the file, returns the initiating outcome, then closes existing WebSockets. Startup repairs a token file behind durable state and fails closed when a token file is ahead.
-
-Secret references are resolved by the loader and remain outside canonical manifests and locks. Plaintext secret injection, redacted audit values, and file/keyring input checks are defined by the [configuration reference](subsystems/configuration.md).
-
-## Bounds and failure containment
-
-Ingress, control egress, plugin control/data lanes, frames, and outstanding stream credit are bounded independently. Native plugin artifacts are capped at 256 MiB, and package-relative artifact/schema paths cannot escape through a symlinked parent. A saturated data lane cannot consume lifecycle-control capacity. Exact transport and stream behavior belongs to the [protocol reference](subsystems/protocols.md).
-
-The daemon observes host termination independently of transport and signal lifecycles; an unexpected registry exit cancels admission instead of leaving a healthy-looking socket. If durable token rotation commits but token-file publication fails, WebSocket initiators receive the stable 1012 `code=daemon_restarting` close when delivery remains possible, and all transports are then stopped for startup reconciliation.
-
-`process_fixed` preflight never maps candidate code or mutates installed state. It reports `restart_required` while the old daemon remains available; an external operator or supervisor owns explicit stop, offline install, and fresh start. A process refuses to replace a different process-fixed artifact that it already mapped. Post-persistence publication failures and monitor inconsistencies terminate rather than continue with split routing and durable state.
+The callback deadline watchdog is independent of the adapter future so caller
+cancellation cannot disable terminalization. Once the callback publishes
+completion, the watchdog retires immediately instead of retaining one Tokio
+task and timer entry until the original deadline.
+Process or Wasm adapters may offer stronger termination without changing core.

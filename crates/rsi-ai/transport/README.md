@@ -10,7 +10,9 @@ Failures while delivering response bytes remain transport errors. Once a
 provider returned a successful response, exceeding a configured body, JSON
 envelope, item, or nesting bound is output validation; malformed JSON shape or
 encoding is a protocol error. Shared mappers keep that distinction consistent
-across providers.
+across providers. The shared OpenAI-compatible context-limit classifier changes
+only the provider-neutral kind and preserves every already-validated status,
+provider code, phase, dispatch fact, retry hint, request ID, and safe summary.
 
 Text-only JSON requests remain one buffered body with a `Content-Length`.
 Requests containing binary media stream base64 from retained bytes without an

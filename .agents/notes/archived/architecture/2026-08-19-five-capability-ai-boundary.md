@@ -79,3 +79,6 @@ provider fallback. Standalone calls are single-attempt. The Agent remains one
 durable language turn per session, has no public language delta stream, and
 does not resume Realtime sessions. Artifact retention is quota-bounded but
 manual; automatic garbage collection requires a later ownership decision.
+
+The composition and Agent integration parts of this decision are superseded by
+the [Runtime-owned plugin foundation](../../implemented/architecture/2026-08-22-runtime-owned-plugin-foundation.md).

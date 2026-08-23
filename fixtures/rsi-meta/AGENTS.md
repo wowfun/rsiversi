@@ -1,3 +1,3 @@
-- These fixtures provide black-box evidence for [`rsi-meta`](../../crates/rsi-meta/README.md). They may use public Rust, C ABI, wire, schema, process, and filesystem surfaces, but must not rely on private registry or store types.
+- These fixtures provide black-box evidence for [`rsi-meta`](../../crates/rsi-meta/README.md). They may use the public Rust API and native ABI, but must not rely on private runtime or loader types.
 - Use explicit synchronization rather than wall-clock sleeps for concurrency behavior. Keep platform claims limited to the host actually executed.
-- Package paths in conformance catalogs, scripts, examples, and goldens must move together. The [testing guide](../../crates/rsi-meta/docs/testing.md) owns release-level interpretation.
+- Keep fixture inputs deterministic and bounded. The [testing guide](../../crates/rsi-meta/docs/testing.md) owns release-level interpretation.

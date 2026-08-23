@@ -1,17 +1,61 @@
 # rsi-meta-loader
 
-`rsi-meta-loader` is the workspace-private loader used by the composition host to turn untrusted package, configuration, filesystem, and lock input into a validated trusted-plugin handle. It owns package parsing, configuration preparation, target and hash checks, immutable artifact staging, and dynamic-library lifetime.
+`rsi-meta-loader` is both a native execution adapter and a plugin.
 
-## Package and configuration preparation
+`NativeCatalog` bounds an artifact at 256 MiB, hashes its exact bytes, and
+publishes those bytes under the SHA-256 name. Symlinks, special files, and
+different bytes already occupying that name are rejected before mapping. On
+Unix, the loader maps a private unlinked copy made from the verified bytes, so
+later replacement or in-place mutation of the durable cache path cannot change
+the staged content. The private descriptor remains writable by trusted code in
+the host process; native execution is not a process-isolation boundary. The
+Windows implementation retains the verified cache handle
+with restrictive sharing; its native behavior requires Windows evidence. The
+catalog then validates the v1 ABI
+table, reads the bounded descriptor, and returns a `NativeFactory`. Live
+factories and instances retain both the mapping and artifact handle. The
+identity used by core is the verified SHA-256 digest, never an untrusted path or
+self-reported revision.
+An explicit non-OK plugin entry status is reported as an entry failure with the
+exact status; ABI incompatibility is reserved for an entry that returned OK
+but published an invalid table. Either path destroys a partially published
+factory exactly once when the paired destructor is available.
+Concurrent loads of one digest share a catalog gate. A live digest reuses its
+already verified mapped module without consulting the durable cache, creating
+another staging copy, or invoking the native entry again. A cold digest
+verifies the durable cache identity before mapping it. If loading, entry, or
+descriptor discovery exceeds its deadline, the digest gate rejects re-entry
+while the abandoned worker is still inside native code; the fence expires only
+after that worker actually returns.
 
-`PluginPackage` parses package metadata and, with the default `config` feature, prepares configuration and retains a redacted projection. Loader-only consumers may disable that feature to avoid configuration-schema and keyring backends. `PluginLoader` checks the current target, locked manifest and artifact hashes, filesystem constraints, ABI compatibility, and the exact entry symbol before loading code. The lock covers the selected library file; transitive libraries resolved by the operating-system loader are not recursively discovered or hashed and belong to the trusted deployment environment. The [configuration reference](../docs/subsystems/configuration.md) owns the cross-package input model; the plugin crate owns the raw ABI declarations.
+Plugin-returned buffers are structurally checked before the Loader reads them.
+An allocator-matched release guard owns each buffer until copying or rejection
+finishes, so malformed metadata and unwinding cannot skip its one release.
 
-## Crash-safe staging
+`NativeFactory` adapts configuration, activation, service frames, outbound
+required-service calls, and destruction to core's `PluginFactory`. Foreign
+callbacks run on dedicated operating-system threads rather than Tokio's shared
+blocking pool. Factory callbacks share one adapter-owned gate; every instance has its
+own gate that remains held until a detached foreign call actually exits. Each
+callback has one deadline and one atomic completion-or-timeout decision. The
+completion marker is published before that gate is released, so success and
+terminalizing timeout cannot both win. A create or service callback timeout
+poisons the gate and terminalizes the Runtime, fencing queued and new work.
+Pre-application config validation has no Runtime
+authority; its timeout poisons only the factory and returns an error. Worker
+disconnects are reported as callback failures rather than timeouts. Instance destruction is offloaded and reported through cleanup;
+factory destruction is offloaded with the mapping retained. Fallback instance
+destruction is also offloaded when activation cannot register its cleanup. A
+failed create destroys any non-null partial instance transferred by the ABI.
+Outbound service calls requested synchronously by native code wait through the
+current runtime handle on the dedicated foreign worker. The async native
+endpoint yields while that worker waits, leaving provider tasks free to run;
+the bridge therefore supports both current-thread and multi-thread Tokio
+runtimes.
 
-Artifacts are limited to 256 MiB, copied and hashed in bounded memory, reverified, and published under content-derived paths inside a current-user-private cache. Growth is checked during both hashing and copying. Manifest-declared artifact and schema parents are physically resolved and must remain inside the package root; the final file is opened without following a symlink. Digest-scoped staging locks serialize publication and let a retry reap crash-orphaned temporary files. Linux and Android map the same open file description that was hashed, closing the path-replacement window between verification and dynamic loading. Interrupted staging cannot make an incomplete entry authoritative, and package manifests and schemas are size-bounded.
-
-Each `(target, host ABI, artifact SHA-256)` maps at most once through a process-global registry. Concurrent and repeated loads share that mapping, and terminal content failures are memoized. The registry rejects a new artifact before exceeding 128 unique mappings or 1 GiB of mapped artifact bytes.
-
-The immutable cache retains at most 512 artifacts or 4 GiB. Staged, loaded, and resident artifacts hold shared process-visible file-lock pins; maintenance takes the corresponding exclusive lock before eviction, so daemons sharing one user cache cannot evict each other's live artifacts. The cache-wide publication lock spans cache-hit verification or publication through pin acquisition. Maintenance evicts only oldest unpinned entries, rejects publication if pinned data alone prevents the incoming entry from fitting, and removes crash-orphaned staging files while holding that publication lock. Unknown files, malformed hash directories, and unsafe entry types are cache corruption and fail staging rather than being deleted; automatic cleanup is limited to loader-owned temporary names.
-
-Loaded libraries remain mapped until process exit because the loader cannot prove that trusted plugin threads, callbacks, or code pointers no longer refer to the image. Plugin instances may still be destroyed after retirement acknowledgement and lease drain. Reaching a resident hard limit requires a controlled process restart before further unique HMR; unsafe `dlclose` is not attempted. Unsafe operations are limited to operating-system and dynamic-loading boundaries and state their validity, ownership, and lifetime requirements in source.
+`LoaderFactory` is applied like any other plugin and provides the exact `rsi.meta.loader.v1` service. Its initial config accepts at most 1024 entries with unique IDs of at most 128 bytes, then maps and converts them with at most eight concurrent preflight operations into opaque core-prepared applications before the first child Fiber is applied, so a normalizer runs exactly once and a failed preflight publishes no child. Prepared children are then applied in configuration order. Service commands load, reconfigure, unload, or inspect named child Fibers. A missing dependency leaves a loaded child validly `Pending`; the Loader does not perform a global graph transaction.
+Loader IDs are adapter-owned atomic reservations. Concurrent or cancelled load
+commands cannot publish the same ID twice or strand an in-flight claim. A
+runtime-owned load retains its reservation until the response is delivered; if
+the caller disappears first, it retains the reservation through child rollback.
+An ID likewise remains reserved until its unload cleanup finishes.

@@ -19,13 +19,11 @@ when durability matters, and then starts the external effect.
 | [`rsi-ai-deepseek`](deepseek/README.md) | DeepSeek language policy and reasoning replay |
 | [`rsi-ai-openai`](openai/README.md) | OpenAI Responses, Images, transcription, speech, and Realtime adapters |
 | [`rsi-ai-xiaomi`](xiaomi/README.md) | Xiaomi transcription and speech adapters |
-| [`rsi-ai-meta`](meta/README.md) | Five generation-pinned `rsi-meta` services and plugin wrapper |
 | [`rsi-ai-testkit`](testkit/README.md) | Deterministic adapters and media resolver for keyless tests |
 
-The standalone plugin workspace is [`plugins/rsi-ai`](../../plugins/rsi-ai/README.md).
 Request schemas are owned by [`schemas/rsi-ai`](../../schemas/rsi-ai/README.md).
-`rsi-agent` consumes the five service contracts and owns durable agent history,
-retry scheduling, artifact retention, and live-session policy.
+The product currently has no active `rsi-meta` adapter. A future integration
+must be an ordinary plugin over the Context/Fiber foundation.
 
 ## Contract
 

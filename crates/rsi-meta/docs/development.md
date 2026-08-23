@@ -1,27 +1,14 @@
 # Developing rsi-meta
 
-## Prerequisites
+Use the pinned Rust toolchain. Change the owning public contract before implementation, keep core free of artifact and product policy, and add the closest behavior test for every lifecycle or routing change.
 
-Use the Rust toolchain pinned by [`rust-toolchain.toml`](../../../rust-toolchain.toml). Root workspace commands cover the four product crates and `rsi-xtask`; standalone plugin and fixture workspaces are exercised by the conformance xtask.
-
-## Daily checks
-
-Run the narrowest owning package checks while iterating. Before handing off a cross-package change, run:
-
-```sh
-cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-targets
-cargo xtask rsi-meta code-health
-cargo xtask verify-docs
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --lib --no-deps
-cargo test --locked --workspace --doc
-```
-
-Run the product-wide standalone checks when a package, ABI, schema, fixture, or shared contract changes:
+The standard product gate is:
 
 ```sh
 cargo xtask rsi-meta conformance
+cargo xtask rsi-meta code-health
+cargo xtask verify-docs
+RUSTDOCFLAGS="-D warnings" cargo doc --locked -p rsi-meta -p rsi-meta-plugin -p rsi-meta-loader --no-deps
 ```
 
-The [testing policy](testing.md) maps changed surfaces to additional failpoint and release checks.
+Native failures must be reproduced through an actual dynamic library when the host platform supports it. Do not refresh a baseline or weaken a bound merely to make a gate pass.

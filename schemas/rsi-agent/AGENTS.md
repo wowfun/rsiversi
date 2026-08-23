@@ -1,4 +1,4 @@
-- These schemas own the exact version-zero external JSON shape and the
+- These schemas own the exact version-one external JSON shape and the
   per-field character and collection bounds expressible in JSON Schema. The
   protocol decoder owns aggregate encoded-byte and recursive JSON-complexity
   limits. Read the product [README](../../crates/rsi-agent/README.md) for

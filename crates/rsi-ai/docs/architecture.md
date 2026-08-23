@@ -5,8 +5,7 @@
 `rsi-ai-protocol` owns provider-neutral meaning. `rsi-ai-provider` owns the five
 provider-author adapter seams. Concrete providers translate to private HTTP,
 SSE, multipart, or WebSocket syntax through `rsi-ai-transport`. The `rsi-ai`
-package is the standalone façade; `rsi-ai-meta` adapts the same façade to
-generation-pinned native services. Concrete provider packages do not depend on
+package is the standalone façade. Concrete provider packages do not depend on
 the façade, keeping the dependency graph acyclic.
 
 The public API is capability-specific: `LanguageModel`, `ImageModel`,
@@ -17,9 +16,12 @@ Tool execution belongs to the caller or agent orchestrator.
 
 ## Prepare and Start
 
-Every capability follows the same two-stage boundary:
+Every capability follows a provider-I/O-free description and two-stage effect boundary:
 
 ```text
+exact language handle -> describe(model) -> generation-pinned LanguageProfile
+                                              |
+                                              v
 exact model handle -> prepare(validated request) -> redacted snapshot
                                                durable commit when required
                                                         |
@@ -27,7 +29,13 @@ exact model handle -> prepare(validated request) -> redacted snapshot
                                                   start(one attempt)
 ```
 
-Prepare may validate, apply provider defaults, resolve a captured credential,
+Describe returns configured per-model context and output-reserve limits, tool
+dialect, freeform and image-result support, and accepted provider-extension
+formats. A production language plugin must name every model it serves together
+with those three token limits; describe and prepare reject an unconfigured model
+instead of inventing capacity from an adapter-wide constant. Describe performs
+no provider I/O and lets an orchestrator build the exact catalog and request for
+the pinned route. Prepare may validate, apply provider defaults, resolve a captured credential,
 and bind local media descriptors. It must not perform inference, refresh a
 catalog, fetch a media URL, or refresh an OAuth token. Start is consuming and
 owns the external effect. A snapshot records deployment, provider family,
@@ -35,10 +43,14 @@ protocol, transport, endpoint fingerprint, config generation, credential
 source, request digest, and bounded retry policy without secrets.
 
 The standalone registry permits exact unlisted model identifiers because
-generic compatible deployments often have no trustworthy catalog. It never
-changes a handle's route after construction. Each adapter attempt is single
-shot. `rsi-agent` may apply the frozen retry policy only after a durable retry
-event and only before visible output.
+generic compatible deployments often have no trustworthy discovery catalog.
+Concrete language adapters may still require a locally configured profile for
+that identifier; their bounded maps use the shared protocol-owned
+`LanguageModelProfiles` invariant. Integrations that treat the returned limits
+as operational facts must do so. The registry never changes a handle's route after
+construction. Each adapter attempt is single shot. A future durable agent may
+apply the frozen retry policy only after a durable retry event and only before
+visible output.
 
 Providers that support long-running server jobs may opt into the separate
 deferred-language seam. `submit`, `poll`, `resume`, and `cancel` each perform at
@@ -48,9 +60,9 @@ stream-created flag, monotonic sequence cursor, and bounded provider parser
 state. Each resumed stream item is an atomic pair of normalized events and the
 cursor after those events; durable callers must commit the pair together.
 Accumulated output is not duplicated inside the checkpoint.
-This is an intentional standalone API: the v0 `rsi-agent` retry state machine
-does not submit provider-managed background jobs, so it neither consumes nor
-re-exports the deferred handle.
+This is an intentional standalone API. A future agent integration may choose
+whether to expose provider-managed deferred language jobs; no active agent
+runtime currently re-exports this handle.
 
 ## Normalized streams
 
@@ -82,40 +94,9 @@ Production HTTP attempts have finite connect and whole-request deadlines and
 observe abort while streaming the body. The OpenAI Realtime WebSocket dialer
 has a finite connect deadline and observes abort during connect and socket I/O.
 
-## rsi-meta integration
+## Integration boundary
 
-The five version-zero service keys are `rsi.ai.language`, `rsi.ai.image`,
-`rsi.ai.transcription`, `rsi.ai.speech`, and `rsi.ai.realtime`. One service
-stream pins one provider generation. A language turn may execute sequential
-calls on its pinned stream; each media operation and each Realtime session owns
-one stream. Hot replacement affects only later streams.
-
-The control protocol is `Prepare -> Prepared -> Start -> events -> terminal`.
-JSON declares media identity, size, MIME type, and digest; raw binary chunks
-carry bytes under rolling `rsi-meta` credit. Provider failures are semantic
-terminal messages. Version, framing, ordering, or credit violations cancel the
-service stream.
-
-The maintained wrappers expose this matrix:
-
-| Plugin | Capabilities |
-|---|---|
-| OpenAI | language Responses, image, transcription, speech, Realtime WebSocket |
-| OpenAI-compatible Chat | language |
-| DeepSeek | language |
-| Xiaomi | transcription and speech |
-
-## Agent ownership
-
-`rsi-agent` asks only for a model identifier; provider instance, endpoint, and
-protocol come from the composition binding and plugin config. Language model
-requests and retries are transcript events. Direct media and Realtime calls use
-a caller-owned `AiOperationId`; the owning
-[`rsi-agent` architecture](../../rsi-agent/docs/architecture.md#direct-ai-operations-and-artifacts)
-defines reservation, effect barriers, bounded duplicate suppression, and
-recovery.
-
-The agent workspace CAS stores validated image/audio bytes by SHA-256. Durable
-records carry descriptors or artifact references, never base64 or provider
-URLs. Raw Realtime frames are live-only; returned audio is committed to the CAS
-and a clean Closed event terminates the durable operation.
+The five capability APIs are standalone Rust interfaces. No active package
+adapts them to `rsi-meta` or an agent runtime. A future adapter must be an
+ordinary plugin over the public `PluginFactory` seam and must define its own
+bounded wire contract; provider packages remain unaware of that integration.

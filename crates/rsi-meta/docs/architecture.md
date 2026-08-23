@@ -1,53 +1,38 @@
 # rsi-meta architecture
 
-## Product interfaces
-
-[`CompositionProject`](../core/README.md) is the independently usable offline façade for candidate validation and lock creation. [`CompositionHost`](../core/README.md) is the only online embedded façade. The [CLI](../cli/README.md) owns the v0 control protocol and adapts it to host methods; transports never own composition state.
-
-Inside the core crate, composition parsing, transaction recovery, persistence, routing, and runtime actor lifecycle are crate-private deep modules. The registry remains the only graph writer, routing publication remains one atomic snapshot replacement, runtime work remains actor-owned, and persistence shares one SQLite connection. The [loader](../loader/README.md) keeps one crate boundary while privately separating manifest/security validation, CAS staging, dynamic-library mapping, and mailbox ABI work.
-
-## Online apply
+The core is one deep module with three public concepts:
 
 ```text
-OperationId lookup and first input snapshot
-              |
-              v
-bounded read, normalization, and validation (no cache mutation)
-              |
-              v
-process-fixed preflight -- yes --> durable RestartRequired only
-              |
-              no
-              v
-immutable CAS staging and identity recheck
-              |
-              v
-shadow prepare -- failure --> reverse abort
-              |
-              v
-pair journal and file install (lock last)
-              |
-              v
-active state, result, event, and revision commit
-              |
-              v
-atomic routing publication
-              |
-              v
-reverse retirement after generation leases drain
+Runtime
+  └─ persistent COW Context (owner + isolation + direct-edge intercept + trace)
+       └─ apply(factory, config)
+            └─ Fiber generation
+                 ├─ dependency bindings
+                 ├─ provided services and event listeners
+                 ├─ child Fibers
+                 └─ reverse-ordered effects
 ```
 
-The graph revision advances only when a routing graph becomes active. At cutover the new admitting snapshot is published before admission stops on the old generations; lock-free readers that race the boundary can therefore retry against a usable snapshot. A failure after durable commit but before publication terminates the host; a later `open` reconstructs the committed graph rather than continuing with split state.
+Every apply creates a Fiber. A Fiber resolves all requirements from one registry snapshot, remains `Pending` when the snapshot cannot satisfy them, and activates only after a matching publication makes convergence possible. A declaration index is updated atomically with Fiber ownership and lets cycle diagnosis traverse only provider declarations reachable from the pending Fiber. Service-change convergence runs independent Fibers with a Runtime-configured concurrency bound; each Fiber still serializes its own transitions. Setup mutations remain staged. Publication makes the generation's services and listeners visible together; setup failure disposes staged ownership without publication.
 
-## Process-fixed installation
+Retirement reverses ownership. It closes admission and withdraws publications, asks dependent Fibers to converge, waits for their binding leases and admitted callbacks, disposes children, then runs effects last-in-first-out. A service handle contains both provider and caller generation identity, so a value captured from an old activation cannot silently route through a new graph. Runtime-wide service-call admission bounds the number of live calls independently of each call's bounded channels.
+
+Provider admission closure and its live-callback count share one atomic state.
+A concurrent ordinary callback therefore either increments the count before
+closure or observes the closed gate. Cleanup-time calls from an already
+retiring dependent remain inside the dependent convergence transaction, which
+the provider joins before checking that its callback count drained.
+
+The native path is an adapter chain:
 
 ```text
-apply -> RestartRequired -> request_shutdown -> wait_terminated
-      -> install_offline -> fresh open -> one activation
+Loader Fiber → NativeCatalog → verified hash + mapped ABI → NativeFactory → child Fiber
 ```
 
-Preflight does not alter the installed pair or lifecycle. Offline install holds the same workspace lease as `open`, commits only files and its operation result, and never loads plugin code. A process that already mapped a different process-fixed artifact rejects replacement with `fresh_process_required`.
+The Loader has no privileged access to Runtime internals. Its service handler uses its own provider Context to apply children. Native, future process, and future Wasm execution therefore converge at `PluginFactory` rather than adding branches inside core.
 
-## Trust and protocols
-
-Typed safe-Rust values are trusted only after validation at their owning boundary. Native plugin ABI frames, files, durable state, local transport input, and process inputs remain bounded and validated. Native plugins are trusted host code; [security.md](security.md) defines the failure domain. The [composition runtime](subsystems/composition-runtime.md), [configuration](subsystems/configuration.md), and [protocol reference](subsystems/protocols.md) own their current semantics.
+A timed-out in-process native create or call terminalizes the complete Runtime,
+not only one module. This is an intentional blast radius: trusted native code
+shares memory and may already have corrupted global invariants, so a
+module-local fence would claim isolation that does not exist. Process or Wasm
+adapters are the route to smaller trustworthy failure domains.

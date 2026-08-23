@@ -1,4 +1,9 @@
 {
   "version": 1,
-  "notes": {}
+  "notes": {
+    "architecture/2026-08-18-replayable-agent-turn-runtime.md": "ee6a3ae9f86581dfa1d90c2866d2004b2c49b422f8114616573cf1f5e536c7a1",
+    "architecture/2026-08-19-five-capability-ai-boundary.md": "97c2ff2ebb5ce7fd3a0257cb9dc79b2b8c6115d68d8309f1fe172a4b6f9b01c3",
+    "architecture/2026-08-21-live-agent-and-coding-tools.md": "c9019c494295abc5259ac0906d8ef1195b0d584f588ea0f6a72431029e5a94b7",
+    "process/2026-08-19-rsi-ai-native-conformance.md": "f764bebec5b0714080d3db51adb07c631d2d77dadda8e498709bff8ffaa07ae3"
+  }
 }
