@@ -1,25 +1,24 @@
 use crate::listener_registry::{ListenerBinding, ListenerRegistry};
-use crate::service::{AdmissionLease, LeaseGuard, ProviderBinding};
+use crate::service::{AdmissionLease, BufferedByteAdmission, ProviderBinding};
 use crate::{
-    CallId, Cleanup, CleanupReport, ConfigValue, ContractId, ContractVersion, DispatchMode,
-    EventHandler, EventKey, EventListenerId, EventOptions, EventOutcome, EventReceipt,
-    FactoryIdentity, FiberGeneration, FiberId, InvocationContext, IsolationId, MetaError,
-    PluginDescriptor, PluginFactory, Result, ServiceCall, ServiceEndpoint, ServiceHandle,
-    ServiceKey,
+    CallId, Cleanup, CleanupPhase, CleanupReport, ConfigValue, ContractId, ContractVersion,
+    DispatchMode, EventHandler, EventKey, EventListenerId, EventOptions, EventOutcome,
+    EventReceipt, FactoryIdentity, FiberGeneration, FiberId, InvocationContext, IsolationId,
+    MetaError, PluginDescriptor, PluginFactory, Result, ServiceCall, ServiceEndpoint,
+    ServiceHandle, ServiceKey, ShutdownOutcome, UnresolvedCleanup, UnresolvedCleanupReport,
 };
 use futures_util::FutureExt as _;
-use futures_util::future::{BoxFuture, join_all};
-use futures_util::stream::{FuturesUnordered, StreamExt as _};
-use serde::{Deserialize, Serialize};
+use futures_util::future::BoxFuture;
+use futures_util::stream::StreamExt as _;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+mod admission;
 mod configuration;
 mod context_api;
 mod context_scope;
@@ -27,95 +26,31 @@ mod declaration_index;
 mod dispatch;
 mod lifecycle;
 mod limits;
+mod ownership;
+mod pending_report;
+mod preparation;
 mod reconciliation_queue;
 mod service_bridge;
+mod state;
 
 use context_api::binding_identities;
 pub(crate) use context_scope::InterceptLayers;
 use declaration_index::DeclarationIndex;
-pub use limits::RuntimeLimits;
+pub use limits::{
+    DeadlineLimits, ExecutionLimits, MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, PayloadLimits,
+    ResourceUsageSnapshot, RuntimeLimits, RuntimeResourceSnapshot, TopologyLimits,
+};
+pub(crate) use limits::{ResourceLedger, ResourceReservation};
+use limits::{RuntimeResources, ValidatedRuntimeLimits};
+use pending_report::PendingReportBuilder;
+pub use preparation::PreparedPlugin;
+use preparation::{PreparedDescriptor, PreparedReservations};
+pub use state::{FiberSnapshot, FiberState, PendingReason, PendingReport, RuntimeSnapshot};
 
 const ROOT_FIBER: FiberId = FiberId(0);
 
-/// Why a non-active Fiber cannot currently resolve and activate.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PendingReason {
-    /// No provider is published in the selected isolation slot.
-    MissingService {
-        /// Missing logical service key.
-        service: ServiceKey,
-        /// Isolation slot selected by the Fiber Context.
-        isolation: IsolationId,
-    },
-    /// A provider exists but does not match the exact declared contract.
-    ContractMismatch {
-        /// Logical service key.
-        service: ServiceKey,
-        /// Required contract identity.
-        expected: ContractId,
-        /// Required exact version.
-        expected_version: ContractVersion,
-        /// Published contract identity.
-        actual: ContractId,
-        /// Published exact version.
-        actual_version: ContractVersion,
-    },
-    /// Reachable pending declarations form a dependency cycle.
-    DependencyCycle {
-        /// Ordered service path that closes the cycle.
-        services: Vec<ServiceKey>,
-    },
-}
-
-/// Observable lifecycle state of one Fiber.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FiberState {
-    /// Dependency convergence has not produced an activatable snapshot.
-    Pending(Vec<PendingReason>),
-    /// One generation is staging owned resources.
-    Loading,
-    /// The staged generation is published.
-    Active,
-    /// The latest activation or retirement transaction failed.
-    Failed(String),
-    /// Publications are withdrawn and owned resources are retiring.
-    Unloading,
-    /// Final teardown completed and the Fiber left the registry.
-    Disposed,
-}
-
-impl FiberState {
-    fn is_transitioning(&self) -> bool {
-        matches!(self, Self::Loading | Self::Unloading)
-    }
-}
-
-/// Immutable observation of one Fiber at one Runtime revision.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FiberSnapshot {
-    /// Runtime-local Fiber identity.
-    pub id: FiberId,
-    /// Latest assigned activation generation.
-    pub generation: FiberGeneration,
-    /// Factory identity captured during preparation.
-    pub factory: FactoryIdentity,
-    /// Current lifecycle state.
-    pub state: FiberState,
-}
-
-/// Point-in-time observation of Runtime lifecycle and registered Fibers.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeSnapshot {
-    /// Monotonic registry revision.
-    pub revision: u64,
-    /// Whether shutdown admission has closed.
-    pub shutting_down: bool,
-    /// First terminal reason, when the Runtime has fenced new work.
-    pub terminal: Option<String>,
-    /// Fiber snapshots ordered by Fiber identity.
-    pub fibers: Vec<FiberSnapshot>,
+fn drop_catching_unwind<T>(value: T) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value))).is_err()
 }
 
 /// Cloneable owner of plugin composition, admission, convergence, and teardown.
@@ -140,13 +75,20 @@ impl fmt::Debug for Runtime {
 }
 
 struct RuntimeInner {
-    limits: RuntimeLimits,
+    limits: ValidatedRuntimeLimits,
+    resources: RuntimeResources,
     state: Mutex<RuntimeState>,
     shutting_down: AtomicBool,
-    shutdown_result: Mutex<Option<CleanupReport>>,
-    shutdown_complete: Notify,
+    shutdown: ShutdownRun,
+    runtime_admission: Arc<AdmissionLease>,
     terminal_cancellation: CancellationToken,
+    scheduler_idle: Notify,
+    scheduler_wakeup: Notify,
+    paused_reconciliations: AtomicUsize,
+    reconciliation_admission: Arc<Semaphore>,
     service_call_admission: Arc<Semaphore>,
+    service_byte_admission: Arc<BufferedByteAdmission>,
+    event_callback_admission: Arc<Semaphore>,
     next_fiber: AtomicU64,
     next_generation: AtomicU64,
     next_isolation: AtomicU64,
@@ -157,13 +99,15 @@ struct RuntimeInner {
 struct RuntimeState {
     revision: u64,
     fibers: BTreeMap<FiberId, Arc<Fiber>>,
-    dependents: HashMap<ServiceKey, BTreeSet<FiberId>>,
+    dependents: HashMap<ServiceSlot, BTreeSet<FiberId>>,
     declarations: DeclarationIndex,
     providers: HashMap<ServiceSlot, Arc<ProviderBinding>>,
     listeners: HashMap<EventKey, ListenerRegistry>,
     listener_events: HashMap<EventListenerId, EventKey>,
-    staged_listeners: HashMap<(FiberId, FiberGeneration), Vec<ListenerBinding>>,
+    staged_listeners:
+        HashMap<(FiberId, FiberGeneration), BTreeMap<EventListenerId, Arc<ListenerBinding>>>,
     pending_reconciliations: BTreeSet<FiberId>,
+    active_reconciliations: BTreeSet<FiberId>,
     reconciliation_worker_running: bool,
     terminal: Option<String>,
 }
@@ -176,26 +120,48 @@ struct ServiceSlot {
 
 struct Fiber {
     id: FiberId,
+    depth: usize,
     runtime: Weak<RuntimeInner>,
+    executor: tokio::runtime::Handle,
     parent: Option<Owner>,
     base_context: ContextScope,
-    configuration: AsyncMutex<()>,
+    configuration: Arc<AsyncMutex<()>>,
     transition: AsyncMutex<()>,
+    reconciliation: ReconciliationProgress,
+    apply_cancellation: CancellationToken,
+    disposal_requested: CancellationToken,
+    disposal: Arc<DisposalRun>,
+    cleanup_phase: Mutex<CleanupPhase>,
     data: Mutex<FiberData>,
     watch: watch::Sender<FiberSnapshot>,
 }
 
 struct FiberData {
-    factory: Arc<dyn PluginFactory>,
-    descriptor: PluginDescriptor,
-    config: ConfigValue,
+    identity: FactoryIdentity,
+    factory: Option<Arc<dyn PluginFactory>>,
+    descriptor: Option<Arc<PreparedDescriptor>>,
+    config: Option<Arc<RetainedConfig>>,
+    reservations: Option<PreparedReservations>,
     target_revision: u64,
     generation: FiberGeneration,
     state: FiberState,
     disposed: bool,
-    disposal_report: Option<CleanupReport>,
     active: Option<GenerationData>,
     last_attempt: Option<ActivationAttempt>,
+}
+
+struct RetainedConfig {
+    value: Arc<ConfigValue>,
+    _reservation: ResourceReservation,
+}
+
+impl RetainedConfig {
+    fn new(value: ConfigValue, reservation: ResourceReservation) -> Self {
+        Self {
+            value: Arc::new(value),
+            _reservation: reservation,
+        }
+    }
 }
 
 type BindingIdentities = BTreeMap<ServiceKey, (FiberId, FiberGeneration)>;
@@ -204,24 +170,107 @@ type ActivationAttempt = (u64, BindingIdentities);
 struct GenerationData {
     generation: FiberGeneration,
     bindings: BTreeMap<ServiceKey, Arc<ProviderBinding>>,
+    activation_cancellation: CancellationToken,
     effects: Vec<EffectRecord>,
-    services: Vec<Arc<ProviderBinding>>,
-    listeners: Vec<EventListenerId>,
-    children: Vec<FiberId>,
+    services: BTreeMap<ServiceKey, StagedService>,
+    listeners: BTreeMap<EventListenerId, ResourceReservation>,
+    children: Vec<Arc<Fiber>>,
+    retired_child_report: CleanupReport,
+    cleanup: Arc<CleanupRun>,
     lease: Arc<AdmissionLease>,
     published: bool,
     target_revision: u64,
 }
 
+struct StagedService {
+    binding: Arc<ProviderBinding>,
+    _reservation: ResourceReservation,
+}
+
 struct EffectRecord {
     label: String,
     cleanup: Cleanup,
+    _reservation: ResourceReservation,
+}
+
+struct ClaimedCleanup {
+    generation: FiberGeneration,
+    services: Vec<Arc<ProviderBinding>>,
+    listener_ids: BTreeSet<EventListenerId>,
+    published: bool,
+    lease: Arc<AdmissionLease>,
+    children: Vec<Arc<Fiber>>,
+    retired_child_report: CleanupReport,
+    effects: Vec<EffectRecord>,
+}
+
+struct ReconciliationProgress {
+    desired: AtomicU64,
+    settled: AtomicU64,
+    watch: watch::Sender<u64>,
+    completions: Mutex<BTreeMap<u64, Vec<Weak<ReconciliationCompletion>>>>,
+}
+
+struct ReconciliationTicket {
+    receiver: watch::Receiver<u64>,
+    completion: Arc<ReconciliationCompletion>,
+}
+
+#[derive(Default)]
+struct ReconciliationCompletion {
+    snapshot: Mutex<Option<FiberSnapshot>>,
+}
+
+struct PendingApplyOwnership {
+    runtime: Weak<RuntimeInner>,
+    fiber: Arc<Fiber>,
+    armed: bool,
+}
+
+#[derive(Default)]
+struct CleanupRun {
+    started: AtomicBool,
+    result: Mutex<Option<CleanupReport>>,
+    complete: Notify,
+}
+
+#[derive(Clone)]
+struct DisposalResult {
+    report: CleanupReport,
+    quiescent: bool,
+}
+
+#[derive(Default)]
+struct DisposalRun {
+    started: AtomicBool,
+    result: Mutex<Option<DisposalResult>>,
+    complete: Notify,
+}
+
+#[derive(Default)]
+struct ShutdownRun {
+    state: Mutex<ShutdownRunState>,
+    complete: Notify,
+}
+
+#[derive(Default)]
+struct ShutdownRunState {
+    report: CleanupReport,
+    outcome: Option<CleanupReport>,
+    failed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Owner {
     fiber: FiberId,
     generation: FiberGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ListenerRemovalCause {
+    Explicit,
+    Once,
+    Retirement,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +283,8 @@ struct CallTrace {
 pub(crate) struct ContextScope {
     isolation: Arc<BTreeMap<ServiceKey, IsolationId>>,
     intercepts: Arc<BTreeMap<ServiceKey, Arc<InterceptLayers>>>,
+    entries: usize,
+    encoded_bytes: usize,
     trace: Option<CallTrace>,
 }
 
@@ -244,6 +295,8 @@ pub struct Context {
     owner: Option<Owner>,
     isolation: Arc<BTreeMap<ServiceKey, IsolationId>>,
     intercepts: Arc<BTreeMap<ServiceKey, Arc<InterceptLayers>>>,
+    entries: usize,
+    encoded_bytes: usize,
     trace: Option<CallTrace>,
 }
 
@@ -264,32 +317,27 @@ pub struct FiberHandle {
     fiber: Arc<Fiber>,
 }
 
-/// Opaque proof that descriptor validation and configuration normalization
-/// completed successfully exactly once.
-pub struct PreparedPlugin {
-    factory: Arc<dyn PluginFactory>,
-    descriptor: PluginDescriptor,
-    config: ConfigValue,
-}
-
-impl fmt::Debug for PreparedPlugin {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedPlugin")
-            .field("descriptor", &self.descriptor)
-            .finish_non_exhaustive()
-    }
-}
-
 impl Runtime {
-    /// Creates an empty Runtime after validating every nonzero capacity and deadline.
+    /// Creates an empty Runtime after validating capacities, arithmetic, and deadlines.
     pub fn new(limits: RuntimeLimits) -> Result<Self> {
-        limits.validate()?;
-        let service_call_admission =
-            Arc::new(Semaphore::new(limits.maximum_concurrent_service_calls));
+        let limits = ValidatedRuntimeLimits::new(limits)?;
+        let resources = RuntimeResources::new(limits.configured());
+        let reconciliation_admission = Arc::new(Semaphore::new(
+            limits.execution.maximum_concurrent_reconciliations,
+        ));
+        let service_call_admission = Arc::new(Semaphore::new(
+            limits.execution.maximum_concurrent_service_calls,
+        ));
+        let service_byte_admission = Arc::new(BufferedByteAdmission::new(
+            limits.payloads.maximum_buffered_service_bytes,
+        ));
+        let event_callback_admission = Arc::new(Semaphore::new(
+            limits.execution.maximum_concurrent_event_callbacks,
+        ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 limits,
+                resources,
                 state: Mutex::new(RuntimeState {
                     revision: 0,
                     fibers: BTreeMap::new(),
@@ -300,14 +348,21 @@ impl Runtime {
                     listener_events: HashMap::new(),
                     staged_listeners: HashMap::new(),
                     pending_reconciliations: BTreeSet::new(),
+                    active_reconciliations: BTreeSet::new(),
                     reconciliation_worker_running: false,
                     terminal: None,
                 }),
                 shutting_down: AtomicBool::new(false),
-                shutdown_result: Mutex::new(None),
-                shutdown_complete: Notify::new(),
+                shutdown: ShutdownRun::default(),
+                runtime_admission: Arc::new(AdmissionLease::default()),
                 terminal_cancellation: CancellationToken::new(),
+                scheduler_idle: Notify::new(),
+                scheduler_wakeup: Notify::new(),
+                paused_reconciliations: AtomicUsize::new(0),
+                reconciliation_admission,
                 service_call_admission,
+                service_byte_admission,
+                event_callback_admission,
                 next_fiber: AtomicU64::new(0),
                 next_generation: AtomicU64::new(0),
                 next_isolation: AtomicU64::new(0),
@@ -324,13 +379,20 @@ impl Runtime {
             owner: None,
             isolation: Arc::new(BTreeMap::new()),
             intercepts: Arc::new(BTreeMap::new()),
+            entries: 0,
+            encoded_bytes: 0,
             trace: None,
         }
     }
 
     /// Returns the immutable limits selected at construction.
     pub fn limits(&self) -> &RuntimeLimits {
-        &self.inner.limits
+        self.inner.limits.configured()
+    }
+
+    /// Captures current and peak logical Runtime resource usage.
+    pub fn resource_snapshot(&self) -> RuntimeResourceSnapshot {
+        self.inner.resources.snapshot()
     }
 
     /// Captures bounded membership, then reads each Fiber outside the registry lock.
@@ -356,13 +418,25 @@ impl Runtime {
     /// This is intended for trusted execution adapters that detect a condition
     /// unsafe to isolate within the process.
     pub fn mark_terminal(&self, reason: impl Into<String>) {
-        let reason = reason.into();
-        self.inner
-            .state
-            .lock()
-            .expect("runtime state poisoned")
-            .terminal
-            .get_or_insert(reason);
+        self.mark_terminal_owned(reason);
+    }
+
+    pub(super) fn mark_terminal_owned(&self, reason: impl Into<String>) {
+        let reason = dispatch::bound_owned_diagnostic(
+            reason.into(),
+            self.inner.limits.payloads.maximum_diagnostic_bytes,
+        );
+        {
+            // Keep the lock order aligned with shutdown completion. Once a
+            // quiescent outcome is cached, terminalization must not mutate it;
+            // before then, the first terminal reason remains diagnostic state.
+            let mut state = self.inner.state.lock().expect("runtime state poisoned");
+            if self.inner.shutdown.is_complete() {
+                return;
+            }
+            state.terminal.get_or_insert(reason);
+        }
+        self.inner.runtime_admission.close();
         self.inner.terminal_cancellation.cancel();
     }
 
@@ -381,52 +455,70 @@ impl Runtime {
         FiberGeneration(self.inner.next_generation.fetch_add(1, Ordering::AcqRel) + 1)
     }
 
-    /// Validates a descriptor and normalizes bounded configuration exactly once.
-    ///
-    /// The returned proof can be consumed by [`Context::apply_prepared`] without
-    /// invoking factory normalization again.
-    pub fn prepare(
-        &self,
-        factory: Arc<dyn PluginFactory>,
-        config: ConfigValue,
-    ) -> Result<PreparedPlugin> {
-        self.ensure_admitting()?;
-        let descriptor = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let descriptor = factory.descriptor().clone();
-            descriptor.validate()?;
-            Ok::<_, MetaError>(descriptor)
-        }))
-        .map_err(|_| MetaError::Activation("plugin descriptor validation panicked".to_owned()))??;
-        let config =
-            Self::normalize_config(&factory, config, self.inner.limits.maximum_config_bytes)?;
-        Ok(PreparedPlugin {
-            factory,
-            descriptor,
-            config,
-        })
-    }
-
     #[allow(clippy::too_many_lines)] // Validation proof consumption and atomic ownership insertion stay adjacent.
     async fn apply_prepared(
         &self,
         parent: &Context,
         prepared: PreparedPlugin,
     ) -> Result<FiberHandle> {
-        self.ensure_admitting()?;
         let PreparedPlugin {
+            runtime,
+            admission,
             factory,
             descriptor,
             config,
+            reservations,
         } = prepared;
-        let declared_services = descriptor
-            .provides
-            .iter()
-            .map(|provision| provision.key.clone())
+        if !runtime.ptr_eq(&Arc::downgrade(&self.inner)) {
+            return Err(MetaError::PreparedForDifferentRuntime);
+        }
+        self.ensure_admitting()?;
+        let depth = if let Some(owner) = parent.owner {
+            let state = self.inner.state.lock().expect("runtime state poisoned");
+            let parent_fiber = state
+                .fibers
+                .get(&owner.fiber)
+                .ok_or(MetaError::StaleContext {
+                    fiber: owner.fiber,
+                    generation: owner.generation,
+                })?;
+            let data = parent_fiber.data.lock().expect("fiber state poisoned");
+            if data.generation != owner.generation
+                || !matches!(data.state, FiberState::Loading | FiberState::Active)
+            {
+                return Err(MetaError::StaleContext {
+                    fiber: owner.fiber,
+                    generation: owner.generation,
+                });
+            }
+            parent_fiber
+                .depth
+                .checked_add(1)
+                .ok_or(MetaError::CapacityExhausted {
+                    resource: "fiber depth",
+                })?
+        } else {
+            1
+        };
+        if depth > self.inner.limits.topology.maximum_fiber_depth {
+            return Err(MetaError::CapacityExhausted {
+                resource: "fiber depth",
+            });
+        }
+        let base_context = ContextScope {
+            isolation: Arc::clone(&parent.isolation),
+            intercepts: Arc::clone(&parent.intercepts),
+            entries: parent.entries,
+            encoded_bytes: parent.encoded_bytes,
+            trace: parent.trace.clone(),
+        };
+        let declared_slots = descriptor
+            .provided_services()
+            .map(|service| base_context.service_slot(service))
             .collect::<Vec<_>>();
-        let required_services = descriptor
-            .requires
-            .iter()
-            .map(|requirement| requirement.key.clone())
+        let required_slots = descriptor
+            .required_services()
+            .map(|service| base_context.service_slot(service))
             .collect::<Vec<_>>();
 
         let id = FiberId(self.inner.next_fiber.fetch_add(1, Ordering::AcqRel) + 1);
@@ -434,30 +526,39 @@ impl Runtime {
             id,
             generation: FiberGeneration(0),
             factory: descriptor.identity.clone(),
-            state: FiberState::Pending(Vec::new()),
+            state: FiberState::Pending(PendingReport::default()),
         };
         let (watch, _) = watch::channel(initial);
-        let base_context = ContextScope {
-            isolation: Arc::clone(&parent.isolation),
-            intercepts: Arc::clone(&parent.intercepts),
-            trace: parent.trace.clone(),
-        };
+        let (reconciliation_watch, _) = watch::channel(0_u64);
         let fiber = Arc::new(Fiber {
             id,
+            depth,
             runtime: Arc::downgrade(&self.inner),
+            executor: tokio::runtime::Handle::current(),
             parent: parent.owner,
             base_context,
-            configuration: AsyncMutex::new(()),
+            configuration: Arc::new(AsyncMutex::new(())),
             transition: AsyncMutex::new(()),
+            reconciliation: ReconciliationProgress {
+                desired: AtomicU64::new(0),
+                settled: AtomicU64::new(0),
+                watch: reconciliation_watch,
+                completions: Mutex::new(BTreeMap::new()),
+            },
+            apply_cancellation: CancellationToken::new(),
+            disposal_requested: CancellationToken::new(),
+            disposal: Arc::new(DisposalRun::default()),
+            cleanup_phase: Mutex::new(CleanupPhase::Scheduled),
             data: Mutex::new(FiberData {
-                factory,
-                descriptor,
-                config,
+                identity: descriptor.identity.clone(),
+                factory: Some(factory),
+                descriptor: Some(descriptor),
+                config: Some(config),
+                reservations: Some(reservations),
                 target_revision: 1,
                 generation: FiberGeneration(0),
-                state: FiberState::Pending(Vec::new()),
+                state: FiberState::Pending(PendingReport::default()),
                 disposed: false,
-                disposal_report: None,
                 active: None,
                 last_attempt: None,
             }),
@@ -471,9 +572,6 @@ impl Runtime {
             }
             if self.inner.shutting_down.load(Ordering::Acquire) {
                 return Err(MetaError::RuntimeShuttingDown);
-            }
-            if state.fibers.len() >= self.inner.limits.maximum_fibers {
-                return Err(MetaError::CapacityExhausted { resource: "fibers" });
             }
             if let Some(owner) = parent.owner {
                 let parent_fiber =
@@ -501,70 +599,52 @@ impl Runtime {
                         generation: owner.generation,
                     })?
                     .children
-                    .push(id);
+                    .push(Arc::clone(&fiber));
             }
-            for service in &required_services {
-                state
-                    .dependents
-                    .entry(service.clone())
-                    .or_default()
-                    .insert(id);
+            for slot in &required_slots {
+                state.dependents.entry(slot.clone()).or_default().insert(id);
             }
             state.declarations.insert(
                 id,
                 &fiber.base_context,
-                &fiber.data.lock().expect("fiber state poisoned").descriptor,
+                fiber
+                    .data
+                    .lock()
+                    .expect("fiber state poisoned")
+                    .descriptor
+                    .as_deref()
+                    .expect("registered Fiber retains its descriptor"),
             );
             state.fibers.insert(id, Arc::clone(&fiber));
             state.revision += 1;
         }
-        let (mut sender, receiver) = oneshot::channel();
-        let runtime = self.clone();
-        tokio::spawn(async move {
-            let reconciliation_runtime = runtime.clone();
-            let mut reconciliation = tokio::spawn(async move {
-                reconciliation_runtime.reconcile_fiber(id).await;
-            });
-            tokio::select! {
-                biased;
-                () = sender.closed() => {
-                    reconciliation.abort();
-                    let _ = reconciliation.await;
-                    let _ = runtime.dispose_fiber(id).await;
-                }
-                _ = &mut reconciliation => {
-                    if matches!(fiber.snapshot().state, FiberState::Pending(_)) {
-                        // A pending declaration may complete another pending
-                        // fiber's cycle diagnostics. Active publication already
-                        // notifies consumers with its actual provided services.
-                        runtime.notify_service_changes(&declared_services, Some(id));
-                    }
-                    let handle = FiberHandle {
-                        runtime: runtime.clone(),
-                        fiber,
-                    };
-                    let (acknowledge, acknowledged) = oneshot::channel();
-                    let rollback_runtime = Arc::downgrade(&runtime.inner);
-                    if sender.send((handle, acknowledge)).is_err() {
-                        let _ = runtime.dispose_fiber(id).await;
-                    } else {
-                        drop(runtime);
-                        if acknowledged.await.is_err()
-                            && let Some(inner) = rollback_runtime.upgrade()
-                        {
-                            let _ = Runtime { inner }.dispose_fiber(id).await;
-                        }
-                    }
-                }
+        // Registry membership now owns every durable reservation and is part
+        // of the shutdown root snapshot; the proof's external admission can
+        // be released before reconciliation continues.
+        drop(admission);
+        let mut ownership = PendingApplyOwnership {
+            runtime: Arc::downgrade(&self.inner),
+            fiber: Arc::clone(&fiber),
+            armed: true,
+        };
+        self.yield_reconciliation_slot(async {
+            if let Some(ticket) = self.request_reconciliation(id) {
+                self.drive_nested_intent(id).await;
+                ticket.join().await;
             }
-        });
-        let (handle, acknowledge) = receiver.await.map_err(|_| {
-            MetaError::Activation("runtime-owned plugin application task failed".to_owned())
-        })?;
-        acknowledge.send(()).map_err(|()| {
-            MetaError::Activation("plugin application ownership transfer failed".to_owned())
-        })?;
-        Ok(handle)
+        })
+        .await;
+        if matches!(fiber.snapshot().state, FiberState::Pending(_)) {
+            // A pending declaration may complete another pending fiber's cycle
+            // diagnostics. Active publication already notifies consumers with
+            // its actual provided services.
+            self.refresh_pending_diagnostics(&declared_slots, Some(id));
+        }
+        ownership.armed = false;
+        Ok(FiberHandle {
+            runtime: self.clone(),
+            fiber,
+        })
     }
 
     fn owner_fiber(&self, owner: Owner) -> Result<Arc<Fiber>> {
@@ -594,68 +674,90 @@ impl Runtime {
     fn resolve_bindings(
         &self,
         fiber: &Fiber,
-    ) -> std::result::Result<BTreeMap<ServiceKey, Arc<ProviderBinding>>, Vec<PendingReason>> {
+    ) -> std::result::Result<BTreeMap<ServiceKey, Arc<ProviderBinding>>, PendingReport> {
         let descriptor = {
             let data = fiber.data.lock().expect("fiber state poisoned");
-            data.descriptor.clone()
+            Arc::clone(
+                data.descriptor
+                    .as_ref()
+                    .expect("registered Fiber retains its descriptor"),
+            )
+        };
+        let slots = descriptor
+            .requires
+            .iter()
+            .enumerate()
+            .map(|(index, requirement)| {
+                let isolation =
+                    Self::isolation_for(&fiber.base_context.isolation, &requirement.key);
+                (
+                    index,
+                    isolation,
+                    fiber.base_context.service_slot(&requirement.key),
+                )
+            })
+            .collect::<Vec<_>>();
+        // One registry lock is one dependency snapshot. An activation must
+        // never observe requirements from different publication revisions. The
+        // lock only performs keyed Arc lookups; diagnostics and comparison stay
+        // outside the global mutation boundary.
+        let candidates = {
+            let state = self.inner.state.lock().expect("runtime state poisoned");
+            slots
+                .iter()
+                .map(|(_, _, slot)| state.providers.get(slot).cloned())
+                .collect::<Vec<_>>()
         };
         let mut bindings = BTreeMap::new();
-        let mut pending = Vec::new();
-        // One registry lock is one dependency snapshot. An activation must
-        // never observe requirements from different publication revisions.
-        let state = self.inner.state.lock().expect("runtime state poisoned");
-        for requirement in descriptor.requires {
-            let isolation = Self::isolation_for(&fiber.base_context.isolation, &requirement.key);
-            let binding = state
-                .providers
-                .get(&ServiceSlot {
-                    key: requirement.key.clone(),
-                    isolation,
-                })
-                .cloned();
+        let mut pending = PendingReportBuilder::new(&self.inner.limits.payloads);
+        for ((index, isolation, _), binding) in slots.into_iter().zip(candidates) {
+            let requirement = &descriptor.requires[index];
             let Some(binding) = binding else {
-                pending.push(PendingReason::MissingService {
-                    service: requirement.key,
-                    isolation,
+                pending.push_with(1, requirement.key.as_str().len(), || {
+                    PendingReason::MissingService {
+                        service: requirement.key.clone(),
+                        isolation,
+                    }
                 });
                 continue;
             };
             if binding.contract != requirement.contract || binding.version != requirement.version {
-                pending.push(PendingReason::ContractMismatch {
-                    service: requirement.key,
-                    expected: requirement.contract,
+                let retained_bytes = requirement
+                    .key
+                    .as_str()
+                    .len()
+                    .saturating_add(requirement.contract.as_str().len())
+                    .saturating_add(binding.contract.as_str().len());
+                pending.push_with(1, retained_bytes, || PendingReason::ContractMismatch {
+                    service: requirement.key.clone(),
+                    expected: requirement.contract.clone(),
                     expected_version: requirement.version,
                     actual: binding.contract.clone(),
                     actual_version: binding.version,
                 });
                 continue;
             }
-            bindings.insert(requirement.key, binding);
+            bindings.insert(requirement.key.clone(), binding);
         }
-        drop(state);
-        if !pending.is_empty()
-            && let Some(services) = self.dependency_cycle(fiber.id)
+        if pending.total_reasons() != 0
+            && let Some((services, truncated)) = self.dependency_cycle(
+                fiber.id,
+                pending.remaining_cycle_services(),
+                pending.remaining_bytes(),
+            )
         {
-            pending.push(PendingReason::DependencyCycle { services });
+            pending.push_cycle(services, truncated);
         }
-        if pending.is_empty() {
+        if pending.total_reasons() == 0 {
             Ok(bindings)
         } else {
-            Err(pending)
+            Err(pending.finish())
         }
     }
 
-    fn reconcile_fiber(&self, id: FiberId) -> BoxFuture<'static, ()> {
+    fn reconcile_fiber(&self, fiber: Arc<Fiber>) -> BoxFuture<'static, ()> {
         let runtime = self.clone();
         Box::pin(async move {
-            let fiber = {
-                let state = runtime.inner.state.lock().expect("runtime state poisoned");
-                state.fibers.get(&id).cloned()
-            };
-            let Some(fiber) = fiber else {
-                return;
-            };
-            let _transition = fiber.transition.lock().await;
             if std::panic::AssertUnwindSafe(runtime.reconcile_fiber_inner(&fiber))
                 .catch_unwind()
                 .await
@@ -677,15 +779,21 @@ impl Runtime {
                         .catch_unwind()
                         .await
                 };
+                let maximum = runtime.inner.limits.payloads.maximum_diagnostic_bytes;
                 let message = match cleanup {
                     Ok(report) if report.is_clean() => "plugin activation panicked".to_owned(),
-                    Ok(report) => format!(
-                        "plugin activation panicked; cleanup also failed: {:?}",
-                        report.failures
+                    Ok(report) => dispatch::bound_formatted_diagnostic(
+                        format_args!(
+                            "plugin activation panicked; cleanup also failed: {:?}",
+                            report.failures
+                        ),
+                        maximum,
                     ),
                     Err(_) => "plugin activation and cleanup panicked".to_owned(),
                 };
-                fiber.set_state(FiberState::Failed(message));
+                fiber.set_state(FiberState::Failed(dispatch::bound_owned_diagnostic(
+                    message, maximum,
+                )));
             }
         })
     }
@@ -715,9 +823,12 @@ impl Runtime {
                 if active_bindings.is_some() {
                     let cleanup = self.unload_generation(fiber).await;
                     if !cleanup.is_clean() {
-                        fiber.set_state(FiberState::Failed(format!(
-                            "dependency retirement cleanup failed: {:?}",
-                            cleanup.failures
+                        fiber.set_state(FiberState::Failed(dispatch::bound_formatted_diagnostic(
+                            format_args!(
+                                "dependency retirement cleanup failed: {:?}",
+                                cleanup.failures
+                            ),
+                            self.inner.limits.payloads.maximum_diagnostic_bytes,
                         )));
                         return;
                     }
@@ -746,9 +857,9 @@ impl Runtime {
         if active_bindings.is_some() {
             let cleanup = self.unload_generation(fiber).await;
             if !cleanup.is_clean() {
-                fiber.set_state(FiberState::Failed(format!(
-                    "reconfiguration cleanup failed: {:?}",
-                    cleanup.failures
+                fiber.set_state(FiberState::Failed(dispatch::bound_formatted_diagnostic(
+                    format_args!("reconfiguration cleanup failed: {:?}", cleanup.failures),
+                    self.inner.limits.payloads.maximum_diagnostic_bytes,
                 )));
                 return;
             }
@@ -756,12 +867,14 @@ impl Runtime {
         self.activate_generation(fiber, bindings).await;
     }
 
+    #[allow(clippy::too_many_lines)] // Activation, rollback, and publication are one generation transaction.
     async fn activate_generation(
         &self,
         fiber: &Arc<Fiber>,
         bindings: BTreeMap<ServiceKey, Arc<ProviderBinding>>,
     ) {
         let generation = self.next_generation();
+        let activation_cancellation = CancellationToken::new();
         let (factory, config, target_revision) = {
             let mut data = fiber.data.lock().expect("fiber state poisoned");
             let target_revision = data.target_revision;
@@ -771,10 +884,13 @@ impl Runtime {
             data.active = Some(GenerationData {
                 generation,
                 bindings,
+                activation_cancellation: activation_cancellation.clone(),
                 effects: Vec::new(),
-                services: Vec::new(),
-                listeners: Vec::new(),
+                services: BTreeMap::new(),
+                listeners: BTreeMap::new(),
                 children: Vec::new(),
+                retired_child_report: CleanupReport::default(),
+                cleanup: Arc::new(CleanupRun::default()),
                 lease: Arc::new(AdmissionLease::default()),
                 published: false,
                 target_revision,
@@ -783,27 +899,78 @@ impl Runtime {
             let snapshot = data.snapshot(fiber.id);
             fiber.watch.send_replace(snapshot);
             (
-                Arc::clone(&data.factory),
-                data.config.clone(),
+                Arc::clone(
+                    data.factory
+                        .as_ref()
+                        .expect("registered Fiber retains its factory"),
+                ),
+                Arc::clone(
+                    data.config
+                        .as_ref()
+                        .expect("registered Fiber retains its configuration"),
+                ),
                 data.target_revision,
             )
         };
         let context = fiber.context(generation);
-        let activation = factory.activate(context, config);
-        let result = tokio::time::timeout(self.inner.limits.transition_timeout, activation).await;
+        // Keep the sidecar reservation in the same future as plugin activation.
+        // The post-await drop also keeps it live while cancellation destroys a
+        // plugin future whose destructor may still own the shared Value.
+        let activation = async move {
+            let result = factory.activate(context, Arc::clone(&config.value)).await;
+            drop(config);
+            result
+        };
+        // Plugin code may synchronously await another scheduler-backed
+        // operation through a service or a spawned task. It owns no registry
+        // mutation while awaiting, so transfer the slot until its result is
+        // ready and reacquire before publication or rollback.
+        let result = self
+            .yield_reconciliation_slot(async {
+                tokio::select! {
+                    biased;
+                    () = fiber.apply_cancellation.cancelled() => {
+                        None
+                    }
+                    () = activation_cancellation.cancelled() => {
+                        None
+                    }
+                    result = tokio::time::timeout(
+                        self.inner.limits.deadlines.transition,
+                        activation,
+                    ) => {
+                        Some(result)
+                    }
+                }
+            })
+            .await;
+        let maximum = self.inner.limits.payloads.maximum_diagnostic_bytes;
         let activation_error = match result {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(_) => Some(MetaError::Timeout("plugin activation").to_string()),
+            Some(Ok(Ok(()))) => None,
+            Some(Ok(Err(error))) => Some(dispatch::bound_formatted_diagnostic(
+                format_args!("{error}"),
+                maximum,
+            )),
+            Some(Err(_)) => Some(dispatch::bound_formatted_diagnostic(
+                format_args!("{}", MetaError::Timeout("plugin activation")),
+                maximum,
+            )),
+            None => Some(dispatch::bound_formatted_diagnostic(
+                format_args!("{}", MetaError::Cancelled),
+                maximum,
+            )),
         };
         if let Some(error) = activation_error {
             let cleanup = self.rollback_loading(fiber).await;
             let error = if cleanup.is_clean() {
                 error
             } else {
-                format!(
-                    "{error}; activation rollback failed: {:?}",
-                    cleanup.failures
+                dispatch::bound_formatted_diagnostic(
+                    format_args!(
+                        "{error}; activation rollback failed: {:?}",
+                        cleanup.failures
+                    ),
+                    maximum,
                 )
             };
             fiber.set_state(FiberState::Failed(error));
@@ -813,11 +980,14 @@ impl Runtime {
         if let Err(error) = self.publish_generation(fiber, generation, target_revision) {
             let cleanup = self.rollback_loading(fiber).await;
             let error = if cleanup.is_clean() {
-                error.to_string()
+                dispatch::bound_formatted_diagnostic(format_args!("{error}"), maximum)
             } else {
-                format!(
-                    "{error}; publication rollback failed: {:?}",
-                    cleanup.failures
+                dispatch::bound_formatted_diagnostic(
+                    format_args!(
+                        "{error}; publication rollback failed: {:?}",
+                        cleanup.failures
+                    ),
+                    maximum,
                 )
             };
             fiber.set_state(FiberState::Failed(error));
@@ -847,36 +1017,34 @@ impl Runtime {
                 fiber: fiber.id,
                 generation,
             })?;
-            active.services.clone()
+            if active.activation_cancellation.is_cancelled() {
+                return Err(MetaError::Cancelled);
+            }
+            active
+                .services
+                .values()
+                .map(|service| {
+                    let binding = Arc::clone(&service.binding);
+                    let slot = fiber.base_context.service_slot(&binding.key);
+                    (slot, binding)
+                })
+                .collect::<Vec<_>>()
         };
-        for binding in &services {
-            let slot = ServiceSlot {
-                key: binding.key.clone(),
-                isolation: Self::isolation_for(&fiber.base_context.isolation, &binding.key),
-            };
-            if state.providers.contains_key(&slot) {
+        for (slot, binding) in &services {
+            if state.providers.contains_key(slot) {
                 return Err(MetaError::DuplicateProvider {
                     service: binding.key.clone(),
                 });
             }
         }
-        if state.providers.len() + services.len() > self.inner.limits.maximum_services {
-            return Err(MetaError::CapacityExhausted {
-                resource: "services",
-            });
-        }
-        for binding in &services {
-            let slot = ServiceSlot {
-                key: binding.key.clone(),
-                isolation: Self::isolation_for(&fiber.base_context.isolation, &binding.key),
-            };
-            state.providers.insert(slot, Arc::clone(binding));
+        for (slot, binding) in &services {
+            state.providers.insert(slot.clone(), Arc::clone(binding));
         }
         let staged = state
             .staged_listeners
             .remove(&(fiber.id, generation))
             .unwrap_or_default();
-        for listener in staged {
+        for listener in staged.into_values() {
             let listeners = state.listeners.entry(listener.event.clone()).or_default();
             listeners.insert(listener);
         }
@@ -884,11 +1052,15 @@ impl Runtime {
             .as_mut()
             .expect("active generation exists")
             .published = true;
+        data.last_attempt = None;
         data.state = FiberState::Active;
         let snapshot = data.snapshot(fiber.id);
         fiber.watch.send_replace(snapshot);
         state.revision += 1;
-        let changed: Vec<ServiceKey> = services.iter().map(|binding| binding.key.clone()).collect();
+        let changed = services
+            .into_iter()
+            .map(|(slot, _binding)| slot)
+            .collect::<Vec<_>>();
         drop(data);
         drop(state);
         self.notify_service_changes(&changed, Some(fiber.id));
@@ -900,199 +1072,6 @@ impl Runtime {
         key: &ServiceKey,
     ) -> IsolationId {
         isolations.get(key).copied().unwrap_or(IsolationId(0))
-    }
-
-    fn add_effect(&self, owner: Owner, label: String, cleanup: Cleanup) -> Result<()> {
-        let fiber = self.owner_fiber(owner)?;
-        let mut data = fiber.data.lock().expect("fiber state poisoned");
-        Self::validate_owner_data(owner, &data, true)?;
-        if !matches!(data.state, FiberState::Loading | FiberState::Active) {
-            return Err(MetaError::StaleContext {
-                fiber: owner.fiber,
-                generation: owner.generation,
-            });
-        }
-        let active = data.active.as_mut().ok_or(MetaError::StaleContext {
-            fiber: owner.fiber,
-            generation: owner.generation,
-        })?;
-        if active.effects.len() >= self.inner.limits.maximum_effects_per_fiber {
-            return Err(MetaError::CapacityExhausted {
-                resource: "effects",
-            });
-        }
-        active.effects.push(EffectRecord { label, cleanup });
-        Ok(())
-    }
-
-    fn provide(
-        &self,
-        context: &Context,
-        key: ServiceKey,
-        contract: ContractId,
-        version: ContractVersion,
-        endpoint: Arc<dyn ServiceEndpoint>,
-    ) -> Result<()> {
-        let owner = context.owner.ok_or_else(|| {
-            MetaError::InvalidInput("the root context cannot provide a service".to_owned())
-        })?;
-        let fiber = self.owner_fiber(owner)?;
-        let mut data = fiber.data.lock().expect("fiber state poisoned");
-        Self::validate_owner_data(owner, &data, true)?;
-        if !matches!(data.state, FiberState::Loading) {
-            return Err(MetaError::InvalidInput(
-                "services may only be provided during plugin activation".to_owned(),
-            ));
-        }
-        let provision = data
-            .descriptor
-            .provides
-            .iter()
-            .find(|provision| provision.key == key)
-            .ok_or_else(|| MetaError::UndeclaredProvision {
-                service: key.clone(),
-            })?;
-        if provision.contract != contract || provision.version != version {
-            return Err(MetaError::ContractMismatch {
-                service: key,
-                expected_id: provision.contract.clone(),
-                expected_version: provision.version,
-                actual_id: contract,
-                actual_version: version,
-            });
-        }
-        let active = data.active.as_mut().expect("loading generation exists");
-        if active.services.iter().any(|binding| binding.key == key) {
-            return Err(MetaError::DuplicateProvider { service: key });
-        }
-        active.services.push(Arc::new(ProviderBinding {
-            key,
-            contract,
-            version,
-            provider: owner.fiber,
-            generation: owner.generation,
-            endpoint,
-            lease: Arc::clone(&active.lease),
-        }));
-        Ok(())
-    }
-
-    fn add_listener(
-        &self,
-        context: &Context,
-        event: EventKey,
-        handler: Arc<dyn EventHandler>,
-        options: EventOptions,
-    ) -> Result<EventListenerId> {
-        let owner = context.owner.ok_or_else(|| {
-            MetaError::InvalidInput("the root context cannot own a listener".to_owned())
-        })?;
-        let id = EventListenerId(self.inner.next_listener.fetch_add(1, Ordering::AcqRel) + 1);
-        let mut state = self.inner.state.lock().expect("runtime state poisoned");
-        let fiber = state
-            .fibers
-            .get(&owner.fiber)
-            .cloned()
-            .ok_or(MetaError::StaleContext {
-                fiber: owner.fiber,
-                generation: owner.generation,
-            })?;
-        if state.listener_events.len() >= self.inner.limits.maximum_event_listeners {
-            return Err(MetaError::CapacityExhausted {
-                resource: "event listeners",
-            });
-        }
-        let mut data = fiber.data.lock().expect("fiber state poisoned");
-        if data.generation != owner.generation
-            || !matches!(data.state, FiberState::Loading | FiberState::Active)
-        {
-            return Err(MetaError::StaleContext {
-                fiber: owner.fiber,
-                generation: owner.generation,
-            });
-        }
-        let loading = matches!(data.state, FiberState::Loading);
-        let active = data.active.as_mut().ok_or(MetaError::StaleContext {
-            fiber: owner.fiber,
-            generation: owner.generation,
-        })?;
-        active.listeners.push(id);
-        let listener = ListenerBinding {
-            id,
-            event: event.clone(),
-            owner: owner.fiber,
-            generation: owner.generation,
-            scope: ContextScope {
-                isolation: Arc::clone(&context.isolation),
-                intercepts: Arc::clone(&context.intercepts),
-                trace: context.trace.clone(),
-            },
-            handler,
-            options,
-            lease: Arc::clone(&active.lease),
-        };
-        state.listener_events.insert(id, event.clone());
-        if loading {
-            state
-                .staged_listeners
-                .entry((owner.fiber, owner.generation))
-                .or_default()
-                .push(listener);
-        } else {
-            state.listeners.entry(event).or_default().insert(listener);
-        }
-        state.revision += 1;
-        Ok(id)
-    }
-
-    fn remove_listener(&self, context: &Context, id: EventListenerId) -> bool {
-        let Some(owner) = context.owner else {
-            return false;
-        };
-        let mut state = self.inner.state.lock().expect("runtime state poisoned");
-        let Some(fiber) = state.fibers.get(&owner.fiber).cloned() else {
-            return false;
-        };
-        let mut data = fiber.data.lock().expect("fiber state poisoned");
-        if data.generation != owner.generation
-            || !matches!(data.state, FiberState::Loading | FiberState::Active)
-        {
-            return false;
-        }
-        let Some(event) = state.listener_events.get(&id).cloned() else {
-            return false;
-        };
-        let published = state
-            .listeners
-            .get_mut(&event)
-            .and_then(|listeners| listeners.remove(id));
-        let mut removed = published.as_ref().is_some_and(|listener| {
-            listener.owner == owner.fiber && listener.generation == owner.generation
-        });
-        if !removed && let Some(listener) = published {
-            state
-                .listeners
-                .entry(event.clone())
-                .or_default()
-                .insert(listener);
-        }
-        if !removed
-            && let Some(listeners) = state
-                .staged_listeners
-                .get_mut(&(owner.fiber, owner.generation))
-            && let Some(index) = listeners.iter().position(|listener| listener.id == id)
-        {
-            listeners.remove(index);
-            removed = true;
-        }
-        if removed {
-            state.listener_events.remove(&id);
-            if let Some(active) = data.active.as_mut() {
-                active.listeners.retain(|listener| *listener != id);
-            }
-            state.revision += 1;
-        }
-        removed
     }
 }
 

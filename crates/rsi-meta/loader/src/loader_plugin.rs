@@ -1,3 +1,4 @@
+use super::catalog::LoadAdmission;
 use super::{LOADER_CONTRACT_ID, LOADER_CONTRACT_VERSION, LOADER_SERVICE_KEY, NativeCatalog};
 use async_trait::async_trait;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -5,10 +6,12 @@ use rsi_meta::{
     ConfigValue, Context, FactoryIdentity, FiberHandle, FiberSnapshot, MetaError, PluginDescriptor,
     PluginFactory, ProviderChannel, Provision, Result, ServiceEndpoint, ServiceFrame,
 };
+use serde::ser::{SerializeMap as _, SerializeStruct as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -16,6 +19,8 @@ use tokio::sync::oneshot;
 const MAX_CONCURRENT_PREFLIGHTS: usize = 8;
 const MAX_LOADER_ENTRIES: usize = 1024;
 const MAX_LOADER_ID_BYTES: usize = 128;
+const RESPONSE_TOO_LARGE_JSON: &[u8] =
+    br#"{"ok":false,"error":"loader response exceeds frame limit"}"#;
 
 fn valid_loader_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_LOADER_ID_BYTES
@@ -84,37 +89,82 @@ impl PluginFactory for LoaderFactory {
         serde_json::to_value(parsed).map_err(|error| MetaError::InvalidInput(error.to_string()))
     }
 
-    async fn activate(&self, context: Context, config: ConfigValue) -> Result<()> {
-        let parsed: LoaderConfig = serde_json::from_value(config)
+    async fn activate(&self, context: Context, config: Arc<ConfigValue>) -> Result<()> {
+        let parsed = LoaderConfig::deserialize(config.as_ref())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        let preflight_width = self
+            .catalog
+            .load_concurrency_limit()
+            .min(MAX_CONCURRENT_PREFLIGHTS);
         let catalog = self.catalog.clone();
-        let runtime = context.runtime().clone();
-        let prepared = stream::iter(parsed.entries)
-            .map(move |entry| {
+        let loaded = stream::iter(parsed.entries.into_iter().enumerate())
+            .map(move |(position, entry)| {
                 let catalog = catalog.clone();
-                let runtime = runtime.clone();
                 async move {
-                    let factory = tokio::task::spawn_blocking(move || catalog.load(entry.artifact))
-                        .await
-                        .map_err(|error| MetaError::Activation(error.to_string()))?
+                    let LoaderEntry {
+                        id,
+                        artifact,
+                        config,
+                    } = entry;
+                    let load_admission = catalog
+                        .try_reserve_load()
                         .map_err(|error| MetaError::Activation(error.to_string()))?;
-                    let plugin =
-                        tokio::task::spawn_blocking(move || runtime.prepare(factory, entry.config))
-                            .await
-                            .map_err(|error| MetaError::Activation(error.to_string()))??;
-                    Ok::<_, MetaError>((entry.id, plugin))
+                    let worker_admission = load_admission.clone();
+                    let factory = tokio::task::spawn_blocking(move || {
+                        catalog.load_admitted(artifact, &worker_admission)
+                    })
+                    .await
+                    .map_err(|error| MetaError::Activation(error.to_string()))?
+                    .map_err(|error| MetaError::Activation(error.to_string()))?;
+                    drop(load_admission);
+                    Ok::<_, MetaError>((position, id, config, factory))
                 }
             })
-            .buffered(MAX_CONCURRENT_PREFLIGHTS)
+            .buffered(preflight_width)
             .try_collect::<Vec<_>>()
             .await?;
+        let mut module_groups = BTreeMap::<_, Vec<_>>::new();
+        for (position, id, config, factory) in loaded {
+            module_groups
+                .entry(factory.module_digest().to_owned())
+                .or_default()
+                .push((position, id, config, factory));
+        }
+        let runtime = context.runtime().clone();
+        let preparation_width =
+            preflight_width.min(runtime.limits().execution.maximum_concurrent_preparations);
+        let prepared_groups = stream::iter(module_groups.into_values())
+            .map(move |group| {
+                let runtime = runtime.clone();
+                async move {
+                    let mut prepared = Vec::with_capacity(group.len());
+                    for (position, id, config, factory) in group {
+                        let plugin = tokio::task::spawn_blocking({
+                            let runtime = runtime.clone();
+                            move || runtime.prepare(factory, config)
+                        })
+                        .await
+                        .map_err(|error| MetaError::Activation(error.to_string()))??;
+                        prepared.push((position, id, plugin));
+                    }
+                    Ok::<_, MetaError>(prepared)
+                }
+            })
+            .buffer_unordered(preparation_width)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let prepared = prepared_groups
+            .into_iter()
+            .flatten()
+            .map(|(position, id, plugin)| (position, (id, plugin)))
+            .collect::<BTreeMap<_, _>>();
 
         let state = Arc::new(Mutex::new(LoaderState::default()));
-        for (id, plugin) in prepared {
+        for (_, (id, plugin)) in prepared {
             let handle = context.apply_prepared(plugin).await?;
-            let mut entries = state.lock().expect("loader state poisoned");
-            entries.claimed.insert(id.clone());
-            entries.handles.insert(id, handle);
+            IdReservation::claim(&state, id)
+                .map_err(|error| MetaError::Activation(error.to_owned()))?
+                .publish(handle);
         }
         context.provide(
             LOADER_SERVICE_KEY,
@@ -144,20 +194,23 @@ struct LoaderResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     fiber: Option<FiberSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fibers: Option<BTreeMap<String, FiberSnapshot>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
+enum CommandResponse {
+    Immediate(LoaderResponse),
+    Inspect,
+}
+
 struct CommandResult {
-    response: LoaderResponse,
+    response: CommandResponse,
     delivered: Option<oneshot::Sender<()>>,
 }
 
 impl CommandResult {
     fn immediate(response: LoaderResponse) -> Self {
         Self {
-            response,
+            response: CommandResponse::Immediate(response),
             delivered: None,
         }
     }
@@ -171,66 +224,133 @@ struct LoaderEndpoint {
 
 #[derive(Default)]
 struct LoaderState {
-    handles: BTreeMap<String, FiberHandle>,
-    claimed: BTreeSet<String>,
+    slots: BTreeMap<String, LoaderSlot>,
+}
+
+struct LoaderSlot {
+    token: Arc<IdToken>,
+    handle: Option<FiberHandle>,
+}
+
+#[derive(Debug)]
+struct IdToken;
+
+#[derive(Clone)]
+struct IdClaim {
+    id: String,
+    token: Arc<IdToken>,
+}
+
+struct PublishedId {
+    claim: IdClaim,
 }
 
 struct IdReservation {
     state: Arc<Mutex<LoaderState>>,
-    id: Option<String>,
+    claim: Option<IdClaim>,
 }
 
 impl IdReservation {
-    fn claim(state: &Arc<Mutex<LoaderState>>, id: String) -> Option<Self> {
-        if !state
-            .lock()
-            .expect("loader state poisoned")
-            .claimed
-            .insert(id.clone())
-        {
-            return None;
+    fn claim(
+        state: &Arc<Mutex<LoaderState>>,
+        id: String,
+    ) -> std::result::Result<Self, &'static str> {
+        let mut loader = state.lock().expect("loader state poisoned");
+        if loader.slots.contains_key(&id) {
+            return Err("loader entry id already exists");
         }
-        Some(Self {
+        if loader.slots.len() >= MAX_LOADER_ENTRIES {
+            return Err("loader entry capacity is exhausted");
+        }
+        let claim = IdClaim {
+            id,
+            token: Arc::new(IdToken),
+        };
+        loader.slots.insert(
+            claim.id.clone(),
+            LoaderSlot {
+                token: Arc::clone(&claim.token),
+                handle: None,
+            },
+        );
+        drop(loader);
+        Ok(Self {
             state: Arc::clone(state),
-            id: Some(id),
+            claim: Some(claim),
         })
     }
 
-    fn publish(mut self, handle: FiberHandle) -> String {
-        let id = self.id.take().expect("unpublished reservation");
-        self.state
-            .lock()
-            .expect("loader state poisoned")
-            .handles
-            .insert(id.clone(), handle);
-        id
+    fn publish(mut self, handle: FiberHandle) -> PublishedId {
+        let claim = self.claim.take().expect("unpublished reservation");
+        let mut loader = self.state.lock().expect("loader state poisoned");
+        let slot = loader
+            .slots
+            .get_mut(&claim.id)
+            .expect("a reservation retains its Loader slot");
+        assert!(Arc::ptr_eq(&slot.token, &claim.token));
+        assert!(slot.handle.replace(handle).is_none());
+        drop(loader);
+        PublishedId { claim }
     }
 
-    fn retain_until_released(state: &Arc<Mutex<LoaderState>>, id: String) -> Self {
-        debug_assert!(
-            state
-                .lock()
-                .expect("loader state poisoned")
-                .claimed
-                .contains(&id),
-            "an active Loader ID remains claimed"
-        );
-        Self {
-            state: Arc::clone(state),
-            id: Some(id),
+    fn retire(state: &Arc<Mutex<LoaderState>>, id: &str) -> Option<(FiberHandle, Self)> {
+        let mut loader = state.lock().expect("loader state poisoned");
+        let slot = loader.slots.get_mut(id)?;
+        let handle = slot.handle.take()?;
+        let claim = IdClaim {
+            id: id.to_owned(),
+            token: Arc::clone(&slot.token),
+        };
+        Some((
+            handle,
+            Self {
+                state: Arc::clone(state),
+                claim: Some(claim),
+            },
+        ))
+    }
+
+    fn retire_published(state: &Arc<Mutex<LoaderState>>, published: &PublishedId) -> Option<Self> {
+        let mut loader = state.lock().expect("loader state poisoned");
+        let slot = loader.slots.get_mut(&published.claim.id)?;
+        if !Arc::ptr_eq(&slot.token, &published.claim.token) {
+            return None;
         }
+        // Only the caller that transitions this generation out of the
+        // published state owns its retirement reservation. A concurrent unload
+        // may already be retaining the same token through cleanup.
+        slot.handle.take()?;
+        Some(Self {
+            state: Arc::clone(state),
+            claim: Some(published.claim.clone()),
+        })
     }
 }
 
 impl Drop for IdReservation {
     fn drop(&mut self) {
-        if let Some(id) = self.id.take() {
-            self.state
-                .lock()
-                .expect("loader state poisoned")
-                .claimed
-                .remove(&id);
+        if let Some(claim) = self.claim.take() {
+            let mut loader = self.state.lock().expect("loader state poisoned");
+            let matches = loader.slots.get(&claim.id).is_some_and(|slot| {
+                slot.handle.is_none() && Arc::ptr_eq(&slot.token, &claim.token)
+            });
+            if matches {
+                loader.slots.remove(&claim.id);
+            }
         }
+    }
+}
+
+impl LoaderState {
+    fn handle(&self, id: &str) -> Option<FiberHandle> {
+        self.slots.get(id).and_then(|slot| slot.handle.clone())
+    }
+
+    fn handles(&self) -> BTreeMap<String, FiberHandle> {
+        self.slots
+            .iter()
+            .filter_map(|(id, slot)| slot.handle.clone().map(|handle| (id.clone(), handle)))
+            .collect()
     }
 }
 
@@ -246,9 +366,15 @@ impl fmt::Debug for LoaderEndpoint {
 impl ServiceEndpoint for LoaderEndpoint {
     async fn serve(
         &self,
-        _: rsi_meta::InvocationContext,
-        mut channel: ProviderChannel,
+        invocation: rsi_meta::InvocationContext,
+        mut channel: ProviderChannel<'_>,
     ) -> Result<()> {
+        let maximum_frame_bytes = invocation
+            .provider_context()
+            .runtime()
+            .limits()
+            .payloads
+            .maximum_frame_bytes;
         let cancellation = channel.cancellation();
         while let Some(frame) = channel.recv().await {
             let mut result = match serde_json::from_slice::<LoaderCommand>(frame.as_bytes()) {
@@ -261,10 +387,11 @@ impl ServiceEndpoint for LoaderEndpoint {
                 }
                 Err(error) => CommandResult::immediate(LoaderResponse::error(error)),
             };
-            let bytes = serde_json::to_vec(&result.response)
-                .map_err(|error| MetaError::Service(error.to_string()))?;
-            channel.send(ServiceFrame::new(bytes)).await?;
-            if let Some(delivered) = result.delivered.take() {
+            let response = serialize_response(&result.response, &self.state, maximum_frame_bytes)?;
+            channel.send(response.frame).await?;
+            if response.complete
+                && let Some(delivered) = result.delivered.take()
+            {
                 let _ = delivered.send(());
             }
         }
@@ -272,41 +399,163 @@ impl ServiceEndpoint for LoaderEndpoint {
     }
 }
 
+struct FrameBudgetWriter {
+    bytes: Vec<u8>,
+    maximum: usize,
+    exceeded: bool,
+}
+
+impl FrameBudgetWriter {
+    fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            maximum,
+            exceeded: false,
+        }
+    }
+}
+
+impl io::Write for FrameBudgetWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(end) = self.bytes.len().checked_add(bytes.len()) else {
+            self.exceeded = true;
+            return Err(io::Error::other("loader response exceeds frame limit"));
+        };
+        if end > self.maximum {
+            self.exceeded = true;
+            return Err(io::Error::other("loader response exceeds frame limit"));
+        }
+        if end > self.bytes.capacity() {
+            let doubled = self.bytes.capacity().max(256).saturating_mul(2);
+            let target = end.max(doubled.min(self.maximum));
+            self.bytes
+                .try_reserve_exact(target.saturating_sub(self.bytes.len()))
+                .map_err(io::Error::other)?;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct SerializedResponse {
+    frame: ServiceFrame,
+    complete: bool,
+}
+
+fn serialize_response(
+    response: &CommandResponse,
+    state: &Arc<Mutex<LoaderState>>,
+    maximum: usize,
+) -> Result<SerializedResponse> {
+    match response {
+        CommandResponse::Immediate(response) => serialize_value(response, maximum),
+        CommandResponse::Inspect => {
+            // FiberHandle clones retain only Runtime-owned handles. Snapshot
+            // construction and bounded JSON serialization must not exclude
+            // concurrent load, unload, or reconfigure registry operations.
+            let handles = state.lock().expect("loader state poisoned").handles();
+            serialize_value(
+                &InspectResponse {
+                    entries: &handles,
+                    snapshot: FiberHandle::snapshot,
+                },
+                maximum,
+            )
+        }
+    }
+}
+
+fn serialize_value(response: &impl Serialize, maximum: usize) -> Result<SerializedResponse> {
+    let mut writer = FrameBudgetWriter::new(maximum);
+    match serde_json::to_writer(&mut writer, response) {
+        Ok(()) => Ok(SerializedResponse {
+            frame: ServiceFrame::new(writer.bytes),
+            complete: true,
+        }),
+        Err(_) if writer.exceeded => {
+            drop(writer);
+            if RESPONSE_TOO_LARGE_JSON.len() > maximum {
+                Err(MetaError::PayloadTooLarge { maximum })
+            } else {
+                Ok(SerializedResponse {
+                    frame: ServiceFrame::new(RESPONSE_TOO_LARGE_JSON.to_vec()),
+                    complete: false,
+                })
+            }
+        }
+        Err(error) => Err(MetaError::Service(format!(
+            "loader response serialization failed: {error}"
+        ))),
+    }
+}
+
+struct InspectResponse<'a, Value, Snapshot> {
+    entries: &'a BTreeMap<String, Value>,
+    snapshot: Snapshot,
+}
+
+impl<Value, Snapshot> Serialize for InspectResponse<'_, Value, Snapshot>
+where
+    Snapshot: Fn(&Value) -> FiberSnapshot,
+{
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> std::result::Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        let mut response = serializer.serialize_struct("LoaderResponse", 2)?;
+        response.serialize_field("ok", &true)?;
+        response.serialize_field(
+            "fibers",
+            &LazySnapshots {
+                entries: self.entries,
+                snapshot: &self.snapshot,
+            },
+        )?;
+        response.end()
+    }
+}
+
+struct LazySnapshots<'a, Value, Snapshot> {
+    entries: &'a BTreeMap<String, Value>,
+    snapshot: &'a Snapshot,
+}
+
+impl<Value, Snapshot> Serialize for LazySnapshots<'_, Value, Snapshot>
+where
+    Snapshot: Fn(&Value) -> FiberSnapshot,
+{
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> std::result::Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        let mut snapshots = serializer.serialize_map(Some(self.entries.len()))?;
+        for (id, handle) in self.entries {
+            snapshots.serialize_entry(id, &(self.snapshot)(handle))?;
+        }
+        snapshots.end()
+    }
+}
+
 impl LoaderEndpoint {
     async fn execute(&self, command: LoaderCommand) -> CommandResult {
         match command {
-            LoaderCommand::Load(entry) => {
-                if !valid_loader_id(&entry.id) {
-                    return CommandResult::immediate(LoaderResponse::error(
-                        "invalid loader entry id",
-                    ));
-                }
-                let Some(reservation) = IdReservation::claim(&self.state, entry.id.clone()) else {
-                    return CommandResult::immediate(LoaderResponse::error(
-                        "loader entry id already exists",
-                    ));
-                };
-                let context = self.context.clone();
-                let catalog = self.catalog.clone();
-                let state = Arc::clone(&self.state);
-                let (response, receiver) = oneshot::channel();
-                tokio::spawn(async move {
-                    run_owned_load(context, catalog, state, reservation, entry, response).await;
-                });
-                receiver.await.unwrap_or_else(|_| {
-                    CommandResult::immediate(LoaderResponse::error(
-                        "runtime-owned Loader task failed",
-                    ))
-                })
-            }
+            LoaderCommand::Load(entry) => self.execute_load(entry).await,
             LoaderCommand::Reconfigure { id, config } => {
                 let handle = self
                     .state
                     .lock()
                     .expect("loader state poisoned")
-                    .handles
-                    .get(&id)
-                    .cloned();
+                    .handle(&id);
                 match handle {
                     Some(handle) => {
                         CommandResult::immediate(match handle.reconfigure(config).await {
@@ -320,13 +569,12 @@ impl LoaderEndpoint {
                 }
             }
             LoaderCommand::Unload { id } => {
-                let handle = {
-                    let mut state = self.state.lock().expect("loader state poisoned");
-                    state.handles.remove(&id)
-                };
-                match handle {
-                    Some(handle) => {
-                        let reservation = IdReservation::retain_until_released(&self.state, id);
+                match IdReservation::retire(&self.state, &id) {
+                    Some((handle, reservation)) => {
+                        // The service waiter may be cancelled while disposal is
+                        // still running. A Runtime-owned disposal persists, but
+                        // this task must also retain the Loader ID until that
+                        // disposal finishes so a replacement cannot overlap it.
                         let response = match tokio::spawn(async move {
                             let _reservation = reservation;
                             let report = handle.dispose().await;
@@ -349,23 +597,44 @@ impl LoaderEndpoint {
                     }
                 }
             }
-            LoaderCommand::Inspect => {
-                let fibers = self
-                    .state
-                    .lock()
-                    .expect("loader state poisoned")
-                    .handles
-                    .iter()
-                    .map(|(id, handle)| (id.clone(), handle.snapshot()))
-                    .collect();
-                CommandResult::immediate(LoaderResponse {
-                    ok: true,
-                    fiber: None,
-                    fibers: Some(fibers),
-                    error: None,
-                })
-            }
+            LoaderCommand::Inspect => CommandResult {
+                response: CommandResponse::Inspect,
+                delivered: None,
+            },
         }
+    }
+
+    async fn execute_load(&self, entry: LoaderEntry) -> CommandResult {
+        if !valid_loader_id(&entry.id) {
+            return CommandResult::immediate(LoaderResponse::error("invalid loader entry id"));
+        }
+        let load_admission = match self.catalog.try_reserve_load() {
+            Ok(admission) => admission,
+            Err(error) => return CommandResult::immediate(LoaderResponse::error(error)),
+        };
+        let reservation = match IdReservation::claim(&self.state, entry.id.clone()) {
+            Ok(reservation) => reservation,
+            Err(error) => return CommandResult::immediate(LoaderResponse::error(error)),
+        };
+        let context = self.context.clone();
+        let catalog = self.catalog.clone();
+        let state = Arc::clone(&self.state);
+        let (response, receiver) = oneshot::channel();
+        tokio::spawn(async move {
+            run_owned_load(
+                context,
+                catalog,
+                state,
+                reservation,
+                load_admission,
+                entry,
+                response,
+            )
+            .await;
+        });
+        receiver.await.unwrap_or_else(|_| {
+            CommandResult::immediate(LoaderResponse::error("runtime-owned Loader task failed"))
+        })
     }
 }
 
@@ -374,11 +643,20 @@ async fn run_owned_load(
     catalog: NativeCatalog,
     state: Arc<Mutex<LoaderState>>,
     reservation: IdReservation,
+    load_admission: LoadAdmission,
     entry: LoaderEntry,
     response: oneshot::Sender<CommandResult>,
 ) {
     let artifact = entry.artifact;
-    let factory = match tokio::task::spawn_blocking(move || catalog.load(artifact)).await {
+    let worker_admission = load_admission.clone();
+    // This owner outlives native loading and remains through delivery or
+    // rollback; the blocking worker holds only a clone for its call boundary.
+    let _owned_load_admission = load_admission;
+    let factory = match tokio::task::spawn_blocking(move || {
+        catalog.load_admitted(artifact, &worker_admission)
+    })
+    .await
+    {
         Ok(Ok(factory)) => factory,
         Ok(Err(error)) => {
             let _ = response.send(CommandResult::immediate(LoaderResponse::error(error)));
@@ -401,11 +679,11 @@ async fn run_owned_load(
     };
     let snapshot = handle.snapshot();
     let rollback_handle = handle.clone();
-    let id = reservation.publish(handle);
+    let published = reservation.publish(handle);
     let (delivered, delivery) = oneshot::channel();
     if response
         .send(CommandResult {
-            response: LoaderResponse::fiber(snapshot),
+            response: CommandResponse::Immediate(LoaderResponse::fiber(snapshot)),
             delivered: Some(delivered),
         })
         .is_ok()
@@ -414,16 +692,8 @@ async fn run_owned_load(
         return;
     }
 
-    let removed = state
-        .lock()
-        .expect("loader state poisoned")
-        .handles
-        .remove(&id);
-    if removed.is_some() {
-        let reservation = IdReservation::retain_until_released(&state, id);
-        let _reservation = reservation;
-        let _ = rollback_handle.dispose().await;
-    }
+    let _reservation = IdReservation::retire_published(&state, &published);
+    let _ = rollback_handle.dispose().await;
 }
 
 impl LoaderResponse {
@@ -431,7 +701,6 @@ impl LoaderResponse {
         Self {
             ok: true,
             fiber: Some(fiber),
-            fibers: None,
             error: None,
         }
     }
@@ -441,8 +710,141 @@ impl LoaderResponse {
         Self {
             ok: false,
             fiber: None,
-            fibers: None,
             error: Some(error.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsi_meta::{FiberGeneration, FiberId, FiberState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct PassiveFactory {
+        descriptor: PluginDescriptor,
+    }
+
+    #[async_trait]
+    impl PluginFactory for PassiveFactory {
+        fn descriptor(&self) -> &PluginDescriptor {
+            &self.descriptor
+        }
+
+        async fn activate(&self, _context: Context, _config: Arc<ConfigValue>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn passive_factory(name: &'static str) -> Arc<dyn PluginFactory> {
+        Arc::new(PassiveFactory {
+            descriptor: PluginDescriptor::new(FactoryIdentity::builtin(name, "1")),
+        })
+    }
+
+    #[test]
+    fn dynamic_id_claims_are_bounded_before_fiber_publication() {
+        let state = Arc::new(Mutex::new(LoaderState::default()));
+        let reservations = (0..MAX_LOADER_ENTRIES)
+            .map(|index| IdReservation::claim(&state, format!("entry-{index}")).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            IdReservation::claim(&state, "overflow".to_owned()),
+            Err("loader entry capacity is exhausted")
+        ));
+        drop(reservations);
+        IdReservation::claim(&state, "reused".to_owned())
+            .expect("released ID capacity must be reusable");
+    }
+
+    #[tokio::test]
+    async fn stale_rollback_cannot_remove_a_reused_loader_id() {
+        let runtime = rsi_meta::Runtime::default();
+        let first = runtime
+            .root()
+            .apply(passive_factory("first"), Value::Null)
+            .await
+            .unwrap();
+        let second = runtime
+            .root()
+            .apply(passive_factory("second"), Value::Null)
+            .await
+            .unwrap();
+        let state = Arc::new(Mutex::new(LoaderState::default()));
+        let oversized = serialize_value(
+            &LoaderResponse::fiber(first.snapshot()),
+            RESPONSE_TOO_LARGE_JSON.len(),
+        )
+        .unwrap();
+        assert!(!oversized.complete);
+
+        let first_id = IdReservation::claim(&state, "shared".to_owned())
+            .unwrap()
+            .publish(first);
+        let (unloaded, retirement) = IdReservation::retire(&state, &first_id.claim.id).unwrap();
+        assert!(IdReservation::retire_published(&state, &first_id).is_none());
+        assert!(
+            state
+                .lock()
+                .expect("loader state poisoned")
+                .slots
+                .contains_key(&first_id.claim.id)
+        );
+        drop(unloaded);
+        drop(retirement);
+
+        let second_id = IdReservation::claim(&state, first_id.claim.id.clone())
+            .unwrap()
+            .publish(second.clone());
+
+        assert!(IdReservation::retire_published(&state, &first_id).is_none());
+
+        {
+            let loader = state.lock().expect("loader state poisoned");
+            assert_eq!(
+                loader
+                    .handle(&second_id.claim.id)
+                    .map(|handle| handle.snapshot()),
+                Some(second.snapshot())
+            );
+            assert!(loader.slots.contains_key(&second_id.claim.id));
+        }
+        assert!(runtime.shutdown().await.is_clean());
+    }
+
+    #[test]
+    fn maximum_inspection_uses_a_frame_bounded_diagnostic() {
+        let entries = (0..MAX_LOADER_ENTRIES)
+            .map(|index| (format!("entry-{index}"), index))
+            .collect();
+        let constructed = AtomicUsize::new(0);
+        let response = InspectResponse {
+            entries: &entries,
+            snapshot: |index: &usize| {
+                constructed.fetch_add(1, Ordering::Relaxed);
+                FiberSnapshot {
+                    id: FiberId(u64::try_from(*index).unwrap()),
+                    generation: FiberGeneration(1),
+                    factory: FactoryIdentity::builtin(format!("factory-{index}"), "1"),
+                    state: FiberState::Failed("x".repeat(64 * 1024)),
+                }
+            },
+        };
+
+        let serialized = serialize_value(&response, RESPONSE_TOO_LARGE_JSON.len()).unwrap();
+        assert_eq!(serialized.frame.as_bytes(), RESPONSE_TOO_LARGE_JSON);
+        assert!(!serialized.complete);
+        assert_eq!(constructed.load(Ordering::Relaxed), 1);
+        let Err(error) = serialize_value(&response, RESPONSE_TOO_LARGE_JSON.len() - 1) else {
+            panic!("a response smaller than the diagnostic must be rejected");
+        };
+        assert_eq!(
+            error,
+            MetaError::PayloadTooLarge {
+                maximum: RESPONSE_TOO_LARGE_JSON.len() - 1
+            }
+        );
     }
 }

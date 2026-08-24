@@ -9,13 +9,14 @@ pub(crate) struct AdmissionLease {
 }
 
 impl AdmissionLease {
-    const CLOSED: usize = 1 << (usize::BITS - 1);
+    const SEALED: usize = 1 << (usize::BITS - 1);
+    const CLOSED: usize = 1 << (usize::BITS - 2);
     const ACTIVE: usize = Self::CLOSED - 1;
 
     pub(crate) fn acquire(self: &Arc<Self>, retiring_consumer: bool) -> Option<LeaseGuard> {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
-            if !retiring_consumer && current & Self::CLOSED != 0 {
+            if current & Self::SEALED != 0 || (!retiring_consumer && current & Self::CLOSED != 0) {
                 return None;
             }
             if current & Self::ACTIVE == Self::ACTIVE {
@@ -38,6 +39,15 @@ impl AdmissionLease {
 
     pub(crate) fn close(&self) {
         let previous = self.state.fetch_or(Self::CLOSED, Ordering::AcqRel);
+        if previous & Self::ACTIVE == 0 {
+            self.drained.notify_waiters();
+        }
+    }
+
+    pub(crate) fn seal(&self) {
+        let previous = self
+            .state
+            .fetch_or(Self::CLOSED | Self::SEALED, Ordering::AcqRel);
         if previous & Self::ACTIVE == 0 {
             self.drained.notify_waiters();
         }
@@ -72,5 +82,26 @@ pub(crate) struct LeaseGuard {
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
         self.lease.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hard_seal_rejects_a_stale_retiring_acquisition() {
+        let lease = Arc::new(AdmissionLease::default());
+        let retiring_consumer = true;
+
+        lease.close();
+        let admitted_before_seal = lease
+            .acquire(retiring_consumer)
+            .expect("retiring work may join tracked cleanup before the final fence");
+        lease.seal();
+
+        assert!(lease.acquire(retiring_consumer).is_none());
+        assert!(lease.acquire(false).is_none());
+        drop(admitted_before_seal);
     }
 }

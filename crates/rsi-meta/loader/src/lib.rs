@@ -16,32 +16,35 @@ use rsi_meta::{
     PluginDescriptor, PluginFactory, ProviderChannel, Result, ServiceEndpoint, ServiceFrame,
 };
 use rsi_meta_plugin::{
-    ABI_MAJOR, ABI_MINOR, Buffer, HostApi, PLUGIN_ENTRY_SYMBOL, PluginApi, PluginEntryFn,
-    STATUS_OK, borrow_abi_input,
+    ABI_MAJOR, ABI_MINOR, Buffer, PLUGIN_ENTRY_SYMBOL, PluginApi, PluginEntryFn, STATUS_OK,
 };
 use serde_json::Value;
 use std::ffi::c_void;
 use std::fmt;
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use thiserror::Error;
 
 mod catalog;
+mod catalog_io;
+mod catalog_resources;
+mod host_bridge;
 mod loader_plugin;
 mod returned_buffer;
 mod worker;
 
-use catalog::StagedArtifact;
+use catalog::{CatalogInner, StagedArtifact, StagedModuleLoad};
 pub use catalog::{CatalogOptions, NativeCatalog};
+pub use catalog_resources::{NativeCatalogLimits, NativeCatalogSnapshot};
+use host_bridge::call_native;
 pub use loader_plugin::{LoaderConfig, LoaderEntry, LoaderFactory};
 use returned_buffer::ReturnedPluginBuffer;
 use worker::{
-    CallbackCompletion, CallbackWaitError, CompletionOnDrop, run_bounded_callback,
-    spawn_native_worker,
+    CallbackCompletion, CallbackWaitError, CompletionOnDrop, DestructionReservation,
+    InstanceReservation, NativeExecutor, run_bounded_callback,
 };
 
 pub const LOADER_SERVICE_KEY: &str = "rsi.meta.loader";
@@ -54,8 +57,11 @@ struct NativeModule {
     api: PluginApi,
     descriptor: PluginDescriptor,
     library: Option<Library>,
-    artifact: Option<File>,
-    factory_gate: Mutex<()>,
+    artifact: Option<StagedArtifact>,
+    catalog: Option<Arc<CatalogInner>>,
+    factory_destruction_permit: Option<DestructionReservation>,
+    executor: NativeExecutor,
+    factory_gate: Arc<tokio::sync::Semaphore>,
     factory_poisoned: AtomicBool,
 }
 
@@ -80,10 +86,12 @@ impl NativeModule {
     /// The library is trusted native code and must uphold every contract in
     /// `rsi_meta_plugin.h`, including callback lifetime and no unwinding.
     unsafe fn load(
-        artifact: StagedArtifact,
+        resources: StagedModuleLoad,
         digest: String,
+        executor: NativeExecutor,
+        factory_destruction_permit: DestructionReservation,
     ) -> std::result::Result<Self, LoaderError> {
-        let path = artifact.loader_path();
+        let path = resources.artifact().loader_path();
         // SAFETY: Caller accepts execution of this verified trusted artifact.
         let library = unsafe { Library::new(&path) }?;
         // SAFETY: Symbol type and name are the complete v1 entry contract.
@@ -104,12 +112,16 @@ impl NativeModule {
                 plugin_minor: api.abi_minor,
             });
         }
+        let (artifact, catalog) = resources.into_parts();
         let mut module = Self {
             api,
             descriptor: PluginDescriptor::new(FactoryIdentity::builtin("unread", "0")),
             library: Some(library),
-            artifact: Some(artifact.file),
-            factory_gate: Mutex::new(()),
+            artifact: Some(artifact),
+            catalog: Some(catalog),
+            factory_destruction_permit: Some(factory_destruction_permit),
+            executor,
+            factory_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             factory_poisoned: AtomicBool::new(false),
         };
         let mut descriptor = module.read_descriptor()?;
@@ -121,8 +133,14 @@ impl NativeModule {
         Ok(module)
     }
 
+    fn staged_artifact(&self) -> &StagedArtifact {
+        self.artifact
+            .as_ref()
+            .expect("a loaded native module retains its staged artifact")
+    }
+
     fn read_descriptor(&self) -> std::result::Result<PluginDescriptor, LoaderError> {
-        let _gate = self.lock_factory("descriptor")?;
+        let _gate = self.try_lock_factory("descriptor")?;
         let mut output = Buffer::EMPTY;
         // SAFETY: The validated callback owns a live factory; output is writable.
         let status = unsafe {
@@ -133,7 +151,6 @@ impl NativeModule {
     }
 
     fn transform_config(&self, config: &Value) -> std::result::Result<Value, LoaderError> {
-        let _gate = self.lock_factory("validate_config")?;
         let input = serde_json::to_vec(&config)?;
         if input.len() > MAX_DESCRIPTOR_BYTES {
             return Err(LoaderError::InvalidInput(
@@ -158,8 +175,8 @@ impl NativeModule {
         self: &Arc<Self>,
         config: &Value,
         completed: &CallbackCompletion,
+        instance_reservation: InstanceReservation,
     ) -> std::result::Result<NativeInstance, LoaderError> {
-        let _gate = self.lock_factory("create")?;
         let _completion = CompletionOnDrop(completed);
         let input = serde_json::to_vec(&config)?;
         let mut instance = core::ptr::null_mut();
@@ -201,29 +218,26 @@ impl NativeModule {
         Ok(NativeInstance {
             module: Arc::clone(self),
             handle: instance,
-            call_gate: Mutex::new(()),
+            call_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             poisoned: AtomicBool::new(false),
             destroyed: AtomicBool::new(false),
+            instance_reservation: Some(instance_reservation),
         })
     }
 
-    fn lock_factory(
+    fn try_lock_factory(
         &self,
         operation: &'static str,
-    ) -> std::result::Result<std::sync::MutexGuard<'_, ()>, LoaderError> {
+    ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, LoaderError> {
         if self.factory_poisoned.load(Ordering::Acquire) {
             return Err(LoaderError::Callback {
                 operation,
                 message: "factory was poisoned by a timed-out callback".to_owned(),
             });
         }
-        let guard = self
-            .factory_gate
-            .lock()
-            .map_err(|_| LoaderError::Callback {
-                operation,
-                message: "factory callback lock was poisoned".to_owned(),
-            })?;
+        let guard = Arc::clone(&self.factory_gate)
+            .try_acquire_owned()
+            .map_err(|_| LoaderError::Busy { operation })?;
         if self.factory_poisoned.load(Ordering::Acquire) {
             return Err(LoaderError::Callback {
                 operation,
@@ -273,20 +287,18 @@ impl Drop for NativeModule {
         let Some(library) = self.library.take() else {
             return;
         };
-        let resources = Arc::new(Mutex::new(Some(FactoryResources {
+        let resources = FactoryResources {
             api: self.api,
             _library: library,
             _artifact: self.artifact.take(),
-        })));
-        let worker_resources = Arc::clone(&resources);
-        let spawn = std::thread::Builder::new()
-            .name("rsi-meta-native-destroy-factory".to_owned())
-            .spawn(move || {
-                let resources = worker_resources
-                    .lock()
-                    .expect("factory destruction state poisoned")
-                    .take()
-                    .expect("factory destruction runs once");
+            _catalog: self.catalog.take(),
+        };
+        let permit = self
+            .factory_destruction_permit
+            .take()
+            .expect("mapped factories retain reserved finalizer admission");
+        self.executor
+            .submit_reserved_destruction(permit, move |_permit| {
                 // SAFETY: NativeModule exclusively owned the factory. The
                 // resource bundle keeps the library mapped through callback exit.
                 unsafe {
@@ -296,18 +308,14 @@ impl Drop for NativeModule {
                 }
                 drop(resources);
             });
-        if spawn.is_err() {
-            // Thread creation failure cannot justify running foreign code on an
-            // arbitrary dropping thread. Leak the still-live mapping safely.
-            std::mem::forget(resources);
-        }
     }
 }
 
 struct FactoryResources {
     api: PluginApi,
     _library: Library,
-    _artifact: Option<File>,
+    _artifact: Option<StagedArtifact>,
+    _catalog: Option<Arc<CatalogInner>>,
 }
 
 // SAFETY: The ABI requires factory destruction to be callable from any host
@@ -318,6 +326,7 @@ pub struct NativeFactory {
     module: Arc<NativeModule>,
     descriptor: PluginDescriptor,
     callback_timeout: Duration,
+    executor: NativeExecutor,
 }
 
 impl fmt::Debug for NativeFactory {
@@ -326,6 +335,58 @@ impl fmt::Debug for NativeFactory {
             .debug_struct("NativeFactory")
             .field("descriptor", &self.descriptor)
             .finish_non_exhaustive()
+    }
+}
+
+impl NativeFactory {
+    pub(crate) fn module_digest(&self) -> &str {
+        match &self.descriptor.identity {
+            FactoryIdentity::Artifact { sha256, .. } => sha256,
+            FactoryIdentity::Builtin { .. } => {
+                unreachable!("a NativeFactory always has artifact identity")
+            }
+        }
+    }
+
+    fn register_instance(&self, context: &Context, instance: &Arc<NativeInstance>) -> Result<()> {
+        for provision in &self.descriptor.provides {
+            context.provide(
+                provision.key.clone(),
+                provision.contract.clone(),
+                provision.version,
+                Arc::new(NativeEndpoint {
+                    instance: Arc::downgrade(instance),
+                    service: Arc::from(provision.key.as_str()),
+                    callback_timeout: self.callback_timeout,
+                }),
+            )?;
+        }
+        let destruction_executor = self.executor.clone();
+        let cleanup_instance = Arc::clone(instance);
+        context.defer(
+            "native instance",
+            Box::new(move || {
+                let executor = destruction_executor.clone();
+                let instance = Arc::clone(&cleanup_instance);
+                Box::pin(async move {
+                    let gate = Arc::clone(&instance.call_gate)
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| "native instance gate is closed".to_owned())?;
+                    let destruction = executor
+                        .spawn_destruction(move || {
+                            let _gate = gate;
+                            instance.destroy_once();
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    destruction
+                        .await
+                        .map_err(|error| format!("native destruction worker failed: {error}"))
+                }) as CleanupFuture
+            }),
+        )?;
+        Ok(())
     }
 }
 
@@ -343,12 +404,15 @@ impl PluginFactory for NativeFactory {
             ));
         }
         let timeout = self.callback_timeout;
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let gate = module
+            .try_lock_factory("validate_config")
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let worker_module = Arc::clone(&module);
-        std::thread::Builder::new()
-            .name("rsi-meta-native-validate".to_owned())
-            .spawn(move || {
-                let _ = sender.send(worker_module.transform_config(&config));
+        let receiver = self
+            .executor
+            .spawn_blocking_callback("validate_config", move || {
+                let _gate = gate;
+                worker_module.transform_config(&config)
             })
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         match receiver.recv_timeout(timeout) {
@@ -363,18 +427,34 @@ impl PluginFactory for NativeFactory {
         }
     }
 
-    async fn activate(&self, context: Context, config: ConfigValue) -> Result<()> {
+    async fn activate(&self, context: Context, config: Arc<ConfigValue>) -> Result<()> {
         let module = Arc::clone(&self.module);
+        let gate = module
+            .try_lock_factory("create")
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let instance_reservation = self
+            .executor
+            .reserve_instance()
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let worker_module = Arc::clone(&module);
         let completed = Arc::new(CallbackCompletion::new());
         let worker_completed = Arc::clone(&completed);
-        let callback_result_rx = spawn_native_worker("rsi-meta-native-create", move || {
-            let result = worker_module.create(&config, &worker_completed);
-            worker_completed.complete();
-            result
-        })
-        .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let callback_result_rx = self
+            .executor
+            .spawn_callback("create", move || {
+                let _gate = gate;
+                let result =
+                    worker_module.create(config.as_ref(), &worker_completed, instance_reservation);
+                worker_completed.complete();
+                result
+            })
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let timeout = self.callback_timeout;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| {
+                MetaError::InvalidInput("native callback deadline overflow".to_owned())
+            })?;
         let timeout_module = Arc::clone(&module);
         let timeout_runtime = context.runtime().clone();
         let on_timeout: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -384,7 +464,7 @@ impl PluginFactory for NativeFactory {
         let callback_result = match run_bounded_callback(
             callback_result_rx,
             Arc::clone(&completed),
-            timeout,
+            deadline,
             on_timeout,
         )
         .await
@@ -401,44 +481,17 @@ impl PluginFactory for NativeFactory {
             Ok(instance) => Arc::new(instance),
             Err(error) => return Err(MetaError::Activation(error.to_string())),
         };
-        for provision in &self.descriptor.provides {
-            context.provide(
-                provision.key.clone(),
-                provision.contract.clone(),
-                provision.version,
-                Arc::new(NativeEndpoint {
-                    instance: Arc::downgrade(&instance),
-                    service: provision.key.clone(),
-                    callback_timeout: self.callback_timeout,
-                }),
-            )?;
-        }
-        context.defer(
-            "native instance",
-            Box::new(move || {
-                Box::pin(async move {
-                    let destruction =
-                        spawn_native_worker("rsi-meta-native-destroy-instance", move || {
-                            instance.destroy_once();
-                        })
-                        .map_err(|error| error.to_string())?;
-                    match tokio::time::timeout(timeout, destruction).await {
-                        Ok(Ok(())) => Ok(()),
-                        Ok(Err(error)) => Err(format!("native destruction worker failed: {error}")),
-                        Err(_) => Err("native instance destruction timed out".to_owned()),
-                    }
-                }) as CleanupFuture
-            }),
-        )
+        self.register_instance(&context, &instance)
     }
 }
 
 struct NativeInstance {
     module: Arc<NativeModule>,
     handle: *mut c_void,
-    call_gate: Mutex<()>,
+    call_gate: Arc<tokio::sync::Semaphore>,
     poisoned: AtomicBool,
     destroyed: AtomicBool,
+    instance_reservation: Option<InstanceReservation>,
 }
 
 // SAFETY: The adapter-owned call gate serializes access to the opaque mutable
@@ -454,13 +507,6 @@ impl NativeInstance {
     }
 
     fn destroy_once(&self) {
-        // The cleanup task may outlive the core admission lease after a timed-
-        // out callback. Join the adapter-owned instance gate before claiming
-        // destruction so foreign mutable access and destruction never overlap.
-        let _gate = self
-            .call_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.destroyed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -478,21 +524,24 @@ impl Drop for NativeInstance {
         if self.destroyed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let resources = Arc::new(Mutex::new(Some(InstanceResources {
+        let gate = Arc::clone(&self.call_gate)
+            .try_acquire_owned()
+            .expect("the final instance owner cannot race a serialized callback");
+        let resources = InstanceResources {
             module: Arc::clone(&self.module),
             handle: self.handle,
-        })));
-        let worker_resources = Arc::clone(&resources);
-        let spawn = std::thread::Builder::new()
-            .name("rsi-meta-native-destroy-instance".to_owned())
-            .spawn(move || {
-                let resources = worker_resources
-                    .lock()
-                    .expect("instance destruction state poisoned")
-                    .take()
-                    .expect("fallback instance destruction runs once");
-                // SAFETY: Drop atomically claimed the create-owned handle once;
-                // the resource bundle keeps its callback code mapped.
+            _gate: gate,
+        };
+        let reservation = self
+            .instance_reservation
+            .take()
+            .expect("an undestroyed native instance retains finalizer admission");
+        self.module.executor.submit_reserved_instance_destruction(
+            reservation,
+            move |_reservation| {
+                // SAFETY: NativeInstance::drop claimed this create-owned
+                // handle exactly once and moved its exclusive call-gate
+                // permit here. The module Arc retains the callback code.
                 unsafe {
                     resources
                         .module
@@ -500,18 +549,16 @@ impl Drop for NativeInstance {
                         .destroy_instance
                         .expect("validated API")(resources.handle);
                 }
-            });
-        if spawn.is_err() {
-            // Foreign code must not run on an arbitrary dropping thread. Keep
-            // both the handle and its mapped callback code alive instead.
-            std::mem::forget(resources);
-        }
+                drop(resources);
+            },
+        );
     }
 }
 
 struct InstanceResources {
     module: Arc<NativeModule>,
     handle: *mut c_void,
+    _gate: tokio::sync::OwnedSemaphorePermit,
 }
 
 // SAFETY: The ABI requires instance destruction after serialized callbacks to
@@ -520,7 +567,7 @@ unsafe impl Send for InstanceResources {}
 
 struct NativeEndpoint {
     instance: Weak<NativeInstance>,
-    service: rsi_meta::ServiceKey,
+    service: Arc<str>,
     callback_timeout: Duration,
 }
 
@@ -538,45 +585,80 @@ impl ServiceEndpoint for NativeEndpoint {
     async fn serve(
         &self,
         invocation: rsi_meta::InvocationContext,
-        mut channel: ProviderChannel,
+        mut channel: ProviderChannel<'_>,
     ) -> Result<()> {
+        let provider_context = invocation.provider_context().clone();
+        let maximum = provider_context
+            .runtime()
+            .limits()
+            .payloads
+            .maximum_frame_bytes;
+        let runtime = provider_context.runtime().clone();
+        let runtime_handle = tokio::runtime::Handle::current();
         while let Some(request) = channel.recv().await {
             let instance = self
                 .instance
                 .upgrade()
                 .ok_or_else(|| MetaError::Service("native instance is retiring".to_owned()))?;
-            let service = self.service.to_string();
-            let provider_context = invocation.provider_context().clone();
-            let maximum = provider_context.runtime().limits().maximum_frame_bytes;
-            let runtime = provider_context.runtime().clone();
-            let runtime_handle = tokio::runtime::Handle::current();
+            let service = Arc::clone(&self.service);
+            let frame_context = provider_context.clone();
+            let frame_runtime_handle = runtime_handle.clone();
+            // Fail fast before waiting behind a callback that timed out while
+            // retaining the serialized instance gate.
+            if instance.poisoned.load(Ordering::Acquire) {
+                return Err(MetaError::Service(
+                    "native instance was poisoned by a timed-out callback".to_owned(),
+                ));
+            }
+            let gate = Arc::clone(&instance.call_gate)
+                .acquire_owned()
+                .await
+                .map_err(|_| MetaError::Service("native instance gate is closed".to_owned()))?;
+            // Close the race in which the previous callback timed out while
+            // this frame was waiting for the gate, then eventually returned.
+            if instance.poisoned.load(Ordering::Acquire) {
+                return Err(MetaError::Service(
+                    "native instance was poisoned by a timed-out callback".to_owned(),
+                ));
+            }
             let completed = Arc::new(CallbackCompletion::new());
             let worker_completed = Arc::clone(&completed);
             let worker_instance = Arc::clone(&instance);
-            let callback_result_rx = spawn_native_worker("rsi-meta-native-call", move || {
-                let result = call_native(
-                    &worker_instance,
-                    &worker_completed,
-                    runtime_handle,
-                    provider_context,
-                    maximum,
-                    &service,
-                    request.as_bytes(),
-                );
-                worker_completed.complete();
-                result
-            })
-            .map_err(|error| MetaError::Service(error.to_string()))?;
+            let callback_result_rx = instance
+                .module
+                .executor
+                .spawn_callback("call", move || {
+                    let result = call_native(
+                        &worker_instance,
+                        &worker_completed,
+                        frame_runtime_handle,
+                        frame_context,
+                        maximum,
+                        service.as_ref(),
+                        request.as_bytes(),
+                    );
+                    worker_completed.complete();
+                    // NativeInstance::drop may run as the callback-owned Arc
+                    // is released, so publish the gate first.
+                    drop(gate);
+                    result
+                })
+                .map_err(|error| MetaError::Service(error.to_string()))?;
             let timeout_instance = Arc::clone(&instance);
             let timeout_runtime = runtime.clone();
             let on_timeout: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 timeout_instance.poison();
                 timeout_runtime.mark_terminal("trusted native plugin service callback timed out");
             });
+            let deadline = tokio::time::Instant::now()
+                .checked_add(self.callback_timeout)
+                .ok_or_else(|| {
+                    MetaError::InvalidInput("native callback deadline overflow".to_owned())
+                })?;
             let callback_result = match run_bounded_callback(
                 callback_result_rx,
                 Arc::clone(&completed),
-                self.callback_timeout,
+                deadline,
                 on_timeout,
             )
             .await
@@ -599,140 +681,26 @@ impl ServiceEndpoint for NativeEndpoint {
     }
 }
 
-struct HostCallContext {
-    runtime: tokio::runtime::Handle,
-    context: Context,
-    maximum_frame_bytes: usize,
-}
-
-unsafe extern "C" fn host_call_service(
-    handle: *mut c_void,
-    service_ptr: *const u8,
-    service_len: usize,
-    request_ptr: *const u8,
-    request_len: usize,
-    output: *mut Buffer,
-) -> u32 {
-    if handle.is_null()
-        || output.is_null()
-        || (service_ptr.is_null() && service_len != 0)
-        || (request_ptr.is_null() && request_len != 0)
-    {
-        return rsi_meta_plugin::STATUS_INVALID_ARGUMENT;
-    }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: The caller borrows these pointers for this synchronous call.
-        let service = unsafe { borrow_abi_input(service_ptr, service_len) };
-        let service = std::str::from_utf8(service).map_err(|error| error.to_string())?;
-        // SAFETY: The caller borrows these pointers for this synchronous call.
-        let request = unsafe { borrow_abi_input(request_ptr, request_len) };
-        // SAFETY: call_native owns this exact context for the callback duration.
-        let host = unsafe { &*(handle.cast::<HostCallContext>()) };
-        if request.len() > host.maximum_frame_bytes {
-            return Err("outbound service request exceeds the host frame limit".to_owned());
-        }
-        host.runtime.block_on(async {
-            host.context
-                .service(service)
-                .map_err(|error| error.to_string())?
-                .open()
-                .map_err(|error| error.to_string())?
-                .unary(ServiceFrame::new(request.to_vec()))
-                .await
-                .map(ServiceFrame::into_bytes)
-                .map_err(|error| error.to_string())
-        })
-    }));
-    let (status, bytes) = match result {
-        Ok(Ok(bytes)) => (STATUS_OK, bytes),
-        Ok(Err(error)) => (rsi_meta_plugin::STATUS_FAILED, error.into_bytes()),
-        Err(_) => (
-            rsi_meta_plugin::STATUS_PANICKED,
-            b"host service bridge panicked".to_vec(),
-        ),
-    };
-    // SAFETY: output is non-null and exclusively borrowed for this call.
-    unsafe { output.write(Buffer::from_vec(bytes)) };
-    status
-}
-
-unsafe extern "C" fn release_host_buffer(buffer: Buffer) {
-    // SAFETY: Host bridge buffers are allocated by Buffer::from_vec here.
-    unsafe { buffer.reclaim() };
-}
-
-fn call_native(
-    instance: &NativeInstance,
-    completed: &CallbackCompletion,
-    runtime: tokio::runtime::Handle,
-    context: Context,
-    maximum_frame_bytes: usize,
-    service: &str,
-    request: &[u8],
-) -> std::result::Result<Vec<u8>, LoaderError> {
-    if instance.poisoned.load(Ordering::Acquire) {
-        return Err(LoaderError::Callback {
-            operation: "call",
-            message: "instance was poisoned by a timed-out callback".to_owned(),
-        });
-    }
-    let _gate = instance
-        .call_gate
-        .lock()
-        .map_err(|_| LoaderError::Callback {
-            operation: "call",
-            message: "instance callback lock was poisoned".to_owned(),
-        })?;
-    let _completion = CompletionOnDrop(completed);
-    if instance.poisoned.load(Ordering::Acquire) {
-        return Err(LoaderError::Callback {
-            operation: "call",
-            message: "instance was poisoned by a timed-out callback".to_owned(),
-        });
-    }
-    let mut host_context = HostCallContext {
-        runtime,
-        context,
-        maximum_frame_bytes,
-    };
-    let host_api = HostApi {
-        abi_major: ABI_MAJOR,
-        abi_minor: ABI_MINOR,
-        struct_size: HostApi::STRUCT_SIZE,
-        reserved: 0,
-        host_handle: (&raw mut host_context).cast(),
-        call_service: Some(host_call_service),
-        release_buffer: Some(release_host_buffer),
-    };
-    let mut output = Buffer::EMPTY;
-    // SAFETY: Instance/module are live, host context and inputs are borrowed for
-    // this synchronous call, and output is writable.
-    let status = unsafe {
-        instance.module.api.call.expect("validated API")(
-            instance.handle,
-            &raw const host_api,
-            service.as_ptr(),
-            service.len(),
-            request.as_ptr(),
-            request.len(),
-            &raw mut output,
-        )
-    };
-    instance
-        .module
-        .take_buffer(status, output, maximum_frame_bytes, "call")
-}
-
 #[derive(Debug, Error)]
 pub enum LoaderError {
     #[error("native operation timed out: {0}")]
     Timeout(&'static str),
+    #[error("native operation is busy: {operation}")]
+    Busy { operation: &'static str },
     #[error("invalid loader input: {0}")]
     InvalidInput(String),
     #[error("native artifact exceeds the {MAX_ARTIFACT_BYTES}-byte limit")]
     ArtifactTooLarge,
+    #[error("private staged artifact changed after its digest was computed")]
+    StagedArtifactChanged,
     #[error("content-addressed cache collision at {0}")]
     CacheCollision(PathBuf),
+    #[error("native cache directory is already owned by another catalog: {0}")]
+    CacheLocked(PathBuf),
+    #[error("native cache durability is poisoned after an unprovable rollback")]
+    CachePoisoned,
+    #[error("native {resource} capacity is exhausted at limit {limit}")]
+    CapacityExhausted { resource: &'static str, limit: u64 },
     #[error("native plugin entry failed with status {status}")]
     PluginEntry { status: u32 },
     #[error(
@@ -767,15 +735,19 @@ mod tests {
     static DESTROYED_PARTIAL_INSTANCES: AtomicUsize = AtomicUsize::new(0);
     static DESTROYED_SLOW_INSTANCES: AtomicUsize = AtomicUsize::new(0);
 
+    fn test_executor() -> NativeExecutor {
+        NativeExecutor::new(8, 2, 8, 8).unwrap()
+    }
+
     #[test]
     fn callback_completion_and_timeout_have_one_winner() {
         let completed = CallbackCompletion::new();
         assert!(completed.complete());
-        assert!(!completed.time_out());
+        assert!(!completed.time_out(&|| {}));
         assert!(!completed.is_timed_out());
 
         let timed_out = CallbackCompletion::new();
-        assert!(timed_out.time_out());
+        assert!(timed_out.time_out(&|| {}));
         assert!(!timed_out.complete());
         assert!(timed_out.is_timed_out());
     }
@@ -814,8 +786,20 @@ mod tests {
     }
 
     #[test]
-    fn fallback_instance_drop_offloads_foreign_destruction() {
+    fn fallback_instance_drop_uses_reserved_capacity_when_the_queue_is_full() {
         DESTROYED_SLOW_INSTANCES.store(0, Ordering::Relaxed);
+        let executor = NativeExecutor::new(8, 1, 1, 1).unwrap();
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(executor.try_submit_destruction(move || {
+            release_receiver.recv().unwrap();
+        }));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while executor.snapshot().active_destructions != 1 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(executor.snapshot().active_destructions, 1);
+        assert!(executor.try_submit_destruction(|| {}));
+        let instance_reservation = executor.reserve_instance().unwrap();
         let instance = NativeInstance {
             module: Arc::new(NativeModule {
                 api: PluginApi {
@@ -825,13 +809,17 @@ mod tests {
                 descriptor: PluginDescriptor::new(FactoryIdentity::builtin("slow-drop", "1")),
                 library: None,
                 artifact: None,
-                factory_gate: Mutex::new(()),
+                catalog: None,
+                factory_destruction_permit: None,
+                executor: executor.clone(),
+                factory_gate: Arc::new(tokio::sync::Semaphore::new(1)),
                 factory_poisoned: AtomicBool::new(false),
             }),
             handle: Box::into_raw(Box::new(1_u8)).cast(),
-            call_gate: Mutex::new(()),
+            call_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             poisoned: AtomicBool::new(false),
             destroyed: AtomicBool::new(false),
+            instance_reservation: Some(instance_reservation),
         };
 
         let started = std::time::Instant::now();
@@ -840,6 +828,7 @@ mod tests {
             started.elapsed() < Duration::from_millis(100),
             "fallback Drop ran foreign destruction inline"
         );
+        release_sender.send(()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while DESTROYED_SLOW_INSTANCES.load(Ordering::Relaxed) == 0
             && std::time::Instant::now() < deadline
@@ -852,6 +841,8 @@ mod tests {
     #[test]
     fn failed_create_destroys_a_nonnull_partial_instance() {
         DESTROYED_PARTIAL_INSTANCES.store(0, Ordering::Relaxed);
+        let executor = test_executor();
+        let instance_reservation = executor.reserve_instance().unwrap();
         let module = Arc::new(NativeModule {
             api: PluginApi {
                 create: Some(create_partial_failure),
@@ -862,13 +853,16 @@ mod tests {
             descriptor: PluginDescriptor::new(FactoryIdentity::builtin("partial", "1")),
             library: None,
             artifact: None,
-            factory_gate: Mutex::new(()),
+            catalog: None,
+            factory_destruction_permit: None,
+            executor,
+            factory_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             factory_poisoned: AtomicBool::new(false),
         });
 
         let completed = CallbackCompletion::new();
         let error = module
-            .create(&Value::Null, &completed)
+            .create(&Value::Null, &completed, instance_reservation)
             .err()
             .expect("create must fail");
         assert!(!completed.is_timed_out());

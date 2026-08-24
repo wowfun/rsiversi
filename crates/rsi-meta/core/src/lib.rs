@@ -10,7 +10,7 @@
 //! they use Tokio-owned tasks, channels, cancellation, and deadlines. Cloned
 //! contexts and handles retain the runtime allocation, so dropping another
 //! [`Runtime`] clone does not invalidate them. Call [`Runtime::shutdown`] when
-//! deterministic teardown and its [`CleanupReport`] are required.
+//! deterministic teardown and its [`ShutdownOutcome`] are required.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -25,7 +25,10 @@ mod plugin;
 mod runtime;
 mod service;
 
-pub use cleanup::{CleanupFailure, CleanupReport};
+pub use cleanup::{
+    CleanupFailure, CleanupPhase, CleanupReport, ShutdownOutcome, UnresolvedCleanup,
+    UnresolvedCleanupReport,
+};
 pub use error::{MetaError, Result};
 pub use events::{DispatchMode, EventHandler, EventOptions, EventOutcome, EventReceipt};
 pub use ids::{
@@ -37,8 +40,10 @@ pub use plugin::{
     Provision, Requirement,
 };
 pub use runtime::{
-    Context, FiberHandle, FiberSnapshot, FiberState, PendingReason, PreparedPlugin, Runtime,
-    RuntimeLimits, RuntimeSnapshot,
+    Context, DeadlineLimits, ExecutionLimits, FiberHandle, FiberSnapshot, FiberState,
+    MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, PayloadLimits, PendingReason, PendingReport,
+    PreparedPlugin, ResourceUsageSnapshot, Runtime, RuntimeLimits, RuntimeResourceSnapshot,
+    RuntimeSnapshot, TopologyLimits,
 };
 pub use service::{
     InvocationContext, ProviderChannel, ServiceCall, ServiceEndpoint, ServiceFrame, ServiceHandle,

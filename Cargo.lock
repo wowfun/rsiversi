@@ -1540,7 +1540,6 @@ name = "rsi-meta"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "bytes",
  "futures-util",
  "serde",
  "serde_json",
@@ -1560,6 +1559,7 @@ dependencies = [
  "libloading",
  "rsi-meta",
  "rsi-meta-plugin",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

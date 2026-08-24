@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::fmt;
+use std::sync::Arc;
 
 mod descriptor;
 pub use descriptor::{FactoryIdentity, PluginDescriptor, Provision, Requirement};
@@ -26,5 +27,8 @@ pub trait PluginFactory: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Stages services, listeners, children, and effects for one generation.
-    async fn activate(&self, context: Context, config: ConfigValue) -> Result<()>;
+    ///
+    /// Configuration is shared with the Fiber so repeated convergence does not
+    /// deep-clone the validated JSON tree.
+    async fn activate(&self, context: Context, config: Arc<ConfigValue>) -> Result<()>;
 }

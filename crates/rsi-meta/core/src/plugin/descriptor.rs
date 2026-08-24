@@ -1,4 +1,4 @@
-use crate::{ContractId, ContractVersion, MetaError, Result, ServiceKey};
+use crate::{ContractId, ContractVersion, ServiceKey};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -128,27 +128,5 @@ impl PluginDescriptor {
     pub fn providing(mut self, provision: Provision) -> Self {
         self.provides.push(provision);
         self
-    }
-
-    pub(crate) fn validate(&self) -> Result<()> {
-        let mut requirements = std::collections::BTreeSet::new();
-        for requirement in &self.requires {
-            if !requirements.insert(requirement.key.clone()) {
-                return Err(MetaError::InvalidInput(format!(
-                    "factory {} declares requirement {} more than once",
-                    self.identity, requirement.key
-                )));
-            }
-        }
-        let mut provisions = std::collections::BTreeSet::new();
-        for provision in &self.provides {
-            if !provisions.insert(provision.key.clone()) {
-                return Err(MetaError::InvalidInput(format!(
-                    "factory {} declares provision {} more than once",
-                    self.identity, provision.key
-                )));
-            }
-        }
-        Ok(())
     }
 }

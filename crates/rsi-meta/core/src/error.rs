@@ -84,6 +84,15 @@ pub enum MetaError {
         /// Stable name of the exhausted resource class.
         resource: &'static str,
     },
+    /// A fail-fast operation already has its configured in-flight population.
+    #[error("operation is busy: {operation}")]
+    Busy {
+        /// Stable name of the operation class.
+        operation: &'static str,
+    },
+    /// A preparation proof was presented to a Runtime other than its owner.
+    #[error("prepared plugin belongs to a different runtime")]
+    PreparedForDifferentRuntime,
     /// Plugin configuration normalization rejected its input or output.
     #[error("plugin configuration is invalid: {0}")]
     InvalidConfig(String),
@@ -93,6 +102,9 @@ pub enum MetaError {
     /// A service stream or endpoint failed.
     #[error("service call failed: {0}")]
     Service(String),
+    /// A service endpoint unwound instead of returning a bounded error.
+    #[error("service endpoint panicked")]
+    ServiceEndpointPanicked,
     /// Event dispatch or one of its listeners failed.
     #[error("event dispatch failed: {0}")]
     Event(String),

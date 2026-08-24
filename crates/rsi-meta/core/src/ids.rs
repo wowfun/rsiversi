@@ -37,6 +37,12 @@ macro_rules! string_id {
                 formatter.write_str(&self.0)
             }
         }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
     };
 }
 
