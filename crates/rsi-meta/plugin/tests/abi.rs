@@ -5,7 +5,9 @@ use rsi_meta_plugin::{
     STATUS_OK, STATUS_PANICKED, copy_buffer, plugin_api,
 };
 use serde_json::{Value, json};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::fs;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

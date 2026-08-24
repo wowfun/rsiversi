@@ -151,7 +151,6 @@ name = "rsi-meta"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "bytes",
  "futures-util",
  "serde",
  "serde_json",

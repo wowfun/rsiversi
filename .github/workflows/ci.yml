@@ -73,6 +73,13 @@ jobs:
         timeout-minutes: 10
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
         timeout-minutes: 30
+      - name: Lint standalone rsi-meta cycle probe
+        run: cargo clippy --locked --manifest-path fixtures/rsi-meta/cycle-probe/Cargo.toml --all-targets -- -D warnings
+        timeout-minutes: 10
+      - name: Exercise rsi-meta lifecycle and scalability probe
+        if: runner.os == 'Linux'
+        run: cargo run --release --locked --manifest-path fixtures/rsi-meta/cycle-probe/Cargo.toml
+        timeout-minutes: 15
       - name: Exercise the root workspace
         run: cargo test --locked --workspace --all-targets
         timeout-minutes: 30
@@ -100,12 +107,55 @@ jobs:
             cargo audit --no-fetch --file "$lockfile"
           done < <(find . -name Cargo.lock -not -path '*/target/*' ! -path './Cargo.lock' -print | sort)
 
+  windows-rsi-meta:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify runner architecture
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+            throw "expected an x86_64 runner, found $env:PROCESSOR_ARCHITECTURE"
+          }
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
+        with:
+          toolchain: 1.97.0
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: . -> target
+      - name: Verify rsi-meta code health
+        run: cargo xtask rsi-meta code-health
+        timeout-minutes: 10
+      - name: Lint rsi-meta packages
+        shell: pwsh
+        run: |
+          cargo clippy --locked -p rsi-meta --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked -p rsi-meta-plugin --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked -p rsi-meta-loader --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        timeout-minutes: 20
+      - name: Exercise rsi-meta packages and native echo-bidi
+        shell: pwsh
+        run: |
+          cargo test --locked -p rsi-meta --all-targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p rsi-meta-plugin --all-targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p rsi-meta-loader --all-targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        timeout-minutes: 30
+
   ci-required:
     if: always()
     needs:
       - documentation
       - conformance
       - dependency-audit
+      - windows-rsi-meta
     runs-on: ubuntu-24.04
     steps:
       - name: Require every CI contract
@@ -113,7 +163,9 @@ jobs:
           DOCUMENTATION: ${{ needs.documentation.result }}
           CONFORMANCE: ${{ needs.conformance.result }}
           DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
+          WINDOWS_RSI_META: ${{ needs.windows-rsi-meta.result }}
         run: |
           test "$DOCUMENTATION" = success
           test "$CONFORMANCE" = success
           test "$DEPENDENCY_AUDIT" = success
+          test "$WINDOWS_RSI_META" = success
