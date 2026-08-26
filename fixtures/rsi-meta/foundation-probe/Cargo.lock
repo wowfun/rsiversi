@@ -160,7 +160,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-meta-fixture-cycle-probe"
+name = "rsi-meta-fixture-foundation-probe"
 version = "0.0.1"
 dependencies = [
  "async-trait",

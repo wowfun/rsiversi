@@ -13,7 +13,9 @@ use syn::{Meta, Token};
 
 const BASELINE_PATH: &str = "crates/rsi-meta/code-health.toml";
 const HARD_LIMIT: usize = 1_200;
-const REGIONS: [&str; 6] = ["core", "runtime", "service", "events", "loader", "abi"];
+const REGIONS: [&str; 7] = [
+    "core", "runtime", "service", "events", "scope", "loader", "abi",
+];
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +114,7 @@ pub fn run(repository: &Path, write: bool) -> Result<(), String> {
 fn require_repository_root(repository: &Path) -> Result<(), String> {
     if repository.join("Cargo.toml").is_file()
         && repository.join("crates/rsi-meta/core/src").is_dir()
+        && repository.join("crates/rsi-meta/scope/src").is_dir()
         && repository.join("crates/rsi-meta/loader/src").is_dir()
     {
         Ok(())
@@ -151,7 +154,7 @@ fn validate_baseline_shape(baseline: &Baseline) -> Result<(), String> {
         .collect::<BTreeSet<_>>();
     if actual != expected {
         return Err(
-            "code-health baseline must contain exactly the six foundation regions".to_owned(),
+            "code-health baseline must contain exactly the seven foundation regions".to_owned(),
         );
     }
     Ok(())
@@ -160,6 +163,7 @@ fn validate_baseline_shape(baseline: &Baseline) -> Result<(), String> {
 fn measure_repository(repository: &Path) -> Result<Vec<Measurement>, String> {
     let mut paths = Vec::new();
     collect_rust_files(&repository.join("crates/rsi-meta/core/src"), &mut paths)?;
+    collect_rust_files(&repository.join("crates/rsi-meta/scope/src"), &mut paths)?;
     collect_rust_files(&repository.join("crates/rsi-meta/loader/src"), &mut paths)?;
     collect_rust_files(&repository.join("crates/rsi-meta/plugin/src"), &mut paths)?;
     paths.sort();
@@ -232,7 +236,9 @@ fn collect_rust_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), 
 
 fn classify(path: &Path) -> &'static str {
     let normalized = path.to_string_lossy().replace('\\', "/");
-    if normalized.starts_with("crates/rsi-meta/loader/src/") {
+    if normalized.starts_with("crates/rsi-meta/scope/src/") {
+        "scope"
+    } else if normalized.starts_with("crates/rsi-meta/loader/src/") {
         "loader"
     } else if normalized.starts_with("crates/rsi-meta/plugin/src/") {
         "abi"
@@ -240,7 +246,7 @@ fn classify(path: &Path) -> &'static str {
         "runtime"
     } else if normalized.contains("/service/") || normalized.ends_with("/service.rs") {
         "service"
-    } else if normalized.ends_with("/events.rs") {
+    } else if normalized.contains("/events/") || normalized.ends_with("/events.rs") {
         "events"
     } else {
         "core"
@@ -447,5 +453,43 @@ mod tests {
 
         let excluded = test_only_module_files(&[root, gated.clone()]).unwrap();
         assert_eq!(excluded, BTreeSet::from([gated]));
+    }
+
+    #[test]
+    fn classifies_scope_as_its_own_region() {
+        assert_eq!(
+            classify(Path::new("crates/rsi-meta/scope/src/lib.rs")),
+            "scope"
+        );
+    }
+
+    #[test]
+    fn classifies_event_submodules_with_their_owner() {
+        assert_eq!(
+            classify(Path::new("crates/rsi-meta/core/src/events/target.rs")),
+            "events"
+        );
+    }
+
+    #[test]
+    fn baseline_requires_the_scope_region() {
+        let baseline = Baseline {
+            version: 1,
+            hard_limit: HARD_LIMIT,
+            regions: [
+                ("abi".to_owned(), 1),
+                ("core".to_owned(), 1),
+                ("events".to_owned(), 1),
+                ("loader".to_owned(), 1),
+                ("runtime".to_owned(), 1),
+                ("service".to_owned(), 1),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let error = validate_baseline_shape(&baseline)
+            .expect_err("a baseline without scope must not own every production package");
+        assert!(error.contains("seven foundation regions"));
     }
 }

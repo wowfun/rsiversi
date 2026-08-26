@@ -2,9 +2,10 @@ version = 1
 hard_limit = 1200
 
 [regions]
-abi = 197
-core = 117
-events = 46
-loader = 668
-runtime = 998
-service = 226
+abi = 195
+core = 113
+events = 40
+loader = 1146
+runtime = 875
+scope = 443
+service = 217

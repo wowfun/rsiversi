@@ -67,21 +67,27 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> target
-      - run: cargo fmt --all --check
-        timeout-minutes: 10
+      - name: Exercise rsi-meta conformance
+        run: cargo xtask rsi-meta conformance
+        timeout-minutes: 45
       - run: cargo xtask rsi-meta code-health
         timeout-minutes: 10
-      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Lint the non-rsi-meta root workspace
+        run: >-
+          cargo clippy --locked --workspace --all-targets --all-features
+          --exclude rsi-meta
+          --exclude rsi-meta-scope
+          --exclude rsi-meta-plugin
+          --exclude rsi-meta-loader
+          -- -D warnings
         timeout-minutes: 30
-      - name: Lint standalone rsi-meta cycle probe
-        run: cargo clippy --locked --manifest-path fixtures/rsi-meta/cycle-probe/Cargo.toml --all-targets -- -D warnings
-        timeout-minutes: 10
-      - name: Exercise rsi-meta lifecycle and scalability probe
-        if: runner.os == 'Linux'
-        run: cargo run --release --locked --manifest-path fixtures/rsi-meta/cycle-probe/Cargo.toml
-        timeout-minutes: 15
-      - name: Exercise the root workspace
-        run: cargo test --locked --workspace --all-targets
+      - name: Exercise the non-rsi-meta root workspace
+        run: >-
+          cargo test --locked --workspace --all-targets
+          --exclude rsi-meta
+          --exclude rsi-meta-scope
+          --exclude rsi-meta-plugin
+          --exclude rsi-meta-loader
         timeout-minutes: 30
       - name: Exercise agent protocol feature-unification boundary
         if: runner.os == 'Linux'
@@ -121,33 +127,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
-          components: clippy
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> target
       - name: Verify rsi-meta code health
         run: cargo xtask rsi-meta code-health
         timeout-minutes: 10
-      - name: Lint rsi-meta packages
-        shell: pwsh
-        run: |
-          cargo clippy --locked -p rsi-meta --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked -p rsi-meta-plugin --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked -p rsi-meta-loader --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        timeout-minutes: 20
-      - name: Exercise rsi-meta packages and native echo-bidi
-        shell: pwsh
-        run: |
-          cargo test --locked -p rsi-meta --all-targets
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p rsi-meta-plugin --all-targets
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p rsi-meta-loader --all-targets
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        timeout-minutes: 30
+      - name: Exercise rsi-meta conformance and native echo-bidi
+        run: cargo xtask rsi-meta conformance
+        timeout-minutes: 45
 
   ci-required:
     if: always()
