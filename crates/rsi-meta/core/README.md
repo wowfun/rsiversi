@@ -1,60 +1,171 @@
 # rsi-meta
 
-The public module is `Runtime -> Context -> FiberHandle`.
+The public composition seam is `Runtime -> Context -> FiberHandle`. The crate
+contains no unsafe code.
 
-All public async operations must be polled inside a Tokio runtime with time
-enabled. Once application inserts a Fiber, it captures that executor for the
-Runtime-owned ownership handoff: destroying the waiter on another thread still
-schedules disposal and cannot strand scheduler state. The host keeps that
-executor alive until the Fiber is disposed and Runtime shutdown completes.
-Synchronous `ServiceHandle::open` uses that captured authority to start the
-Runtime-owned call driver and therefore does not require an ambient Tokio
-context or a panic-based time-driver probe.
-`Context`, `FiberHandle`, and `ServiceHandle` retain their owning
-Runtime; call `Runtime::shutdown` when deterministic teardown and a complete
-cleanup report are required.
+## Runtime
 
-`Runtime` owns bounded registries, retained plugin configuration, and shutdown. Its construction policy is grouped into topology, payload, execution, and deadline limits; construction validates every value and relationship needed by downstream Tokio primitives and caps configured JSON depth at the implementation-safe maximum of 128, so an accepted policy cannot panic later while allocating a semaphore, channel, deadline, or recursively encoding an already shape-checked value. Every owned configuration, intercept, and event value crosses an iterative-destruction guard before fallible work or future construction; rejected values, never-polled futures, normalized plugin output, and handler output therefore cannot turn untrusted nesting into recursive-drop stack exhaustion. `Runtime::resource_snapshot` reports logical budget usage, high-water marks, and rejected reservations for capacity planning; these values describe retained Runtime ownership rather than allocator RSS.
+`Runtime::new` validates one policy grouped into topology, payload, execution,
+and deadline limits. Accepted values are safe for every downstream channel,
+semaphore, counter, JSON traversal, and deadline. `resource_snapshot` reports
+logical retained ownership, high-water marks, and rejected reservations rather
+than allocator RSS.
 
-A cloned `Context` is a persistent capability value containing a Fiber owner, service-isolation selections, direct-edge intercept data, and call trace. Scope-builder methods are fallible, consume the selected value, and use copy-on-write storage, so an unbranched chain extends in place while cloned sibling scopes remain immutable and independent. They bound service identifiers, entry count, retained overlay bytes, and JSON shape before extending the scope. The overlay-byte budget counts each retained per-service encoding, including its quoted and JSON-escaped service key, list delimiters, values, and value separators. Intercept layers retain their exact encoded length, making each append validate only the new value rather than re-encoding the complete chain. Each `Context::apply(factory, config)` bounds the input, validates the factory, bounds the normalized output, and creates a new Fiber. Callers that must preflight a batch use `Runtime::prepare` and `Context::apply_prepared`: the opaque proof is bound to its creating Runtime, reserves its Fiber and retained-byte capacity until application or drop, and proves normalization ran exactly once. Applying it to another Runtime is rejected. Factory identity may be shared, mutable Fiber state never is.
+All public async operations require a Tokio runtime with time enabled. A Fiber
+captures its executor at insertion so Runtime-owned transitions, rollback, and
+cleanup remain schedulable when the initiating waiter is dropped on another
+thread. Synchronous capability opening uses the captured executor and does not
+require an ambient Tokio context.
 
-`Runtime::snapshot` captures the bounded Fiber membership and registry facts
-under the global state lock, releases that lock, and then reads each Fiber. It
-therefore describes one membership point with subsequently observed Fiber
-states without blocking registry mutations across every per-Fiber lock.
+`Runtime::snapshot` captures bounded registry membership under the Runtime
+lock, releases it, and then observes individual Fibers. It is an operational
+snapshot, not one global linearizable image. `Runtime::shutdown` is the
+deterministic quiescence boundary.
 
-A Fiber converges independently. Requirements are resolved from one registry revision. Missing providers, exact contract mismatches, and dependency cycles are observable through a `PendingReport`; retained reasons and the cycle service sample obey the diagnostic entry and aggregate UTF-8 byte limits, while `total_reasons` and `truncated` disclose omitted detail. Cycle diagnosis walks only declarations reachable from the pending Fiber through an incrementally maintained declaration index; unrelated Fibers are not part of its cost. Preparation validates identifier lengths, per-Fiber declaration counts, global declaration and dependency budgets, encoded descriptor/config bytes, and JSON depth and node counts before retaining data. It builds immutable requirement and provision indexes once, so activation does not rescan a descriptor for every staged provision. Activation is staged: services and listeners publish only after `activate` succeeds. Failure or cancellation removes all staged ownership and rolls back children and effects in reverse order. Each loading generation has its own cancellation fence: a newer desired revision cancels the stale attempt before dependent convergence waits, including when activation reentrantly awaits disposal of the provider whose withdrawal invalidated that attempt. A queued intent at the saturated revision is still reconciled even though its numeric revision cannot increase. Each run captures the completion prefix present when it starts and settles only that prefix; tickets registered during the run wait for the queued rerun. A Fiber admits at most one reconfiguration transaction; a concurrent request returns `Busy`, while an admitted transaction remains Runtime-owned through convergence if its initiating future is dropped. Disposal linearizes by setting `disposed` under the Fiber data lock and never waits for the reconfiguration gate while holding the transition: an in-flight normalizer either observes that fence before publication or has its reconciliation ticket completed as disposed. Its normalized configuration uses a separate pessimistic staging reservation that is shrunk into a shared Runtime-owned configuration lease; an in-flight activation retains that lease across its await, so reconfiguration accounts the old and new allocations for their complete coexistence. Reconfiguration and provider replacement create a new monotonically identified generation, and every operation validates owner generation and consumes the protected Fiber state under the same lock acquisition, so captured Contexts and service handles cannot cross that fence. Service-change reconciliation admits a bounded number of independent Fibers concurrently, while each Fiber retains its own transition serialization.
+## Context
 
-Declaration insertion and removal refresh only affected pending diagnostics.
-Unlike actual provider publication or withdrawal, a declaration-only change
-does not invalidate bindings or cancel a loading or active generation.
+A cloned `Context` retains its Runtime, owner generation, service-isolation
+map, direct-edge intercepts, call trace, and typed extensions. Builders consume
+the selected value and use copy-on-write storage, so cloned siblings remain
+independent. Identifiers, entries, intercept JSON shape, and retained encoding
+are validated before the new Context exists.
 
-Reverse dependencies use the exact service slot (key plus selected isolation),
-so a same-named provider change in another isolation does not schedule the
-consumer. Every terminal disposal path, including a caught late panic, settles
-the Fiber's already-registered reconciliation tickets with its final snapshot.
+Typed extensions are safe-Rust values keyed by a marker type. They are inherited
+by derived Contexts, may be shadowed without mutating siblings, and are not
+serialized or passed through native ABI v2.
 
-Across independently reserved channel slots, service byte admission is
-work-conserving for mixed frame sizes: a fitting frame may bypass an older frame
-that cannot yet fit, while a bounded bypass count eventually reserves released
-capacity for the older frame.
+`Context::apply` inserts one child Fiber. Application preparation is
+Runtime-bound, fail-fast, and capacity-reserved. The factory's per-attempt
+`prepare` step borrows the Fiber's bounded retained desired configuration
+without a generation Context and returns one single-use `PreparedActivation`.
+That value owns only the current attempt's normalized activation configuration,
+exact requirements, and at most one opaque safe-Rust state value. The factory
+declares the state's retained-byte charge; this is a trusted typed-Rust resource
+contract, while configuration and requirement metadata are measured by core.
+Core conservatively holds that charge until the attempt retires, even after
+activation takes the value, because the plugin may move it into
+generation-owned state; there is no byte-exact early-release claim.
+Every later attempt prepares again from the unchanged desired value, never from
+the previous normalized result. Requirements are resolved into an
+`ActivationPlan` containing exact injected capabilities and the single-use
+state. Before plugin entry, core allocates a nonzero call-lineage seed, installs
+it on the activation Context with the current Fiber as origin and no parent,
+and exposes it as `ActivationPlan::lineage_call_id`. Exhaustion fails before
+`activate` is called. A wrong-type state take fails without consuming the value.
 
-Service calls use bounded bidirectional channels, one Runtime-wide concurrent-call admission limit, and one weighted budget for bytes queued in either direction. Capacity exhaustion is reported before channel allocation or provider invocation. After provider admission is held, call opening revalidates the caller generation and exact binding before allocating channels or spawning the driver, so a concurrent caller transition cannot launch work from a stale handle. One Runtime-owned call driver owns the real channel halves, absolute deadline, cancellation, provider-generation lease, and exactly one explicit terminal. The endpoint receives a borrowed `ProviderChannel<'_>` that safe Rust cannot detach beyond `serve`; panic becomes a call-local `ServiceEndpointPanicked` terminal, while endpoint errors are formatted directly into a bounded service diagnostic before terminal publication. A Runtime-terminal or absolute-deadline selection remains authoritative if destroying the losing endpoint future panics; cancellation and provider completion still surface such a destructor panic as `ServiceEndpointPanicked`. Endpoint-future destruction is synchronous and precedes terminal publication and provider-lease release, so trusted endpoint `Drop` code may delay that driver and a shutdown waiter but cannot outlive tracked generation ownership. A clean terminal alone produces EOF, so unary calls cannot mistake a panic or provider error after one response for success. The driver releases the provider-generation lease after endpoint exit and terminal publication; the caller retains only the shared Runtime and service-call admission until it observes that terminal or drops the call. Terminal observation immediately destroys the caller response inbox, releasing every queued frame and its weighted-byte reservation even when a losing provider send completed late. Receiving a frame releases its queued-byte permit. The runtime also mints call identity, origin, immediate caller, provider Context, caller Context, and the direct requirement-edge overlay. Safe-Rust service endpoints and event handlers may run concurrently; an execution adapter that cannot uphold `Send + Sync` concurrency owns its serialization policy. Provider retirement stops ordinary admission, converges dependents, hard-seals stale retiring admission, drains calls admitted before that seal without freeing resources still reachable by a live call, disposes children, then runs effects in strict reverse order.
+## Fiber and effects
 
-Events take a listener snapshot before invocation. One validated immutable input value is shared across listeners; `emit` invokes in order, `parallel` aggregates failures, `serial` stops on `Complete`, and `waterfall` passes each `Continue` value to the next listener. Input and every handler-produced event value obey the frame-size bound without requiring an encoded allocation merely to count it. `prepend`, exactly-once claiming, global, and service-isolated listeners are part of the same bounded generation lifecycle. Dispatch authority is generation-fenced. One deadline starts at dispatch admission and bounds the complete dispatch; handler panics become event errors and parallel siblings finish independently.
+A Fiber is one independently converging plugin authority. Its observable states
+are Pending, Loading, Active, Unloading, Failed, and Disposed. Missing actual
+supplies keep it Pending. Stale desired revisions or changed supply identities
+cancel and roll back Loading before a fresh attempt.
 
-Application, admitted reconfiguration, reconciliation, public disposal, and shutdown teardown are Runtime-owned operations. Preparation and direct application use fail-fast admission rather than an internal waiting queue. One absolute transition deadline starts when an async `apply`, `apply_prepared`, or `reconfigure` waiter is admitted and bounds that caller across blocking preparation, scheduler delay, activation, and convergence. A timeout drops only that waiter: blocking work retains its preparation permit, an inserted but unacknowledged application is disposed, and admitted reconfiguration, rollback, and cleanup continue under Runtime ownership. Direct synchronous `Runtime::prepare` is caller-owned preflight and has no async waiter deadline. A Runtime-wide closeable lease covers the gap between each external admission check and its first logical resource reservation; `PreparedPlugin` retains that lease, and application transfers it only after Fiber insertion. Application ownership transfers only after the initiating future acknowledges its returned handle; cancellation before that point disposes the Fiber. Once a public disposal begins, dropping its initiating future does not cancel child or effect cleanup, and later disposal callers join the same result. A child that finishes public disposal transfers its bounded report into the owning generation before removing the ownership edge, so later parent or shutdown teardown cannot lose that result without retaining unbounded child history. User cleanup-effect panics are isolated as bounded failures; a panic outside that boundary means the cleanup transaction can no longer prove publication withdrawal and permanently terminalizes the Runtime. Terminal state fences publication, so an in-flight activation is rolled back instead of becoming Active after the Runtime terminalizes. Shutdown closes admission, cancels call and dispatch drivers, captures strong references to the current root disposal runs, and starts or joins them concurrently; registry removal by a racing public disposal cannot erase a captured cleanup report. Retiring calls remain allowed only until disposal and scheduler work end; shutdown then atomically hard-seals both ordinary and retiring admission before the final drain. Existing leases may delay `Complete` without head-of-line blocking independent cleanup. Completion additionally requires the scheduler, resource ledger, and registry to be quiescent. `Complete` reports cleanup quiescence even when a prior terminal reason remains visible in `Runtime::snapshot`; `TimedOut` is reserved for a waiter that still has tracked work to join. One Runtime-wide wait deadline bounds each caller rather than multiplying by the root count; it is independent of transition, service-call, and event-dispatch deadlines and does not authorize abandoning cleanup.
+Reconfiguration stages and prepares its replacement before installing a new
+desired revision or retiring the current Active generation. Old and replacement
+desired/attempt ownership is charged while it coexists. A staging failure leaves
+the installed revision, requirement watchers, and Active generation unchanged;
+a successful install atomically replaces the desired value, pending attempt, and
+watchers.
 
-`CleanupReport` is an observation-only value: Runtime teardown and validated
-deserialization are its only sources of non-clean state. Callers inspect its
-retained failures, total failure count, and truncation marker through accessors;
-they cannot mutate those fields into a state that contradicts `is_clean` or the
-serialized report.
+Every Loading attempt owns an `EffectTxn` whose wrapper is registered before
+plugin code. `defer` appends one labeled asynchronous undo, `commit` retains
+the resulting LIFO effect group, and `abort` joins rollback. Dropping an open
+transaction transfers abort to Runtime-owned work. Once unload begins, a new
+transaction and commit fail. The setup owner of an already-open transaction
+may still defer the exact undo it just acquired before abort, Drop, or the
+failed commit closes that setup window. `InvocationContext::caller_effect`
+exposes the same authority fenced to the exact caller generation.
 
-An unexpected panic in the persistent shutdown driver, or a joined disposal
-that cannot prove quiescence, is cached as `ShutdownOutcome::Failed`; later
-callers observe that failure immediately with a fresh bounded unresolved
-snapshot instead of repeatedly waiting the complete shutdown deadline. It is
-never reported as `Complete` without a proven quiescence fence.
+`Context::provide` dynamically claims a service slot and returns a
+`SupplyId`-fenced disposer. Loading occupies the slot but external lookup and
+injection require Active. Listener and product registrations are immediately
+visible because their undo is already owned. Supply withdrawal removes
+visibility before dependent convergence and admitted-call drain.
+`Context::provide_and_capture` atomically returns that disposer together with
+the providing generation's own `Capability`: capability admission precedes
+registry publication, so a failed capture never leaves a registered supply.
+A dormant supply disposer keeps only a weak Runtime reference because its
+generation effect record is already Runtime-owned. Starting disposal upgrades
+that reference into task-lifetime ownership; dropping the final Runtime owner
+instead drops the dormant cleanup and the registry state together, without an
+ownership cycle.
 
-The crate denies unsafe code. Execution backends implement `PluginFactory` outside core.
+## Message capabilities
+
+`Message` contains opaque bytes and transferable `Capability` handles.
+Minting accounts one unique capability entry. Cloning or transferring a Rust
+handle shares that entry; it neither mints another authority nor registers
+another generation-owned entry. Safe Rust exposes no raw token,
+reconstruction, import operation, capability kind, or rights metadata; native
+capability IDs belong to the independent ABI/Loader adapter. Retirement
+immediately revokes use and removes the entry from its generation's revocation
+set, while the unique entry reservation remains charged until the final safe
+handle or containing Message drops. This keeps retained stale handles inside
+the same memory bound and means callers release their own capabilities before
+expecting a clean Runtime shutdown.
+`Capability::detach` is the adapter retention seam: it consumes the strong
+holder Context, preserves the exact entry and charge, and keeps only a weak
+snapshot of the original holder scope. `DetachedCapability::upgrade` can
+reconstruct that same holder while Runtime exists; it cannot choose a new
+Context or retain activation setup authority.
+Sending admits the destination channel position, byte weight, and queued
+references as one operation. A sender waiting for that transaction consumes a
+separate bounded pending-send reservation and holds none of those three queue
+resources. Waiters have keyed cancellation and a constant per-channel
+candidate window; unchanged nonfitting work is not rescanned on registration
+or cancellation. Handles retain their exact generation authority until the
+final owner drops. Their `Debug` output contains only logical service/provider
+facts.
+
+`Capability::open` creates a bounded bidirectional call. The caller can send
+Messages, finish requests, receive Messages, cancel, and observe one explicit
+terminal. Providers receive a borrowed channel. `Capability::invoke` requires
+one response followed by a clean terminal and rejects every other sequence.
+A cloneable `CancellationObserver` can retain only the observation of that
+exact call while an adapter temporarily transfers its caller half; it cannot
+request cancellation or expose the underlying token.
+
+One absolute call deadline covers admission, request and response backpressure,
+provider execution, and terminal observation. Caller and provider generations
+are revalidated after admission and before driver creation. Provider panic is
+call-local; retiring a provider closes new admission and waits for calls already
+admitted.
+
+Each `InvocationContext` distinguishes its own `call_id`, the immediate
+`parent_call_id`, and the activation seed `lineage_call_id` for the nested
+service/event chain. A first call from the activation Context has a distinct
+current ID and no parent. Provider Contexts propagate lineage and current-call
+facts into subsequent calls; the lineage therefore survives re-entry without
+ambient thread-local state.
+
+## Events
+
+Registration returns an effect-owned disposer. Loading listeners are visible,
+and activation rollback removes them. Dispatch snapshots listeners, evaluates
+an optional `EventTarget` against immutable listener views outside locks on
+blocking workers bounded by dispatch admission, and only then admits callbacks.
+The absolute dispatch deadline includes selection; an over-deadline selector
+starts no later selector or callback and retains its dispatch ownership until
+the blocking worker returns. Explicitly global listeners bypass targeting;
+selection failure starts no callbacks. Disposing an ordinary listener removes
+future membership without invalidating a binding already held by one snapshot.
+
+Emit, serial, waterfall, and parallel modes share bounded inputs, outputs,
+diagnostics, callback admission, and one dispatch deadline. Parallel dispatch
+admits lazily. Once claiming and every removal path share the same owner token.
+One private driver contains handler-future construction, polling, iterative
+outcome adoption, future and panic-payload destruction, then callback-lease
+closure in that order.
+
+## Persistent operations
+
+Apply, reconfiguration, reconciliation, disposal, and shutdown are
+Runtime-owned after admission. Deadline or caller cancellation detaches a
+waiter, not the operation. Disposal and shutdown callers join the same
+persistent result. Cleanup reports retain a bounded prefix plus total and
+truncation metadata and cannot be mutated into a contradictory state.
+
+The complete ownership, visibility, scheduling, and shutdown laws are defined
+in the product [architecture](../docs/architecture.md). Boundary validation is
+defined in [security](../docs/security.md), and public behavioral evidence in
+[testing](../docs/testing.md).

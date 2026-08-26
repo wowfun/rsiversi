@@ -1,16 +1,81 @@
 # rsi-meta-plugin
 
-`rsi-meta-plugin` defines the fixed-layout v1 C ABI and a safe Rust authoring surface for trusted native plugins. The maintained header is [`include/rsi_meta_plugin.h`](include/rsi_meta_plugin.h).
+`rsi-meta-plugin` defines native ABI v2 and its safe Rust authoring surface for
+trusted in-process plugins. The maintained C11/C++17-compatible header is
+[`include/rsi_meta_plugin.h`](include/rsi_meta_plugin.h).
 
-The host resolves only `rsi_meta_plugin_entry_v1`. A validated plugin table can describe one factory, normalize configuration, create an instance, handle a byte request for a declared service, and destroy instances and the factory. A per-call host table lets native code invoke services it declared as requirements. Context, Fiber lifecycle, routing, events, generation fencing, and cleanup never cross the ABI.
+## Version and exchange
 
-Major versions must match. A host accepts a plugin minor version no newer than
-its own; a plugin accepts a host minor version at least as new as the plugin's
-required minor. Tables grow only by appending fields. Compatibility checks the
-minimum prefix associated with the table's declared minor, not the newest
-reader's complete table size. The host zero-initializes its full plugin-table
-output before entry so an older plugin leaves every unknown suffix absent.
+Native ABI v2 uses `rsi_meta_plugin_entry_v2` and a single host/plugin exchange
+port on 64-bit-pointer targets. ILP32 targets are rejected at compile time;
+there is no untested alternate layout and no v1 compatibility path. The maintained
+[`rsi_meta_plugin.h`](include/rsi_meta_plugin.h) is the authoritative contract
+for entry and version rules, table and frame layouts, opcodes, statuses, and
+every ownership and one-shot release transition. Native authors must compile
+against that header rather than infer wire rules from this overview.
 
-Buffers always travel as pointer, length, and capacity plus an allocator-matched release callback. A null pointer is valid only for a zero-length input; release callbacks must accept the empty `{NULL, 0, 0}` value. Input borrows and the host table last only for the synchronous callback and must not be retained. Factory callbacks are serialized, calls are serialized per instance but may overlap across instances, and callbacks may run on arbitrary host threads. A plugin must not synchronously create a service-call cycle that re-enters the same instance. On every `create` return, a non-null instance output transfers ownership to the host, including failure returns. A plugin must not unwind across C, call its destruction twice, or return while work still uses an instance being destroyed. The SDK trampolines contain factory construction, callback, and destructor panics; they cannot contain aborts, memory faults, or arbitrary native behavior.
+The exchange can describe identity, prepare one activation attempt, create and
+destroy an instance, operate callback-lifetime caller and provider channels,
+transfer capabilities, and manage setup effects. Native code does not publish a
+static service descriptor. It provides services through the activation host.
 
-Implement `NativePlugin` and `NativeInstance`, then invoke `export_plugin!(YourPlugin)`. The descriptor is JSON matching `rsi_meta::PluginDescriptor`; the Loader replaces its self-reported identity with the verified artifact hash.
+## Messages and capabilities
+
+The SDK presents calls as `Message` values containing bytes and owned,
+transferable capabilities. Callback-scoped channel and effect handles carry
+Rust borrow lifetimes, while transferable handles retain their native backing
+until the owner releases them. The SDK keeps raw IDs and release tokens out of
+plugin code. The header owns their exact validation, adoption, and cleanup
+rules, including malformed and failure outputs.
+
+Every successful preparation also declares `retained_bytes`: a conservative
+charge for plugin-owned state kept behind the prepared capability until create
+or release. The host cannot measure that native ownership, so it validates and
+reserves the declaration before adopting the attempt. `Prepared::new` requires
+the value explicitly; zero is correct only for truly empty retained state.
+
+## Callback lifetime and effects
+
+The safe surface exposes two callback-lifetime channel orientations:
+
+- `Host::open` returns a `CallChannel<'callback>` for sending requests and
+  receiving responses and the terminal outcome.
+- `NativeInstance::serve` receives a `ProviderChannel<'callback>` for receiving
+  requests, sending responses, and observing cancellation.
+
+Neither channel can escape its callback lifetime. Activation similarly receives
+an `EffectTxn<'callback>` for dynamic provide and deferred cleanup. Plugin code
+requests commit after successful setup; errors, panics, and drops converge on
+abort. The SDK maps those lifetime-bound operations to the raw exchange. The
+header owns the exact channel, effect, callback-seal, and output state machines.
+
+## Concurrency and trust
+
+Callbacks may run on arbitrary host-owned OS threads. Factory preparation is
+serialized per mapped factory, and instance callbacks are serialized per
+instance while distinct instances may overlap. Admission is fail-fast, so
+plugin code must handle rejected reentry and contention without relying on a
+blocked callback.
+
+Native plugins are trusted process code. A timeout poisons the adapter and
+terminalizes the owning Runtime, but the thread, callback frame, library,
+capabilities, and accounting remain retained until the callback returns.
+Plugin-owned threads and transferable SDK handles must remain owned by plugin
+lifecycle objects and return before successful finalization; both exchange
+tables and the dynamic-library mapping may become invalid immediately after
+that point. Leaking either across teardown violates the trusted native contract.
+The SDK contains Rust panics at its trampolines, but it cannot contain aborts,
+memory faults, data races, or arbitrary native behavior. The header owns the
+raw destruction and finalization protocol; the
+[`rsi-meta-loader` contract](../loader/README.md) owns host mapping, timeout,
+cache, and teardown policy.
+
+## Rust SDK
+
+Implement `NativePlugin` and `NativeInstance`, then use
+`export_plugin!(YourPlugin)`. The SDK exposes lifetime-bound `Host`,
+`CallChannel`, `ProviderChannel`, and `EffectTxn` values plus explicitly owned
+transferable capabilities. Factory identity and prepared injection are bounded
+data; services are published dynamically through the activation host.
+
+The SDK is an adapter for the header's lifetime model, not a second protocol.

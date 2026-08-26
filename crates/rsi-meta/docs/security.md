@@ -1,187 +1,246 @@
 # rsi-meta security boundary
 
-Core trusts validated safe-Rust inputs and bounds every registry, frame,
-channel, plugin configuration and overlay, activation, call, and shutdown
-operation. Runtime construction validates nonzero limits, arithmetic and Tokio
-primitive maxima, payload-budget relationships, and a 24-hour hard deadline
-ceiling before storing a typed policy. Configured JSON depth also has a hard
-ceiling of 128 so the recursive encoding library cannot follow an arbitrarily
-deep safe-Rust `Value` after iterative shape validation. Both input and normalized plugin
-configurations are checked for encoded bytes, JSON depth, and JSON node count
-before the Runtime retains them. Owned configuration, intercept, and event
-values enter an iterative-destruction guard before any fallible admission,
-validation, or future construction; plugin-normalized configuration and event
-handler output enter the same guard immediately on return. Rejection or an
-unpolled future therefore cannot recursively destroy adversarial nesting on the
-thread stack. Descriptor identity, declaration count,
-dependency count, and encoded bytes are validated before cloning. A prepared
-application is bound to one Runtime and holds its Fiber, declaration,
-dependency, and retained-byte reservations until application or drop, so a
-proof from a wider Runtime cannot bypass a stricter target Runtime.
-Reconfiguration separately reserves its maximum staging configuration before
-normalization. The staging reservation is shrunk into a shared Runtime-owned
-configuration lease. The Fiber and every in-flight activation retain that lease
-with the configuration, so old and new allocations remain included in the
-aggregate retained-byte high-water mark and capacity decision for their full
-coexistence. Disposal
-sets the Fiber's disposed fence under the protected data lock and does not wait
-for the configuration gate while holding the transition lock; an in-flight
-normalizer must recheck that fence before it can publish.
-Context scope construction validates service identifiers, entry count, each
-retained per-service overlay encoding (including JSON-escaped service-key quotes
-and list delimiters), and JSON shape before copy-on-write retention. Event registration
-and dispatch validate event identifiers, and scoped dispatch validates its
-service identifier, before either key reaches a Runtime registry. Service lookup
-and provision validate their service and contract identifiers before ownership
-resolution or staging. Cleanup-effect
-labels exceeding the configured diagnostic byte bound are rejected before
-retention; Runtime-generated task and listener diagnostics are UTF-8 truncated
-to that bound before publication. Pending reports retain at most the configured
-diagnostic reason count and aggregate identifier bytes; dependency-cycle
-traversal samples no more services than those same limits allow and marks the
-report truncated without first constructing the complete service path. A cycle
-whose service sample has no remaining entry capacity is counted as omitted
-evidence and never retained as an empty `DependencyCycle`. Plugin
-errors crossing activation, service,
-and event callback boundaries are normalized into a boundary-specific error
-whose retained diagnostic payload obeys the same bound; formatting uses a
-bounded writer rather than first cloning an arbitrarily large display value.
-Cleanup reports expose bounded diagnostic state through immutable accessors;
-their private representation and validated deserializer preserve the relationship
-between retained failures, total failures, truncation, and `is_clean`.
+`rsi-meta` is a bounded composition kernel for safe Rust plus deliberately
+trusted native adapters. Core denies unsafe code. The plugin ABI and Loader are
+the only unsafe subtrees and document every pointer, layout, lifetime, mapping,
+and allocator contract at the operation that relies on it.
 
-Service requirements and provisions use exact contract identity and version.
-Call opening uses the caller Fiber's captured time-enabled executor, so the
-synchronous operation neither depends on ambient Tokio state nor probes a
-missing time driver by triggering a panic. The host retains that executor until
-Fiber disposal and Runtime shutdown complete.
-Context ownership and Fiber generation are validated whenever a structural
-operation or service call crosses the runtime seam. Service-call opening
-revalidates the caller generation and exact binding after acquiring provider
-admission but before channel allocation or driver spawn; a concurrent caller
-transition therefore either precedes that linearization point or releases all
-provisional admission through RAII. Independent preparation,
-Fiber reconciliation, and live service calls have explicit Runtime-wide
-concurrency limits; fail-fast operations do not hide an unbounded waiting
-queue. A separate closeable Runtime admission gate covers preparation proofs,
-Fiber insertion, reconfiguration, calls, dispatches, and structural Context
-mutations. Shutdown closes that gate before cancellation and root discovery;
-pre-close leases remain accounted while registered roots begin teardown, and
-the final completion fence atomically hard-seals retiring admission after
-disposal and scheduler work, then drains every existing lease. The sealed state
-and acquisition share one atomic transition, so a stale retiring caller either
-joins before the seal and is drained or fails without reserving resources.
-Post-close attempts fail before logical resource reservation. Terminalization
-is a control fence rather than ordinary external work: it remains able to record
-the first bounded terminal reason and cancel drivers after shutdown has closed
-the admission gate. Provider-generation retirement uses the same close then
-hard-seal protocol: cleanup-time calls may join while dependents converge, but
-the generation is sealed before its final callback drain. Per-call channel
-limits are not treated as a global memory bound.
-Queued request and response frames therefore also reserve their encoded byte
-length from one Runtime-wide logical budget until the receiving side consumes
-them; the budget describes retained frame bytes rather than allocator RSS.
-Mixed-size waiters use bounded-bypass admission rather than a fair weighted
-semaphore: a fitting frame can consume otherwise idle capacity, but no older
-frame can be bypassed by more than 64 younger grants before new capacity is
-reserved for it. Byte waiters hold a bounded channel slot, so this policy does
-not introduce an independent unbounded queue.
-Every admission authority paired with a logical ledger releases the ledger
-reservation before returning capacity, so a woken waiter cannot observe
-transient false capacity or violate the synchronized admission invariant.
-Provider closure and its admitted-callback count are one atomic state, so an
-ordinary callback racing closure either commits its count first or observes
-the closed gate. Only the Runtime-owned driver owns this provider-generation
-lease; caller-held terminal admission cannot extend the provider generation
-after the driver publishes its unique terminal. Cleanup-time calls from retiring dependents remain ordered by
-the joined convergence transaction. Caller cancellation wakes both service
-halves promptly; a terminal result is published before internal cancellation,
-and the caller gives an already-published terminal result and its absolute
-deadline authority over that internal wake-up. Runtime-terminal and deadline
-selections also remain authoritative if destroying the losing endpoint future
-panics; cancellation and endpoint-result paths continue to report that panic as
-`ServiceEndpointPanicked`. The driver destroys the endpoint future synchronously
-before publishing its terminal or releasing provider ownership. Observing the
-terminal destroys the caller response inbox and releases every queued weighted
-frame reservation, including a late frame from the losing send branch. The
-Runtime publishes `Complete` only after the admission gate is sealed and drained,
-the scheduler is idle, every logical resource counter is zero, and the Fiber
-registry is empty; later external admission cannot mutate the cached terminal
-state.
-An escaped cleanup-driver panic terminalizes the Runtime because publication
-withdrawal is then unprovable; user effect panics remain bounded report entries.
-An escaped shutdown-driver panic is cached as `ShutdownOutcome::Failed` so
-later callers neither wait repeatedly nor mistake unproven cleanup for
-`Complete`.
-Cleanup-report wire decoding rejects contradictory retained counts and
-truncation metadata before reconstructing its private byte ledger, so an
-external report cannot claim a clean outcome while retaining failures.
+## Runtime policy and durable input
 
-Native plugins are trusted process code. Hashing proves which top-level bytes were mapped; it does not sandbox them or recursively authenticate operating-system dynamic dependencies. A plugin can read memory, access the operating system, spawn threads, corrupt state, or abort. Only fully trusted artifacts belong in `NativeCatalog`.
+`Runtime::new` validates topology, payload, execution, and deadline groups
+before constructing a downstream primitive. Zero widths, arithmetic overflow,
+Tokio primitive maxima, inconsistent aggregate/per-item limits, and deadlines
+above the 24-hour hard ceiling are rejected. Accepted policy values are trusted
+typed Rust state.
 
-`NativeCatalog` accepts a caller-selected source path; its cache directory is a
-content-addressed staging destination, not a source allowlist. Possession of the
-Loader service is therefore authority to select and execute trusted native code
-with the host process's permissions. Products that need an artifact policy must
-place it in front of that service rather than treating the cache as a sandbox.
+Factory identity, configuration, requirements, service keys, event keys,
+effect labels, native adapter metadata, and diagnostics are bounded at their owning
+input boundary. JSON configuration and intercept data are checked iteratively
+for encoded bytes, depth, and node count before retention. The configured depth
+cannot exceed 128 because compact serialization remains recursive. Rejected,
+normalized, unpolled, and callback-returned owned JSON values enter an
+iterative-destruction guard before fallible work can drop them.
 
-On Unix, the catalog pins and locks its dedicated cache directory object as the
-ownership authority; `.rsi-meta.lock` remains a cooperative marker but removing
-it cannot bypass the directory lock. Windows pins the pathname with a marker
-handle that denies delete sharing. The catalog rejects symlinks and special
-files. Unix cache enumeration, private temporary creation, digest-file opening,
-no-clobber publication, post-publication comparison, rollback, and durability
-fencing resolve names relative to the pinned directory descriptor. Revalidating
-the public pathname only poisons a replaced Catalog and is never the authority
-for cache-owned I/O. The catalog first streams a bounded regular file through a fixed-size
-hash buffer; a matching live digest reuses its already verified mapping without
-claiming another staging artifact. A cold identity is read again into a private
-stable copy while hashing, and that second digest is authoritative if the source
-changed between reads. Aggregate durable-cache and live-staging budgets are
-reserved before file creation or commitment. The catalog maps the private copy,
-commits a digest only after ABI and descriptor validation, recomputes that
-digest while streaming the commit copy, and never reopens a durable path as
-mapping authority. Later replacement or in-place mutation of the durable cache
-path therefore cannot change staged content or publish modified staging under
-an old digest. On Linux, cache accounting commits only after the published
-directory entry passes its durability fence. A failed fence is rolled back by
-removing the entry relative to the pinned directory and durably syncing that
-same directory, so that rollback never targets a replacement-owned entry.
-Failure to establish either cleanup step poisons the Catalog, and all later
-load admission fails closed. The private
-descriptor remains writable to trusted code with the host process's authority;
-this does not weaken the stated trust boundary, because native plugins can
-already mutate arbitrary process resources. Windows seals the private staged
-artifact by reopening it read-only, rechecking its digest, and denying write
-and delete sharing until unload; any Windows support claim requires a
-passing native conformance job and is never inferred from Unix evidence.
-Native outbound service identifiers and request lengths are rejected at the
-Runtime identifier/frame limits before the host borrows their ABI pointers.
-The dedicated cache accepts only its lock and canonical digest files at
-startup; stale staging or unmanaged entries require operator cleanup while the
-directory is unlocked instead of creating unbounded scan history.
-Timed-out load workers and live factories or instances retain the cache lease
-through foreign teardown, so an unlocked directory never contains staging
-still owned by native execution. A mapped factory reserves finalizer admission
-before native entry executes, so ordinary destruction saturation cannot strand
-its mapping or cache lease. Each create separately reserves a bounded
-live-instance slot before its callback thread is spawned and retains that slot
-through real destruction. Publication failure or direct Runtime-owner release
-transfers the reservation and instance resources to a physically bounded
-reserved queue. Those paths therefore need neither inline foreign destruction,
-an unbounded hidden backlog, nor task-per-instance spawning.
+Preparation reserves Fiber, desired configuration, attempt configuration,
+maximum prepared-state bytes, and worst-case requirement capacity before plugin
+code. Factory identity is called once, bounded, and charged independently for
+the Fiber lifetime. Each desired configuration is validated once at its owning
+input boundary and retained as typed proof; the Runtime reuses that proof when it
+borrows the value into later preparation attempts. Plugin code cannot replace it
+or receive a previous attempt's normalized value as input, and every normalized
+output is independently validated before retention. Distinct desired and attempt allocations are charged
+independently for as long as they coexist; an allocation shared by
+Runtime-owned wrappers is charged once and its reservation follows those
+wrappers. Core makes no accounting claim for a trusted safe-Rust plugin that
+clones configuration into ownership the Runtime cannot observe. Core measures
+normalized configuration and requirement metadata. The `retained_bytes` supplied
+with opaque safe-Rust prepared state is a trusted in-process factory contract and
+must include everything retained solely by that state. A prepared value is
+Runtime-bound, desired-revision-fenced, and single-use. A stale or foreign value
+cannot activate. The declared state charge remains reserved until the attempt
+retires even after activation takes the value, since core cannot prove whether
+the plugin dropped it or transferred it into generation-owned state. Core does
+not claim byte-exact early release. Preparation has no Context or injected
+capability, preventing dependency use before the requirement set exists.
+Public preparation admission is fail-fast. A Runtime-owned reconciliation that
+refreshes an already-admitted Fiber instead waits for a transiently full
+preparation gate while yielding its reconciliation slot; capacity pressure is
+not plugin failure and cannot retire the healthy installed generation.
+The public `PreparedPlugin` proof retains Runtime admission and its pessimistic
+resource reservations until apply or Drop. A caller that keeps an unapplied
+proof across shutdown therefore keeps quiescence intentionally incomplete.
 
-The ABI validates table sizes, versions, mandatory pointers, returned-buffer structure, output bounds, UTF-8/JSON at owning boundaries, and allocator ownership. An allocator-matched guard releases every plugin-returned buffer exactly once after either copying or rejection. Every unsafe operation in `rsi-meta-plugin` and `rsi-meta-loader` documents pointer, lifetime, serialization, or mapping requirements. Core contains no unsafe code.
+Plugin preparation and activation are unwind-contained through return-value,
+future, state, and panic-payload destruction. Rejected and replaced values are
+extracted under locks and destroyed only after those locks are released. A
+private owner guard applies the same activation-future destruction boundary when
+deadline, cancellation, or caller loss selects another branch.
 
-A native callback that exceeds its deadline cannot be forcibly stopped safely,
-so the adapter retains its thread, library, gate, and accounted resources until
-foreign code actually exits. Timeout authority is operation-scoped: create and
-service-call callbacks atomically publish poison and the owning Runtime's
-terminal fence; pre-application configuration validation has no Runtime
-authority and poisons only its factory; catalog load owns a digest fence and
-cache lease rather than a Runtime; admitted destruction has no adapter-local
-deadline. The authoritative callback, load, destruction, and concurrency
-contract is the [loader README](../loader/README.md). The Runtime terminal fence
-bounds later adapter admission but cannot constrain arbitrary resources created
-by trusted native code.
-Process or Wasm adapters may offer stronger termination without changing core.
+Before plugin activation entry, core uses the same checked nonwrapping call-ID
+allocator as service and event dispatch to mint one nonzero lineage seed. It
+installs that seed in the activation Context with the current Fiber as origin
+and no parent. Exhaustion fails the Fiber before plugin code runs. Nested call
+lineage is carried only by immutable Context values; it uses no thread-local or
+Runtime-global ambient tracing state.
+
+Reconfiguration reserves and prepares the complete replacement before publishing
+its desired revision. Any error or panic releases only replacement reservations;
+the installed desired value, Active generation, and requirement watchers remain
+unchanged. Installing a successful replacement changes the desired value,
+prepared attempt, and watcher set under one Runtime state transition.
+
+## Contexts and effects
+
+Context isolation and intercept builders account each retained key, container
+delimiter, separator, and value rather than estimating only payload values.
+Typed extensions accept only `Send + Sync + 'static` safe-Rust values and are
+bounded by Context entry count. Their contents are never serialized, inspected
+by core, or exported through native ABI v2.
+
+Every mutable plugin operation validates Runtime, Fiber, generation, and
+transaction state while holding the owning state lock. User setup, cleanup,
+notification, selector, service, and listener callbacks run without Runtime or
+scope-store locks.
+
+An `EffectTxn` reserves and installs its wrapper before user setup. Defer
+records ownership before a helper returns observable state. Commit, abort,
+explicit disposal, unload, panic, and dropped-owner paths claim the same
+one-shot records. Unloading rejects a new transaction and commit, but the
+original owner of an already-open setup retains only the bounded authority to
+defer its exact newly acquired undo before abort, Drop, or failed commit closes
+it. The Runtime joins that setup or rollback and does not claim to reverse an
+external action performed before its undo was deferred.
+Each cleanup invocation and each caught panic-payload destruction has its own
+unwind boundary. A payload destructor panic becomes bounded cleanup evidence
+and cannot abort the remaining last-in, first-out undos.
+
+`caller_effect` carries the exact caller Fiber and generation. It cannot be
+retargeted, serialized, used after closure, or retained by a native callback
+beyond an issued host capability's lifetime.
+
+## Supplies and calls
+
+A service slot is the full service key plus isolation. Dynamic provide
+atomically checks the owner generation, reserves capacity, rejects an occupied
+slot, creates a non-repeating `SupplyId`, inserts the Loading supply, and
+advances the registry revision. Notification occurs after unlocking.
+
+External lookup and injection require the provider to be Active and retain the
+exact `SupplyId`. Call opening acquires provider admission, then revalidates
+caller generation, provider generation, supply identity, and binding before it
+allocates channels or starts a driver. Withdrawal removes external visibility
+and closes admission while the same Runtime-state transaction cancels every
+affected Loading generation and queues its exact reconciliation. User-owned
+destruction begins only after that invalidation fence. Closure and the
+admitted-callback count share one atomic state, so a racing callback either
+commits before closure or observes it.
+
+`Message` validates byte length and capability count before borrowing either
+input. Queue admission reserves channel position, bytes, and queued capability
+references as one all-or-nothing operation. A blocked sender owns only a
+bounded, Runtime-accounted pending-send reservation until that transaction can
+commit. Unique Runtime-wide capability entries are reserved when authority is
+minted, not by infallible safe-Rust handle cloning or transfer. Safe Rust can
+possess and transfer only an opaque `Capability`; it has no raw identifier,
+reconstruction, kind, or rights state. Stale and foreign owned handles fail
+before dispatch. Hostile raw-ID validation belongs to the independent native
+ABI and Loader tables at that unsafe adapter boundary. `Capability`
+diagnostics expose only bounded logical service/provider facts.
+Generation retirement closes every capability entry before draining any
+admitted use and yields its reconciliation slot while those deadline-bounded
+call drivers finish, so stale authority is fenced without blocking unrelated
+Fiber convergence.
+
+Mixed-size byte admission is work-conserving with bounded bypass: a fitting
+message may use otherwise idle capacity, but an older request becomes the
+reservation barrier after 64 younger grants. Every logical reservation is
+released before returning its admission capacity so an awakened waiter cannot
+observe transient false room. Pending waiters use keyed removal and bounded
+per-channel candidate windows. Registration or cancellation schedules only
+when it exposes a newly fitting candidate, returns capacity, or removes a
+fairness barrier; concentrated cancellation cannot repeatedly scan unchanged
+nonfitting work. Registration into a full channel window displaces its youngest
+nonfitting candidate when the new waiter fits current global capacity, keeping
+the window constant without hiding usable capacity.
+
+The call driver owns the real channel halves, absolute deadline, cancellation,
+provider lease, caller lease, and unique terminal. Providers borrow a channel
+for the callback lifetime. Provider-future destruction occurs before terminal
+publication and lease release. A clean terminal alone means EOF. Terminal
+observation destroys the response inbox immediately, releasing late queued
+Messages even if the public call value remains live, while the bounded terminal
+result remains cached so later reads cannot turn an error into clean EOF.
+
+## Events and scoped storage
+
+Event registration, once claiming, explicit disposal, activation rollback, and
+unload share one owner token. Dispatch snapshots bounded immutable listener
+views, releases the registry lock, then evaluates its host-owned
+`EventTarget`. A target panic or error is normalized and bounded before any
+ordinary callback admission. Global listeners bypass selection without giving
+the selector authority to mutate listener ownership. Synchronous selectors run
+outside asynchronous Runtime workers on blocking work bounded by dispatch
+admission. The absolute dispatch deadline can detach the caller, but the
+blocking worker retains Runtime admission, its dispatch reservation, and the
+snapshot until it actually returns, so hostile selectors cannot create
+untracked work or callbacks after expiry.
+
+`EventHandle::dispose` withdraws registry membership but is not a drain fence
+for ordinary bindings already retained by a dispatch snapshot. Generation
+retirement separately closes and drains callback admission. Once listeners are
+claimed through their exact effect ownership after selection, so concurrent
+disposal can prevent a once callback rather than leave duplicate authority.
+Listener destruction happens after Runtime locks are released. If user-owned
+listener state panics while being destroyed, the exact removal still publishes
+completion, the failure is retained in its cleanup report, and the Runtime
+terminalizes because safe continued execution is no longer provable.
+
+Parallel dispatch admits callbacks lazily under separate dispatch and callback
+limits. It consumes outcomes as they complete, so one slow sibling cannot
+retain every completed result or callback permit. Input, output, panic, and
+aggregate diagnostics share payload and entry bounds.
+
+The private event callback driver contains handler-future construction,
+polling, returned-value adoption, future destruction, and caught panic-payload
+destruction. Returned JSON enters iterative owned storage before any
+user-controlled destructor runs. The callback lease remains open through all
+of that teardown and closes only after callback-owned state is gone.
+
+`rsi-meta-scope` keys belong to one `ScopeRoot` and cannot cross roots.
+Parent cycle check and link replacement are one critical section. The library
+does not prove the product's quiescence precondition for rebind. Layer callbacks
+run after unlocking. Snapshots clone bounded owned values rather than exposing
+a lock guard or iterator into mutable storage.
+
+A fallible add notification runs after the value is visible. Its failure
+triggers exact undo and a compensating notification. Both errors are retained
+when both fail. Removal notification failure never restores removed state.
+Built-in entry insertion records its exact undo with the active layer action
+before returning to product code. An action error or panic after insertion
+therefore aborts through that recorded undo instead of leaving silent state.
+
+## Native trust and ABI v2
+
+Native plugins are trusted process code. A loaded artifact can read or corrupt
+memory, access the operating system, spawn untracked threads, or abort the
+process. Hashing identifies the mapped top-level bytes; it does not sandbox the
+plugin or authenticate its transitive operating-system dependencies. Products
+that need artifact policy place it in front of Loader authority.
+
+ABI v2 has no v1 compatibility path. The Loader treats every native table,
+frame, pointer range, token, status, and output as hostile until it has validated
+and adopted the value into typed Safe Rust ownership. The maintained
+[`rsi_meta_plugin.h`](../plugin/include/rsi_meta_plugin.h) owns the exact raw
+layouts, validation order, statuses, operation state machines, and one-shot
+release rules.
+
+Native callback frames are host-owned authority. Callback-scoped channels and
+effect transactions are sealed when foreign code returns and cannot become
+durable product state. Explicitly transferable capabilities retain the mapped
+module and issuer authority until their safe owner releases them. No
+capability-table, cache, or Runtime lock is held while entering foreign code;
+Loader admission rejects reentry or contention instead of waiting across that
+trust seam.
+
+A native create or call timeout atomically poisons the adapter and terminalizes
+the owning Runtime before foreign completion can release its gate. Native code
+cannot be forcibly stopped safely, so timeout seals later admission but retains
+the callback thread, frame, library, capabilities, effect ownership, instance
+gate, cache lease, and accounting until foreign code actually returns.
+
+## Catalog and shutdown
+
+`NativeCatalog` owns a dedicated content-addressed cache and its callback,
+instance, destruction, staging, and durable-byte limits. It accepts regular
+non-symlink files, hashes through bounded private staging, validates ABI before
+durable publication, and maps the verified stable copy. Unix operations resolve
+against the pinned and locked directory object; Windows support requires an
+exclusive private writer followed by a read-only handle denying write and
+delete sharing. The [Loader README](../loader/README.md) owns the complete
+cache and finalization contract.
+
+Runtime completion is published only after external admission is closed and
+drained, the scheduler is idle, the Fiber registry is empty, and every logical
+resource counter is zero. Timeout returns tracked unresolved ownership and
+never changes those conditions. Native platform behavior is claimed only on a
+host where the real dynamic-library conformance suite ran.

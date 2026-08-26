@@ -8,7 +8,11 @@ The standard product gate is:
 cargo xtask rsi-meta conformance
 cargo xtask rsi-meta code-health
 cargo xtask verify-docs
-RUSTDOCFLAGS="-D warnings" cargo doc --locked -p rsi-meta -p rsi-meta-plugin -p rsi-meta-loader --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked -p rsi-meta -p rsi-meta-scope -p rsi-meta-plugin -p rsi-meta-loader --no-deps
 ```
 
-Native failures must be reproduced through an actual dynamic library when the host platform supports it. Do not refresh a baseline or weaken a bound merely to make a gate pass.
+Native failures must be reproduced through an actual dynamic library when the
+host platform supports it. Do not refresh a baseline or weaken a bound merely
+to make a gate pass. An evidence-backed reviewed baseline adjustment is valid
+when the measured file still owns one cohesive contract; avoid mechanical
+splits whose only purpose is preserving an old line count.

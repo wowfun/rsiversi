@@ -12,8 +12,25 @@
 
 ## rsi-meta verification
 
-`cargo xtask rsi-meta code-health` checks the hard per-file production-code limit and each owned region's non-growing maximum. `--write` creates the baseline or lowers it after a refactor; it refuses increases.
+`cargo xtask rsi-meta code-health` checks the hard per-file production-code
+limit and each owned region's recorded maximum. `--write` creates the baseline
+or lowers it after a refactor; it refuses automatic increases. A reviewed
+baseline increase is allowed when a cohesive ownership boundary genuinely grew
+and the contract plus behavior evidence justify keeping it together. The
+baseline is a smell detector, not a reason to split one safety state machine
+mechanically.
 
-`cargo xtask rsi-meta conformance` runs locked formatting, warning-denied Clippy, and all-target tests for core, ABI, and Loader. The Loader suite builds and maps a real native fixture on the executing host.
+`cargo xtask rsi-meta conformance` is the single CI and local orchestration
+authority for the foundation. It checks formatting, then runs locked,
+warning-denied Clippy and all-target tests for core, `rsi-meta-scope`, ABI, and
+Loader. It also validates both standalone fixture manifests offline, formats
+and lints them, tests and release-builds `echo-bidi`, and either runs the
+release `foundation-probe` on Linux or release-builds it on other hosts. On
+Linux it additionally inspects the built ELF dynamic symbol table and accepts
+only the v2 plugin entry export. The inspection uses `NM` when set and otherwise
+uses `nm`, so cross-toolchain Linux hosts can select the matching GNU- or
+LLVM-compatible inspector. The ABI package test owns the maintained C11/C++17
+header compilation, while the Loader suite maps the real native fixture on the
+executing host.
 
 Both commands must run from the repository root. Native evidence applies only to the platform that actually executed it.

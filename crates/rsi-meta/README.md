@@ -1,9 +1,23 @@
 # rsi-meta
 
-`rsi-meta` is a process-local foundation for applications assembled from plugins. Its composition model is deliberately small: a `Runtime` owns resources, immutable `Context` values carry scope, and every `Context::apply` creates a separately managed `Fiber`.
+`rsi-meta` is RSIversi's composition foundation. Its one ownership model is
+`Runtime -> Context -> Fiber`: every long-lived authority is a plugin
+generation, while leaf tools, commands, prompt fragments, and similar values
+are effect-owned contributions to product plugins.
 
-The [core crate](core/README.md) owns convergence, lifecycle, services, events, isolation, effects, call tracing, and generation fencing. It knows nothing about files, package manifests, daemons, products, or native libraries. The [native ABI](plugin/README.md) is a narrow byte-call contract. The [Loader](loader/README.md) adapts verified native artifacts into `PluginFactory` values and is itself applied as an ordinary plugin that provides `rsi.meta.loader`.
+The [core crate](core/README.md) owns bounded lifecycle, dynamic injection and
+supply, transactional effects, message capabilities, events, and shutdown. It
+contains no unsafe code and knows nothing about files, product schemas, or
+native libraries. The independent `rsi-meta-scope` crate supplies safe Rust
+scope identity and layered contribution storage without adding a generic
+Runtime registry.
 
-There is no privileged global composition host, persistence layer, CLI, watcher, or HMR subsystem. Products add those policies as plugins or callers. Native code shares the host process and is trusted; read the [security boundary](docs/security.md).
+The [native ABI](plugin/README.md) expresses the same capability and effect
+model through a versioned C boundary. The [Loader](loader/README.md) validates
+and maps trusted native artifacts, then adapts them into ordinary
+`PluginFactory` values. Native loading is not privileged core behavior.
 
-The current execution and ownership model is defined in [architecture](docs/architecture.md). Use the [testing policy](docs/testing.md) for evidence requirements.
+Current contracts live in the product [architecture](docs/architecture.md),
+[security boundary](docs/security.md), and [testing policy](docs/testing.md).
+The rationale and cutover criteria are recorded in the
+[Cordis capability foundation Agent Note](../../.agents/notes/implemented/architecture/2026-08-24-cordis-capability-foundation.md).
