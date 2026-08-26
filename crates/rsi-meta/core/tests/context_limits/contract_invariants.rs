@@ -4,7 +4,7 @@ use super::*;
 fn intercept_bound_applies_to_the_accumulated_overlay() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
-            maximum_frame_bytes: 8,
+            maximum_message_bytes: 8,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()

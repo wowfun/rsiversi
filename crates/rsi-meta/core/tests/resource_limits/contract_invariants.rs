@@ -51,21 +51,24 @@ async fn runtime_rejects_every_zero_limit() {
         topology!(maximum_fibers),
         topology!(maximum_fiber_depth),
         topology!(maximum_services),
-        topology!(maximum_service_declarations),
         topology!(maximum_dependency_edges),
         topology!(maximum_requirements_per_fiber),
-        topology!(maximum_provisions_per_fiber),
         topology!(maximum_event_listeners),
         topology!(maximum_effects_per_fiber),
         topology!(maximum_effects),
+        topology!(maximum_effect_transactions_per_fiber),
+        topology!(maximum_effect_transactions),
         topology!(maximum_context_entries),
+        topology!(maximum_capability_entries),
+        topology!(maximum_capabilities_per_message),
+        topology!(maximum_queued_capability_references),
         payloads!(maximum_identifier_bytes),
-        payloads!(maximum_descriptor_bytes),
-        payloads!(maximum_frame_bytes),
+        payloads!(maximum_prepared_state_bytes),
+        payloads!(maximum_message_bytes),
         payloads!(maximum_config_bytes),
         payloads!(maximum_retained_plugin_bytes),
         payloads!(maximum_context_bytes),
-        payloads!(maximum_buffered_service_bytes),
+        payloads!(maximum_buffered_message_bytes),
         payloads!(maximum_json_depth),
         payloads!(maximum_json_nodes),
         payloads!(maximum_diagnostic_entries),
@@ -74,6 +77,7 @@ async fn runtime_rejects_every_zero_limit() {
         execution!(maximum_concurrent_reconciliations),
         execution!(maximum_concurrent_service_calls),
         execution!(channel_capacity),
+        execution!(maximum_pending_message_sends),
         execution!(maximum_concurrent_event_dispatches),
         execution!(maximum_concurrent_event_callbacks),
         deadline!(transition),
@@ -100,7 +104,7 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let duplicate = PluginDescriptor::new(FactoryIdentity::builtin("duplicate", "1"))
+    let duplicate = FactorySpec::new(FactoryIdentity::builtin("duplicate", "1"))
         .requiring(Requirement::new("same", "one", V1))
         .requiring(Requirement::new("same", "two", V1));
     assert!(matches!(
@@ -115,7 +119,7 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
         .root()
         .apply(
             Arc::new(PassiveFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("consumer", "1"))
+                FactorySpec::new(FactoryIdentity::builtin("consumer", "1"))
                     .requiring(Requirement::new("missing", "expected", V1)),
             )),
             Value::Null,
@@ -126,9 +130,10 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
         runtime
             .root()
             .apply(
-                Arc::new(PassiveFactory(PluginDescriptor::new(
-                    FactoryIdentity::builtin("over-capacity", "1")
-                ))),
+                Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                    "over-capacity",
+                    "1"
+                )))),
                 Value::Null,
             )
             .await,
@@ -145,11 +150,13 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
     let provider = mismatch_runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("provider", "1"))
-                    .providing(Provision::new("slot", "actual", V1)),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(EndpointFactory::new(
+                FactoryIdentity::builtin("provider", "1"),
+                "slot",
+                "actual",
+                V1,
+                Arc::new(Echo),
+            )),
             Value::Null,
         )
         .await
@@ -159,7 +166,7 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
         .root()
         .apply(
             Arc::new(PassiveFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("mismatch", "1"))
+                FactorySpec::new(FactoryIdentity::builtin("mismatch", "1"))
                     .requiring(Requirement::new("slot", "expected", V1)),
             )),
             Value::Null,
@@ -177,41 +184,41 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
 }
 
 #[derive(Debug)]
-struct ExpandingConfigFactory(PluginDescriptor);
+struct ExpandingConfigFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for ExpandingConfigFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    fn validate_config(&self, _: Value) -> Result<Value> {
-        Ok(Value::String("x".repeat(64)))
+    fn prepare(&self, _: &Value) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(Value::String("x".repeat(64))))
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
 
 #[derive(Debug)]
-struct PanickingConfigFactory(PluginDescriptor);
+struct PanickingConfigFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for PanickingConfigFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    fn validate_config(&self, config: Value) -> Result<Value> {
+    fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if config.is_null() {
-            Ok(config)
+            Ok(PreparedActivation::new(config.clone()))
         } else {
-            panic!("configuration validation panic")
+            panic!("configuration preparation panic")
         }
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
@@ -226,26 +233,25 @@ async fn plugin_config_is_bounded_before_and_after_normalization() {
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let descriptor =
-        || PluginDescriptor::new(FactoryIdentity::builtin("bounded-configuration", "1"));
+    let spec = || FactorySpec::new(FactoryIdentity::builtin("bounded-configuration", "1"));
 
     assert!(matches!(
         runtime.prepare(
-            Arc::new(PassiveFactory(descriptor())),
+            Arc::new(PassiveFactory(spec())),
             Value::String("x".repeat(64)),
         ),
         Err(MetaError::InvalidConfig(_))
     ));
     assert!(matches!(
-        runtime.prepare(Arc::new(ExpandingConfigFactory(descriptor())), Value::Null,),
+        runtime.prepare(Arc::new(ExpandingConfigFactory(spec())), Value::Null,),
         Err(MetaError::InvalidConfig(_))
     ));
 }
 
 #[tokio::test]
-async fn config_validation_panics_have_one_error_classification() {
+async fn preparation_panics_have_one_error_classification() {
     let runtime = Runtime::default();
-    let factory = Arc::new(PanickingConfigFactory(PluginDescriptor::new(
+    let factory = Arc::new(PanickingConfigFactory(FactorySpec::new(
         FactoryIdentity::builtin("panicking-configuration", "1"),
     )));
     assert!(matches!(
@@ -262,24 +268,25 @@ async fn config_validation_panics_have_one_error_classification() {
 
 #[derive(Debug)]
 struct QuotaFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
+    services: Vec<(&'static str, &'static str, ContractVersion)>,
     effects: usize,
 }
 
 #[async_trait]
 impl PluginFactory for QuotaFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        for provision in &self.descriptor.provides {
-            context.provide(
-                provision.key.clone(),
-                provision.contract.clone(),
-                provision.version,
-                Arc::new(Echo),
-            )?;
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
+        for (key, contract, version) in &self.services {
+            context.provide(*key, *contract, *version, Arc::new(Echo))?;
         }
         for index in 0..self.effects {
             context.defer(
@@ -305,9 +312,8 @@ async fn service_and_effect_quotas_fail_closed_at_their_owning_seams() {
         .root()
         .apply(
             Arc::new(QuotaFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("service-quota", "1"))
-                    .providing(Provision::new("first", "test.first", V1))
-                    .providing(Provision::new("second", "test.second", V1)),
+                spec: FactorySpec::new(FactoryIdentity::builtin("service-quota", "1")),
+                services: vec![("first", "test.first", V1), ("second", "test.second", V1)],
                 effects: 0,
             }),
             Value::Null,
@@ -332,7 +338,8 @@ async fn service_and_effect_quotas_fail_closed_at_their_owning_seams() {
         .root()
         .apply(
             Arc::new(QuotaFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("effect-quota", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("effect-quota", "1")),
+                services: Vec::new(),
                 effects: 2,
             }),
             Value::Null,
@@ -348,87 +355,89 @@ async fn service_and_effect_quotas_fail_closed_at_their_owning_seams() {
 
 #[derive(Debug)]
 struct NormalizingFactory {
-    descriptor: PluginDescriptor,
-    validations: Arc<AtomicUsize>,
+    spec: FactorySpec,
+    preparations: Arc<AtomicUsize>,
     activated_with: Arc<Mutex<Option<Value>>>,
 }
 
 #[async_trait]
 impl PluginFactory for NormalizingFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    fn validate_config(&self, config: Value) -> Result<Value> {
-        self.validations.fetch_add(1, Ordering::AcqRel);
-        Ok(Value::from(config.as_u64().unwrap() + 1))
+    fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
+        self.preparations.fetch_add(1, Ordering::AcqRel);
+        Ok(PreparedActivation::new(Value::from(
+            config.as_u64().unwrap() + 1,
+        )))
     }
 
-    async fn activate(&self, _: Context, config: Arc<Value>) -> Result<()> {
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let config = Arc::clone(plan.config());
         *self.activated_with.lock().expect("activation poisoned") = Some((*config).clone());
         Ok(())
     }
 }
 
 #[derive(Debug)]
-struct OneShotDescriptorFactory {
-    descriptor: PluginDescriptor,
+struct OneShotIdentityFactory {
+    spec: FactorySpec,
     calls: AtomicUsize,
 }
 
 #[async_trait]
-impl PluginFactory for OneShotDescriptorFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
+impl PluginFactory for OneShotIdentityFactory {
+    fn identity(&self) -> FactoryIdentity {
         assert_eq!(
             self.calls.fetch_add(1, Ordering::AcqRel),
             0,
-            "descriptor was called after preparation"
+            "identity was called more than once"
         );
-        &self.descriptor
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
 
 #[tokio::test]
-async fn prepared_descriptor_is_the_only_descriptor_observation() {
+async fn factory_identity_is_captured_once_across_preparation_and_activation() {
     let runtime = Runtime::default();
-    let prepared = runtime
-        .prepare(
-            Arc::new(OneShotDescriptorFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "one-shot-descriptor",
-                    "1",
-                )),
-                calls: AtomicUsize::new(0),
-            }),
-            Value::Null,
-        )
-        .unwrap();
+    let factory = Arc::new(OneShotIdentityFactory {
+        spec: FactorySpec::new(FactoryIdentity::builtin("one-shot-identity", "1")),
+        calls: AtomicUsize::new(0),
+    });
+    let prepared = runtime.prepare(factory.clone(), Value::Null).unwrap();
     let fiber = runtime.root().apply_prepared(prepared).await.unwrap();
     assert!(matches!(fiber.snapshot().state, FiberState::Active));
+    fiber.reconfigure(Value::from(1)).await.unwrap();
+    assert_eq!(factory.calls.load(Ordering::Acquire), 1);
     assert_eq!(runtime.snapshot().fibers.len(), 1);
 }
 
 #[tokio::test]
 async fn prepared_application_runs_a_stateful_normalizer_exactly_once() {
     let runtime = Runtime::default();
-    let validations = Arc::new(AtomicUsize::new(0));
+    let preparations = Arc::new(AtomicUsize::new(0));
     let activated_with = Arc::new(Mutex::new(None));
     let prepared = runtime
         .prepare(
             Arc::new(NormalizingFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("normalizer", "1")),
-                validations: Arc::clone(&validations),
+                spec: FactorySpec::new(FactoryIdentity::builtin("normalizer", "1")),
+                preparations: Arc::clone(&preparations),
                 activated_with: Arc::clone(&activated_with),
             }),
             Value::from(1),
         )
         .unwrap();
     runtime.root().apply_prepared(prepared).await.unwrap();
-    assert_eq!(validations.load(Ordering::Acquire), 1);
+    assert_eq!(preparations.load(Ordering::Acquire), 1);
     assert_eq!(
         *activated_with.lock().expect("activation poisoned"),
         Some(Value::from(2))

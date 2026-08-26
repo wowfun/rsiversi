@@ -14,7 +14,7 @@ pub enum PendingReason {
         /// Isolation slot selected by the Fiber Context.
         isolation: IsolationId,
     },
-    /// A provider exists but does not match the exact declared contract.
+    /// A provider exists but does not match the exact prepared requirement.
     ContractMismatch {
         /// Logical service key.
         service: ServiceKey,
@@ -27,11 +27,6 @@ pub enum PendingReason {
         /// Published exact version.
         actual_version: ContractVersion,
     },
-    /// Reachable pending declarations form a dependency cycle.
-    DependencyCycle {
-        /// Ordered service path that closes the cycle.
-        services: Vec<ServiceKey>,
-    },
 }
 
 /// Bounded dependency-convergence diagnostics retained by one Fiber.
@@ -41,7 +36,7 @@ pub struct PendingReport {
     pub reasons: Vec<PendingReason>,
     /// Total reasons observed, including reasons omitted from `reasons`.
     pub total_reasons: usize,
-    /// Whether a reason or nested dependency-cycle service was omitted.
+    /// Whether a reason was omitted by the diagnostic bounds.
     pub truncated: bool,
 }
 

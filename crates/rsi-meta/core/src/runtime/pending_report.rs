@@ -52,37 +52,6 @@ impl PendingReportBuilder {
         self.report.total_reasons
     }
 
-    pub(super) fn remaining_cycle_services(&self) -> usize {
-        if self.report.truncated {
-            return 0;
-        }
-        self.maximum_entries
-            .saturating_sub(self.retained_entries)
-            .saturating_sub(1)
-    }
-
-    pub(super) fn remaining_bytes(&self) -> usize {
-        if self.report.truncated {
-            0
-        } else {
-            self.maximum_bytes.saturating_sub(self.retained_bytes)
-        }
-    }
-
-    pub(super) fn push_cycle(&mut self, services: Vec<ServiceKey>, sample_truncated: bool) {
-        if services.is_empty() {
-            self.report.total_reasons = self.report.total_reasons.saturating_add(1);
-            self.report.truncated = true;
-            return;
-        }
-        let service_count = services.len();
-        let retained_bytes = services.iter().map(|service| service.as_str().len()).sum();
-        self.push_with(1 + service_count, retained_bytes, || {
-            PendingReason::DependencyCycle { services }
-        });
-        self.report.truncated |= sample_truncated;
-    }
-
     pub(super) fn finish(self) -> PendingReport {
         self.report
     }

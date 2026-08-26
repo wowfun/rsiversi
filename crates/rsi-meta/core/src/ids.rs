@@ -82,3 +82,31 @@ pub struct EventListenerId(pub u64);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CallId(pub u64);
+
+/// Non-repeating identity of one generation-owned dynamic service supply.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct SupplyId {
+    owner: FiberId,
+    generation: FiberGeneration,
+    token: u64,
+}
+
+impl SupplyId {
+    pub(crate) fn new(owner: FiberId, generation: FiberGeneration, token: u64) -> Self {
+        Self {
+            owner,
+            generation,
+            token,
+        }
+    }
+
+    /// Returns the exact Fiber generation that created this supply.
+    pub fn owner(&self) -> (FiberId, FiberGeneration) {
+        (self.owner, self.generation)
+    }
+
+    /// Returns the Runtime-local monotonic supply token.
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+}

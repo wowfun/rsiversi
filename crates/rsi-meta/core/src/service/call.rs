@@ -1,12 +1,11 @@
-use super::channel::{FrameBudget, send_frame};
+use super::channel::{MessageBudget, send_message};
+use super::message::validate_message_bounds;
 use super::{
-    BufferedByteAdmission, BufferedFrame, LeaseGuard, ProviderBinding, ResponseMessage,
-    ServiceFrame,
+    BufferedMessage, BufferedMessageAdmission, LeaseGuard, Message, MessageChannel, ResponseMessage,
 };
 use crate::runtime::{ResourceLedger, ResourceReservation};
 use crate::{
-    Context, ContractId, ContractVersion, FiberGeneration, FiberId, MetaError, Result, Runtime,
-    ServiceKey,
+    Context, ContractId, ContractVersion, FiberGeneration, FiberId, MetaError, Result, ServiceKey,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -18,11 +17,13 @@ pub(crate) struct CallLease {
     _resource: ResourceReservation,
     _admission: OwnedSemaphorePermit,
     _runtime: LeaseGuard,
+    _caller: LeaseGuard,
 }
 
 impl CallLease {
     pub(crate) fn new(
         runtime: LeaseGuard,
+        caller: LeaseGuard,
         admission: OwnedSemaphorePermit,
         resource: ResourceReservation,
     ) -> Self {
@@ -30,6 +31,7 @@ impl CallLease {
             _resource: resource,
             _admission: admission,
             _runtime: runtime,
+            _caller: caller,
         }
     }
 }
@@ -40,39 +42,78 @@ impl fmt::Debug for CallLease {
     }
 }
 
-/// Caller half of one admitted bounded bidirectional service call.
-#[derive(Debug)]
-pub struct ServiceCall {
-    pub(crate) requests: Option<mpsc::Sender<BufferedFrame>>,
-    pub(crate) responses: Option<mpsc::Receiver<ResponseMessage>>,
-    pub(crate) byte_admission: Arc<BufferedByteAdmission>,
-    pub(crate) byte_resources: Arc<ResourceLedger>,
-    pub(crate) cancellation: CancellationToken,
-    pub(crate) deadline: Instant,
-    pub(crate) maximum_frame_bytes: usize,
-    pub(crate) lease: Option<Arc<CallLease>>,
-    pub(crate) terminal_observed: bool,
+/// Cloneable observation-only view of one service call's cancellation fact.
+#[derive(Clone)]
+pub struct CancellationObserver {
+    cancellation: CancellationToken,
 }
 
-impl ServiceCall {
-    /// Sends one bounded request frame.
-    pub async fn send(&self, frame: ServiceFrame) -> Result<()> {
+impl CancellationObserver {
+    pub(crate) fn new(cancellation: CancellationToken) -> Self {
+        Self { cancellation }
+    }
+
+    /// Reports whether cooperative cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Waits until cooperative cancellation has been requested.
+    pub async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
+    }
+}
+
+impl fmt::Debug for CancellationObserver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancellationObserver")
+            .field("is_cancelled", &self.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Caller half of one admitted bounded bidirectional service call.
+#[derive(Debug)]
+pub struct CapabilityCall {
+    pub(crate) context: Context,
+    pub(crate) requests: Option<mpsc::Sender<BufferedMessage>>,
+    pub(crate) responses: Option<mpsc::Receiver<ResponseMessage>>,
+    pub(crate) message_admission: Arc<BufferedMessageAdmission>,
+    pub(crate) request_channel: Arc<MessageChannel>,
+    pub(crate) byte_resources: Arc<ResourceLedger>,
+    pub(crate) capability_resources: Arc<ResourceLedger>,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) deadline: Instant,
+    pub(crate) maximum_message_bytes: usize,
+    pub(crate) maximum_capabilities_per_message: usize,
+    pub(crate) lease: Option<Arc<CallLease>>,
+    pub(crate) terminal_result: Option<Result<()>>,
+}
+
+impl CapabilityCall {
+    /// Sends one bounded request Message.
+    pub async fn send(&self, message: Message) -> Result<()> {
+        validate_message_bounds(
+            &message,
+            self.maximum_message_bytes,
+            self.maximum_capabilities_per_message,
+        )?;
         let Some(requests) = self.requests.as_ref() else {
-            if frame.as_bytes().len() > self.maximum_frame_bytes {
-                return Err(MetaError::PayloadTooLarge {
-                    maximum: self.maximum_frame_bytes,
-                });
-            }
             return Err(MetaError::Cancelled);
         };
-        send_frame(
+        send_message(
             requests,
-            frame,
+            message,
             std::convert::identity,
-            FrameBudget {
-                maximum_frame_bytes: self.maximum_frame_bytes,
-                byte_admission: &self.byte_admission,
+            MessageBudget {
+                sender: &self.context,
+                maximum_message_bytes: self.maximum_message_bytes,
+                maximum_capabilities_per_message: self.maximum_capabilities_per_message,
+                message_admission: &self.message_admission,
+                channel: &self.request_channel,
                 byte_resources: &self.byte_resources,
+                capability_resources: &self.capability_resources,
                 cancellation: &self.cancellation,
                 deadline: self.deadline,
             },
@@ -86,11 +127,13 @@ impl ServiceCall {
     }
 
     /// Receives the next response; a clean terminal is returned as `Ok(None)`.
+    /// Once observed, that terminal result is sticky: later reads repeat an
+    /// error and only a clean terminal remains EOF.
     /// Cooperative cancellation joins the driver's unique terminal instead of
     /// synthesizing a competing result in the caller half.
-    pub async fn recv(&mut self) -> Result<Option<ServiceFrame>> {
-        if self.terminal_observed {
-            return Ok(None);
+    pub async fn recv(&mut self) -> Result<Option<Message>> {
+        if let Some(result) = self.terminal_result.clone() {
+            return result.map(|()| None);
         }
         // A ready response is authoritative over the driver's internal
         // cancellation wake-up; the absolute deadline is authoritative when
@@ -104,8 +147,7 @@ impl ServiceCall {
             message = responses.recv() => message,
             () = tokio::time::sleep_until(self.deadline) => {
                 self.cancellation.cancel();
-                self.observe_terminal();
-                return Err(MetaError::Timeout("service call"));
+                return self.observe_terminal(Err(MetaError::Timeout("service call")));
             }
             () = self.cancellation.cancelled() => {
                 // Cancellation requests the Runtime-owned driver to publish
@@ -117,24 +159,19 @@ impl ServiceCall {
                     biased;
                     message = responses.recv() => message,
                     () = tokio::time::sleep_until(self.deadline) => {
-                        self.observe_terminal();
-                        return Err(MetaError::Timeout("service call"));
+                        return self.observe_terminal(Err(MetaError::Timeout("service call")));
                     }
                 }
             }
         };
         match message {
-            Some(ResponseMessage::Frame(frame)) => Ok(Some(frame.into_frame())),
-            Some(ResponseMessage::Terminal(result)) => {
-                self.observe_terminal();
-                result.map(|()| None)
+            Some(ResponseMessage::Message(message)) => {
+                Ok(Some(message.into_message(&self.context)))
             }
-            None => {
-                self.observe_terminal();
-                Err(MetaError::Service(
-                    "service call driver ended without a terminal".to_owned(),
-                ))
-            }
+            Some(ResponseMessage::Terminal(result)) => self.observe_terminal(result),
+            None => self.observe_terminal(Err(MetaError::Service(
+                "service call driver ended without a terminal".to_owned(),
+            ))),
         }
     }
 
@@ -143,29 +180,22 @@ impl ServiceCall {
         self.cancellation.cancel();
     }
 
-    /// Sends one request and requires exactly one successful response.
-    ///
-    /// A terminal provider error is propagated even when it follows the
-    /// response; a second successful response is a service protocol error.
-    pub async fn unary(mut self, request: ServiceFrame) -> Result<ServiceFrame> {
-        self.send(request).await?;
-        self.finish();
-        let response = self.recv().await?.ok_or_else(|| {
-            MetaError::Service("provider ended a unary call without a response".to_owned())
-        })?;
-        if self.recv().await?.is_some() {
-            return Err(MetaError::Service(
-                "provider produced more than one unary response".to_owned(),
-            ));
-        }
-        Ok(response)
+    /// Reports whether this exact call has observed cooperative cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
     }
 
-    fn observe_terminal(&mut self) {
-        self.terminal_observed = true;
+    /// Returns an observation-only view that remains valid if this caller half moves.
+    pub fn cancellation_observer(&self) -> CancellationObserver {
+        CancellationObserver::new(self.cancellation.clone())
+    }
+
+    fn observe_terminal(&mut self, result: Result<()>) -> Result<Option<Message>> {
+        self.terminal_result = Some(result.clone());
         self.requests.take();
         Self::drop_response_inbox(&mut self.responses);
         self.lease.take();
+        result.map(|()| None)
     }
 
     fn drop_response_inbox(inbox: &mut Option<mpsc::Receiver<ResponseMessage>>) {
@@ -173,43 +203,72 @@ impl ServiceCall {
     }
 }
 
-impl Drop for ServiceCall {
+impl Drop for CapabilityCall {
     fn drop(&mut self) {
         self.cancellation.cancel();
     }
 }
 
-/// Generation-fenced capability for one resolved service requirement.
-#[derive(Clone, Debug)]
-pub struct ServiceHandle {
-    pub(crate) runtime: Runtime,
-    pub(crate) caller: Context,
-    pub(crate) binding: Arc<ProviderBinding>,
-    pub(crate) overlay: Arc<crate::runtime::InterceptLayers>,
+/// Transferable generation-fenced authority for one service endpoint.
+#[derive(Clone)]
+pub struct Capability {
+    pub(crate) holder: Context,
+    pub(crate) entry: Arc<crate::runtime::CapabilityEntry>,
 }
 
-impl ServiceHandle {
+impl Capability {
     /// Returns the logical service key.
     pub fn key(&self) -> &ServiceKey {
-        &self.binding.key
+        &self.entry.binding.key
     }
 
     /// Returns the exact resolved contract identity and version.
     pub fn contract(&self) -> (&ContractId, ContractVersion) {
-        (&self.binding.contract, self.binding.version)
+        (&self.entry.binding.contract, self.entry.binding.version)
     }
 
     /// Returns the resolved provider Fiber and generation.
     pub fn provider(&self) -> (FiberId, FiberGeneration) {
-        (self.binding.provider, self.binding.generation)
+        (self.entry.binding.provider, self.entry.binding.generation)
     }
 
     /// Admits a new call after revalidating caller and provider generations.
     ///
     /// The Runtime-owned driver uses the caller Fiber's captured executor, so
     /// this synchronous operation does not require an ambient Tokio context.
-    pub fn open(&self) -> Result<ServiceCall> {
-        self.runtime.open_service(self)
+    pub fn open(&self) -> Result<CapabilityCall> {
+        self.holder.runtime().open_service(self)
+    }
+
+    /// Sends exactly one request and accepts only one response plus clean EOF.
+    pub async fn invoke(&self, request: Message) -> Result<Message> {
+        let mut call = self.open()?;
+        call.send(request).await?;
+        call.finish();
+        let response = call.recv().await?.ok_or_else(|| {
+            MetaError::Service("provider ended a unary call without a response".to_owned())
+        })?;
+        if call.recv().await?.is_some() {
+            return Err(MetaError::Service(
+                "provider produced more than one unary response".to_owned(),
+            ));
+        }
+        Ok(response)
+    }
+}
+
+impl fmt::Debug for Capability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Capability")
+            .field("key", &self.entry.binding.key)
+            .field("contract", &self.entry.binding.contract)
+            .field("version", &self.entry.binding.version)
+            .field(
+                "provider",
+                &(self.entry.binding.provider, self.entry.binding.generation),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -221,7 +280,7 @@ mod tests {
     fn terminal_observation_drops_the_response_inbox() {
         let (sender, receiver) = mpsc::channel(1);
         let mut inbox = Some(receiver);
-        ServiceCall::drop_response_inbox(&mut inbox);
+        CapabilityCall::drop_response_inbox(&mut inbox);
         assert!(inbox.is_none());
         assert!(sender.is_closed());
     }

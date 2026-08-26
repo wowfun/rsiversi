@@ -17,14 +17,154 @@ struct NestedIntentClaim {
     completed: bool,
 }
 
-struct CycleEdges {
-    descriptor: Arc<PreparedDescriptor>,
-    edges: Vec<(FiberId, usize)>,
-}
-
 struct ReconciliationRun {
     revision: u64,
     saturated_completion_prefix: Option<usize>,
+}
+
+impl ReconciliationFrontier {
+    const TOMBSTONE_HEADROOM: usize = 64;
+
+    fn enqueue_ready(&mut self, id: FiberId) {
+        if self.ready.contains_key(&id) {
+            return;
+        }
+        let token = self.next_ready_token();
+        self.ready.insert(id, token);
+        self.ready_order.push_back((id, token));
+    }
+
+    fn remove_ready(&mut self, id: FiberId) -> bool {
+        let removed = self.ready.remove(&id).is_some();
+        if removed
+            && self.ready_order.len()
+                > self
+                    .ready
+                    .len()
+                    .saturating_mul(2)
+                    .saturating_add(Self::TOMBSTONE_HEADROOM)
+        {
+            self.compact_ready_order();
+        }
+        removed
+    }
+
+    fn compact_ready_order(&mut self) {
+        self.ready_order
+            .retain(|(id, token)| self.ready.get(id) == Some(token));
+    }
+
+    fn next_ready_token(&mut self) -> u64 {
+        if self.next_ready_token == u64::MAX {
+            self.compact_ready_order();
+            let mut compacted = VecDeque::with_capacity(self.ready.len());
+            for (id, token) in std::mem::take(&mut self.ready_order) {
+                if self.ready.get(&id) != Some(&token) {
+                    continue;
+                }
+                let compacted_token = u64::try_from(compacted.len())
+                    .expect("a FiberId-bounded frontier fits u64")
+                    + 1;
+                *self
+                    .ready
+                    .get_mut(&id)
+                    .expect("a live ready entry remains indexed") = compacted_token;
+                compacted.push_back((id, compacted_token));
+            }
+            self.ready_order = compacted;
+            self.next_ready_token =
+                u64::try_from(self.ready.len()).expect("a FiberId-bounded frontier fits u64");
+        }
+        self.next_ready_token += 1;
+        self.next_ready_token
+    }
+
+    fn enqueue(&mut self, id: FiberId) {
+        if self.active.contains(&id) {
+            debug_assert!(!self.ready.contains_key(&id));
+            self.rerun.insert(id);
+        } else {
+            debug_assert!(!self.rerun.contains(&id));
+            self.enqueue_ready(id);
+        }
+    }
+
+    fn claim(&mut self, id: FiberId) -> bool {
+        if !self.remove_ready(id) {
+            return false;
+        }
+        let inserted = self.active.insert(id);
+        debug_assert!(inserted);
+        debug_assert!(!self.rerun.contains(&id));
+        true
+    }
+
+    fn take(&mut self, active_limit: usize) -> Option<FiberId> {
+        if self.active.len() >= active_limit {
+            return None;
+        }
+        let id = loop {
+            let (id, token) = self.ready_order.pop_front()?;
+            if self.ready.get(&id) == Some(&token) {
+                self.ready.remove(&id);
+                break id;
+            }
+        };
+        let inserted = self.active.insert(id);
+        debug_assert!(inserted);
+        debug_assert!(!self.rerun.contains(&id));
+        Some(id)
+    }
+
+    fn finish(&mut self, id: FiberId, fiber_exists: bool) {
+        let removed = self.active.remove(&id);
+        debug_assert!(removed);
+        let requested_rerun = self.rerun.remove(&id);
+        if requested_rerun && fiber_exists {
+            self.enqueue_ready(id);
+        }
+        debug_assert!(!self.active.contains(&id));
+        debug_assert!(!self.rerun.contains(&id));
+    }
+
+    fn abandon(&mut self, id: FiberId, fiber_exists: bool) {
+        let removed = self.active.remove(&id);
+        debug_assert!(removed);
+        self.rerun.remove(&id);
+        if fiber_exists {
+            self.enqueue_ready(id);
+        }
+        debug_assert!(!self.active.contains(&id));
+        debug_assert!(!self.rerun.contains(&id));
+    }
+
+    pub(super) fn remove_queued(&mut self, id: FiberId) {
+        self.remove_ready(id);
+        self.rerun.remove(&id);
+    }
+
+    fn has_queued(&self) -> bool {
+        !self.ready.is_empty() || !self.rerun.is_empty()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.ready.is_empty() && self.active.is_empty() && self.rerun.is_empty()
+    }
+
+    #[cfg(test)]
+    fn invariants_hold(&self) -> bool {
+        let ordered = self
+            .ready_order
+            .iter()
+            .filter(|(id, token)| self.ready.get(id) == Some(token))
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>();
+        ordered.len() == self.ready.len()
+            && ordered.iter().all(|id| self.ready.contains_key(id))
+            && self.ready.keys().all(|id| !self.active.contains(id))
+            && self.ready.keys().all(|id| !self.rerun.contains(id))
+            && self.rerun.is_subset(&self.active)
+    }
 }
 
 impl NestedIntentClaim {
@@ -53,11 +193,8 @@ impl Drop for NestedIntentClaim {
             .state
             .lock()
             .expect("runtime state poisoned");
-        let removed = state.active_reconciliations.remove(&self.id);
-        debug_assert!(removed);
-        if state.fibers.contains_key(&self.id) {
-            state.pending_reconciliations.insert(self.id);
-        }
+        let fiber_exists = state.fibers.contains_key(&self.id);
+        state.reconciliations.abandon(self.id, fiber_exists);
         drop(state);
         self.runtime.inner.scheduler_wakeup.notify_one();
     }
@@ -267,148 +404,24 @@ impl Drop for PendingApplyOwnership {
 }
 
 impl Runtime {
-    pub(super) fn dependency_cycle(
-        &self,
-        start: FiberId,
-        maximum_services: usize,
-        maximum_bytes: usize,
-    ) -> Option<(Vec<ServiceKey>, bool)> {
-        struct CycleFrame {
-            descriptor: Arc<PreparedDescriptor>,
-            edges: Vec<(FiberId, usize)>,
-            next_edge: usize,
-            restore_services: usize,
-            restore_bytes: usize,
-            restore_truncated: bool,
-        }
-
-        let CycleEdges { descriptor, edges } = self.cycle_edges(start)?;
-        let mut visited = BTreeSet::from([start]);
-        let mut stack = vec![CycleFrame {
-            descriptor,
-            edges,
-            next_edge: 0,
-            restore_services: 0,
-            restore_bytes: 0,
-            restore_truncated: false,
-        }];
-        let mut services = Vec::new();
-        let mut retained_bytes = 0_usize;
-        let mut truncated = false;
-        while let Some(frame) = stack.last_mut() {
-            let Some((next, requirement_index)) = frame.edges.get(frame.next_edge).copied() else {
-                let frame = stack.pop().expect("cycle stack has a current frame");
-                services.truncate(frame.restore_services);
-                retained_bytes = frame.restore_bytes;
-                truncated = frame.restore_truncated;
-                continue;
-            };
-            frame.next_edge += 1;
-            let restore_services = services.len();
-            let restore_bytes = retained_bytes;
-            let restore_truncated = truncated;
-            if !truncated {
-                let service = &frame.descriptor.requires[requirement_index].key;
-                let next_bytes = retained_bytes.checked_add(service.as_str().len());
-                if services.len() < maximum_services
-                    && next_bytes.is_some_and(|bytes| bytes <= maximum_bytes)
-                {
-                    retained_bytes = next_bytes.expect("checked bounded service bytes");
-                    services.push(service.clone());
-                } else {
-                    truncated = true;
-                }
-            }
-            if next == start {
-                return Some((services, truncated));
-            }
-            if visited.insert(next)
-                && let Some(CycleEdges { descriptor, edges }) = self.cycle_edges(next)
-            {
-                stack.push(CycleFrame {
-                    descriptor,
-                    edges,
-                    next_edge: 0,
-                    restore_services,
-                    restore_bytes,
-                    restore_truncated,
-                });
-                continue;
-            }
-            services.truncate(restore_services);
-            retained_bytes = restore_bytes;
-            truncated = restore_truncated;
-        }
-        None
-    }
-
-    fn cycle_edges(&self, id: FiberId) -> Option<CycleEdges> {
-        let fiber = {
-            let state = self.inner.state.lock().expect("runtime state poisoned");
-            state.fibers.get(&id).cloned()
-        }?;
-        let descriptor = {
-            let data = fiber.data.lock().expect("fiber state poisoned");
-            if data.disposed {
-                return None;
-            }
-            let descriptor = Arc::clone(
-                data.descriptor
-                    .as_ref()
-                    .expect("registered Fiber retains its descriptor"),
-            );
-            if let Some(active) = &data.active {
-                let edges = descriptor
-                    .requires
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, requirement)| {
-                        active
-                            .bindings
-                            .get(&requirement.key)
-                            .map(|binding| (binding.provider, index))
-                    })
-                    .collect();
-                return Some(CycleEdges { descriptor, edges });
-            }
-            // Pending and Failed fibers have no actual bindings. Their
-            // validated declarations remain graph edges because Failed is a
-            // recoverable state: reconfiguration can reactivate the same Fiber.
-            descriptor
-        };
-        let state = self.inner.state.lock().expect("runtime state poisoned");
-        let edges = descriptor
-            .requires
-            .iter()
-            .enumerate()
-            .flat_map(|(index, requirement)| {
-                state
-                    .declarations
-                    .providers(&fiber.base_context, requirement)
-                    .into_iter()
-                    .map(move |provider| (provider, index))
-            })
-            .collect();
-        Some(CycleEdges { descriptor, edges })
-    }
-
     pub(super) fn request_reconciliation(&self, id: FiberId) -> Option<ReconciliationTicket> {
-        let (ticket, should_spawn) = {
+        let (ticket, executor) = {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
             let fiber = state.fibers.get(&id).cloned()?;
             let ticket = fiber.reconciliation.request();
             fiber.cancel_loading_activation();
-            state.pending_reconciliations.insert(id);
+            state.reconciliations.enqueue(id);
             let should_spawn = if state.reconciliation_worker_running {
                 false
             } else {
                 state.reconciliation_worker_running = true;
                 true
             };
-            (ticket, should_spawn)
+            let executor = should_spawn.then(|| fiber.executor.clone());
+            (ticket, executor)
         };
-        if should_spawn {
-            self.spawn_reconciliation_worker();
+        if let Some(executor) = executor {
+            self.spawn_reconciliation_worker(&executor);
         }
         self.inner.scheduler_wakeup.notify_one();
         Some(ticket)
@@ -418,27 +431,27 @@ impl Runtime {
         if !fiber.disposal.try_start() {
             return;
         }
-        fiber.disposal_requested.cancel();
-        fiber.cancel_loading_activation();
-        self.enqueue_intent(fiber.id);
-    }
-
-    fn enqueue_intent(&self, id: FiberId) {
-        let should_spawn = {
+        let executor = {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            if !state.fibers.contains_key(&id) {
+            if !state.fibers.contains_key(&fiber.id) {
                 return;
             }
-            state.pending_reconciliations.insert(id);
-            if state.reconciliation_worker_running {
+            // This shares the state -> Fiber-data transaction used by Loading
+            // installation. Disposal either fences a not-yet-installed
+            // generation there or observes and cancels its exact token here.
+            fiber.disposal_requested.cancel();
+            fiber.cancel_loading_activation();
+            state.reconciliations.enqueue(fiber.id);
+            let should_spawn = if state.reconciliation_worker_running {
                 false
             } else {
                 state.reconciliation_worker_running = true;
                 true
-            }
+            };
+            should_spawn.then(|| fiber.executor.clone())
         };
-        if should_spawn {
-            self.spawn_reconciliation_worker();
+        if let Some(executor) = executor {
+            self.spawn_reconciliation_worker(&executor);
         }
         self.inner.scheduler_wakeup.notify_one();
     }
@@ -452,15 +465,7 @@ impl Runtime {
         }
         let claimed = {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            if state.active_reconciliations.contains(&id) {
-                false
-            } else if state.pending_reconciliations.remove(&id) {
-                let inserted = state.active_reconciliations.insert(id);
-                debug_assert!(inserted);
-                true
-            } else {
-                false
-            }
+            state.reconciliations.claim(id)
         };
         if !claimed {
             return;
@@ -527,63 +532,75 @@ impl Runtime {
         }
     }
 
-    pub(super) fn refresh_pending_diagnostics(
+    pub(super) fn notify_service_appearances(
         &self,
         services: &[ServiceSlot],
         except: Option<FiberId>,
     ) {
-        let should_spawn = {
+        let executor = {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            let affected = Self::dependent_ids(&state, services, except)
-                .into_iter()
-                .filter(|id| {
-                    state.fibers.get(id).is_some_and(|fiber| {
-                        matches!(
-                            fiber.data.lock().expect("fiber state poisoned").state,
-                            FiberState::Pending(_)
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
+            let affected = Self::dependent_ids(&state, services, except);
+            let mut executor = None;
             for id in affected {
                 if let Some(fiber) = state.fibers.get(&id) {
+                    executor.get_or_insert_with(|| fiber.executor.clone());
                     fiber.reconciliation.request_revision();
-                    state.pending_reconciliations.insert(id);
+                    state.reconciliations.enqueue(id);
                 }
             }
-            if state.pending_reconciliations.is_empty() || state.reconciliation_worker_running {
-                false
-            } else {
-                state.reconciliation_worker_running = true;
-                true
-            }
+            let should_spawn =
+                if !state.reconciliations.has_queued() || state.reconciliation_worker_running {
+                    false
+                } else {
+                    state.reconciliation_worker_running = true;
+                    true
+                };
+            debug_assert!(!should_spawn || executor.is_some());
+            should_spawn.then_some(executor).flatten()
         };
-        if should_spawn {
-            self.spawn_reconciliation_worker();
+        if let Some(executor) = executor {
+            self.spawn_reconciliation_worker(&executor);
         }
         self.inner.scheduler_wakeup.notify_one();
     }
 
-    pub(super) fn notify_service_changes(&self, services: &[ServiceSlot], except: Option<FiberId>) {
-        let should_spawn = {
-            let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            let affected = Self::dependent_ids(&state, services, except);
-            for id in affected {
-                if let Some(fiber) = state.fibers.get(&id) {
-                    fiber.reconciliation.request_revision();
-                    fiber.cancel_loading_activation();
-                    state.pending_reconciliations.insert(id);
-                }
+    /// Fences every exact dependent in the same Runtime-state transaction that
+    /// removes service visibility. The caller must hold `state` across both
+    /// operations so a Loading generation cannot publish a withdrawn binding.
+    pub(super) fn request_service_withdrawals_locked(
+        state: &mut RuntimeState,
+        services: &[ServiceSlot],
+        except: Option<FiberId>,
+    ) -> (
+        Vec<(FiberId, ReconciliationTicket)>,
+        Option<tokio::runtime::Handle>,
+    ) {
+        let affected = Self::dependent_ids(state, services, except);
+        let mut tickets = Vec::with_capacity(affected.len());
+        let mut executor = None;
+        for id in affected {
+            if let Some(fiber) = state.fibers.get(&id) {
+                executor.get_or_insert_with(|| fiber.executor.clone());
+                let ticket = fiber.reconciliation.request();
+                fiber.cancel_loading_activation();
+                state.reconciliations.enqueue(id);
+                tickets.push((id, ticket));
             }
-            if state.pending_reconciliations.is_empty() || state.reconciliation_worker_running {
+        }
+        let should_spawn =
+            if !state.reconciliations.has_queued() || state.reconciliation_worker_running {
                 false
             } else {
                 state.reconciliation_worker_running = true;
                 true
-            }
-        };
-        if should_spawn {
-            self.spawn_reconciliation_worker();
+            };
+        debug_assert!(!should_spawn || executor.is_some());
+        (tickets, should_spawn.then_some(executor).flatten())
+    }
+
+    pub(super) fn start_reconciliation_requests(&self, executor: Option<tokio::runtime::Handle>) {
+        if let Some(executor) = executor {
+            self.spawn_reconciliation_worker(&executor);
         }
         self.inner.scheduler_wakeup.notify_one();
     }
@@ -602,7 +619,7 @@ impl Runtime {
             .collect()
     }
 
-    fn spawn_reconciliation_worker(&self) {
+    fn spawn_reconciliation_worker(&self, executor: &tokio::runtime::Handle) {
         let usage = self
             .inner
             .resources
@@ -610,7 +627,7 @@ impl Runtime {
             .try_reserve(1)
             .expect("one scheduler-running flag owns the single worker reservation");
         let runtime = self.clone();
-        tokio::spawn(async move { runtime.run_reconciliation_worker(usage).await });
+        executor.spawn(async move { runtime.run_reconciliation_worker(usage).await });
     }
 
     async fn run_reconciliation_worker(&self, mut worker_usage: ResourceReservation) {
@@ -628,21 +645,31 @@ impl Runtime {
             while let Some(id) = self.take_scheduled_intent(active_limit) {
                 let runtime = self.clone();
                 active.push(Box::pin(async move {
-                    runtime.drive_transition(id).await;
+                    let transition = contain_panic_result(
+                        std::panic::AssertUnwindSafe(runtime.drive_transition(id))
+                            .catch_unwind()
+                            .await,
+                    );
+                    if transition.is_err() {
+                        runtime.mark_terminal_owned(format!(
+                            "runtime-owned Fiber {} transition escaped containment",
+                            id.0
+                        ));
+                    }
                     id
                 }));
             }
             if active.is_empty() {
                 let should_stop = {
                     let mut state = self.inner.state.lock().expect("runtime state poisoned");
-                    if state.pending_reconciliations.is_empty() {
+                    if state.reconciliations.has_queued() {
+                        false
+                    } else {
                         state.reconciliation_worker_running = false;
                         // State serialization keeps the running flag and the
                         // one-worker ledger at one linearization point.
                         worker_usage.shrink_to(0);
                         true
-                    } else {
-                        false
                     }
                 };
                 if should_stop {
@@ -668,29 +695,14 @@ impl Runtime {
 
     fn take_scheduled_intent(&self, active_limit: usize) -> Option<FiberId> {
         let mut state = self.inner.state.lock().expect("runtime state poisoned");
-        if state.active_reconciliations.len() >= active_limit {
-            return None;
-        }
-        let id = state
-            .pending_reconciliations
-            .iter()
-            .find(|id| !state.active_reconciliations.contains(id))
-            .copied()?;
-        state.pending_reconciliations.remove(&id);
-        let inserted = state.active_reconciliations.insert(id);
-        debug_assert!(inserted);
-        Some(id)
+        state.reconciliations.take(active_limit)
     }
 
     fn finish_scheduled_intent(&self, id: FiberId) {
-        let removed = self
-            .inner
-            .state
-            .lock()
-            .expect("runtime state poisoned")
-            .active_reconciliations
-            .remove(&id);
-        debug_assert!(removed);
+        let mut state = self.inner.state.lock().expect("runtime state poisoned");
+        let fiber_exists = state.fibers.contains_key(&id);
+        state.reconciliations.finish(id, fiber_exists);
+        drop(state);
         self.inner.scheduler_wakeup.notify_one();
     }
 
@@ -701,9 +713,7 @@ impl Runtime {
             notified.as_mut().enable();
             let idle = {
                 let state = self.inner.state.lock().expect("runtime state poisoned");
-                !state.reconciliation_worker_running
-                    && state.pending_reconciliations.is_empty()
-                    && state.active_reconciliations.is_empty()
+                !state.reconciliation_worker_running && state.reconciliations.is_idle()
             };
             if idle {
                 return;
@@ -740,29 +750,12 @@ impl Runtime {
         self.with_reconciliation_slot(self.reconcile_fiber(Arc::clone(&fiber)))
             .await;
         fiber.reconciliation.mark_settled(&run, &fiber.snapshot());
-        if fiber.reconciliation.desired() > revision {
-            let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            if state.fibers.contains_key(&id) {
-                state.pending_reconciliations.insert(id);
-            }
-            drop(state);
-            self.inner.scheduler_wakeup.notify_one();
-        }
     }
 
-    pub(super) async fn reconcile_service_changes(
+    pub(super) async fn join_reconciliation_requests(
         &self,
-        services: &[ServiceSlot],
-        except: Option<FiberId>,
+        tickets: Vec<(FiberId, ReconciliationTicket)>,
     ) {
-        let affected = {
-            let state = self.inner.state.lock().expect("runtime state poisoned");
-            Self::dependent_ids(&state, services, except)
-        };
-        let tickets = affected
-            .into_iter()
-            .filter_map(|id| self.request_reconciliation(id).map(|ticket| (id, ticket)))
-            .collect::<Vec<_>>();
         self.yield_reconciliation_slot(async {
             futures_util::stream::iter(tickets)
                 .for_each_concurrent(
@@ -784,37 +777,154 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{PreparedActivation, Requirement};
+
+    #[test]
+    fn active_rerequests_stay_out_of_the_ready_frontier() {
+        const ACTIVE: usize = 4_096;
+        let active_id_limit = u64::try_from(ACTIVE).expect("test size fits a Fiber ID");
+        let mut frontier = ReconciliationFrontier::default();
+        for raw in 1..=active_id_limit {
+            frontier.enqueue(FiberId(raw));
+        }
+        for raw in 1..=active_id_limit {
+            assert_eq!(frontier.take(ACTIVE), Some(FiberId(raw)));
+        }
+        assert!(frontier.ready.is_empty());
+        assert_eq!(frontier.active.len(), ACTIVE);
+
+        for raw in 1..=active_id_limit {
+            frontier.enqueue(FiberId(raw));
+            frontier.enqueue(FiberId(raw));
+        }
+        assert!(frontier.ready.is_empty());
+        assert_eq!(frontier.rerun.len(), ACTIVE);
+        assert!(frontier.invariants_hold());
+        assert_eq!(frontier.take(ACTIVE + 1), None);
+
+        let completed = FiberId(active_id_limit);
+        frontier.finish(completed, true);
+        assert_eq!(frontier.ready.len(), 1);
+        assert!(frontier.ready.contains_key(&completed));
+        assert!(!frontier.rerun.contains(&completed));
+        assert!(frontier.invariants_hold());
+        assert_eq!(frontier.take(ACTIVE), Some(completed));
+    }
+
+    #[test]
+    fn rerun_does_not_overtake_an_already_ready_fiber() {
+        let repeatedly_requested = FiberId(1);
+        let waiting = FiberId(2);
+        let mut frontier = ReconciliationFrontier::default();
+
+        frontier.enqueue(repeatedly_requested);
+        assert_eq!(frontier.take(1), Some(repeatedly_requested));
+        frontier.enqueue(waiting);
+        frontier.enqueue(repeatedly_requested);
+        frontier.finish(repeatedly_requested, true);
+
+        assert_eq!(
+            frontier.take(1),
+            Some(waiting),
+            "a rerun must join the tail instead of starving ready work"
+        );
+    }
+
+    #[test]
+    fn requeued_arbitrary_claim_joins_the_ready_tail() {
+        let first = FiberId(1);
+        let claimed = FiberId(2);
+        let mut frontier = ReconciliationFrontier::default();
+
+        frontier.enqueue(first);
+        frontier.enqueue(claimed);
+        assert!(frontier.claim(claimed));
+        frontier.enqueue(claimed);
+        frontier.finish(claimed, true);
+
+        assert_eq!(frontier.take(1), Some(first));
+        assert_eq!(frontier.take(2), Some(claimed));
+        assert!(frontier.invariants_hold());
+    }
+
+    #[test]
+    fn arbitrary_claim_tombstones_remain_amortized_and_bounded() {
+        const FIBERS: u64 = 4_096;
+        let mut frontier = ReconciliationFrontier::default();
+        for raw in 1..=FIBERS {
+            frontier.enqueue(FiberId(raw));
+        }
+        for raw in (1..=FIBERS).rev() {
+            let id = FiberId(raw);
+            assert!(frontier.claim(id));
+            frontier.finish(id, false);
+        }
+
+        assert!(frontier.ready.is_empty());
+        assert!(frontier.ready_order.len() <= ReconciliationFrontier::TOMBSTONE_HEADROOM);
+        assert!(frontier.invariants_hold());
+    }
+
+    #[test]
+    fn abandoned_and_removed_work_preserves_frontier_ownership() {
+        let abandoned = FiberId(1);
+        let removed = FiberId(2);
+        let mut frontier = ReconciliationFrontier::default();
+
+        frontier.enqueue(abandoned);
+        assert!(frontier.claim(abandoned));
+        frontier.abandon(abandoned, true);
+        assert!(frontier.ready.contains_key(&abandoned));
+
+        frontier.enqueue(removed);
+        assert!(frontier.claim(removed));
+        frontier.enqueue(removed);
+        frontier.remove_queued(removed);
+        frontier.finish(removed, true);
+        assert!(!frontier.ready.contains_key(&removed));
+        assert!(!frontier.rerun.contains(&removed));
+        assert!(frontier.invariants_hold());
+    }
 
     #[derive(Debug)]
-    struct PassiveFactory(PluginDescriptor);
+    struct PassiveFactory(FactoryIdentity);
 
     #[async_trait::async_trait]
     impl PluginFactory for PassiveFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.0
+        fn identity(&self) -> FactoryIdentity {
+            self.0.clone()
         }
 
-        async fn activate(&self, _: Context, _: Arc<ConfigValue>) -> Result<()> {
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, _: ActivationPlan) -> Result<()> {
             Ok(())
         }
     }
 
     #[derive(Debug)]
-    struct SaturationProvider(PluginDescriptor);
+    struct SaturationProvider(FactoryIdentity);
 
     #[async_trait::async_trait]
     impl PluginFactory for SaturationProvider {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.0
+        fn identity(&self) -> FactoryIdentity {
+            self.0.clone()
         }
 
-        async fn activate(&self, context: Context, _: Arc<ConfigValue>) -> Result<()> {
-            context.provide(
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            plan.context().provide(
                 "saturation-trigger",
                 "test.saturation-trigger",
                 ContractVersion(1),
                 Arc::new(SaturationEndpoint),
-            )
+            )?;
+            Ok(())
         }
     }
 
@@ -830,18 +940,28 @@ mod tests {
 
     #[derive(Debug)]
     struct GatedSaturationConsumer {
-        descriptor: PluginDescriptor,
+        identity: FactoryIdentity,
         started: Arc<tokio::sync::Semaphore>,
         release: Arc<tokio::sync::Semaphore>,
     }
 
     #[async_trait::async_trait]
     impl PluginFactory for GatedSaturationConsumer {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.descriptor
+        fn identity(&self) -> FactoryIdentity {
+            self.identity.clone()
         }
 
-        async fn activate(&self, _: Context, _: Arc<ConfigValue>) -> Result<()> {
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(
+                PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                    "saturation-trigger",
+                    "test.saturation-trigger",
+                    ContractVersion(1),
+                )),
+            )
+        }
+
+        async fn activate(&self, _: ActivationPlan) -> Result<()> {
             self.started.add_permits(1);
             self.release
                 .acquire()
@@ -853,7 +973,7 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct PanickingDropFactory(PluginDescriptor);
+    struct PanickingDropFactory(FactoryIdentity);
 
     impl Drop for PanickingDropFactory {
         fn drop(&mut self) {
@@ -863,11 +983,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for PanickingDropFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.0
+        fn identity(&self) -> FactoryIdentity {
+            self.0.clone()
         }
 
-        async fn activate(&self, _: Context, _: Arc<ConfigValue>) -> Result<()> {
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, _: ActivationPlan) -> Result<()> {
             Ok(())
         }
     }
@@ -949,8 +1073,9 @@ mod tests {
         let fiber = runtime
             .root()
             .apply(
-                Arc::new(PassiveFactory(PluginDescriptor::new(
-                    FactoryIdentity::builtin("saturated-revision", "1"),
+                Arc::new(PassiveFactory(FactoryIdentity::builtin(
+                    "saturated-revision",
+                    "1",
                 ))),
                 ConfigValue::Null,
             )
@@ -989,15 +1114,7 @@ mod tests {
             .root()
             .apply(
                 Arc::new(GatedSaturationConsumer {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "saturated-consumer",
-                        "1",
-                    ))
-                    .requiring(crate::Requirement::new(
-                        "saturation-trigger",
-                        "test.saturation-trigger",
-                        ContractVersion(1),
-                    )),
+                    identity: FactoryIdentity::builtin("saturated-consumer", "1"),
                     started: Arc::clone(&started),
                     release: Arc::clone(&release),
                 }),
@@ -1022,14 +1139,10 @@ mod tests {
         let provider = runtime
             .root()
             .apply(
-                Arc::new(SaturationProvider(
-                    PluginDescriptor::new(FactoryIdentity::builtin("saturation-provider", "1"))
-                        .providing(crate::Provision::new(
-                            "saturation-trigger",
-                            "test.saturation-trigger",
-                            ContractVersion(1),
-                        )),
-                )),
+                Arc::new(SaturationProvider(FactoryIdentity::builtin(
+                    "saturation-provider",
+                    "1",
+                ))),
                 ConfigValue::Null,
             )
             .await
@@ -1073,8 +1186,9 @@ mod tests {
         let fiber = runtime
             .root()
             .apply(
-                Arc::new(PanickingDropFactory(PluginDescriptor::new(
-                    FactoryIdentity::builtin("late-disposal-panic", "1"),
+                Arc::new(PanickingDropFactory(FactoryIdentity::builtin(
+                    "late-disposal-panic",
+                    "1",
                 ))),
                 ConfigValue::Null,
             )
@@ -1090,7 +1204,7 @@ mod tests {
         runtime.request_disposal(&fiber.fiber);
 
         let report = fiber.dispose().await;
-        assert_eq!(report.failures.len(), 1);
+        assert!(report.is_clean());
         let snapshot = tokio::time::timeout(std::time::Duration::from_millis(100), ticket.join())
             .await
             .expect("terminal disposal left a registered reconciliation ticket pending");

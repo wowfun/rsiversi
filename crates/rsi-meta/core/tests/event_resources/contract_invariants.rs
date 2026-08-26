@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn listener_capacity_and_generation_authority_cover_active_and_staged_entries() {
+async fn listener_capacity_and_exact_handles_cover_active_and_loading_entries() {
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_event_listeners: 1,
@@ -16,17 +16,17 @@ async fn listener_capacity_and_generation_authority_cover_active_and_staged_entr
         .root()
         .apply(
             Arc::new(ListenerCaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("listener-owner", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("listener-owner", "1")),
                 context: Arc::clone(&owner_context),
                 listener: Arc::clone(&owner_listener),
-                remove_while_staged: false,
+                dispose_during_activation: false,
             }),
             Value::Null,
         )
         .await
         .unwrap();
     let owner_context = owner_context.lock().unwrap().clone().unwrap();
-    let owner_listener = owner_listener.lock().unwrap().unwrap();
+    let owner_listener = owner_listener.lock().unwrap().clone().unwrap();
     assert!(matches!(
         owner_context.on(
             "authority",
@@ -38,28 +38,7 @@ async fn listener_capacity_and_generation_authority_cover_active_and_staged_entr
         })
     ));
 
-    let foreign_context = Arc::new(Mutex::new(None));
-    let consumer = runtime
-        .root()
-        .apply(
-            Arc::new(ContextCaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("foreign", "1")),
-                context: Arc::clone(&foreign_context),
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(consumer.snapshot().state, FiberState::Active));
-    assert!(
-        !foreign_context
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .off(owner_listener)
-    );
-    assert!(!runtime.root().off(owner_listener));
+    assert_eq!(owner_listener.id(), owner_listener.clone().id());
 
     owner.dispose().await;
     assert!(matches!(
@@ -69,16 +48,16 @@ async fn listener_capacity_and_generation_authority_cover_active_and_staged_entr
         Err(MetaError::StaleContext { .. })
     ));
 
-    let staged_context = Arc::new(Mutex::new(None));
-    let staged_listener = Arc::new(Mutex::new(None));
+    let loading_context = Arc::new(Mutex::new(None));
+    let loading_listener = Arc::new(Mutex::new(None));
     runtime
         .root()
         .apply(
             Arc::new(ListenerCaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("staged-off", "1")),
-                context: staged_context,
-                listener: staged_listener,
-                remove_while_staged: true,
+                spec: FactorySpec::new(FactoryIdentity::builtin("loading-dispose", "1")),
+                context: loading_context,
+                listener: loading_listener,
+                dispose_during_activation: true,
             }),
             Value::Null,
         )

@@ -1,19 +1,20 @@
 use crate::runtime::ContextScope;
+use crate::runtime::EventOwnership;
 use crate::service::AdmissionLease;
-use crate::{EventHandler, EventKey, EventListenerId, EventOptions, FiberGeneration, FiberId};
+use crate::{EventHandler, EventListenerId, EventOptions, FiberGeneration, FiberId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct ListenerBinding {
     pub id: EventListenerId,
-    pub event: EventKey,
     pub owner: FiberId,
     pub generation: FiberGeneration,
     pub scope: ContextScope,
     pub handler: Arc<dyn EventHandler>,
     pub options: EventOptions,
     pub lease: Arc<AdmissionLease>,
+    pub ownership: EventOwnership,
 }
 
 /// Ordered per-event storage with logarithmic identity removal.

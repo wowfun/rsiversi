@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    Context, ContractVersion, FactoryIdentity, InvocationContext, PluginDescriptor, PluginFactory,
-    ProviderChannel, Provision, Requirement, Result, ServiceEndpoint, ServiceFrame,
+    ActivationPlan, ConfigValue, ContractVersion, FactoryIdentity, InvocationContext, Message,
+    PluginFactory, PreparedActivation, ProviderChannel, Requirement, Result, ServiceEndpoint,
 };
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -34,7 +34,7 @@ impl ServiceEndpoint for EchoEndpoint {
 
 #[derive(Debug)]
 pub(crate) struct ProviderFactory {
-    descriptor: PluginDescriptor,
+    identity: FactoryIdentity,
     pub(crate) overlays: Arc<Mutex<Vec<Vec<Value>>>>,
     cleanup: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -42,8 +42,7 @@ pub(crate) struct ProviderFactory {
 impl ProviderFactory {
     pub(crate) fn new(cleanup: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
-            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("provider", "1"))
-                .providing(Provision::new("echo", "test.echo", V1)),
+            identity: FactoryIdentity::builtin("provider", "1"),
             overlays: Arc::new(Mutex::new(Vec::new())),
             cleanup,
         }
@@ -52,12 +51,16 @@ impl ProviderFactory {
 
 #[async_trait]
 impl PluginFactory for ProviderFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.provide(
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context().provide(
             "echo",
             "test.echo",
             V1,
@@ -66,7 +69,7 @@ impl PluginFactory for ProviderFactory {
             }),
         )?;
         let cleanup = Arc::clone(&self.cleanup);
-        context.defer(
+        plan.context().defer(
             "provider",
             Box::new(move || {
                 async move {
@@ -85,7 +88,7 @@ impl PluginFactory for ProviderFactory {
 #[derive(Debug)]
 #[allow(dead_code)] // Shared with the service-invariants target, not every importer.
 pub(crate) struct ConsumerFactory {
-    descriptor: PluginDescriptor,
+    identity: FactoryIdentity,
     pub(crate) observed: Arc<Mutex<Vec<Vec<u8>>>>,
     cleanup: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -94,8 +97,7 @@ pub(crate) struct ConsumerFactory {
 impl ConsumerFactory {
     pub(crate) fn new(cleanup: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
-            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("consumer", "1"))
-                .requiring(Requirement::new("echo", "test.echo", V1)),
+            identity: FactoryIdentity::builtin("consumer", "1"),
             observed: Arc::new(Mutex::new(Vec::new())),
             cleanup,
         }
@@ -104,33 +106,39 @@ impl ConsumerFactory {
 
 #[async_trait]
 impl PluginFactory for ConsumerFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        let service = context.service("echo")?;
-        let response = service
-            .open()?
-            .unary(ServiceFrame::new(b"active".to_vec()))
-            .await?;
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(
+            PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                "echo",
+                "test.echo",
+                V1,
+            )),
+        )
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let service = plan
+            .inject("echo")
+            .expect("prepared echo requirement must be injected")
+            .clone();
+        let response = service.invoke(Message::new(b"active".to_vec())).await?;
         self.observed
             .lock()
             .expect("observation log poisoned")
-            .push(response.into_bytes());
+            .push(response.into_parts().0);
         let cleanup = Arc::clone(&self.cleanup);
-        context.defer(
+        plan.context().defer(
             "consumer",
             Box::new(move || {
                 async move {
-                    let response = service
-                        .open()
-                        .map_err(|error| error.to_string())?
-                        .unary(ServiceFrame::new(b"cleanup".to_vec()))
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    if response.as_bytes() != b"cleanup" {
-                        return Err("cleanup call returned wrong bytes".to_owned());
+                    if !matches!(service.open(), Err(rsi_meta::MetaError::StaleCapability)) {
+                        return Err(
+                            "ordinary capability admission remained open during cleanup".to_owned()
+                        );
                     }
                     cleanup
                         .lock()

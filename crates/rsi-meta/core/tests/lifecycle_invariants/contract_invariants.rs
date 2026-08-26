@@ -2,18 +2,23 @@ use super::*;
 
 #[derive(Debug)]
 struct BlockingActivationFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
     cleaned: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for BlockingActivationFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
         context.on(
             "cancelled-activation",
             Arc::new(NoopHandler),
@@ -54,10 +59,7 @@ async fn cancelling_apply_rolls_back_the_runtime_owned_activation() {
         async move {
             root.apply(
                 Arc::new(BlockingActivationFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "cancelled-apply",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-apply", "1")),
                     entered,
                     cleaned,
                 }),
@@ -84,13 +86,10 @@ async fn cancelling_apply_rolls_back_the_runtime_owned_activation() {
         .root()
         .apply(
             Arc::new(ListenerCaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "replacement-listener",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("replacement-listener", "1")),
                 context: Arc::new(Mutex::new(None)),
                 listener: Arc::new(Mutex::new(None)),
-                remove_while_staged: false,
+                dispose_during_activation: false,
             }),
             Value::Null,
         )
@@ -107,10 +106,7 @@ async fn captured_context_cannot_cross_a_reconfiguration_generation() {
         .root()
         .apply(
             Arc::new(ContextCaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "context-generation",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("context-generation", "1")),
                 context: Arc::clone(&captured),
             }),
             Value::Null,
@@ -144,7 +140,7 @@ async fn captured_context_cannot_cross_a_reconfiguration_generation() {
 
 #[derive(Debug)]
 struct PanicCleanupSerializationFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     cleanup_entered: Arc<Notify>,
     cleanup_release: Arc<Notify>,
     panic_once: AtomicBool,
@@ -152,12 +148,18 @@ struct PanicCleanupSerializationFactory {
 
 #[async_trait]
 impl PluginFactory for PanicCleanupSerializationFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, config: Arc<Value>) -> Result<()> {
-        if *config == 1 && !self.panic_once.swap(true, Ordering::AcqRel) {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
+        let config = plan.config();
+        if config.as_ref() == &Value::from(1) && !self.panic_once.swap(true, Ordering::AcqRel) {
             let entered = Arc::clone(&self.cleanup_entered);
             let release = Arc::clone(&self.cleanup_release);
             context.defer(
@@ -183,18 +185,13 @@ async fn activation_panic_cleanup_remains_inside_the_transition_transaction() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "panic-dependency",
-                    "1",
-                ))
-                .providing(Provision::new(
-                    "panic-dependency",
-                    "test.dependency",
-                    V1,
-                )),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(EndpointFactory::new(
+                FactoryIdentity::builtin("panic-dependency", "1"),
+                "panic-dependency",
+                "test.dependency",
+                V1,
+                Arc::new(Echo),
+            )),
             Value::Null,
         )
         .await
@@ -205,15 +202,8 @@ async fn activation_panic_cleanup_remains_inside_the_transition_transaction() {
         .root()
         .apply(
             Arc::new(PanicCleanupSerializationFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "panic-cleanup-consumer",
-                    "1",
-                ))
-                .requiring(Requirement::new(
-                    "panic-dependency",
-                    "test.dependency",
-                    V1,
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("panic-cleanup-consumer", "1"))
+                    .requiring(Requirement::new("panic-dependency", "test.dependency", V1)),
                 cleanup_entered: Arc::clone(&cleanup_entered),
                 cleanup_release: Arc::clone(&cleanup_release),
                 panic_once: AtomicBool::new(false),

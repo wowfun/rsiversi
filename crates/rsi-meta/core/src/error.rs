@@ -1,4 +1,4 @@
-use crate::{ContractId, ContractVersion, FiberGeneration, FiberId, ServiceKey};
+use crate::{FiberGeneration, FiberId, ServiceKey};
 
 /// Result type returned by the `rsi-meta` foundation.
 pub type Result<T> = std::result::Result<T, MetaError>;
@@ -26,19 +26,7 @@ pub enum MetaError {
         /// Generation captured by the stale Context.
         generation: FiberGeneration,
     },
-    /// A plugin requested a service absent from its declared requirements.
-    #[error("service {service} was not declared as a requirement")]
-    UndeclaredRequirement {
-        /// Undeclared service key.
-        service: ServiceKey,
-    },
-    /// A plugin published a service absent from its declared provisions.
-    #[error("service {service} was not declared as a provision")]
-    UndeclaredProvision {
-        /// Undeclared service key.
-        service: ServiceKey,
-    },
-    /// No bound provider is available for the declared requirement.
+    /// No bound provider is available for the requested service.
     #[error("service {service} is not bound")]
     ServiceUnavailable {
         /// Unavailable service key.
@@ -50,29 +38,19 @@ pub enum MetaError {
         /// Service key carried by the stale handle.
         service: ServiceKey,
     },
-    /// The provider in a resolved slot does not satisfy the exact requirement contract.
-    #[error(
-        "service contract mismatch for {service}: expected {expected_id}@{expected_version:?}, got {actual_id}@{actual_version:?}"
-    )]
-    ContractMismatch {
-        /// Service slot whose contracts differ.
-        service: ServiceKey,
-        /// Required contract identity.
-        expected_id: ContractId,
-        /// Required exact contract version.
-        expected_version: ContractVersion,
-        /// Published contract identity.
-        actual_id: ContractId,
-        /// Published exact contract version.
-        actual_version: ContractVersion,
-    },
+    /// A capability or Message belongs to another Runtime.
+    #[error("capability belongs to a different runtime")]
+    CapabilityFromDifferentRuntime,
+    /// A capability entry was revoked.
+    #[error("capability is stale")]
+    StaleCapability,
     /// Another provider already occupies the same service and isolation slot.
     #[error("service slot already has a provider: {service}")]
     DuplicateProvider {
         /// Conflicting service key.
         service: ServiceKey,
     },
-    /// An encoded frame, configuration, or value exceeds its owning byte bound.
+    /// An encoded Message, configuration, or value exceeds its owning byte bound.
     #[error("payload exceeds the configured {maximum}-byte limit")]
     PayloadTooLarge {
         /// Maximum permitted encoded bytes.
@@ -90,9 +68,24 @@ pub enum MetaError {
         /// Stable name of the operation class.
         operation: &'static str,
     },
+    /// The current authority recursively entered an operation that forbids its lineage.
+    #[error("operation is reentrant: {operation}")]
+    Reentrant {
+        /// Stable name of the operation class.
+        operation: &'static str,
+    },
     /// A preparation proof was presented to a Runtime other than its owner.
     #[error("prepared plugin belongs to a different runtime")]
     PreparedForDifferentRuntime,
+    /// The activation plan contains no unconsumed opaque prepared state.
+    #[error("prepared activation state is unavailable")]
+    PreparedStateUnavailable,
+    /// The requested Rust type does not match the opaque prepared state.
+    #[error("prepared activation state has a different type; expected {expected}")]
+    PreparedStateTypeMismatch {
+        /// Rust type requested by the factory.
+        expected: &'static str,
+    },
     /// Plugin configuration normalization rejected its input or output.
     #[error("plugin configuration is invalid: {0}")]
     InvalidConfig(String),

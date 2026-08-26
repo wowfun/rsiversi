@@ -1,172 +1,67 @@
 #![allow(clippy::wildcard_imports)] // This is one implementation partition of runtime.
 
 use super::*;
-use crate::service::{BufferedFrame, CallLease, LeaseGuard, ResponseMessage};
+use crate::service::CallLease;
 
-#[derive(Clone, Copy)]
-enum CallTerminationSource {
-    RuntimeTerminal,
-    Deadline,
-    Endpoint,
-    Cancellation,
-}
+mod driver;
+mod endpoint_driver;
 
-struct CallDriver {
-    requests: mpsc::Receiver<BufferedFrame>,
-    responses: mpsc::Sender<ResponseMessage>,
-    terminal: mpsc::OwnedPermit<ResponseMessage>,
-    byte_admission: Arc<BufferedByteAdmission>,
-    byte_resources: Arc<ResourceLedger>,
-    cancellation: CancellationToken,
-    deadline: tokio::time::Instant,
-    maximum_frame_bytes: usize,
-    call_lease: Arc<CallLease>,
-    provider_lease: LeaseGuard,
-    runtime: Runtime,
-}
-
-impl CallDriver {
-    async fn run(self, endpoint: Arc<dyn ServiceEndpoint>, invocation: InvocationContext) {
-        let Self {
-            mut requests,
-            responses,
-            terminal,
-            byte_admission,
-            byte_resources,
-            cancellation,
-            deadline,
-            maximum_frame_bytes,
-            call_lease,
-            provider_lease,
-            runtime,
-        } = self;
-        let terminal_result = {
-            let provider_channel = crate::ProviderChannel {
-                requests: &mut requests,
-                responses: &responses,
-                byte_admission: &byte_admission,
-                byte_resources: &byte_resources,
-                cancellation: &cancellation,
-                deadline,
-                maximum_frame_bytes,
-            };
-            let mut operation = Some(Box::pin(
-                std::panic::AssertUnwindSafe(endpoint.serve(invocation, provider_channel))
-                    .catch_unwind(),
-            ));
-            let (selected, source) = tokio::select! {
-                biased;
-                () = runtime.inner.terminal_cancellation.cancelled() => {
-                    (
-                        Err(runtime.ensure_admitting().err().unwrap_or(MetaError::RuntimeShuttingDown)),
-                        CallTerminationSource::RuntimeTerminal,
-                    )
-                }
-                () = tokio::time::sleep_until(deadline) => {
-                    (
-                        Err(MetaError::Timeout("service call")),
-                        CallTerminationSource::Deadline,
-                    )
-                }
-                result = operation
-                    .as_mut()
-                    .expect("the provider future lives through selection")
-                    .as_mut() => (
-                        match result {
-                            Err(_) => Err(MetaError::ServiceEndpointPanicked),
-                            Ok(Ok(())) if cancellation.is_cancelled() => Err(MetaError::Cancelled),
-                            Ok(Ok(())) => Ok(()),
-                            Ok(Err(error)) => Err(super::dispatch::bound_service_callback_error(
-                                error,
-                                runtime.inner.limits.payloads.maximum_diagnostic_bytes,
-                            )),
-                        },
-                        CallTerminationSource::Endpoint,
-                    ),
-                () = cancellation.cancelled() => (
-                    Err(MetaError::Cancelled),
-                    CallTerminationSource::Cancellation,
-                ),
-            };
-            if drop_catching_unwind(operation.take())
-                && matches!(
-                    source,
-                    CallTerminationSource::Endpoint | CallTerminationSource::Cancellation
-                )
-            {
-                Err(MetaError::ServiceEndpointPanicked)
-            } else {
-                selected
-            }
-        };
-        // The reserved slot makes publication synchronous. Wake the shared
-        // cancellation token only afterwards so a caller's biased receive can
-        // preserve this authoritative terminal result.
-        terminal.send(ResponseMessage::Terminal(terminal_result));
-        drop(provider_lease);
-        drop(call_lease);
-        cancellation.cancel();
-    }
-}
+use crate::service::MessageChannel;
+use driver::CallDriver;
 
 impl Runtime {
-    pub(super) fn service(&self, context: &Context, key: &ServiceKey) -> Result<ServiceHandle> {
-        let owner = context
-            .owner
-            .ok_or_else(|| MetaError::UndeclaredRequirement {
-                service: key.clone(),
-            })?;
+    pub(super) fn service(&self, context: &Context, key: &ServiceKey) -> Result<Capability> {
+        let owner = context.owner.ok_or_else(|| MetaError::ServiceUnavailable {
+            service: key.clone(),
+        })?;
         let fiber = self.owner_fiber(owner)?;
-        let data = fiber.data.lock().expect("fiber state poisoned");
-        Self::validate_owner_data(owner, &data, true)?;
-        let requirement = data
-            .descriptor
-            .as_deref()
-            .expect("registered Fiber retains its descriptor")
-            .requirement(key)
-            .ok_or_else(|| MetaError::UndeclaredRequirement {
-                service: key.clone(),
-            })?;
-        let binding = data
-            .active
-            .as_ref()
-            .and_then(|active| active.bindings.get(key))
-            .cloned()
-            .ok_or_else(|| MetaError::ServiceUnavailable {
-                service: key.clone(),
-            })?;
-        if binding.contract != requirement.contract || binding.version != requirement.version {
-            return Err(MetaError::ContractMismatch {
-                service: key.clone(),
-                expected_id: requirement.contract.clone(),
-                expected_version: requirement.version,
-                actual_id: binding.contract.clone(),
-                actual_version: binding.version,
-            });
-        }
-        Ok(ServiceHandle {
-            runtime: self.clone(),
-            caller: context.clone(),
-            binding,
-            overlay: context
-                .intercepts
-                .get(key)
-                .cloned()
-                .unwrap_or_else(InterceptLayers::shared_empty),
-        })
+        let (binding, overlay, capabilities) = {
+            let data = fiber.data.lock().expect("fiber state poisoned");
+            Self::validate_live_owner_data(owner, &data)?;
+            let active = data
+                .active
+                .as_ref()
+                .ok_or_else(|| MetaError::ServiceUnavailable {
+                    service: key.clone(),
+                })?;
+            let slot = ServiceSlot {
+                key: key.clone(),
+                isolation: Self::isolation_for(&context.isolation, key),
+            };
+            let (binding, overlay) = if let Some(supply) = active.services.get(&slot) {
+                (Arc::clone(&supply.binding), InterceptLayers::shared_empty())
+            } else if let Some(binding) = active.bindings.get(key) {
+                (
+                    Arc::clone(binding),
+                    context
+                        .intercepts
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(InterceptLayers::shared_empty),
+                )
+            } else {
+                return Err(MetaError::ServiceUnavailable {
+                    service: key.clone(),
+                });
+            };
+            (binding, overlay, Arc::clone(&active.capabilities))
+        };
+        self.mint_capability(context, owner, &capabilities, binding, overlay)
     }
 
     #[allow(clippy::too_many_lines)] // Admission, tracing, channels, and the owned task form one seam.
-    pub(crate) fn open_service(&self, handle: &ServiceHandle) -> Result<ServiceCall> {
-        let caller_owner = handle.caller.owner.ok_or_else(|| MetaError::StaleService {
-            service: handle.binding.key.clone(),
-        })?;
-        // Activation and reverse-order cleanup may call already-bound
-        // dependencies; generation identity and the provider lease fence them.
+    pub(crate) fn open_service(&self, handle: &Capability) -> Result<CapabilityCall> {
+        let caller_owner = handle.holder.owner.ok_or(MetaError::StaleCapability)?;
+        let capability_use = handle.entry.acquire_use()?;
         let caller_fiber = self.owner_fiber(caller_owner)?;
         let executor = caller_fiber.executor.clone();
-        let retiring_consumer = Self::validate_service_caller(handle, caller_owner, &caller_fiber)?;
-        let runtime_admission = self.begin_admission(retiring_consumer)?;
+        let caller_admission =
+            Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
+        let caller_lease = caller_admission
+            .acquire(false)
+            .ok_or(MetaError::StaleCapability)?;
+        Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
+        let runtime_admission = self.begin_admission(false)?;
         let deadline = tokio::time::Instant::now()
             .checked_add(self.inner.limits.deadlines.service_call)
             .expect("validated service-call deadline fits Tokio Instant");
@@ -183,40 +78,50 @@ impl Runtime {
                 resource: "service calls",
             },
         )?;
-        let lease = Self::acquire_service_provider_lease(
-            handle,
-            caller_owner,
-            &caller_fiber,
-            retiring_consumer,
-        )?;
-        let call_id = CallId(self.inner.next_call.fetch_add(1, Ordering::AcqRel) + 1);
-        let provider_context = self.provider_context(&handle.binding, &handle.caller, call_id)?;
+        let lease = handle
+            .entry
+            .binding
+            .lease
+            .acquire(false)
+            .ok_or(MetaError::StaleCapability)?;
+        Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
+        let call_id = self.next_call_id()?;
+        let provider_context =
+            self.provider_context(&handle.entry.binding, &handle.holder, call_id)?;
+        let provider_message_context = provider_context.clone();
         let immediate_caller = caller_owner.fiber;
         let origin = handle
-            .caller
+            .holder
             .trace
             .as_ref()
             .map_or(immediate_caller, |trace| trace.origin);
+        let lineage_call = handle
+            .holder
+            .trace
+            .as_ref()
+            .map_or(call_id, |trace| trace.lineage_call);
         let parent_call = handle
-            .caller
+            .holder
             .trace
             .as_ref()
             .and_then(|trace| trace.parent_call);
         let cancellation = CancellationToken::new();
         let invocation = InvocationContext::new(
             call_id,
+            lineage_call,
             parent_call,
             origin,
             immediate_caller,
-            handle.binding.provider,
-            handle.binding.generation,
-            Arc::clone(&handle.overlay),
-            handle.caller.clone(),
+            handle.entry.binding.provider,
+            handle.entry.binding.generation,
+            Arc::clone(&handle.entry.overlay),
+            handle.holder.clone(),
             provider_context,
             cancellation.clone(),
         );
         let channel_capacity = self.inner.limits.execution.channel_capacity;
         let (requests_tx, requests_rx) = mpsc::channel(channel_capacity);
+        let request_channel = MessageChannel::new(channel_capacity);
         let response_capacity =
             channel_capacity
                 .checked_add(1)
@@ -224,80 +129,77 @@ impl Runtime {
                     resource: "service response channel",
                 })?;
         let (responses_tx, responses_rx) = mpsc::channel(response_capacity);
+        let response_channel = MessageChannel::new(channel_capacity);
         let terminal_response = responses_tx
             .clone()
             .try_reserve_owned()
             .expect("a fresh response channel has its reserved terminal slot");
-        let endpoint = Arc::clone(&handle.binding.endpoint);
-        let maximum_frame_bytes = self.inner.limits.payloads.maximum_frame_bytes;
+        let endpoint = handle
+            .entry
+            .binding
+            .endpoint
+            .lock()
+            .expect("service endpoint state poisoned")
+            .clone()
+            .ok_or(MetaError::StaleCapability)?;
+        let maximum_message_bytes = self.inner.limits.payloads.maximum_message_bytes;
+        let maximum_capabilities_per_message =
+            self.inner.limits.topology.maximum_capabilities_per_message;
         let runtime = self.clone();
-        let call_lease = Arc::new(CallLease::new(runtime_admission, admission, call_resource));
+        let call_lease = Arc::new(CallLease::new(
+            runtime_admission,
+            caller_lease,
+            admission,
+            call_resource,
+        ));
         let driver = CallDriver {
+            provider_context: provider_message_context,
             requests: requests_rx,
             responses: responses_tx,
             terminal: terminal_response,
-            byte_admission: Arc::clone(&self.inner.service_byte_admission),
-            byte_resources: Arc::clone(&self.inner.resources.buffered_service_bytes),
+            message_admission: Arc::clone(&self.inner.message_admission),
+            response_channel,
+            byte_resources: Arc::clone(&self.inner.resources.buffered_message_bytes),
+            capability_resources: Arc::clone(&self.inner.resources.queued_capability_references),
             cancellation: cancellation.clone(),
             deadline,
-            maximum_frame_bytes,
+            maximum_message_bytes,
+            maximum_capabilities_per_message,
             call_lease: Arc::clone(&call_lease),
+            capability_use,
             provider_lease: lease,
             runtime,
         };
         executor.spawn(driver.run(endpoint, invocation));
-        Ok(ServiceCall {
+        Ok(CapabilityCall {
+            context: handle.holder.clone(),
             requests: Some(requests_tx),
             responses: Some(responses_rx),
-            byte_admission: Arc::clone(&self.inner.service_byte_admission),
-            byte_resources: Arc::clone(&self.inner.resources.buffered_service_bytes),
+            message_admission: Arc::clone(&self.inner.message_admission),
+            request_channel,
+            byte_resources: Arc::clone(&self.inner.resources.buffered_message_bytes),
+            capability_resources: Arc::clone(&self.inner.resources.queued_capability_references),
             cancellation,
             deadline,
-            maximum_frame_bytes,
+            maximum_message_bytes,
+            maximum_capabilities_per_message,
             lease: Some(call_lease),
-            terminal_observed: false,
+            terminal_result: None,
         })
     }
 
-    pub(super) fn validate_service_caller(
-        handle: &ServiceHandle,
+    pub(super) fn validate_capability_holder(
+        handle: &Capability,
         caller_owner: Owner,
         caller_fiber: &Arc<Fiber>,
-    ) -> Result<bool> {
+    ) -> Result<Arc<AdmissionLease>> {
         let data = caller_fiber.data.lock().expect("fiber state poisoned");
-        Self::validate_owner_data(caller_owner, &data, true)?;
-        let still_bound = data.active.as_ref().is_some_and(|active| {
-            active
-                .bindings
-                .get(&handle.binding.key)
-                .is_some_and(|binding| Arc::ptr_eq(binding, &handle.binding))
-        });
-        if !still_bound {
-            return Err(MetaError::StaleService {
-                service: handle.binding.key.clone(),
-            });
+        Self::validate_live_owner_data(caller_owner, &data)?;
+        let active = data.active.as_ref().ok_or(MetaError::StaleCapability)?;
+        if handle.holder.owner != Some(caller_owner) {
+            return Err(MetaError::StaleCapability);
         }
-        Ok(matches!(data.state, FiberState::Unloading))
-    }
-
-    pub(super) fn acquire_service_provider_lease(
-        handle: &ServiceHandle,
-        caller_owner: Owner,
-        caller_fiber: &Arc<Fiber>,
-        retiring_consumer: bool,
-    ) -> Result<LeaseGuard> {
-        let lease = handle
-            .binding
-            .lease
-            .acquire(retiring_consumer)
-            .ok_or_else(|| MetaError::StaleService {
-                service: handle.binding.key.clone(),
-            })?;
-        // Provider admission protects the endpoint while this final caller
-        // check linearizes against reconfiguration and disposal. Any failure
-        // drops the provisional provider lease before channel allocation.
-        Self::validate_service_caller(handle, caller_owner, caller_fiber)?;
-        Ok(lease)
+        Ok(Arc::clone(&active.lease))
     }
 
     fn provider_context(
@@ -319,8 +221,211 @@ impl Runtime {
                 || caller.owner.map_or(ROOT_FIBER, |owner| owner.fiber),
                 |trace| trace.origin,
             ),
+            lineage_call: caller
+                .trace
+                .as_ref()
+                .map_or(call_id, |trace| trace.lineage_call),
             parent_call: Some(call_id),
         });
         Ok(context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Message, PreparedActivation, ProviderChannel, Requirement};
+
+    const V1: ContractVersion = ContractVersion(1);
+    const CONTRACT: &str = "test.lineage";
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ObservedCall {
+        hop: &'static str,
+        call: CallId,
+        lineage: CallId,
+        parent: Option<CallId>,
+        origin: FiberId,
+    }
+
+    #[derive(Debug)]
+    struct ChainEndpoint {
+        hop: &'static str,
+        next: Option<&'static str>,
+        observed: Arc<Mutex<Vec<ObservedCall>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceEndpoint for ChainEndpoint {
+        async fn serve(
+            &self,
+            invocation: InvocationContext,
+            mut channel: ProviderChannel<'_>,
+        ) -> Result<()> {
+            self.observed
+                .lock()
+                .expect("lineage observations poisoned")
+                .push(ObservedCall {
+                    hop: self.hop,
+                    call: invocation.call_id(),
+                    lineage: invocation.lineage_call_id(),
+                    parent: invocation.parent_call_id(),
+                    origin: invocation.origin(),
+                });
+            while let Some(message) = channel.recv().await {
+                let response = if let Some(next) = self.next {
+                    invocation
+                        .provider_context()
+                        .service(next)?
+                        .invoke(message)
+                        .await?
+                } else {
+                    message
+                };
+                channel.send(response).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChainFactory {
+        hop: &'static str,
+        service: &'static str,
+        next: Option<&'static str>,
+        observed: Arc<Mutex<Vec<ObservedCall>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PluginFactory for ChainFactory {
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin(self.hop, "1")
+        }
+
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            let prepared = PreparedActivation::new(desired.clone());
+            Ok(if let Some(next) = self.next {
+                prepared.requiring(Requirement::new(next, CONTRACT, V1))
+            } else {
+                prepared
+            })
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            plan.context().provide(
+                self.service,
+                CONTRACT,
+                V1,
+                Arc::new(ChainEndpoint {
+                    hop: self.hop,
+                    next: self.next,
+                    observed: Arc::clone(&self.observed),
+                }),
+            )?;
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct CaptureFactory(Arc<Mutex<Option<(Capability, CallId)>>>);
+
+    #[async_trait::async_trait]
+    impl PluginFactory for CaptureFactory {
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin("lineage-client", "1")
+        }
+
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone())
+                .requiring(Requirement::new("a-head", CONTRACT, V1)))
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            *self.0.lock().expect("captured capability poisoned") = plan
+                .inject("a-head")
+                .cloned()
+                .map(|capability| (capability, plan.lineage_call_id()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn activation_to_b_to_a_preserves_seed_and_immediate_parents() {
+        let runtime = Runtime::default();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut fibers = Vec::new();
+        for (hop, service, next) in [
+            ("a-tail", "a-tail", None),
+            ("b", "b", Some("a-tail")),
+            ("a-head", "a-head", Some("b")),
+        ] {
+            fibers.push(
+                runtime
+                    .root()
+                    .apply(
+                        Arc::new(ChainFactory {
+                            hop,
+                            service,
+                            next,
+                            observed: Arc::clone(&observed),
+                        }),
+                        ConfigValue::Null,
+                    )
+                    .await
+                    .expect("chain provider activates"),
+            );
+        }
+        let captured = Arc::new(Mutex::new(None));
+        fibers.push(
+            runtime
+                .root()
+                .apply(
+                    Arc::new(CaptureFactory(Arc::clone(&captured))),
+                    ConfigValue::Null,
+                )
+                .await
+                .expect("chain client activates"),
+        );
+        let client = fibers.last().expect("client Fiber is retained").id();
+        let (capability, lineage) = captured
+            .lock()
+            .expect("captured capability poisoned")
+            .clone()
+            .expect("activation receives a-head");
+        assert_ne!(lineage, CallId(0));
+
+        let call =
+            tokio::spawn(async move { capability.invoke(Message::new(b"lineage".to_vec())).await });
+        assert_eq!(
+            call.await
+                .expect("call task succeeds")
+                .expect("nested chain succeeds")
+                .as_bytes(),
+            b"lineage"
+        );
+        let observed = observed
+            .lock()
+            .expect("lineage observations poisoned")
+            .clone();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed.iter().map(|item| item.hop).collect::<Vec<_>>(),
+            ["a-head", "b", "a-tail"]
+        );
+        assert_eq!(observed[0].lineage, lineage);
+        assert_ne!(observed[0].call, lineage);
+        assert_eq!(observed[0].parent, None);
+        assert!(observed.iter().all(|item| item.origin == client));
+        assert_eq!(observed[1].lineage, lineage);
+        assert_eq!(observed[1].parent, Some(observed[0].call));
+        assert_eq!(observed[2].lineage, lineage);
+        assert_eq!(observed[2].parent, Some(observed[1].call));
+        assert_ne!(observed[1].call, observed[0].call);
+        assert_ne!(observed[2].call, observed[1].call);
+        drop(captured);
+        for fiber in fibers.into_iter().rev() {
+            assert!(fiber.dispose().await.is_clean());
+        }
+        assert!(runtime.shutdown().await.is_complete());
     }
 }

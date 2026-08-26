@@ -1,15 +1,15 @@
 use super::*;
 
 #[derive(Debug)]
-struct BlockingDeclaredProviderFactory {
-    descriptor: PluginDescriptor,
+struct BlockingLoadingProviderFactory {
+    spec: FactorySpec,
     entered: Arc<Notify>,
     release: Arc<Notify>,
 }
 
 #[derive(Debug)]
 struct ReconciliationProbeFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Option<Arc<Notify>>,
     release: Option<Arc<Notify>>,
     activated: Arc<Notify>,
@@ -17,18 +17,22 @@ struct ReconciliationProbeFactory {
 
 #[derive(Debug)]
 struct BlockingConsumerFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
     release: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for BlockingConsumerFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())
@@ -37,11 +41,15 @@ impl PluginFactory for BlockingConsumerFactory {
 
 #[async_trait]
 impl PluginFactory for ReconciliationProbeFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         if let Some(entered) = &self.entered {
             entered.notify_one();
         }
@@ -72,7 +80,7 @@ async fn one_slow_pending_fiber_does_not_block_independent_reconciliation() {
         .root()
         .apply(
             Arc::new(ReconciliationProbeFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("slow-pending", "1"))
+                spec: FactorySpec::new(FactoryIdentity::builtin("slow-pending", "1"))
                     .requiring(requirement()),
                 entered: Some(Arc::clone(&entered)),
                 release: Some(Arc::clone(&release)),
@@ -86,7 +94,7 @@ async fn one_slow_pending_fiber_does_not_block_independent_reconciliation() {
         .root()
         .apply(
             Arc::new(ReconciliationProbeFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("fast-pending", "1"))
+                spec: FactorySpec::new(FactoryIdentity::builtin("fast-pending", "1"))
                     .requiring(requirement()),
                 entered: None,
                 release: None,
@@ -99,14 +107,13 @@ async fn one_slow_pending_fiber_does_not_block_independent_reconciliation() {
     runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "reconciliation-provider",
-                    "1",
-                ))
-                .providing(Provision::new("reconcile", "test.reconcile", V1)),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(EndpointFactory::new(
+                FactoryIdentity::builtin("reconciliation-provider", "1"),
+                "reconcile",
+                "test.reconcile",
+                V1,
+                Arc::new(Echo),
+            )),
             Value::Null,
         )
         .await
@@ -128,12 +135,17 @@ async fn one_slow_pending_fiber_does_not_block_independent_reconciliation() {
 }
 
 #[async_trait]
-impl PluginFactory for BlockingDeclaredProviderFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+impl PluginFactory for BlockingLoadingProviderFactory {
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         context.provide("cycle-a", "test.cycle-a", V1, Arc::new(Echo))?;
         self.entered.notify_one();
         self.release.notified().await;
@@ -142,23 +154,18 @@ impl PluginFactory for BlockingDeclaredProviderFactory {
 }
 
 #[tokio::test]
-async fn cycle_diagnostics_follow_loading_fibers_actual_bindings() {
+async fn loading_supply_is_not_an_external_binding_or_a_fabricated_cycle_edge() {
     let runtime = Runtime::default();
     runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "cycle-shared-provider",
-                    "1",
-                ))
-                .providing(Provision::new(
-                    "cycle-shared",
-                    "test.cycle-shared",
-                    V1,
-                )),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(EndpointFactory::new(
+                FactoryIdentity::builtin("cycle-shared-provider", "1"),
+                "cycle-shared",
+                "test.cycle-shared",
+                V1,
+                Arc::new(Echo),
+            )),
             Value::Null,
         )
         .await
@@ -171,13 +178,9 @@ async fn cycle_diagnostics_follow_loading_fibers_actual_bindings() {
         let release = Arc::clone(&release);
         async move {
             root.apply(
-                Arc::new(BlockingDeclaredProviderFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "cycle-loading-provider",
-                        "1",
-                    ))
-                    .requiring(Requirement::new("cycle-shared", "test.cycle-shared", V1))
-                    .providing(Provision::new("cycle-a", "test.cycle-a", V1)),
+                Arc::new(BlockingLoadingProviderFactory {
+                    spec: FactorySpec::new(FactoryIdentity::builtin("cycle-loading-provider", "1"))
+                        .requiring(Requirement::new("cycle-shared", "test.cycle-shared", V1)),
                     entered,
                     release,
                 }),
@@ -191,42 +194,39 @@ async fn cycle_diagnostics_follow_loading_fibers_actual_bindings() {
         .root()
         .apply(
             Arc::new(PassiveFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("cycle-pending", "1"))
-                    .requiring(Requirement::new("cycle-a", "test.cycle-a", V1))
-                    .providing(Provision::new("cycle-shared", "test.cycle-shared", V1)),
+                FactorySpec::new(FactoryIdentity::builtin("cycle-pending", "1"))
+                    .requiring(Requirement::new("cycle-a", "test.cycle-a", V1)),
             )),
             Value::Null,
         )
         .await
         .unwrap();
-    let reported_cycle = matches!(
+    assert!(matches!(
         pending.snapshot().state,
         FiberState::Pending(ref report)
-            if report.reasons.iter().any(|reason| matches!(reason, rsi_meta::PendingReason::DependencyCycle { .. }))
-    );
+            if matches!(report.reasons.as_slice(), [rsi_meta::PendingReason::MissingService { service, .. }] if service.as_ref() == "cycle-a")
+    ));
     release.notify_one();
-    loading.await.unwrap().unwrap();
-
-    assert!(
-        !reported_cycle,
-        "a loading fiber's unused declared provider became a false cycle edge"
-    );
+    let loading = loading.await.unwrap().unwrap();
+    support::wait_active(&pending).await;
+    assert!(pending.dispose().await.is_clean());
+    assert!(loading.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
 }
 
 #[tokio::test]
-async fn pending_declaration_does_not_cancel_a_consumer_of_a_published_provider() {
+async fn unrelated_pending_fiber_does_not_cancel_a_consumer_of_a_published_provider() {
     let runtime = Runtime::default();
     let provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "published-provider",
-                    "1",
-                ))
-                .providing(Provision::new("shared", "test.shared", V1)),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(EndpointFactory::new(
+                FactoryIdentity::builtin("published-provider", "1"),
+                "shared",
+                "test.shared",
+                V1,
+                Arc::new(Echo),
+            )),
             Value::Null,
         )
         .await
@@ -242,11 +242,8 @@ async fn pending_declaration_does_not_cancel_a_consumer_of_a_published_provider(
         async move {
             root.apply(
                 Arc::new(BlockingConsumerFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "loading-consumer",
-                        "1",
-                    ))
-                    .requiring(Requirement::new("shared", "test.shared", V1)),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("loading-consumer", "1"))
+                        .requiring(Requirement::new("shared", "test.shared", V1)),
                     entered,
                     release,
                 }),
@@ -257,20 +254,19 @@ async fn pending_declaration_does_not_cancel_a_consumer_of_a_published_provider(
     });
     entered.notified().await;
 
-    let pending_declaration = runtime
+    let unrelated_pending = runtime
         .root()
         .apply(
             Arc::new(PassiveFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("pending-declaration", "1"))
-                    .requiring(Requirement::new("missing", "test.missing", V1))
-                    .providing(Provision::new("shared", "test.shared", V1)),
+                FactorySpec::new(FactoryIdentity::builtin("unrelated-pending", "1"))
+                    .requiring(Requirement::new("missing", "test.missing", V1)),
             )),
             Value::Null,
         )
         .await
         .unwrap();
     assert!(matches!(
-        pending_declaration.snapshot().state,
+        unrelated_pending.snapshot().state,
         FiberState::Pending(_)
     ));
 
@@ -282,10 +278,10 @@ async fn pending_declaration_does_not_cancel_a_consumer_of_a_published_provider(
         .unwrap();
     assert!(
         matches!(consumer.snapshot().state, FiberState::Active),
-        "a declaration that never published cancelled a valid activation"
+        "an unrelated missing requirement cancelled a valid activation"
     );
 
-    assert!(pending_declaration.dispose().await.is_clean());
+    assert!(unrelated_pending.dispose().await.is_clean());
     assert!(consumer.dispose().await.is_clean());
     assert!(provider.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_complete());

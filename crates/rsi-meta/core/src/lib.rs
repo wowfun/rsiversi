@@ -30,21 +30,25 @@ pub use cleanup::{
     UnresolvedCleanupReport,
 };
 pub use error::{MetaError, Result};
-pub use events::{DispatchMode, EventHandler, EventOptions, EventOutcome, EventReceipt};
+pub use events::{
+    DispatchMode, EventHandler, EventOptions, EventOutcome, EventReceipt, EventTarget, ListenerView,
+};
 pub use ids::{
     CallId, ContractId, ContractVersion, EventKey, EventListenerId, FiberGeneration, FiberId,
-    IsolationId, ServiceKey,
+    IsolationId, ServiceKey, SupplyId,
 };
 pub use plugin::{
-    Cleanup, CleanupFuture, ConfigValue, FactoryIdentity, PluginDescriptor, PluginFactory,
-    Provision, Requirement,
+    ActivationPlan, Cleanup, CleanupFuture, ConfigValue, FactoryIdentity, PluginFactory,
+    PreparedActivation, Requirement,
 };
 pub use runtime::{
-    Context, DeadlineLimits, ExecutionLimits, FiberHandle, FiberSnapshot, FiberState,
+    CallerEffect, Context, ContextExtension, DeadlineLimits, DetachedCapability, EffectHandle,
+    EffectTxn, EventHandle, ExecutionLimits, FiberHandle, FiberSnapshot, FiberState,
     MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, PayloadLimits, PendingReason, PendingReport,
     PreparedPlugin, ResourceUsageSnapshot, Runtime, RuntimeLimits, RuntimeResourceSnapshot,
-    RuntimeSnapshot, TopologyLimits,
+    RuntimeSnapshot, SupplyHandle, TopologyLimits,
 };
 pub use service::{
-    InvocationContext, ProviderChannel, ServiceCall, ServiceEndpoint, ServiceFrame, ServiceHandle,
+    CallerView, CancellationObserver, Capability, CapabilityCall, InvocationContext, Message,
+    ProviderChannel, ServiceEndpoint,
 };

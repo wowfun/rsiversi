@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    Context, ContractVersion, DeadlineLimits, FactoryIdentity, FiberState, InvocationContext,
-    MetaError, PayloadLimits, PluginDescriptor, PluginFactory, ProviderChannel, Provision,
-    Requirement, Result, Runtime, RuntimeLimits, ServiceEndpoint, ServiceFrame, ServiceHandle,
-    ServiceKey, ShutdownOutcome,
+    ActivationPlan, CancellationObserver, Capability, ConfigValue, ContractVersion, DeadlineLimits,
+    FactoryIdentity, FiberState, InvocationContext, Message, MetaError, PayloadLimits,
+    PluginFactory, PreparedActivation, ProviderChannel, Requirement, Result, Runtime,
+    RuntimeLimits, ServiceEndpoint, ServiceKey, ShutdownOutcome,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -69,52 +69,71 @@ impl ServiceEndpoint for SaturatedResponseEndpoint {
     async fn serve(&self, _: InvocationContext, channel: ProviderChannel<'_>) -> Result<()> {
         self.entered.fetch_add(1, Ordering::AcqRel);
         self.wakeup.notify_waiters();
-        channel.send(ServiceFrame::new([1_u8])).await
+        channel.send(Message::new([1_u8])).await
     }
 }
 
 #[derive(Debug)]
 struct ProviderFactory {
-    descriptor: PluginDescriptor,
+    identity: FactoryIdentity,
     endpoint: Arc<dyn ServiceEndpoint>,
 }
 
 #[async_trait]
 impl PluginFactory for ProviderFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.provide("echo", "test.echo", V1, Arc::clone(&self.endpoint))
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context()
+            .provide("echo", "test.echo", V1, Arc::clone(&self.endpoint))?;
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct ConsumerFactory {
-    descriptor: PluginDescriptor,
-    captured: Arc<Mutex<Option<ServiceHandle>>>,
+    identity: FactoryIdentity,
+    captured: Arc<Mutex<Option<Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ConsumerFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        *self.captured.lock().expect("capture poisoned") = Some(context.service("echo")?);
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(
+            PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                "echo",
+                "test.echo",
+                V1,
+            )),
+        )
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        *self.captured.lock().expect("capture poisoned") = Some(
+            plan.inject("echo")
+                .expect("prepared echo requirement must be injected")
+                .clone(),
+        );
         Ok(())
     }
 }
 
-async fn captured_service(runtime: &Runtime, endpoint: Arc<dyn ServiceEndpoint>) -> ServiceHandle {
+async fn captured_service(runtime: &Runtime, endpoint: Arc<dyn ServiceEndpoint>) -> Capability {
     let provider = runtime
         .root()
         .apply(
             Arc::new(ProviderFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("provider", "1"))
-                    .providing(Provision::new("echo", "test.echo", V1)),
+                identity: FactoryIdentity::builtin("provider", "1"),
                 endpoint,
             }),
             Value::Null,
@@ -132,8 +151,7 @@ async fn captured_service(runtime: &Runtime, endpoint: Arc<dyn ServiceEndpoint>)
         .root()
         .apply(
             Arc::new(ConsumerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("consumer", "1"))
-                    .requiring(Requirement::new("echo", "test.echo", V1)),
+                identity: FactoryIdentity::builtin("consumer", "1"),
                 captured: Arc::clone(&captured),
             }),
             Value::Null,
@@ -157,7 +175,7 @@ async fn captured_service(runtime: &Runtime, endpoint: Arc<dyn ServiceEndpoint>)
 async fn oversized_frame_remains_the_authoritative_error_after_finish() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
-            maximum_frame_bytes: 4,
+            maximum_message_bytes: 4,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()
@@ -175,7 +193,7 @@ async fn oversized_frame_remains_the_authoritative_error_after_finish() {
     call.finish();
 
     assert_eq!(
-        call.send(ServiceFrame::new([0_u8; 5])).await.unwrap_err(),
+        call.send(Message::new([0_u8; 5])).await.unwrap_err(),
         MetaError::PayloadTooLarge { maximum: 4 }
     );
 }
@@ -195,16 +213,15 @@ fn opening_a_service_outside_tokio_uses_the_caller_fiber_executor_without_panick
     ));
     let (call, panic_hooks) = count_current_thread_panic_hooks(|| service.open());
     assert_eq!(panic_hooks, 0);
-    let call = call.expect("call opening uses the caller Fiber executor");
+    let mut call = call.expect("call opening uses the caller Fiber executor");
 
     executor.block_on(async {
-        assert_eq!(
-            call.unary(ServiceFrame::new(b"outside".to_vec()))
-                .await
-                .unwrap()
-                .as_bytes(),
-            b"outside"
-        );
+        call.send(Message::new(b"outside".to_vec())).await.unwrap();
+        call.finish();
+        assert_eq!(call.recv().await.unwrap().unwrap().as_bytes(), b"outside");
+        assert!(call.recv().await.unwrap().is_none());
+        drop(call);
+        drop(service);
         assert!(runtime.shutdown().await.is_complete());
     });
 }
@@ -230,6 +247,7 @@ fn opening_a_service_does_not_probe_an_unrelated_runtime_without_time() {
         .block_on(async { service.open() })
         .expect("call opening uses the caller Fiber executor");
     drop(call);
+    drop(service);
     setup_executor.block_on(async {
         tokio::time::timeout(Duration::from_secs(1), async {
             while runtime.resource_snapshot().service_calls.current != 0 {
@@ -299,10 +317,7 @@ async fn completed_call_retains_admission_until_the_caller_consumes_its_terminal
     let admitted = runtime.resource_snapshot();
     assert_eq!(admitted.service_calls.current, 1);
     assert_eq!(admitted.service_calls.high_watermark, 1);
-    first
-        .send(ServiceFrame::new(b"first".to_vec()))
-        .await
-        .unwrap();
+    first.send(Message::new(b"first".to_vec())).await.unwrap();
     first.finish();
     completed.notified().await;
 
@@ -341,9 +356,7 @@ async fn driver_cancellation_never_overtakes_the_terminal_after_a_frame() {
             let service = service.clone();
             tokio::spawn(async move {
                 service
-                    .open()
-                    .unwrap()
-                    .unary(ServiceFrame::new(value.to_le_bytes().to_vec()))
+                    .invoke(Message::new(value.to_le_bytes().to_vec()))
                     .await
             })
         })
@@ -357,19 +370,23 @@ async fn driver_cancellation_never_overtakes_the_terminal_after_a_frame() {
 
 #[derive(Debug)]
 struct IndependentCleanupFactory {
-    descriptor: PluginDescriptor,
+    identity: FactoryIdentity,
     entered: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for IndependentCleanupFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         let entered = Arc::clone(&self.entered);
-        context.defer(
+        plan.context().defer(
             "service-independent cleanup",
             Box::new(move || {
                 let entered = Arc::clone(&entered);
@@ -406,10 +423,7 @@ async fn unread_terminal_delays_shutdown_without_blocking_independent_cleanup() 
         .root()
         .apply(
             Arc::new(IndependentCleanupFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "service-independent-root",
-                    "1",
-                )),
+                identity: FactoryIdentity::builtin("service-independent-root", "1"),
                 entered: Arc::clone(&cleanup_entered),
             }),
             Value::Null,
@@ -417,9 +431,7 @@ async fn unread_terminal_delays_shutdown_without_blocking_independent_cleanup() 
         .await
         .unwrap();
     let mut call = service.open().unwrap();
-    call.send(ServiceFrame::new(b"shutdown".to_vec()))
-        .await
-        .unwrap();
+    call.send(Message::new(b"shutdown".to_vec())).await.unwrap();
     call.finish();
     completed.notified().await;
     assert_eq!(runtime.resource_snapshot().service_calls.current, 1);
@@ -441,6 +453,7 @@ async fn unread_terminal_delays_shutdown_without_blocking_independent_cleanup() 
     assert_eq!(runtime.resource_snapshot().service_calls.current, 1);
 
     drop(call);
+    drop(service);
     assert!(runtime.shutdown().await.is_complete());
     assert_eq!(runtime.resource_snapshot().service_calls.current, 0);
     assert!(runtime.snapshot().fibers.is_empty());
@@ -475,6 +488,11 @@ async fn endpoint_errors_cannot_spoof_runtime_terminal_state() {
     assert!(
         matches!(error, MetaError::Service(ref message) if message.contains("spoofed service terminal")),
         "endpoint error escaped the service boundary: {error:?}"
+    );
+    assert_eq!(
+        call.recv().await.unwrap_err(),
+        error,
+        "an observed error terminal became indistinguishable from clean EOF"
     );
     assert!(runtime.snapshot().terminal.is_none());
 }
@@ -531,6 +549,33 @@ impl ServiceEndpoint for PanicAfterResponse {
     }
 }
 
+#[derive(Debug)]
+struct RecursivelyPanickingPayload;
+
+impl Drop for RecursivelyPanickingPayload {
+    fn drop(&mut self) {
+        std::panic::panic_any(Self);
+    }
+}
+
+#[derive(Debug)]
+struct PanicWhileConstructingFuture;
+
+impl ServiceEndpoint for PanicWhileConstructingFuture {
+    fn serve<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        _: InvocationContext,
+        _: ProviderChannel<'life1>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        std::panic::panic_any(RecursivelyPanickingPayload)
+    }
+}
+
 #[tokio::test]
 async fn endpoint_panic_is_an_authoritative_terminal_before_or_after_a_response() {
     let runtime = Runtime::default();
@@ -546,13 +591,25 @@ async fn endpoint_panic_is_an_authoritative_terminal_before_or_after_a_response(
     let service = captured_service(&runtime, Arc::new(PanicAfterResponse)).await;
     assert_eq!(
         service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"response".to_vec()))
+            .invoke(Message::new(b"response".to_vec()))
             .await
             .unwrap_err(),
         MetaError::ServiceEndpointPanicked
     );
+}
+
+#[tokio::test]
+async fn endpoint_future_construction_and_recursive_payload_panics_are_contained() {
+    let runtime = Runtime::default();
+    let service = captured_service(&runtime, Arc::new(PanicWhileConstructingFuture)).await;
+    let mut call = service.open().unwrap();
+    call.finish();
+
+    assert_eq!(
+        call.recv().await.unwrap_err(),
+        MetaError::ServiceEndpointPanicked
+    );
+    assert_eq!(runtime.resource_snapshot().service_calls.current, 0);
 }
 
 #[derive(Debug)]
@@ -579,18 +636,14 @@ async fn endpoint_panic_does_not_retire_the_provider_generation() {
 
     assert_eq!(
         service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"first".to_vec()))
+            .invoke(Message::new(b"first".to_vec()))
             .await
             .unwrap_err(),
         MetaError::ServiceEndpointPanicked
     );
     assert_eq!(
         service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"second".to_vec()))
+            .invoke(Message::new(b"second".to_vec()))
             .await
             .unwrap()
             .as_bytes(),
@@ -661,7 +714,7 @@ impl ServiceEndpoint for ReadyThenPanickingDropEndpoint {
 #[derive(Debug)]
 struct PanickingFutureDropEndpoint {
     entered: Arc<Notify>,
-    cancellation: Arc<Mutex<Option<CancellationToken>>>,
+    cancellation: Arc<Mutex<Option<CancellationObserver>>>,
 }
 
 #[async_trait]
@@ -736,6 +789,10 @@ async fn runtime_terminal_remains_authoritative_when_endpoint_future_drop_panics
         call.recv().await.unwrap_err(),
         MetaError::RuntimeTerminal("terminal evidence".to_owned())
     );
+    assert_eq!(
+        call.recv().await.unwrap_err(),
+        MetaError::RuntimeTerminal("terminal evidence".to_owned())
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -767,6 +824,10 @@ async fn call_deadline_remains_authoritative_when_endpoint_future_drop_panics() 
         .expect("endpoint captured call cancellation");
 
     driver_cancellation.cancelled().await;
+    assert_eq!(
+        call.recv().await.unwrap_err(),
+        MetaError::Timeout("service call")
+    );
     assert_eq!(
         call.recv().await.unwrap_err(),
         MetaError::Timeout("service call")
@@ -855,9 +916,9 @@ async fn cancelling_a_call_wakes_a_sender_blocked_on_channel_capacity() {
     .await;
     let mut call = service.open().unwrap();
     entered.notified().await;
-    call.send(ServiceFrame::new(vec![1])).await.unwrap();
+    call.send(Message::new(vec![1])).await.unwrap();
     {
-        let blocked = call.send(ServiceFrame::new(vec![2]));
+        let blocked = call.send(Message::new(vec![2]));
         tokio::pin!(blocked);
         tokio::select! {
             biased;
@@ -869,14 +930,15 @@ async fn cancelling_a_call_wakes_a_sender_blocked_on_channel_capacity() {
         assert_eq!(blocked.await.unwrap_err(), MetaError::Cancelled);
     }
     assert_eq!(call.recv().await.unwrap_err(), MetaError::Cancelled);
+    assert_eq!(call.recv().await.unwrap_err(), MetaError::Cancelled);
 }
 
 #[tokio::test]
 async fn cancelling_byte_pressure_records_one_rejection_and_releases_the_reservation() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: rsi_meta::PayloadLimits {
-            maximum_frame_bytes: 1,
-            maximum_buffered_service_bytes: 1,
+            maximum_message_bytes: 1,
+            maximum_buffered_message_bytes: 1,
             ..rsi_meta::PayloadLimits::default()
         },
         execution: rsi_meta::ExecutionLimits {
@@ -896,14 +958,14 @@ async fn cancelling_byte_pressure_records_one_rejection_and_releases_the_reserva
     .await;
     let mut call = service.open().unwrap();
     entered.notified().await;
-    call.send(ServiceFrame::new(vec![1])).await.unwrap();
+    call.send(Message::new(vec![1])).await.unwrap();
     assert_eq!(
-        runtime.resource_snapshot().buffered_service_bytes.current,
+        runtime.resource_snapshot().buffered_message_bytes.current,
         1
     );
 
     {
-        let blocked = call.send(ServiceFrame::new(vec![2]));
+        let blocked = call.send(Message::new(vec![2]));
         tokio::pin!(blocked);
         tokio::select! {
             biased;
@@ -915,13 +977,13 @@ async fn cancelling_byte_pressure_records_one_rejection_and_releases_the_reserva
     }
     assert_eq!(call.recv().await.unwrap_err(), MetaError::Cancelled);
     tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime.resource_snapshot().buffered_service_bytes.current != 0 {
+        while runtime.resource_snapshot().buffered_message_bytes.current != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("cancelled request queue retained its byte reservation");
-    let released = runtime.resource_snapshot().buffered_service_bytes;
+    let released = runtime.resource_snapshot().buffered_message_bytes;
     assert_eq!(released.current, 0);
     assert_eq!(released.high_watermark, 1);
     assert_eq!(released.rejected, 1);
@@ -931,8 +993,8 @@ async fn cancelling_byte_pressure_records_one_rejection_and_releases_the_reserva
 async fn cancellation_without_byte_pressure_does_not_record_a_rejection() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: rsi_meta::PayloadLimits {
-            maximum_frame_bytes: 1,
-            maximum_buffered_service_bytes: 1,
+            maximum_message_bytes: 1,
+            maximum_buffered_message_bytes: 1,
             ..rsi_meta::PayloadLimits::default()
         },
         ..RuntimeLimits::default()
@@ -951,11 +1013,11 @@ async fn cancellation_without_byte_pressure_does_not_record_a_rejection() {
 
     call.cancel();
     assert_eq!(
-        call.send(ServiceFrame::new(vec![1])).await.unwrap_err(),
+        call.send(Message::new(vec![1])).await.unwrap_err(),
         MetaError::Cancelled
     );
     assert_eq!(call.recv().await.unwrap_err(), MetaError::Cancelled);
-    let bytes = runtime.resource_snapshot().buffered_service_bytes;
+    let bytes = runtime.resource_snapshot().buffered_message_bytes;
     assert_eq!(bytes.current, 0);
     assert_eq!(bytes.high_watermark, 0);
     assert_eq!(bytes.rejected, 0);
@@ -975,11 +1037,11 @@ impl ServiceEndpoint for ConcurrentBufferedResponses {
     async fn serve(&self, _: InvocationContext, channel: ProviderChannel<'_>) -> Result<()> {
         let call = self.next_call.fetch_add(1, Ordering::AcqRel);
         if call == 0 {
-            channel.send(ServiceFrame::new(vec![1; 4])).await?;
+            channel.send(Message::new(vec![1; 4])).await?;
             self.first_sent.notify_one();
         } else {
             self.second_entered.notify_one();
-            channel.send(ServiceFrame::new(vec![2; 4])).await?;
+            channel.send(Message::new(vec![2; 4])).await?;
             self.second_completed.store(true, Ordering::Release);
             self.second_sent.notify_one();
         }
@@ -991,8 +1053,8 @@ impl ServiceEndpoint for ConcurrentBufferedResponses {
 async fn queued_frames_share_one_runtime_wide_weighted_byte_budget() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: rsi_meta::PayloadLimits {
-            maximum_frame_bytes: 4,
-            maximum_buffered_service_bytes: 4,
+            maximum_message_bytes: 4,
+            maximum_buffered_message_bytes: 4,
             ..rsi_meta::PayloadLimits::default()
         },
         execution: rsi_meta::ExecutionLimits {
@@ -1021,8 +1083,8 @@ async fn queued_frames_share_one_runtime_wide_weighted_byte_budget() {
     first.finish();
     first_sent.notified().await;
     let first_buffered = runtime.resource_snapshot();
-    assert_eq!(first_buffered.buffered_service_bytes.current, 4);
-    assert_eq!(first_buffered.buffered_service_bytes.high_watermark, 4);
+    assert_eq!(first_buffered.buffered_message_bytes.current, 4);
+    assert_eq!(first_buffered.buffered_message_bytes.high_watermark, 4);
     let mut second = service.open().unwrap();
     second.finish();
     second_entered.notified().await;
@@ -1037,7 +1099,7 @@ async fn queued_frames_share_one_runtime_wide_weighted_byte_budget() {
         .expect("receiving the first frame did not release its byte permit");
     assert_eq!(second.recv().await.unwrap().unwrap().as_bytes(), &[2; 4]);
     assert_eq!(
-        runtime.resource_snapshot().buffered_service_bytes.current,
+        runtime.resource_snapshot().buffered_message_bytes.current,
         0
     );
     assert!(first.recv().await.unwrap().is_none());
@@ -1049,8 +1111,8 @@ async fn queued_frames_share_one_runtime_wide_weighted_byte_budget() {
 async fn saturated_byte_handoffs_release_the_ledger_before_waking_senders() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: rsi_meta::PayloadLimits {
-            maximum_frame_bytes: 1,
-            maximum_buffered_service_bytes: 1,
+            maximum_message_bytes: 1,
+            maximum_buffered_message_bytes: 1,
             ..rsi_meta::PayloadLimits::default()
         },
         execution: rsi_meta::ExecutionLimits {
@@ -1078,7 +1140,7 @@ async fn saturated_byte_handoffs_release_the_ledger_before_waking_senders() {
         while entered.load(Ordering::Acquire) < first_count {
             wakeup.notified().await;
         }
-        while runtime.resource_snapshot().buffered_service_bytes.current == 0 {
+        while runtime.resource_snapshot().buffered_message_bytes.current == 0 {
             tokio::task::yield_now().await;
         }
 
@@ -1097,8 +1159,8 @@ async fn saturated_byte_handoffs_release_the_ledger_before_waking_senders() {
     }
 
     let resources = runtime.resource_snapshot();
-    assert_eq!(resources.buffered_service_bytes.current, 0);
-    assert_eq!(resources.buffered_service_bytes.high_watermark, 1);
+    assert_eq!(resources.buffered_message_bytes.current, 0);
+    assert_eq!(resources.buffered_message_bytes.high_watermark, 1);
     assert_eq!(resources.service_calls.current, 0);
 }
 
@@ -1121,13 +1183,18 @@ async fn caller_cancellation_wakes_recv_and_the_call_driver_promptly() {
     )
     .await;
     let mut call = service.open().unwrap();
+    let cancellation = call.cancellation_observer();
     entered.notified().await;
 
+    assert!(!call.is_cancelled());
+    assert!(!cancellation.is_cancelled());
     call.cancel();
+    assert!(call.is_cancelled());
+    assert!(cancellation.is_cancelled());
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), call.recv())
             .await
-            .expect("caller cancellation did not wake ServiceCall::recv")
+            .expect("caller cancellation did not wake CapabilityCall::recv")
             .unwrap_err(),
         MetaError::Cancelled,
     );
@@ -1140,7 +1207,7 @@ async fn caller_cancellation_wakes_recv_and_the_call_driver_promptly() {
     .expect("caller cancellation did not finish the Runtime-owned CallDriver");
 }
 
-#[path = "service_calls/byte_admission.rs"]
-mod byte_admission;
 #[path = "service_calls/foundation.rs"]
 mod foundation;
+#[path = "service_calls/message_admission.rs"]
+mod message_admission;

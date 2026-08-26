@@ -51,18 +51,32 @@ async fn missing_dependency_converges_and_provider_retires_after_consumer_cleanu
 async fn captured_service_handle_is_fenced_after_its_provider_retires() {
     #[derive(Debug)]
     struct CaptureFactory {
-        descriptor: PluginDescriptor,
-        handle: Arc<Mutex<Option<rsi_meta::ServiceHandle>>>,
+        identity: FactoryIdentity,
+        handle: Arc<Mutex<Option<rsi_meta::Capability>>>,
     }
 
     #[async_trait]
     impl PluginFactory for CaptureFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.descriptor
+        fn identity(&self) -> FactoryIdentity {
+            self.identity.clone()
         }
 
-        async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-            *self.handle.lock().expect("handle poisoned") = Some(context.service("echo")?);
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(
+                PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                    "echo",
+                    "test.echo",
+                    V1,
+                )),
+            )
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            *self.handle.lock().expect("handle poisoned") = Some(
+                plan.inject("echo")
+                    .expect("prepared echo requirement must be injected")
+                    .clone(),
+            );
             Ok(())
         }
     }
@@ -80,8 +94,7 @@ async fn captured_service_handle_is_fenced_after_its_provider_retires() {
         .root()
         .apply(
             Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("capture", "1"))
-                    .requiring(Requirement::new("echo", "test.echo", V1)),
+                identity: FactoryIdentity::builtin("capture", "1"),
                 handle: Arc::clone(&captured),
             }),
             Value::Null,
@@ -94,33 +107,40 @@ async fn captured_service_handle_is_fenced_after_its_provider_retires() {
         .expect("handle poisoned")
         .clone()
         .expect("service captured");
-    let consumer_generation = consumer.snapshot().generation;
     provider.dispose().await;
-    assert_eq!(
-        old.open().unwrap_err(),
-        MetaError::StaleContext {
-            fiber: consumer.id(),
-            generation: consumer_generation,
-        }
-    );
+    assert_eq!(old.open().unwrap_err(), MetaError::StaleCapability);
 }
 
 #[tokio::test]
 async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
     #[derive(Debug)]
     struct CaptureFactory {
-        descriptor: PluginDescriptor,
-        handle: Arc<Mutex<Option<rsi_meta::ServiceHandle>>>,
+        identity: FactoryIdentity,
+        handle: Arc<Mutex<Option<rsi_meta::Capability>>>,
     }
 
     #[async_trait]
     impl PluginFactory for CaptureFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.descriptor
+        fn identity(&self) -> FactoryIdentity {
+            self.identity.clone()
         }
 
-        async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-            *self.handle.lock().expect("handle poisoned") = Some(context.service("echo")?);
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(
+                PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                    "echo",
+                    "test.echo",
+                    V1,
+                )),
+            )
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            *self.handle.lock().expect("handle poisoned") = Some(
+                plan.inject("echo")
+                    .expect("prepared echo requirement must be injected")
+                    .clone(),
+            );
             Ok(())
         }
     }
@@ -140,8 +160,7 @@ async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
         .root()
         .apply(
             Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("capture-reload", "1"))
-                    .requiring(Requirement::new("echo", "test.echo", V1)),
+                identity: FactoryIdentity::builtin("capture-reload", "1"),
                 handle: Arc::clone(&captured),
             }),
             Value::Null,
@@ -158,13 +177,7 @@ async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
 
     let reloaded = consumer.reconfigure(Value::Null).await.unwrap();
     assert_ne!(reloaded.generation, old_generation);
-    assert_eq!(
-        old.open().unwrap_err(),
-        MetaError::StaleContext {
-            fiber: consumer.id(),
-            generation: old_generation,
-        }
-    );
+    assert_eq!(old.open().unwrap_err(), MetaError::StaleCapability);
     let current = captured
         .lock()
         .expect("handle poisoned")
@@ -172,9 +185,7 @@ async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
         .expect("replacement service captured");
     assert_eq!(
         current
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"current".to_vec()))
+            .invoke(Message::new(b"current".to_vec()))
             .await
             .unwrap()
             .as_bytes(),

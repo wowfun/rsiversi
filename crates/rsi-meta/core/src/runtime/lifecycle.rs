@@ -117,15 +117,21 @@ impl Runtime {
                     generation: active.generation,
                     services: active
                         .services
-                        .values()
-                        .map(|service| Arc::clone(&service.binding))
+                        .iter()
+                        .map(|(slot, service)| (slot.clone(), Arc::clone(&service.binding)))
                         .collect::<Vec<_>>(),
                     listener_ids: active.listeners.keys().copied().collect::<BTreeSet<_>>(),
-                    published: active.published,
+                    capabilities: Arc::clone(&active.capabilities),
                     lease: Arc::clone(&active.lease),
                     children: std::mem::take(&mut active.children),
-                    retired_child_report: std::mem::take(&mut active.retired_child_report),
-                    effects: std::mem::take(&mut active.effects),
+                    retired_owned_report: std::mem::take(&mut active.retired_owned_report),
+                    effects: {
+                        let effects = std::mem::take(&mut active.effects);
+                        for effect in effects.values() {
+                            effect.claim_retirement();
+                        }
+                        effects.into_values().collect()
+                    },
                 });
                 if claimed.is_some() {
                     data.state = FiberState::Unloading;
@@ -145,15 +151,17 @@ impl Runtime {
                 let cleanup_runtime = runtime.clone();
                 let cleanup_fiber = Arc::clone(&fiber);
                 let owned_run = Arc::clone(&run);
-                tokio::spawn(async move {
-                    let cleanup = std::panic::AssertUnwindSafe(
-                        cleanup_runtime.with_reconciliation_slot(
-                            cleanup_runtime
-                                .run_claimed_cleanup(Arc::clone(&cleanup_fiber), claimed),
-                        ),
-                    )
-                    .catch_unwind()
-                    .await;
+                fiber.executor.spawn(async move {
+                    let cleanup = contain_panic_result(
+                        std::panic::AssertUnwindSafe(
+                            cleanup_runtime.with_reconciliation_slot(
+                                cleanup_runtime
+                                    .run_claimed_cleanup(Arc::clone(&cleanup_fiber), claimed),
+                            ),
+                        )
+                        .catch_unwind()
+                        .await,
+                    );
                     let report = cleanup.unwrap_or_else(|_| {
                         let mut data = cleanup_fiber.data.lock().expect("fiber state poisoned");
                         if data
@@ -206,38 +214,50 @@ impl Runtime {
             generation,
             services,
             listener_ids,
-            published,
+            capabilities,
             lease,
             children,
-            retired_child_report,
+            retired_owned_report,
             mut effects,
         } = claimed;
         let maximum_entries = self.inner.limits.payloads.maximum_diagnostic_entries;
         let maximum_bytes = self.inner.limits.payloads.maximum_diagnostic_bytes;
-        let mut report = retired_child_report;
+        let mut report = retired_owned_report;
         *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") = CleanupPhase::Withdrawing;
         lease.close();
-        let changed = self.withdraw_generation_services(&fiber, generation, &services, published);
+        self.yield_reconciliation_slot(self.revoke_capability_set(capabilities))
+            .await;
+        let reconciliation = self.withdraw_generation_services(&services, Some(fiber.id));
         let owner = Owner {
             fiber: fiber.id,
             generation,
         };
-        for id in listener_ids {
-            self.remove_listener_owned(owner, id, ListenerRemovalCause::Retirement);
-        }
+        // Listener withdrawal can await an in-flight callback and ultimately
+        // destroy user code. Do not retain the provider's reconciliation slot
+        // while exact dependents need that same bounded capacity to converge.
+        self.yield_reconciliation_slot(async {
+            for id in listener_ids {
+                self.withdraw_listener_owned(owner, id).await;
+            }
+        })
+        .await;
         *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
             CleanupPhase::WaitingForDependents;
-        self.reconcile_service_changes(&changed, Some(fiber.id))
-            .await;
+        self.join_reconciliation_requests(reconciliation).await;
         *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
             CleanupPhase::DrainingAdmissions;
-        // Dependent convergence is the last point at which an already
-        // retiring generation may legitimately start a call. Seal before the
-        // drain so a caller classified from stale state cannot reopen this
-        // provider after cleanup has observed zero live callbacks.
+        // Ordinary holder admission is already fenced before dependent
+        // convergence. Seal before the drain so no stale internal claimant can
+        // reopen this generation after cleanup has observed zero callbacks.
         lease.seal();
+        for (_, binding) in &services {
+            binding.lease.seal();
+        }
         self.yield_reconciliation_slot(async {
             lease.wait_drained().await;
+            for (_, binding) in &services {
+                binding.lease.wait_drained().await;
+            }
             *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
                 CleanupPhase::DisposingChildren;
             for child in children.into_iter().rev() {
@@ -250,21 +270,11 @@ impl Runtime {
             *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
                 CleanupPhase::RunningEffects;
             while let Some(effect) = effects.pop() {
-                match std::panic::AssertUnwindSafe(async { (effect.cleanup)().await })
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        report.push_bounded(effect.label, error, maximum_entries, maximum_bytes);
-                    }
-                    Err(_) => report.push_bounded(
-                        effect.label,
-                        "cleanup panicked",
-                        maximum_entries,
-                        maximum_bytes,
-                    ),
-                }
+                report.extend_bounded(
+                    self.run_effect(&fiber, effect).await,
+                    maximum_entries,
+                    maximum_bytes,
+                );
             }
             let mut data = fiber.data.lock().expect("fiber state poisoned");
             if data
@@ -281,30 +291,40 @@ impl Runtime {
 
     fn withdraw_generation_services(
         &self,
-        fiber: &Fiber,
-        generation: FiberGeneration,
-        services: &[Arc<ProviderBinding>],
-        published: bool,
-    ) -> Vec<ServiceSlot> {
-        let mut changed = Vec::new();
-        {
+        services: &[(ServiceSlot, Arc<ProviderBinding>)],
+        except: Option<FiberId>,
+    ) -> Vec<(FiberId, ReconciliationTicket)> {
+        let (tickets, should_spawn) = {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            if published {
-                for binding in services {
-                    let slot = fiber.base_context.service_slot(&binding.key);
-                    if state.providers.get(&slot).is_some_and(|current| {
-                        current.provider == fiber.id && current.generation == generation
-                    }) {
-                        state.providers.remove(&slot);
-                        changed.push(slot);
-                    }
+            let mut changed = Vec::new();
+            let mut removed_any = false;
+            for (slot, binding) in services {
+                binding.lease.close();
+                let visibility = state
+                    .providers
+                    .get(slot)
+                    .filter(|entry| {
+                        entry.binding.supply == binding.supply
+                            && Arc::ptr_eq(&entry.binding, binding)
+                    })
+                    .map(|entry| entry.visibility);
+                if visibility.is_some() {
+                    state.providers.remove(slot);
+                    removed_any = true;
+                }
+                if visibility == Some(SupplyVisibility::Active) {
+                    changed.push(slot.clone());
                 }
             }
-            if !changed.is_empty() {
-                state.revision += 1;
+            if removed_any {
+                state.advance_revision();
             }
-        }
-        changed
+            let (tickets, should_spawn) =
+                Self::request_service_withdrawals_locked(&mut state, &changed, except);
+            (tickets, should_spawn)
+        };
+        self.start_reconciliation_requests(should_spawn);
+        tickets
     }
 
     pub(super) fn dispose_fiber_instance(
@@ -338,11 +358,13 @@ impl Runtime {
         {
             return;
         }
-        let result = std::panic::AssertUnwindSafe(
-            self.with_reconciliation_slot(self.dispose_fiber_owned(Arc::clone(&fiber))),
-        )
-        .catch_unwind()
-        .await;
+        let result = contain_panic_result(
+            std::panic::AssertUnwindSafe(
+                self.with_reconciliation_slot(self.dispose_fiber_owned(Arc::clone(&fiber))),
+            )
+            .catch_unwind()
+            .await,
+        );
         let result = result.map_or_else(
             |_| {
                 self.mark_terminal_owned(format!(
@@ -377,28 +399,21 @@ impl Runtime {
         }
         let report = self.unload_generation(&fiber).await;
         fiber.set_state(FiberState::Disposed);
-        let (required_slots, declared_slots) = {
+        let required_slots = {
             let data = fiber.data.lock().expect("fiber state poisoned");
-            let descriptor = data
-                .descriptor
-                .as_deref()
-                .expect("registered Fiber retains its descriptor");
-            (
-                descriptor
-                    .required_services()
-                    .map(|service| fiber.base_context.service_slot(service))
-                    .collect::<Vec<_>>(),
-                descriptor
-                    .provided_services()
-                    .map(|service| fiber.base_context.service_slot(service))
-                    .collect::<Vec<_>>(),
-            )
+            let attempt = data
+                .attempt
+                .as_ref()
+                .expect("registered Fiber retains its prepared attempt");
+            attempt
+                .required_services()
+                .map(|service| fiber.base_context.service_slot(service))
+                .collect::<Vec<_>>()
         };
         {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
             state.fibers.remove(&id);
-            state.declarations.remove(id);
-            state.pending_reconciliations.remove(&id);
+            state.reconciliations.remove_queued(id);
             for slot in required_slots {
                 let remove_entry = state.dependents.get_mut(&slot).is_some_and(|fibers| {
                     fibers.remove(&id);
@@ -418,7 +433,7 @@ impl Runtime {
                     let previous = active.children.len();
                     active.children.retain(|child| child.id != id);
                     if active.children.len() != previous {
-                        active.retired_child_report.extend_bounded(
+                        active.retired_owned_report.extend_bounded(
                             report.clone(),
                             self.inner.limits.payloads.maximum_diagnostic_entries,
                             self.inner.limits.payloads.maximum_diagnostic_bytes,
@@ -426,19 +441,23 @@ impl Runtime {
                     }
                 }
             }
-            state.revision += 1;
+            state.advance_revision();
         }
-        self.refresh_pending_diagnostics(&declared_slots, Some(id));
         // Capacity belongs to registry membership, not to management handles
         // that may outlive disposal.
-        {
+        let retired = {
             let mut data = fiber.data.lock().expect("fiber state poisoned");
-            data.reservations.take();
-            data.factory = None;
-            data.descriptor = None;
-            data.config = None;
+            let retired = (
+                data.fiber_reservation.take(),
+                data.factory.take(),
+                data.desired.take(),
+                data.attempt.take(),
+                data.replacement.take(),
+            );
             data.last_attempt = None;
-        }
+            retired
+        };
+        drop(retired);
         fiber.reconciliation.finish(&fiber.snapshot());
         report
     }
@@ -456,11 +475,18 @@ impl Runtime {
             // quiescence instead of allowing callbacks to start after teardown.
             self.inner.terminal_cancellation.cancel();
             let roots = self.shutdown_membership_snapshot();
+            let executor = roots
+                .first()
+                .map_or_else(tokio::runtime::Handle::current, |root| {
+                    root.executor.clone()
+                });
             let runtime = self.clone();
-            tokio::spawn(async move {
-                let result = std::panic::AssertUnwindSafe(runtime.shutdown_inner(roots))
-                    .catch_unwind()
-                    .await;
+            executor.spawn(async move {
+                let result = contain_panic_result(
+                    std::panic::AssertUnwindSafe(runtime.shutdown_inner(roots))
+                        .catch_unwind()
+                        .await,
+                );
                 if result.is_err() {
                     let mut report = CleanupReport::default();
                     report.push_bounded(
@@ -629,7 +655,7 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContractVersion, ProviderChannel, Provision, Requirement};
+    use crate::{ContractVersion, PreparedActivation, ProviderChannel, Requirement};
     use async_trait::async_trait;
     use std::time::Duration;
 
@@ -653,49 +679,62 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct ProviderFactory(PluginDescriptor);
+    struct ProviderFactory;
 
     #[async_trait]
     impl PluginFactory for ProviderFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.0
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin("provider-seal", "1")
         }
 
-        async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-            context.provide("echo", "test.echo", V1, Arc::new(Echo))
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            plan.context()
+                .provide("echo", "test.echo", V1, Arc::new(Echo))?;
+            Ok(())
         }
     }
 
     #[derive(Debug)]
     struct ConsumerFactory {
-        descriptor: PluginDescriptor,
-        captured: Arc<Mutex<Option<ServiceHandle>>>,
+        captured: Arc<Mutex<Option<Capability>>>,
     }
 
     #[async_trait]
     impl PluginFactory for ConsumerFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.descriptor
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin("provider-seal-consumer", "1")
         }
 
-        async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(
+                PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                    "echo",
+                    "test.echo",
+                    V1,
+                )),
+            )
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
             *self.captured.lock().expect("service capture poisoned") =
-                Some(context.service("echo")?);
+                Some(plan.inject("echo").cloned().ok_or_else(|| {
+                    MetaError::ServiceUnavailable {
+                        service: ServiceKey::new("echo"),
+                    }
+                })?);
             Ok(())
         }
     }
 
-    async fn service_fixture() -> (Runtime, FiberHandle, FiberHandle, ServiceHandle) {
+    async fn service_fixture() -> (Runtime, FiberHandle, FiberHandle, Capability) {
         let runtime = Runtime::default();
         let provider = runtime
             .root()
-            .apply(
-                Arc::new(ProviderFactory(
-                    PluginDescriptor::new(FactoryIdentity::builtin("provider-seal", "1"))
-                        .providing(Provision::new("echo", "test.echo", V1)),
-                )),
-                Value::Null,
-            )
+            .apply(Arc::new(ProviderFactory), Value::Null)
             .await
             .unwrap();
         let captured = Arc::new(Mutex::new(None));
@@ -703,11 +742,6 @@ mod tests {
             .root()
             .apply(
                 Arc::new(ConsumerFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "provider-seal-consumer",
-                        "1",
-                    ))
-                    .requiring(Requirement::new("echo", "test.echo", V1)),
                     captured: Arc::clone(&captured),
                 }),
                 Value::Null,
@@ -725,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn provider_cleanup_hard_seals_stale_retiring_admission_before_draining() {
         let (_runtime, provider, consumer, service) = service_fixture().await;
-        let generation_admission = Arc::clone(&service.binding.lease);
+        let generation_admission = Arc::clone(&service.entry.binding.lease);
         let admitted_before_retirement = generation_admission
             .acquire(false)
             .expect("active provider admits an existing callback");
@@ -760,25 +794,31 @@ mod tests {
     #[tokio::test]
     async fn final_service_caller_check_rejects_a_generation_changed_after_initial_validation() {
         let (runtime, provider, consumer, service) = service_fixture().await;
-        let owner = service.caller.owner.expect("captured service has an owner");
+        let owner = service
+            .holder
+            .owner
+            .expect("captured capability has an owner");
         let caller_fiber = runtime.owner_fiber(owner).unwrap();
-        let retiring_consumer =
-            Runtime::validate_service_caller(&service, owner, &caller_fiber).unwrap();
-        assert!(!retiring_consumer);
+        Runtime::validate_capability_holder(&service, owner, &caller_fiber).unwrap();
+        let provisional_provider_lease = service
+            .entry
+            .binding
+            .lease
+            .acquire(false)
+            .expect("active provider admits a provisional call");
 
         consumer.reconfigure(Value::Null).await.unwrap();
         assert!(matches!(
-            Runtime::acquire_service_provider_lease(
-                &service,
-                owner,
-                &caller_fiber,
-                retiring_consumer,
-            ),
+            Runtime::validate_capability_holder(&service, owner, &caller_fiber),
             Err(MetaError::StaleContext { .. })
         ));
-        tokio::time::timeout(Duration::from_secs(1), service.binding.lease.wait_drained())
-            .await
-            .expect("failed caller revalidation retained its provisional provider lease");
+        drop(provisional_provider_lease);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            service.entry.binding.lease.wait_drained(),
+        )
+        .await
+        .expect("failed caller revalidation retained its provisional provider lease");
 
         assert!(consumer.dispose().await.is_clean());
         assert!(provider.dispose().await.is_clean());

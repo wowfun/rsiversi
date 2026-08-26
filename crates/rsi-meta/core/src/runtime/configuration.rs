@@ -1,29 +1,43 @@
 #![allow(clippy::wildcard_imports)] // This is one implementation partition of runtime.
 
 use super::*;
+use crate::Requirement;
+use crate::plugin::PreparedState;
 use serde::Serialize;
 
 impl Runtime {
     pub(super) fn normalize_config(
-        factory: &Arc<dyn PluginFactory>,
-        config: OwnedJsonValue,
+        factory: &preparation::RetainedFactory,
+        desired: &RetainedConfig,
         limits: &PayloadLimits,
     ) -> Result<NormalizedConfig> {
-        Self::validate_config(config.as_value(), limits)?;
-        let config = config.into_inner();
-        let config = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            factory.validate_config(config)
-        }))
-        .map_err(|_| MetaError::InvalidConfig("plugin validation panicked".to_owned()))??;
+        // Preparation is attempt-local. Always start from the immutable raw
+        // desired value whose retained wrapper proves boundary validation; a
+        // previous attempt's normalized output is not a valid input to a
+        // later preparation.
+        let prepared = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            factory.prepare(desired.as_value())
+        })) {
+            Ok(prepared) => prepared?,
+            Err(payload) => {
+                drop_catching_unwind(payload);
+                return Err(MetaError::InvalidConfig(
+                    "plugin preparation panicked".to_owned(),
+                ));
+            }
+        };
+        let (config, requirements, state) = prepared.into_parts();
         let config = OwnedJsonValue::new(config);
         let encoded_bytes = Self::validate_config(config.as_value(), limits)?;
         Ok(NormalizedConfig {
-            value: config.into_inner(),
+            value: config,
             encoded_bytes,
+            requirements,
+            state,
         })
     }
 
-    fn validate_config(config: &ConfigValue, limits: &PayloadLimits) -> Result<usize> {
+    pub(super) fn validate_config(config: &ConfigValue, limits: &PayloadLimits) -> Result<usize> {
         validate_json_shape(config, limits.maximum_json_depth, limits.maximum_json_nodes)
             .map_err(MetaError::InvalidConfig)?;
         encoded_json_size_bounded(config, limits.maximum_config_bytes)
@@ -120,8 +134,10 @@ fn drop_json_value_iteratively(value: Value) {
 }
 
 pub(super) struct NormalizedConfig {
-    pub(super) value: ConfigValue,
+    pub(super) value: OwnedJsonValue,
     pub(super) encoded_bytes: usize,
+    pub(super) requirements: Vec<Requirement>,
+    pub(super) state: Option<PreparedState>,
 }
 
 fn validate_json_shape(

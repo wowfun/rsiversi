@@ -3,6 +3,16 @@
 use super::*;
 
 impl Context {
+    pub(crate) fn ensure_same_authority(&self, other: &Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.runtime.inner, &other.runtime.inner) {
+            return Err(MetaError::CapabilityFromDifferentRuntime);
+        }
+        if self.owner != other.owner {
+            return Err(MetaError::StaleCapability);
+        }
+        Ok(())
+    }
+
     /// Returns the retained Runtime that owns this scope.
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
@@ -11,6 +21,28 @@ impl Context {
     /// Returns the owning Fiber generation, or `None` for a root Context.
     pub fn owner(&self) -> Option<(FiberId, FiberGeneration)> {
         self.owner.map(|owner| (owner.fiber, owner.generation))
+    }
+
+    /// Consumes this value and associates one immutable safe-Rust extension.
+    ///
+    /// A new marker type consumes one Context entry. Replacing the value for
+    /// an existing marker does not consume another entry. Cloned sibling
+    /// Contexts continue to observe their original values.
+    pub fn with_extension<K: ContextExtension>(mut self, value: K::Value) -> Result<Self> {
+        let _runtime_admission = self.runtime.begin_admission(false)?;
+        if !self.extensions.contains::<K>() {
+            self.entries = self.next_context_entry_count()?;
+        }
+        Arc::make_mut(&mut self.extensions).insert::<K>(value);
+        Ok(self)
+    }
+
+    /// Returns the immutable value associated with one extension marker.
+    ///
+    /// Reading an absent marker returns `None` without extending this Context
+    /// or consuming Context-entry capacity.
+    pub fn extension<K: ContextExtension>(&self) -> Option<Arc<K::Value>> {
+        self.extensions.get::<K>()
     }
 
     /// Consumes this value and selects an explicit isolation for one service.
@@ -44,13 +76,7 @@ impl Context {
     /// Consumes this value and selects a newly allocated isolation identity.
     pub fn isolate_fresh(self, service: impl AsRef<str>) -> Result<(Self, IsolationId)> {
         let _runtime_admission = self.runtime.begin_admission(false)?;
-        let isolation = IsolationId(
-            self.runtime
-                .inner
-                .next_isolation
-                .fetch_add(1, Ordering::AcqRel)
-                + 1,
-        );
+        let isolation = self.runtime.next_isolation_id()?;
         Ok((
             self.isolate_admitted(service.as_ref(), isolation)?,
             isolation,
@@ -71,7 +97,7 @@ impl Context {
         let (layer, layer_bytes) = configuration::validate_owned_json_payload(
             layer,
             payloads,
-            payloads.maximum_frame_bytes,
+            payloads.maximum_message_bytes,
         )?;
         let existing = self.intercepts.get(&service);
         let is_new_entry = existing.is_none();
@@ -81,11 +107,11 @@ impl Context {
             .checked_add(separator_bytes)
             .and_then(|size| size.checked_add(layer_bytes))
             .ok_or(MetaError::PayloadTooLarge {
-                maximum: payloads.maximum_frame_bytes,
+                maximum: payloads.maximum_message_bytes,
             })?;
-        if encoded_bytes > payloads.maximum_frame_bytes {
+        if encoded_bytes > payloads.maximum_message_bytes {
             return Err(MetaError::PayloadTooLarge {
-                maximum: payloads.maximum_frame_bytes,
+                maximum: payloads.maximum_message_bytes,
             });
         }
         let key_bytes = if is_new_entry {
@@ -177,6 +203,7 @@ impl Context {
         factory: Arc<dyn PluginFactory>,
         config: ConfigValue,
     ) -> impl std::future::Future<Output = Result<FiberHandle>> + '_ {
+        let factory = RetainedFactory::new(factory);
         let config = configuration::OwnedJsonValue::new(config);
         async move {
             let deadline = tokio::time::Instant::now()
@@ -224,28 +251,58 @@ impl Context {
             .map_err(|_| MetaError::Timeout("plugin transition"))?
     }
 
-    /// Registers one reverse-ordered cleanup effect on the owning generation.
-    pub fn defer(&self, label: impl Into<String>, cleanup: Cleanup) -> Result<()> {
+    /// Begins one wrapper-first effect transaction on the owning generation.
+    ///
+    /// The wrapper is owned by the generation before this method returns.
+    /// Fiber retirement waits for an open transaction to commit, abort, or be
+    /// dropped before it runs the transaction's reverse-ordered cleanups.
+    pub fn begin_effect(&self, label: impl Into<String>) -> Result<EffectTxn> {
         let owner = self.owner.ok_or_else(|| {
             MetaError::InvalidInput("the root context cannot own an effect".to_owned())
         })?;
-        let label = label.into();
-        if label.len() > self.runtime.inner.limits.payloads.maximum_diagnostic_bytes {
-            return Err(MetaError::InvalidInput(
-                "effect label exceeds the configured diagnostic byte limit".to_owned(),
-            ));
+        if let Some(setup) = &self.setup_effect {
+            if setup.is_open() {
+                return Err(MetaError::InvalidInput(
+                    "activation setup already owns the open effect transaction".to_owned(),
+                ));
+            }
+            self.runtime.ensure_dynamic_effect_owner(owner)?;
         }
-        self.runtime.add_effect(owner, label, cleanup)
+        let label = label.into();
+        self.runtime.validate_effect_label(&label)?;
+        self.runtime.begin_effect(owner, label)
     }
 
-    /// Stages an endpoint for one service declared by the owning factory.
+    /// Registers one reverse-ordered cleanup effect on the owning generation.
+    ///
+    /// This shorthand opens a transaction, installs one cleanup, and commits
+    /// it. Use [`Self::begin_effect`] when setup can fail or yield.
+    pub fn defer(&self, label: impl Into<String>, cleanup: Cleanup) -> Result<()> {
+        let label = label.into();
+        if let Some(setup) = &self.setup_effect
+            && setup.is_open()
+        {
+            return setup.defer(label, cleanup);
+        }
+        let mut transaction = self.begin_effect(label.clone())?;
+        transaction.defer(label, cleanup)?;
+        let _handle = transaction.commit()?;
+        Ok(())
+    }
+
+    /// Dynamically supplies one endpoint from the owning generation.
+    ///
+    /// A Loading supply immediately occupies its isolated slot and is visible
+    /// to its own Context, but external injection observes it only after the
+    /// provider generation becomes Active. The returned handle can withdraw
+    /// only this exact non-repeating supply.
     pub fn provide(
         &self,
         key: impl AsRef<str>,
         contract: impl AsRef<str>,
         version: ContractVersion,
         endpoint: Arc<dyn ServiceEndpoint>,
-    ) -> Result<()> {
+    ) -> Result<SupplyHandle> {
         let key = key.as_ref();
         if key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
             return Err(MetaError::InvalidInput(
@@ -267,8 +324,41 @@ impl Context {
         )
     }
 
+    /// Dynamically supplies one endpoint and captures its self-visible authority.
+    ///
+    /// Capability admission completes before the supply can occupy its slot. If
+    /// capture fails, no supply is registered and no withdrawal handle is
+    /// required.
+    pub fn provide_and_capture(
+        &self,
+        key: impl AsRef<str>,
+        contract: impl AsRef<str>,
+        version: ContractVersion,
+        endpoint: Arc<dyn ServiceEndpoint>,
+    ) -> Result<(SupplyHandle, Capability)> {
+        let key = key.as_ref();
+        if key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "service identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        let contract = contract.as_ref();
+        if contract.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "service contract identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        self.runtime.provide_and_capture(
+            self,
+            ServiceKey::new(key),
+            ContractId::new(contract),
+            version,
+            endpoint,
+        )
+    }
+
     /// Captures the exact service binding resolved for the owning generation.
-    pub fn service(&self, key: impl AsRef<str>) -> Result<ServiceHandle> {
+    pub fn service(&self, key: impl AsRef<str>) -> Result<Capability> {
         let key = key.as_ref();
         if key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
             return Err(MetaError::InvalidInput(
@@ -278,26 +368,25 @@ impl Context {
         self.runtime.service(self, &ServiceKey::new(key))
     }
 
-    /// Stages one event listener owned by this Context generation.
+    /// Immediately registers one effect-owned event listener.
+    ///
+    /// Loading listeners are visible because their exact removal effect is
+    /// already installed. The returned handle can dispose only this listener.
     pub fn on(
         &self,
         event: impl AsRef<str>,
         handler: Arc<dyn EventHandler>,
         options: EventOptions,
-    ) -> Result<EventListenerId> {
+    ) -> Result<EventHandle> {
         let event = event.as_ref();
         self.validate_event_key(event)?;
         let event = EventKey::new(event);
         self.runtime.add_listener(self, event, handler, options)
     }
 
-    /// Removes a listener when this Context still has authority over it.
-    pub fn off(&self, listener: EventListenerId) -> bool {
-        self.runtime.remove_listener(self, listener)
-    }
-
-    /// Dispatches a bounded event without service-isolation scoping.
+    /// Dispatches a bounded event to the complete listener snapshot.
     ///
+    /// No target is evaluated; every snapshotted listener remains eligible.
     /// This future must be polled inside a Tokio runtime.
     pub fn dispatch<'a>(
         &'a self,
@@ -316,26 +405,26 @@ impl Context {
         }
     }
 
-    /// Dispatches a bounded event in the selected service-isolation scope.
+    /// Dispatches a bounded event through one generic listener target.
     ///
-    /// This future must be polled inside a Tokio runtime.
-    pub fn dispatch_scoped<'a>(
+    /// The complete listener snapshot is selected before any callback
+    /// admission or once claim. Selection runs on dispatch-bounded blocking
+    /// work and is covered by the event deadline. Explicitly global listeners
+    /// bypass `target`. This future must be polled inside a Tokio runtime.
+    pub fn dispatch_targeted<'a>(
         &'a self,
-        scope: impl AsRef<str> + 'a,
         event: impl AsRef<str> + 'a,
         mode: DispatchMode,
         value: Value,
+        target: Arc<dyn EventTarget>,
     ) -> impl std::future::Future<Output = Result<EventReceipt>> + 'a {
         let value = configuration::OwnedJsonValue::new(value);
         async move {
-            let scope = scope.as_ref();
-            self.validate_context_key(scope)?;
-            let scope = ServiceKey::new(scope);
             let event = event.as_ref();
             self.validate_event_key(event)?;
             let event = EventKey::new(event);
             self.runtime
-                .dispatch_event(self, &event, mode, value, Some(&scope))
+                .dispatch_event(self, &event, mode, value, Some(target))
                 .await
         }
     }
@@ -406,6 +495,7 @@ impl FiberHandle {
     /// This future must be polled inside a Tokio runtime. One absolute
     /// transition deadline includes normalization and convergence. Once
     /// admitted, timeout or caller cancellation detaches only the waiter.
+    #[allow(clippy::too_many_lines)] // The returned future owns serialized preparation, installation, and convergence.
     pub fn reconfigure(
         &self,
         config: ConfigValue,
@@ -425,37 +515,41 @@ impl FiberHandle {
                     .map_err(|_| MetaError::Busy {
                         operation: "plugin reconfiguration",
                     })?;
-            let preparation = runtime.begin_preparation()?;
-            let staged_config = runtime
-                .inner
-                .resources
-                .retained_plugin_bytes
-                .try_reserve(runtime.inner.limits.payloads.maximum_config_bytes)
-                .ok_or(MetaError::CapacityExhausted {
-                    resource: "retained plugin bytes",
-                })?;
+            let (preparation, attempt_reservations) = runtime.begin_attempt_preparation()?;
             let operation = tokio::spawn(async move {
-                let (runtime_admission, preparation) = preparation.into_parts();
-                let _runtime_admission = runtime_admission;
                 let _configuration = configuration;
-                let factory = {
+                let (factory, desired_revision) = {
                     let data = fiber.data.lock().expect("fiber state poisoned");
                     if data.disposed {
                         return Err(MetaError::FiberDisposed { fiber: fiber.id });
                     }
-                    Arc::clone(
+                    let revision = data
+                        .desired
+                        .as_ref()
+                        .expect("registered Fiber retains its desired configuration")
+                        .revision
+                        .checked_add(1)
+                        .ok_or(MetaError::CapacityExhausted {
+                            resource: "desired configuration revisions",
+                        })?;
+                    (
                         data.factory
                             .as_ref()
-                            .expect("registered Fiber retains its factory"),
+                            .expect("registered Fiber retains its factory")
+                            .clone(),
+                        revision,
                     )
                 };
-                let payloads = runtime.inner.limits.payloads.clone();
-                let (config, staged_config) = tokio::task::spawn_blocking(move || {
-                    let _preparation = preparation;
-                    let config = Runtime::normalize_config(&factory, config, &payloads)?;
-                    let mut staged_config = staged_config;
-                    staged_config.shrink_to(config.encoded_bytes);
-                    Ok::<_, MetaError>((config, staged_config))
+                let preparing_runtime = runtime.clone();
+                let preparing_factory = factory.clone();
+                let (desired, attempt) = tokio::task::spawn_blocking(move || {
+                    preparing_runtime.prepare_attempt_admitted(
+                        &preparing_factory,
+                        config,
+                        desired_revision,
+                        preparation,
+                        attempt_reservations,
+                    )
                 })
                 .await
                 .map_err(|error| {
@@ -467,21 +561,45 @@ impl FiberHandle {
                 .map_err(|error| {
                     super::dispatch::bound_error_diagnostic(error, maximum_diagnostic_bytes)
                 })?;
-                {
+                let (retired_desired, retired_attempts) = {
+                    let mut state = runtime.inner.state.lock().expect("runtime state poisoned");
                     let mut data = fiber.data.lock().expect("fiber state poisoned");
                     if data.disposed {
                         return Err(MetaError::FiberDisposed { fiber: fiber.id });
                     }
-                    let previous = data
-                        .config
-                        .replace(Arc::new(RetainedConfig::new(config.value, staged_config)));
-                    drop(previous);
-                    data.target_revision += 1;
-                    if matches!(data.state, FiberState::Failed(_)) {
-                        data.state = FiberState::Pending(PendingReport::default());
-                        data.last_attempt = None;
+                    data.target_revision = desired.revision;
+                    let retired_desired = data.desired.replace(desired);
+                    let mut retired_attempts = Vec::new();
+                    if data.active.is_some() {
+                        if let Some(previous) = data.replacement.replace(attempt) {
+                            retired_attempts.push(previous);
+                        }
+                    } else {
+                        let previous = data
+                            .attempt
+                            .replace(attempt)
+                            .expect("registered Fiber retains its prepared attempt");
+                        Runtime::replace_dependent_requirements(
+                            &mut state,
+                            &fiber,
+                            &previous,
+                            data.attempt
+                                .as_ref()
+                                .expect("replacement attempt was installed"),
+                        );
+                        retired_attempts.push(previous);
+                        if let Some(replacement) = data.replacement.take() {
+                            retired_attempts.push(replacement);
+                        }
                     }
-                }
+                    if matches!(data.state, FiberState::Failed(_)) && data.active.is_none() {
+                        data.state = FiberState::Pending(PendingReport::default());
+                    }
+                    data.last_attempt = None;
+                    (retired_desired, retired_attempts)
+                };
+                drop(retired_desired);
+                drop(retired_attempts);
                 let snapshot = if let Some(ticket) = runtime.request_reconciliation(fiber.id) {
                     ticket.join().await
                 } else {
@@ -534,8 +652,10 @@ impl Fiber {
                 fiber: self.id,
                 generation,
             }),
+            setup_effect: None,
             isolation: Arc::clone(&self.base_context.isolation),
             intercepts: Arc::clone(&self.base_context.intercepts),
+            extensions: Arc::clone(&self.base_context.extensions),
             entries: self.base_context.entries,
             encoded_bytes: self.base_context.encoded_bytes,
             trace: self.base_context.trace.clone(),
@@ -570,9 +690,9 @@ impl FiberData {
 
 pub(super) fn binding_identities(
     bindings: &BTreeMap<ServiceKey, Arc<ProviderBinding>>,
-) -> BTreeMap<ServiceKey, (FiberId, FiberGeneration)> {
+) -> BTreeMap<ServiceKey, SupplyId> {
     bindings
         .iter()
-        .map(|(key, binding)| (key.clone(), (binding.provider, binding.generation)))
+        .map(|(key, binding)| (key.clone(), binding.supply))
         .collect()
 }

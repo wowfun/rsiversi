@@ -22,19 +22,23 @@ impl EventHandler for RecordingHandler {
 
 #[derive(Debug)]
 struct ListenerFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     handlers: Vec<(Arc<dyn EventHandler>, EventOptions)>,
 }
 
 #[async_trait]
 impl PluginFactory for ListenerFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         for (handler, options) in &self.handlers {
-            context.on("test", Arc::clone(handler), *options)?;
+            plan.context().on("test", Arc::clone(handler), *options)?;
         }
         Ok(())
     }
@@ -57,7 +61,7 @@ async fn events_snapshot_order_once_waterfall_and_aggregate_errors() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("listeners", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("listeners", "1")),
                 handlers: vec![
                     (
                         handler("prepended", EventOutcome::Continue(json!(0)), false),
@@ -129,7 +133,7 @@ async fn events_snapshot_order_once_waterfall_and_aggregate_errors() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("failing", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("failing", "1")),
                 handlers: vec![
                     (
                         handler("bad-a", EventOutcome::Continue(Value::Null), true),
@@ -154,64 +158,4 @@ async fn events_snapshot_order_once_waterfall_and_aggregate_errors() {
         .to_string();
     assert!(error.contains("bad-a"));
     assert!(error.contains("bad-b"));
-}
-
-#[tokio::test]
-async fn scoped_dispatch_keeps_isolated_listeners_private_and_includes_global_listeners() {
-    let runtime = Runtime::default();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let handler = |name| {
-        Arc::new(RecordingHandler {
-            name,
-            log: Arc::clone(&log),
-            outcome: EventOutcome::Continue(Value::Null),
-            fail: false,
-        }) as Arc<dyn EventHandler>
-    };
-    let (first_scope, _) = runtime.root().isolate_fresh("scoped-service").unwrap();
-    let (second_scope, _) = runtime.root().isolate_fresh("scoped-service").unwrap();
-    let listeners = first_scope
-        .apply(
-            Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "scoped-listeners",
-                    "1",
-                )),
-                handlers: vec![
-                    (handler("isolated"), EventOptions::default()),
-                    (
-                        handler("global"),
-                        EventOptions {
-                            global: true,
-                            ..EventOptions::default()
-                        },
-                    ),
-                ],
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    wait_active(&listeners).await;
-
-    let foreign = second_scope
-        .dispatch_scoped("scoped-service", "test", DispatchMode::Emit, Value::Null)
-        .await
-        .unwrap();
-    assert_eq!(foreign.invoked, 1);
-    assert_eq!(
-        log.lock().expect("event log poisoned").as_slice(),
-        &["global"]
-    );
-
-    log.lock().expect("event log poisoned").clear();
-    let local = first_scope
-        .dispatch_scoped("scoped-service", "test", DispatchMode::Emit, Value::Null)
-        .await
-        .unwrap();
-    assert_eq!(local.invoked, 2);
-    assert_eq!(
-        log.lock().expect("event log poisoned").as_slice(),
-        &["isolated", "global"]
-    );
 }

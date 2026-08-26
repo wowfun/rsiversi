@@ -2,18 +2,32 @@ use super::*;
 
 #[derive(Debug)]
 struct CaptureOnlyFactory {
-    descriptor: PluginDescriptor,
-    handle: Arc<Mutex<Option<rsi_meta::ServiceHandle>>>,
+    identity: FactoryIdentity,
+    handle: Arc<Mutex<Option<rsi_meta::Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CaptureOnlyFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        *self.handle.lock().expect("capture poisoned") = Some(context.service("echo")?);
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(
+            PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                "echo",
+                "test.echo",
+                V1,
+            )),
+        )
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        *self.handle.lock().expect("capture poisoned") = Some(
+            plan.inject("echo")
+                .expect("prepared echo requirement must be injected")
+                .clone(),
+        );
         Ok(())
     }
 }
@@ -22,7 +36,7 @@ impl PluginFactory for CaptureOnlyFactory {
 async fn bounded_frames_are_rejected_at_the_calling_seam() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: rsi_meta::PayloadLimits {
-            maximum_frame_bytes: 4,
+            maximum_message_bytes: 4,
             ..rsi_meta::PayloadLimits::default()
         },
         ..RuntimeLimits::default()
@@ -45,8 +59,7 @@ async fn bounded_frames_are_rejected_at_the_calling_seam() {
         .root()
         .apply(
             Arc::new(CaptureOnlyFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("capture-only", "1"))
-                    .requiring(Requirement::new("echo", "test.echo", V1)),
+                identity: FactoryIdentity::builtin("capture-only", "1"),
                 handle: Arc::clone(&capture),
             }),
             Value::Null,
@@ -57,7 +70,7 @@ async fn bounded_frames_are_rejected_at_the_calling_seam() {
     let handle = capture.lock().expect("capture poisoned").clone().unwrap();
     let call = handle.open().unwrap();
     assert_eq!(
-        call.send(ServiceFrame::new(vec![0; 5])).await.unwrap_err(),
+        call.send(Message::new(vec![0; 5])).await.unwrap_err(),
         MetaError::PayloadTooLarge { maximum: 4 }
     );
 }

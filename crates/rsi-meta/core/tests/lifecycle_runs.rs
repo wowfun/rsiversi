@@ -1,14 +1,18 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    CleanupPhase, CleanupReport, Context, ContractVersion, DeadlineLimits, FactoryIdentity,
-    MetaError, PluginDescriptor, PluginFactory, Requirement, Result, Runtime, RuntimeLimits,
+    ActivationPlan, CleanupPhase, CleanupReport, ContractVersion, DeadlineLimits, FactoryIdentity,
+    MetaError, PluginFactory, PreparedActivation, Requirement, Result, Runtime, RuntimeLimits,
     ShutdownOutcome,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use tokio::sync::Notify;
+
+mod support;
+
+use support::FactorySpec;
 
 #[test]
 fn cleanup_report_wire_rejects_contradictory_failure_metadata() {
@@ -65,22 +69,26 @@ fn cleanup_report_wire_rejects_contradictory_failure_metadata() {
 
 #[derive(Debug)]
 struct FailingActivationWithBlockingCleanup {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     cleanup_entered: Arc<Notify>,
     cleanup_release: Arc<Notify>,
     cleanups: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
-struct UnexpectedActivation(PluginDescriptor);
+struct UnexpectedActivation(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for UnexpectedActivation {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.0.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         panic!("a missing dependency must keep the test Fiber pending")
     }
 }
@@ -91,7 +99,7 @@ async fn dropping_inserted_apply_waiter_off_executor_still_disposes_the_fiber() 
     let prepared = runtime
         .prepare(
             Arc::new(UnexpectedActivation(
-                PluginDescriptor::new(FactoryIdentity::builtin("off-executor-apply-drop", "1"))
+                FactorySpec::new(FactoryIdentity::builtin("off-executor-apply-drop", "1"))
                     .requiring(Requirement::new(
                         "missing",
                         "test.missing",
@@ -142,11 +150,16 @@ async fn dropping_inserted_apply_waiter_off_executor_still_disposes_the_fiber() 
 
 #[async_trait]
 impl PluginFactory for FailingActivationWithBlockingCleanup {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let cleanups = Arc::clone(&self.cleanups);
         context.defer(
             "earlier cleanup",
@@ -200,10 +213,7 @@ async fn dropping_apply_during_rollback_cannot_cancel_claimed_cleanup() {
         async move {
             root.apply(
                 Arc::new(FailingActivationWithBlockingCleanup {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "cancelled-rollback",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-rollback", "1")),
                     cleanup_entered,
                     cleanup_release,
                     cleanups,
@@ -233,7 +243,7 @@ async fn dropping_apply_during_rollback_cannot_cancel_claimed_cleanup() {
 
 #[derive(Debug)]
 struct BlockingShutdownCleanup {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     cleanups: Arc<AtomicUsize>,
@@ -241,11 +251,16 @@ struct BlockingShutdownCleanup {
 
 #[async_trait]
 impl PluginFactory for BlockingShutdownCleanup {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
         let cleanups = Arc::clone(&self.cleanups);
@@ -284,10 +299,7 @@ async fn shutdown_timeout_is_a_waiter_outcome_and_later_join_reaches_complete() 
         .root()
         .apply(
             Arc::new(BlockingShutdownCleanup {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "blocking-shutdown",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("blocking-shutdown", "1")),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 cleanups: Arc::clone(&cleanups),
@@ -329,17 +341,22 @@ async fn shutdown_timeout_is_a_waiter_outcome_and_later_join_reaches_complete() 
 
 #[derive(Debug)]
 struct IndependentShutdownCleanup {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for IndependentShutdownCleanup {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let entered = Arc::clone(&self.entered);
         context.defer(
             "independent shutdown cleanup",
@@ -370,10 +387,7 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
         .root()
         .apply(
             Arc::new(IndependentShutdownCleanup {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "proof-independent-root",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("proof-independent-root", "1")),
                 entered: Arc::clone(&cleanup_entered),
             }),
             Value::Null,
@@ -383,10 +397,7 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
     let proof = runtime
         .prepare(
             Arc::new(RetainedFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "held-shutdown-proof",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("held-shutdown-proof", "1")),
                 _retained: Arc::new(()),
             }),
             Value::Null,
@@ -409,10 +420,7 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
     assert!(matches!(
         runtime.prepare(
             Arc::new(RetainedFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "post-close-proof",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("post-close-proof", "1",)),
                 _retained: Arc::new(()),
             }),
             Value::Null,
@@ -442,10 +450,7 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
     assert!(matches!(
         runtime.prepare(
             Arc::new(RetainedFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "after-complete-proof",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("after-complete-proof", "1",)),
                 _retained: Arc::new(()),
             }),
             Value::Null,
@@ -459,17 +464,21 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
 
 #[derive(Debug)]
 struct RetainedFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     _retained: Arc<()>,
 }
 
 #[async_trait]
 impl PluginFactory for RetainedFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
@@ -483,7 +492,7 @@ async fn disposed_handle_retains_only_small_snapshot_state() {
         .root()
         .apply(
             Arc::new(RetainedFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("released", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("released", "1")),
                 _retained: retained,
             }),
             Value::String("configuration payload".repeat(1_024)),
@@ -502,15 +511,20 @@ async fn disposed_handle_retains_only_small_snapshot_state() {
 }
 
 #[derive(Debug)]
-struct LongCleanupFailure(PluginDescriptor);
+struct LongCleanupFailure(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for LongCleanupFailure {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.0.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         context.defer(
             "cleanup",
             Box::new(|| async move { Err("界".repeat(4_096)) }.boxed()),
@@ -531,7 +545,7 @@ async fn cleanup_failures_are_utf8_bounded_while_they_are_formatted() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(LongCleanupFailure(PluginDescriptor::new(
+            Arc::new(LongCleanupFailure(FactorySpec::new(
                 FactoryIdentity::builtin("bounded-cleanup", "1"),
             ))),
             Value::Null,
@@ -550,7 +564,7 @@ async fn cleanup_failures_are_utf8_bounded_while_they_are_formatted() {
 
 #[derive(Debug)]
 struct BlockingReconfigurationFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     normalization_entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     normalization_release: Arc<(Mutex<bool>, Condvar)>,
     cleanup_entered: Arc<Notify>,
@@ -560,11 +574,11 @@ struct BlockingReconfigurationFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingReconfigurationFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    fn validate_config(&self, config: Value) -> Result<Value> {
+    fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if !config.is_null() {
             if let Some(entered) = self.normalization_entered.lock().unwrap().take() {
                 let _ = entered.send(());
@@ -573,10 +587,11 @@ impl PluginFactory for BlockingReconfigurationFactory {
             let guard = released.lock().unwrap();
             drop(wakeup.wait_while(guard, |released| !*released).unwrap());
         }
-        Ok(config)
+        Ok(PreparedActivation::new(config.clone()))
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let entered = Arc::clone(&self.cleanup_entered);
         let release = Arc::clone(&self.cleanup_release);
         let cleanups = Arc::clone(&self.cleanups);
@@ -607,10 +622,7 @@ async fn disposal_does_not_deadlock_behind_a_blocking_reconfiguration() {
         .root()
         .apply(
             Arc::new(BlockingReconfigurationFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "blocking-reconfiguration",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("blocking-reconfiguration", "1")),
                 normalization_entered: Mutex::new(Some(normalization_entered_tx)),
                 normalization_release: Arc::clone(&normalization_release),
                 cleanup_entered: Arc::clone(&cleanup_entered),
@@ -676,7 +688,7 @@ async fn disposal_does_not_deadlock_behind_a_blocking_reconfiguration() {
 
 #[derive(Debug)]
 struct ControlledCleanupFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     failure: Option<&'static str>,
@@ -684,11 +696,16 @@ struct ControlledCleanupFactory {
 
 #[async_trait]
 impl PluginFactory for ControlledCleanupFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
         let failure = self.failure;
@@ -722,10 +739,7 @@ async fn shutdown_joins_a_disposal_captured_before_registry_removal() {
         .root()
         .apply(
             Arc::new(ControlledCleanupFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "reported-disposal",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("reported-disposal", "1")),
                 entered: Arc::clone(&target_entered),
                 release: Arc::clone(&target_release),
                 failure: Some("captured cleanup failure"),
@@ -740,10 +754,7 @@ async fn shutdown_joins_a_disposal_captured_before_registry_removal() {
         .root()
         .apply(
             Arc::new(ControlledCleanupFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "shutdown-ordering-blocker",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("shutdown-ordering-blocker", "1")),
                 entered: Arc::clone(&blocker_entered),
                 release: Arc::clone(&blocker_release),
                 failure: None,
@@ -783,18 +794,23 @@ async fn shutdown_joins_a_disposal_captured_before_registry_removal() {
 
 #[derive(Debug)]
 struct ParentWithControlledChild {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     child: Arc<ControlledCleanupFactory>,
     child_handle: Arc<Mutex<Option<rsi_meta::FiberHandle>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ParentWithControlledChild {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let factory: Arc<dyn PluginFactory> = self.child.clone();
         let child = context.apply(factory, Value::Null).await?;
         *self.child_handle.lock().unwrap() = Some(child);
@@ -819,15 +835,9 @@ async fn shutdown_preserves_a_child_report_removed_before_parent_cleanup() {
         .root()
         .apply(
             Arc::new(ParentWithControlledChild {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "parent-of-reported-child",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("parent-of-reported-child", "1")),
                 child: Arc::new(ControlledCleanupFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "reported-child",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("reported-child", "1")),
                     entered: Arc::clone(&child_entered),
                     release: Arc::clone(&child_release),
                     failure: Some("captured child cleanup failure"),
@@ -874,12 +884,9 @@ async fn parent_and_public_child_disposal_join_one_descendant_report() {
         .root()
         .apply(
             Arc::new(ParentWithControlledChild {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("joining-parent", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("joining-parent", "1")),
                 child: Arc::new(ControlledCleanupFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "joining-child",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("joining-child", "1")),
                     entered: Arc::clone(&child_entered),
                     release: Arc::clone(&child_release),
                     failure: Some("joined child cleanup failure"),
@@ -913,17 +920,22 @@ async fn parent_and_public_child_disposal_join_one_descendant_report() {
 
 #[derive(Debug)]
 struct OrderedCleanupFailures {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     failures: &'static [(&'static str, &'static str)],
 }
 
 #[async_trait]
 impl PluginFactory for OrderedCleanupFailures {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         for &(label, error) in self.failures {
             context.defer(
                 label,
@@ -936,17 +948,22 @@ impl PluginFactory for OrderedCleanupFailures {
 
 #[derive(Debug)]
 struct ParentWithOrderedCleanupFailures {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     children: Vec<Arc<OrderedCleanupFailures>>,
 }
 
 #[async_trait]
 impl PluginFactory for ParentWithOrderedCleanupFailures {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         for child in &self.children {
             let factory: Arc<dyn PluginFactory> = child.clone();
             context.apply(factory, Value::Null).await?;
@@ -966,22 +983,19 @@ async fn merged_cleanup_reports_never_retain_entries_after_an_omitted_failure() 
     })
     .unwrap();
     let earlier_child = Arc::new(OrderedCleanupFailures {
-        descriptor: PluginDescriptor::new(FactoryIdentity::builtin("earlier-child", "1")),
+        spec: FactorySpec::new(FactoryIdentity::builtin("earlier-child", "1")),
         // Cleanup is LIFO, so the four-byte failure is observed first.
         failures: &[("", "z"), ("aa", "bb")],
     });
     let later_child = Arc::new(OrderedCleanupFailures {
-        descriptor: PluginDescriptor::new(FactoryIdentity::builtin("later-child", "1")),
+        spec: FactorySpec::new(FactoryIdentity::builtin("later-child", "1")),
         failures: &[("aaaa", "bbbb")],
     });
     let parent = runtime
         .root()
         .apply(
             Arc::new(ParentWithOrderedCleanupFailures {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "ordered-cleanup-parent",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("ordered-cleanup-parent", "1")),
                 // Child cleanup is LIFO, so later_child consumes eight bytes
                 // before earlier_child's four-byte then one-byte failures.
                 children: vec![earlier_child, later_child],

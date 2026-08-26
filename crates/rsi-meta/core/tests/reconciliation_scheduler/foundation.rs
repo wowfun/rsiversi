@@ -1,17 +1,21 @@
 use super::*;
 
 #[tokio::test]
-async fn pending_dependency_cycles_are_reported_without_running_factories() {
+async fn mutual_missing_requirements_report_honest_missing_services_without_activation() {
     #[derive(Debug)]
-    struct CycleFactory(PluginDescriptor);
+    struct CycleFactory(FactorySpec);
 
     #[async_trait]
     impl PluginFactory for CycleFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.0
+        fn identity(&self) -> FactoryIdentity {
+            self.0.identity()
         }
 
-        async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+        fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+            self.0.prepare(desired)
+        }
+
+        async fn activate(&self, _: ActivationPlan) -> Result<()> {
             panic!("a cyclic factory must remain pending")
         }
     }
@@ -21,9 +25,8 @@ async fn pending_dependency_cycles_are_reported_without_running_factories() {
         .root()
         .apply(
             Arc::new(CycleFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("left", "1"))
-                    .requiring(Requirement::new("right", "test.right", V1))
-                    .providing(Provision::new("left", "test.left", V1)),
+                FactorySpec::new(FactoryIdentity::builtin("left", "1"))
+                    .requiring(Requirement::new("right", "test.right", V1)),
             )),
             Value::Null,
         )
@@ -33,55 +36,31 @@ async fn pending_dependency_cycles_are_reported_without_running_factories() {
         .root()
         .apply(
             Arc::new(CycleFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("right", "1"))
-                    .requiring(Requirement::new("left", "test.left", V1))
-                    .providing(Provision::new("right", "test.right", V1)),
+                FactorySpec::new(FactoryIdentity::builtin("right", "1"))
+                    .requiring(Requirement::new("left", "test.left", V1)),
             )),
             Value::Null,
         )
         .await
         .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let reports_cycle = [left.snapshot(), right.snapshot()].iter().all(|snapshot| {
-                matches!(
-                    &snapshot.state,
-                    FiberState::Pending(report)
-                        if report.reasons.iter().any(|reason| matches!(
-                            reason,
-                            rsi_meta::PendingReason::DependencyCycle { .. }
-                        ))
-                )
-            });
-            if reports_cycle {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("both cycle participants should report the cycle");
+    for (snapshot, expected) in [(left.snapshot(), "right"), (right.snapshot(), "left")] {
+        let FiberState::Pending(report) = snapshot.state else {
+            panic!("mutual missing requirement did not remain Pending");
+        };
+        assert_eq!(report.total_reasons, 1);
+        assert!(matches!(
+            report.reasons.as_slice(),
+            [rsi_meta::PendingReason::MissingService { service, .. }] if service.as_ref() == expected
+        ));
+    }
 
     assert!(right.dispose().await.is_clean());
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let no_cycle = matches!(
-                left.snapshot().state,
-                FiberState::Pending(ref report)
-                    if !report.reasons.iter().any(|reason| matches!(
-                        reason,
-                        rsi_meta::PendingReason::DependencyCycle { .. }
-                    ))
-            );
-            if no_cycle {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("disposing a declaration left a stale dependency-cycle diagnostic");
+    assert!(matches!(
+        left.snapshot().state,
+        FiberState::Pending(ref report)
+            if matches!(report.reasons.as_slice(), [rsi_meta::PendingReason::MissingService { service, .. }] if service.as_ref() == "right")
+    ));
 
     assert!(left.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_complete());
@@ -93,14 +72,13 @@ async fn provider_withdrawal_notifies_only_dependents_in_its_exact_isolation_slo
     let default_provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "default-slot-provider",
-                    "1",
-                ))
-                .providing(Provision::new("isolated", "test.isolation", V1)),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(EndpointFactory::new(
+                FactoryIdentity::builtin("default-slot-provider", "1"),
+                "isolated",
+                "test.isolation",
+                V1,
+                Arc::new(Echo),
+            )),
             Value::Null,
         )
         .await
@@ -110,15 +88,16 @@ async fn provider_withdrawal_notifies_only_dependents_in_its_exact_isolation_slo
     let retiring_provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "retiring-provider",
-                    "1",
-                ))
-                .requiring(Requirement::new("isolated", "test.isolation", V1))
-                .providing(Provision::new("upstream", "test.isolation", V1)),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(
+                EndpointFactory::new(
+                    FactoryIdentity::builtin("retiring-provider", "1"),
+                    "upstream",
+                    "test.isolation",
+                    V1,
+                    Arc::new(Echo),
+                )
+                .requiring(Requirement::new("isolated", "test.isolation", V1)),
+            ),
             Value::Null,
         )
         .await
@@ -130,15 +109,16 @@ async fn provider_withdrawal_notifies_only_dependents_in_its_exact_isolation_slo
         .isolate("isolated", IsolationId(7))
         .unwrap()
         .apply(
-            Arc::new(EndpointFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "isolated-dependent",
-                    "1",
-                ))
-                .requiring(Requirement::new("upstream", "test.isolation", V1))
-                .providing(Provision::new("isolated", "test.isolation", V1)),
-                endpoint: Arc::new(Echo),
-            }),
+            Arc::new(
+                EndpointFactory::new(
+                    FactoryIdentity::builtin("isolated-dependent", "1"),
+                    "isolated",
+                    "test.isolation",
+                    V1,
+                    Arc::new(Echo),
+                )
+                .requiring(Requirement::new("upstream", "test.isolation", V1)),
+            ),
             Value::Null,
         )
         .await

@@ -2,18 +2,24 @@ use super::*;
 
 #[derive(Debug)]
 struct EffectFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     log: Arc<Mutex<Vec<String>>>,
     fail: bool,
 }
 
 #[async_trait]
 impl PluginFactory for EffectFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, config: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
+        let config = plan.config();
         let generation = context.owner().expect("plugin has owner").1.0;
         self.log
             .lock()
@@ -49,7 +55,7 @@ async fn failed_setup_and_reconfigure_cleanup_in_strict_reverse_order() {
         .root()
         .apply(
             Arc::new(EffectFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("failed", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("failed", "1")),
                 log: Arc::clone(&failed_log),
                 fail: true,
             }),
@@ -68,7 +74,7 @@ async fn failed_setup_and_reconfigure_cleanup_in_strict_reverse_order() {
         .root()
         .apply(
             Arc::new(EffectFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("effect", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("effect", "1")),
                 log: Arc::clone(&log),
                 fail: false,
             }),
@@ -92,18 +98,23 @@ async fn failed_setup_and_reconfigure_cleanup_in_strict_reverse_order() {
 
 #[derive(Debug)]
 struct ParentFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     child: Arc<dyn PluginFactory>,
     log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ParentFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
         context.apply(Arc::clone(&self.child), Value::Null).await?;
         let log = Arc::clone(&self.log);
         context.defer(
@@ -121,24 +132,29 @@ impl PluginFactory for ParentFactory {
 
 #[derive(Debug)]
 struct ChildFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[derive(Debug)]
 struct NamedChildFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     label: &'static str,
     log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[async_trait]
 impl PluginFactory for NamedChildFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
         let label = self.label;
         let log = Arc::clone(&self.log);
         context.defer(
@@ -156,22 +172,27 @@ impl PluginFactory for NamedChildFactory {
 
 #[derive(Debug)]
 struct MultiChildParentFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     log: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[async_trait]
 impl PluginFactory for MultiChildParentFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
         for label in ["first-child", "second-child"] {
             context
                 .apply(
                     Arc::new(NamedChildFactory {
-                        descriptor: PluginDescriptor::new(FactoryIdentity::builtin(label, "1")),
+                        spec: FactorySpec::new(FactoryIdentity::builtin(label, "1")),
                         label,
                         log: Arc::clone(&self.log),
                     }),
@@ -195,11 +216,16 @@ impl PluginFactory for MultiChildParentFactory {
 
 #[async_trait]
 impl PluginFactory for ChildFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context();
         let log = Arc::clone(&self.log);
         context.defer(
             "child",
@@ -222,9 +248,9 @@ async fn parent_disposes_children_before_its_own_effects_and_dispose_is_joinable
         .root()
         .apply(
             Arc::new(ParentFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("parent", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("parent", "1")),
                 child: Arc::new(ChildFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin("child", "1")),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("child", "1")),
                     log: Arc::clone(&log),
                 }),
                 log: Arc::clone(&log),
@@ -251,10 +277,7 @@ async fn parent_disposes_multiple_children_in_reverse_application_order() {
         .root()
         .apply(
             Arc::new(MultiChildParentFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "multi-child-parent",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("multi-child-parent", "1")),
                 log: Arc::clone(&log),
             }),
             Value::Null,
@@ -278,15 +301,9 @@ async fn parent_reconfiguration_retires_the_old_child_before_publishing_a_new_ge
         .root()
         .apply(
             Arc::new(ParentFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "reconfigured-parent",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("reconfigured-parent", "1")),
                 child: Arc::new(ChildFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "reconfigured-child",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("reconfigured-child", "1")),
                     log: Arc::clone(&log),
                 }),
                 log: Arc::clone(&log),

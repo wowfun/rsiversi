@@ -1,100 +1,39 @@
-use super::InvocationContext;
-use super::byte_admission::{BufferedByteAdmission, BufferedBytePermit};
-use crate::runtime::{ResourceLedger, ResourceReservation};
-use crate::{MetaError, Result};
+use super::message::{BufferedMessage, Message, PreparedMessage};
+use super::message_admission::BufferedMessageAdmission;
+use super::message_waiter::MessageChannel;
+use super::{CancellationObserver, InvocationContext};
+use crate::runtime::ResourceLedger;
+use crate::{Context, MetaError, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// One bounded opaque byte frame in a service stream.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ServiceFrame {
-    bytes: Box<[u8]>,
-}
-
-impl ServiceFrame {
-    /// Creates a frame; the owning send operation enforces its byte bound.
-    pub fn new(bytes: impl Into<Box<[u8]>>) -> Self {
-        Self {
-            bytes: bytes.into(),
-        }
-    }
-
-    /// Borrows the exact frame bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// Consumes the frame and returns its bytes.
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes.into_vec()
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct BufferedFrame {
-    frame: ServiceFrame,
-    _byte_reservation: Option<ResourceReservation>,
-    _byte_lease: Option<BufferedBytePermit>,
-}
-
-pub(super) struct FrameBudget<'call> {
-    pub(super) maximum_frame_bytes: usize,
-    pub(super) byte_admission: &'call Arc<BufferedByteAdmission>,
+pub(super) struct MessageBudget<'call> {
+    pub(super) sender: &'call Context,
+    pub(super) maximum_message_bytes: usize,
+    pub(super) maximum_capabilities_per_message: usize,
+    pub(super) message_admission: &'call Arc<BufferedMessageAdmission>,
+    pub(super) channel: &'call Arc<MessageChannel>,
     pub(super) byte_resources: &'call Arc<ResourceLedger>,
+    pub(super) capability_resources: &'call Arc<ResourceLedger>,
     pub(super) cancellation: &'call CancellationToken,
     pub(super) deadline: Instant,
 }
 
-impl BufferedFrame {
-    async fn acquire(
-        frame: ServiceFrame,
-        byte_admission: &Arc<BufferedByteAdmission>,
-        byte_resources: &Arc<ResourceLedger>,
-        cancellation: &CancellationToken,
-        deadline: Instant,
-    ) -> Result<Self> {
-        let bytes = frame.as_bytes().len();
-        let (byte_lease, byte_reservation) = if bytes == 0 {
-            (None, None)
-        } else {
-            let byte_lease = byte_admission
-                .acquire(bytes, byte_resources, cancellation, deadline)
-                .await?;
-            let byte_reservation =
-                byte_resources
-                    .try_reserve(bytes)
-                    .ok_or(MetaError::CapacityExhausted {
-                        resource: "buffered service bytes",
-                    })?;
-            (Some(byte_lease), Some(byte_reservation))
-        };
-        Ok(Self {
-            frame,
-            _byte_reservation: byte_reservation,
-            _byte_lease: byte_lease,
-        })
-    }
-
-    pub(super) fn into_frame(self) -> ServiceFrame {
-        self.frame
-    }
-}
-
-pub(super) async fn send_frame<T: Send>(
+pub(super) async fn send_message<T: Send>(
     sender: &mpsc::Sender<T>,
-    frame: ServiceFrame,
-    wrap: impl FnOnce(BufferedFrame) -> T,
-    budget: FrameBudget<'_>,
+    message: Message,
+    wrap: impl FnOnce(BufferedMessage) -> T,
+    budget: MessageBudget<'_>,
 ) -> Result<()> {
-    if frame.as_bytes().len() > budget.maximum_frame_bytes {
-        return Err(MetaError::PayloadTooLarge {
-            maximum: budget.maximum_frame_bytes,
-        });
-    }
+    let message = PreparedMessage::validate_and_strip(
+        message,
+        budget.sender,
+        budget.maximum_message_bytes,
+        budget.maximum_capabilities_per_message,
+    )?;
     if Instant::now() >= budget.deadline {
         budget.cancellation.cancel();
         return Err(MetaError::Timeout("service call"));
@@ -102,19 +41,12 @@ pub(super) async fn send_frame<T: Send>(
     if budget.cancellation.is_cancelled() {
         return Err(MetaError::Cancelled);
     }
-    let channel = tokio::select! {
-        biased;
-        () = tokio::time::sleep_until(budget.deadline) => {
-            budget.cancellation.cancel();
-            return Err(MetaError::Timeout("service call"));
-        }
-        () = budget.cancellation.cancelled() => return Err(MetaError::Cancelled),
-        result = sender.reserve() => result.map_err(|_| MetaError::Cancelled)?,
-    };
-    let frame = BufferedFrame::acquire(
-        frame,
-        budget.byte_admission,
+    let message = BufferedMessage::acquire(
+        message,
+        budget.message_admission,
+        budget.channel,
         budget.byte_resources,
+        budget.capability_resources,
         budget.cancellation,
         budget.deadline,
     )
@@ -126,13 +58,30 @@ pub(super) async fn send_frame<T: Send>(
     if budget.cancellation.is_cancelled() {
         return Err(MetaError::Cancelled);
     }
-    channel.send(wrap(frame));
+    message.validate_transfer()?;
+    if Instant::now() >= budget.deadline {
+        budget.cancellation.cancel();
+        return Err(MetaError::Timeout("service call"));
+    }
+    if budget.cancellation.is_cancelled() {
+        return Err(MetaError::Cancelled);
+    }
+    let channel = match sender.try_reserve() {
+        Ok(channel) => channel,
+        Err(mpsc::error::TrySendError::Closed(())) => return Err(MetaError::Cancelled),
+        Err(mpsc::error::TrySendError::Full(())) => {
+            return Err(MetaError::Service(
+                "message channel position admission lost synchronization".to_owned(),
+            ));
+        }
+    };
+    channel.send(wrap(message));
     Ok(())
 }
 
 #[derive(Debug)]
 pub(crate) enum ResponseMessage {
-    Frame(BufferedFrame),
+    Message(BufferedMessage),
     Terminal(Result<()>),
 }
 
@@ -152,18 +101,22 @@ pub(crate) enum ResponseMessage {
 /// ```
 #[derive(Debug)]
 pub struct ProviderChannel<'call> {
-    pub(crate) requests: &'call mut mpsc::Receiver<BufferedFrame>,
+    pub(crate) context: &'call Context,
+    pub(crate) requests: &'call mut mpsc::Receiver<BufferedMessage>,
     pub(crate) responses: &'call mpsc::Sender<ResponseMessage>,
-    pub(crate) byte_admission: &'call Arc<BufferedByteAdmission>,
+    pub(crate) message_admission: &'call Arc<BufferedMessageAdmission>,
+    pub(crate) response_channel: &'call Arc<MessageChannel>,
     pub(crate) byte_resources: &'call Arc<ResourceLedger>,
+    pub(crate) capability_resources: &'call Arc<ResourceLedger>,
     pub(crate) cancellation: &'call CancellationToken,
     pub(crate) deadline: Instant,
-    pub(crate) maximum_frame_bytes: usize,
+    pub(crate) maximum_message_bytes: usize,
+    pub(crate) maximum_capabilities_per_message: usize,
 }
 
 impl ProviderChannel<'_> {
-    /// Receives the next caller frame, or `None` after finish or cancellation.
-    pub async fn recv(&mut self) -> Option<ServiceFrame> {
+    /// Receives the next caller Message, or `None` after finish or cancellation.
+    pub async fn recv(&mut self) -> Option<Message> {
         tokio::select! {
             biased;
             () = self.cancellation.cancelled() => None,
@@ -171,20 +124,26 @@ impl ProviderChannel<'_> {
                 self.cancellation.cancel();
                 None
             }
-            frame = self.requests.recv() => frame.map(BufferedFrame::into_frame),
+            message = self.requests.recv() => {
+                message.map(|message| message.into_message(self.context))
+            },
         }
     }
 
-    /// Sends one bounded successful response frame.
-    pub async fn send(&self, frame: ServiceFrame) -> Result<()> {
-        send_frame(
+    /// Sends one bounded successful response Message.
+    pub async fn send(&self, message: Message) -> Result<()> {
+        send_message(
             self.responses,
-            frame,
-            ResponseMessage::Frame,
-            FrameBudget {
-                maximum_frame_bytes: self.maximum_frame_bytes,
-                byte_admission: self.byte_admission,
+            message,
+            ResponseMessage::Message,
+            MessageBudget {
+                sender: self.context,
+                maximum_message_bytes: self.maximum_message_bytes,
+                maximum_capabilities_per_message: self.maximum_capabilities_per_message,
+                message_admission: self.message_admission,
+                channel: self.response_channel,
                 byte_resources: self.byte_resources,
+                capability_resources: self.capability_resources,
                 cancellation: self.cancellation,
                 deadline: self.deadline,
             },
@@ -192,9 +151,9 @@ impl ProviderChannel<'_> {
         .await
     }
 
-    /// Returns cooperative cancellation for this call.
-    pub fn cancellation(&self) -> CancellationToken {
-        self.cancellation.clone()
+    /// Returns an observation-only view of cooperative cancellation for this call.
+    pub fn cancellation(&self) -> CancellationObserver {
+        CancellationObserver::new(self.cancellation.clone())
     }
 }
 

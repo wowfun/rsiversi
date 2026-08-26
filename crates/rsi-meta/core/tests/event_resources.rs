@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use rsi_meta::{
-    Context, DeadlineLimits, DispatchMode, EventHandler, EventOptions, EventOutcome,
-    ExecutionLimits, FactoryIdentity, FiberState, InvocationContext, MetaError, PayloadLimits,
-    PluginDescriptor, PluginFactory, Result, Runtime, RuntimeLimits, TopologyLimits,
+    ActivationPlan, ConfigValue, Context, DeadlineLimits, DispatchMode, EventHandler, EventOptions,
+    EventOutcome, ExecutionLimits, FactoryIdentity, InvocationContext, MetaError, PayloadLimits,
+    PluginFactory, PreparedActivation, Result, Runtime, RuntimeLimits, TopologyLimits,
 };
 use serde_json::{Value, json};
 use std::process::Command;
@@ -12,11 +12,11 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 
 mod support;
 
-use support::{ContextCaptureFactory, ListenerCaptureFactory};
+use support::{FactorySpec, ListenerCaptureFactory};
 
 #[derive(Debug)]
 struct ListenerFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     event: &'static str,
     handlers: Vec<Arc<dyn EventHandler>>,
     options: EventOptions,
@@ -24,13 +24,18 @@ struct ListenerFactory {
 
 #[async_trait]
 impl PluginFactory for ListenerFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         for handler in &self.handlers {
-            context.on(self.event, Arc::clone(handler), self.options)?;
+            plan.context()
+                .on(self.event, Arc::clone(handler), self.options)?;
         }
         Ok(())
     }
@@ -38,18 +43,22 @@ impl PluginFactory for ListenerFactory {
 
 #[derive(Debug)]
 struct CapturingFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     context: Arc<Mutex<Option<Context>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CapturingFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        *self.context.lock().expect("context capture poisoned") = Some(context);
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        *self.context.lock().expect("context capture poisoned") = Some(plan.context().clone());
         Ok(())
     }
 }
@@ -82,24 +91,29 @@ impl EventHandler for PanickingDropHandler {
 
 #[derive(Debug)]
 struct SolePanickingDropHandlerFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     handler: Mutex<Option<Arc<dyn EventHandler>>>,
 }
 
 #[async_trait]
 impl PluginFactory for SolePanickingDropHandlerFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         let handler = self
             .handler
             .lock()
             .expect("handler holder poisoned")
             .take()
             .expect("the handler is registered once");
-        context.on("drop-panic", handler, EventOptions::default())?;
+        plan.context()
+            .on("drop-panic", handler, EventOptions::default())?;
         Ok(())
     }
 }
@@ -111,10 +125,7 @@ async fn panicking_listener_destructor_cannot_strand_persistent_disposal() {
         .root()
         .apply(
             Arc::new(SolePanickingDropHandlerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "listener-drop-panic",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("listener-drop-panic", "1")),
                 handler: Mutex::new(Some(Arc::new(PanickingDropHandler))),
             }),
             Value::Null,
@@ -174,10 +185,7 @@ async fn handler_errors_cannot_spoof_runtime_terminal_state() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "event-terminal-spoof",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("event-terminal-spoof", "1")),
                 event: "event-terminal-spoof",
                 handlers: vec![Arc::new(TerminalSpoofingHandler)],
                 options: EventOptions::default(),
@@ -216,7 +224,7 @@ async fn event_error_suffix_budget_is_safe_for_every_small_diagnostic_limit() {
             .root()
             .apply(
                 Arc::new(ListenerFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                    spec: FactorySpec::new(FactoryIdentity::builtin(
                         format!("small-diagnostic-{maximum_diagnostic_bytes}"),
                         "1",
                     )),
@@ -265,10 +273,7 @@ async fn dispatch_admission_is_fail_fast_and_reusable() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "dispatch-admission",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("dispatch-admission", "1")),
                 event: "dispatch-admission",
                 handlers: vec![Arc::new(BlockingHandler {
                     entered: Arc::clone(&entered),
@@ -331,10 +336,7 @@ async fn shutdown_cancels_live_dispatch_and_completes_with_stable_zero_usage() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "shutdown-dispatch",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("shutdown-dispatch", "1")),
                 event: "shutdown-dispatch",
                 handlers: vec![Arc::new(BlockingHandler {
                     entered: Arc::clone(&entered),
@@ -452,10 +454,7 @@ async fn callback_admission_is_global_across_parallel_dispatches() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "callback-admission",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("callback-admission", "1")),
                 event: "callback-admission",
                 handlers,
                 options: EventOptions::default(),
@@ -526,10 +525,7 @@ async fn parallel_dispatch_refills_a_callback_slot_before_a_slow_sibling_finishe
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "parallel-lazy-refill",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("parallel-lazy-refill", "1")),
                 event: "parallel-lazy-refill",
                 handlers: vec![
                     Arc::new(NotifyingHandler(Arc::clone(&fast_completed))),
@@ -596,10 +592,7 @@ async fn parallel_error_aggregation_obeys_entry_and_utf8_byte_limits() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "bounded-event-errors",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("bounded-event-errors", "1")),
                 event: "bounded-event-errors",
                 handlers: (0..8)
                     .map(|index| Arc::new(FailingHandler(index)) as Arc<dyn EventHandler>)
@@ -639,7 +632,7 @@ async fn sequential_modes_bound_handler_errors_at_the_same_public_seam() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                spec: FactorySpec::new(FactoryIdentity::builtin(
                     "bounded-sequential-event-errors",
                     "1",
                 )),
@@ -688,6 +681,15 @@ fn deeply_nested_event_value() -> Value {
     value
 }
 
+#[derive(Debug)]
+struct SelectAllTarget;
+
+impl rsi_meta::EventTarget for SelectAllTarget {
+    fn select(&self, _: &rsi_meta::ListenerView) -> Result<bool> {
+        Ok(true)
+    }
+}
+
 fn run_isolated_event_case(test: &str, child_variable: &str, case: &str) {
     let output = Command::new(std::env::current_exe().unwrap())
         .env(child_variable, case)
@@ -714,11 +716,11 @@ fn never_polled_dispatch_futures_destroy_deep_owned_values_without_recursing() {
                 DispatchMode::Emit,
                 deeply_nested_event_value(),
             )),
-            "dispatch-scoped" => drop(context.dispatch_scoped(
-                "service",
+            "dispatch-targeted" => drop(context.dispatch_targeted(
                 "deep-unpolled",
                 DispatchMode::Emit,
                 deeply_nested_event_value(),
+                Arc::new(SelectAllTarget),
             )),
             other => panic!("unknown deep unpolled event case {other:?}"),
         }
@@ -726,7 +728,7 @@ fn never_polled_dispatch_futures_destroy_deep_owned_values_without_recursing() {
     }
 
     let test = "never_polled_dispatch_futures_destroy_deep_owned_values_without_recursing";
-    for case in ["dispatch", "dispatch-scoped"] {
+    for case in ["dispatch", "dispatch-targeted"] {
         run_isolated_event_case(test, CHILD, case);
     }
 }
@@ -785,7 +787,7 @@ fn deep_handler_outcome_is_rejected_without_recursing() {
                 .root()
                 .apply(
                     Arc::new(ListenerFactory {
-                        descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                        spec: FactorySpec::new(FactoryIdentity::builtin(
                             "deep-event-outcome",
                             "1",
                         )),
@@ -834,10 +836,7 @@ async fn event_inputs_and_handler_outcomes_obey_json_shape_limits() {
         .root()
         .apply(
             Arc::new(ListenerFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "event-json-shape",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("event-json-shape", "1")),
                 event: "event-json-shape",
                 handlers: vec![Arc::new(NestedOutcomeHandler)],
                 options: EventOptions::default(),
@@ -864,7 +863,7 @@ async fn event_inputs_and_handler_outcomes_obey_json_shape_limits() {
 }
 
 #[tokio::test]
-async fn once_and_off_churn_reuses_listener_capacity_without_phantom_invocations() {
+async fn once_and_dispose_churn_reuses_listener_capacity_without_phantom_invocations() {
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_event_listeners: 1,
@@ -878,7 +877,7 @@ async fn once_and_off_churn_reuses_listener_capacity_without_phantom_invocations
         .root()
         .apply(
             Arc::new(CapturingFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("listener-churn", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("listener-churn", "1")),
                 context: Arc::clone(&captured),
             }),
             Value::Null,
@@ -893,12 +892,16 @@ async fn once_and_off_churn_reuses_listener_capacity_without_phantom_invocations
 
     for _ in 0..128 {
         let listener = context
-            .on("off-churn", Arc::new(NoopHandler), EventOptions::default())
+            .on(
+                "dispose-churn",
+                Arc::new(NoopHandler),
+                EventOptions::default(),
+            )
             .unwrap();
-        assert!(context.off(listener));
+        assert!(listener.dispose().await.is_clean());
         assert_eq!(
             context
-                .dispatch("off-churn", DispatchMode::Emit, Value::Null)
+                .dispatch("dispose-churn", DispatchMode::Emit, Value::Null)
                 .await
                 .unwrap()
                 .invoked,
@@ -952,10 +955,7 @@ async fn once_removal_releases_capacity_while_its_callback_snapshot_is_still_ali
         .root()
         .apply(
             Arc::new(CapturingFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "listener-snapshot-capacity",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("listener-snapshot-capacity", "1")),
                 context: Arc::clone(&captured),
             }),
             Value::Null,
@@ -1005,7 +1005,7 @@ async fn once_removal_releases_capacity_while_its_callback_snapshot_is_still_ali
 
     release.notify_one();
     assert_eq!(dispatch.await.unwrap().unwrap().invoked, 1);
-    assert!(context.off(replacement));
+    assert!(replacement.dispose().await.is_clean());
     assert_eq!(runtime.resource_snapshot().listeners.current, 0);
 }
 
@@ -1017,10 +1017,7 @@ async fn each_exact_listener_removal_advances_the_registry_revision_once() {
         .root()
         .apply(
             Arc::new(CapturingFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "listener-removal-revision",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("listener-removal-revision", "1")),
                 context: Arc::clone(&captured),
             }),
             Value::Null,
@@ -1038,9 +1035,9 @@ async fn each_exact_listener_removal_advances_the_registry_revision_once() {
         .on("revision", Arc::new(NoopHandler), EventOptions::default())
         .unwrap();
     assert_eq!(runtime.snapshot().revision, baseline + 1);
-    assert!(context.off(explicit));
+    assert!(explicit.dispose().await.is_clean());
     assert_eq!(runtime.snapshot().revision, baseline + 2);
-    assert!(!context.off(explicit));
+    assert!(explicit.dispose().await.is_clean());
     assert_eq!(runtime.snapshot().revision, baseline + 2);
 
     context

@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    Context, ContractVersion, DeadlineLimits, ExecutionLimits, FactoryIdentity, FiberState,
+    ActivationPlan, ContractVersion, DeadlineLimits, ExecutionLimits, FactoryIdentity, FiberState,
     InvocationContext, IsolationId, MAXIMUM_JSON_DEPTH, MetaError, PayloadLimits, PendingReason,
-    PendingReport, PluginDescriptor, PluginFactory, ProviderChannel, Provision, Requirement,
-    Result, Runtime, RuntimeLimits, ServiceEndpoint, TopologyLimits,
+    PluginFactory, PreparedActivation, ProviderChannel, Requirement, Result, Runtime,
+    RuntimeLimits, ServiceEndpoint, TopologyLimits,
 };
 use serde_json::{Value, json};
 use std::process::Command;
@@ -15,10 +15,22 @@ use tokio_util::sync::CancellationToken;
 
 mod support;
 
-use support::{Echo, EndpointFactory};
+use support::{Echo, EndpointFactory, FactorySpec};
 
 const V1: ContractVersion = ContractVersion(1);
 const DEEP_CONFIG_CHILD: &str = "RSI_META_DEEP_CONFIG_CHILD";
+
+fn minimum_retained_plugin_limit(limits: &RuntimeLimits) -> usize {
+    let payloads = &limits.payloads;
+    let maximum_requirement_bytes = limits.topology.maximum_requirements_per_fiber
+        * (payloads.maximum_identifier_bytes * 2 + std::mem::size_of::<ContractVersion>());
+    let maximum_attempt_bytes = payloads.maximum_config_bytes
+        + payloads.maximum_prepared_state_bytes
+        + maximum_requirement_bytes;
+    payloads.maximum_identifier_bytes * 2
+        + payloads.maximum_config_bytes * 2
+        + maximum_attempt_bytes * 2
+}
 
 #[test]
 fn grouped_limits_validate_primitive_bounds_without_coupling_shutdown_wait() {
@@ -42,15 +54,15 @@ fn grouped_limits_validate_primitive_bounds_without_coupling_shutdown_wait() {
         },
         RuntimeLimits {
             payloads: PayloadLimits {
-                maximum_frame_bytes: 0,
+                maximum_message_bytes: 0,
                 ..PayloadLimits::default()
             },
             ..RuntimeLimits::default()
         },
         RuntimeLimits {
             payloads: PayloadLimits {
-                maximum_frame_bytes: 2,
-                maximum_buffered_service_bytes: 1,
+                maximum_message_bytes: 2,
+                maximum_buffered_message_bytes: 1,
                 ..PayloadLimits::default()
             },
             ..RuntimeLimits::default()
@@ -72,7 +84,7 @@ fn grouped_limits_validate_primitive_bounds_without_coupling_shutdown_wait() {
         RuntimeLimits {
             payloads: PayloadLimits {
                 maximum_identifier_bytes: 1,
-                maximum_descriptor_bytes: usize::MAX,
+                maximum_prepared_state_bytes: usize::MAX,
                 maximum_config_bytes: 1,
                 maximum_retained_plugin_bytes: usize::MAX,
                 ..PayloadLimits::default()
@@ -88,14 +100,43 @@ fn grouped_limits_validate_primitive_bounds_without_coupling_shutdown_wait() {
 }
 
 #[test]
+fn retained_plugin_budget_covers_desired_and_normalized_attempt_configurations() {
+    let limits = |maximum_retained_plugin_bytes| RuntimeLimits {
+        topology: TopologyLimits {
+            maximum_dependency_edges: 1,
+            maximum_requirements_per_fiber: 1,
+            ..TopologyLimits::default()
+        },
+        payloads: PayloadLimits {
+            maximum_identifier_bytes: 1,
+            maximum_prepared_state_bytes: 3,
+            maximum_config_bytes: 4,
+            maximum_retained_plugin_bytes,
+            ..PayloadLimits::default()
+        },
+        ..RuntimeLimits::default()
+    };
+
+    let exact = minimum_retained_plugin_limit(&limits(usize::MAX));
+    Runtime::new(limits(exact))
+        .expect("identity, desired, normalized, state, and requirement reservations fit exactly");
+    assert_eq!(
+        Runtime::new(limits(exact - 1)).unwrap_err(),
+        MetaError::InvalidInput(
+            "a maximum plugin or Message payload exceeds its aggregate Runtime budget".to_owned()
+        )
+    );
+}
+
+#[test]
 fn every_accepted_boundary_policy_constructs_without_panicking() {
     let tokio_maximum = tokio::sync::Semaphore::MAX_PERMITS;
     let accepted = [
         RuntimeLimits::default(),
         RuntimeLimits {
             payloads: PayloadLimits {
-                maximum_frame_bytes: (u32::MAX as usize).min(tokio_maximum),
-                maximum_buffered_service_bytes: tokio_maximum,
+                maximum_message_bytes: (u32::MAX as usize).min(tokio_maximum),
+                maximum_buffered_message_bytes: tokio_maximum,
                 ..PayloadLimits::default()
             },
             execution: ExecutionLimits {
@@ -103,6 +144,7 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
                 maximum_concurrent_reconciliations: tokio_maximum,
                 maximum_concurrent_service_calls: tokio_maximum,
                 channel_capacity: tokio_maximum - 1,
+                maximum_pending_message_sends: usize::MAX,
                 maximum_concurrent_event_dispatches: tokio_maximum,
                 maximum_concurrent_event_callbacks: tokio_maximum,
             },
@@ -122,17 +164,15 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
                 maximum_fibers: 1,
                 maximum_fiber_depth: 2,
                 maximum_services: 2,
-                maximum_service_declarations: 1,
-                maximum_dependency_edges: 1,
+                maximum_dependency_edges: 2,
                 maximum_requirements_per_fiber: 2,
-                maximum_provisions_per_fiber: 2,
                 maximum_effects_per_fiber: 2,
                 maximum_effects: 1,
                 ..TopologyLimits::default()
             },
             payloads: PayloadLimits {
                 maximum_identifier_bytes: 16,
-                maximum_descriptor_bytes: 8,
+                maximum_prepared_state_bytes: 8,
                 maximum_json_depth: 8,
                 maximum_json_nodes: 1,
                 ..PayloadLimits::default()
@@ -153,19 +193,19 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
 }
 
 #[test]
-fn duplicate_descriptor_diagnostic_names_the_factory_and_service() {
+fn duplicate_prepared_requirement_diagnostic_names_the_service() {
     let runtime = Runtime::default();
-    let descriptor = PluginDescriptor::new(FactoryIdentity::builtin("duplicate-detail", "7"))
+    let spec = FactorySpec::new(FactoryIdentity::builtin("duplicate-detail", "7"))
         .requiring(Requirement::new("same", "one", V1))
         .requiring(Requirement::new("same", "two", V1));
 
     let error = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor)), Value::Null)
+        .prepare(Arc::new(PassiveFactory(spec)), Value::Null)
         .expect_err("duplicate requirements must fail preparation");
     assert_eq!(
         error,
         MetaError::InvalidInput(
-            "factory duplicate-detail@7 declares requirement same more than once".to_owned()
+            "prepared activation requires service same more than once".to_owned()
         )
     );
 }
@@ -220,23 +260,26 @@ fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panickin
         maximum_fibers,
         maximum_fiber_depth,
         maximum_services,
-        maximum_service_declarations,
         maximum_dependency_edges,
         maximum_requirements_per_fiber,
-        maximum_provisions_per_fiber,
         maximum_event_listeners,
         maximum_effects_per_fiber,
         maximum_effects,
+        maximum_effect_transactions_per_fiber,
+        maximum_effect_transactions,
         maximum_context_entries,
+        maximum_capability_entries,
+        maximum_capabilities_per_message,
+        maximum_queued_capability_references,
     );
     payload_candidates!(
         maximum_identifier_bytes,
-        maximum_descriptor_bytes,
-        maximum_frame_bytes,
+        maximum_prepared_state_bytes,
+        maximum_message_bytes,
         maximum_config_bytes,
         maximum_retained_plugin_bytes,
         maximum_context_bytes,
-        maximum_buffered_service_bytes,
+        maximum_buffered_message_bytes,
         maximum_json_depth,
         maximum_json_nodes,
         maximum_diagnostic_entries,
@@ -260,7 +303,7 @@ fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panickin
                 let snapshot = runtime.resource_snapshot();
                 assert_eq!(snapshot.fibers.current, 0);
                 assert_eq!(snapshot.service_calls.current, 0);
-                assert_eq!(snapshot.buffered_service_bytes.current, 0);
+                assert_eq!(snapshot.buffered_message_bytes.current, 0);
             })
         });
         let constructed = constructed.expect("a boundary policy panicked during validation");
@@ -285,9 +328,10 @@ fn json_depth_hard_ceiling_is_exact_and_precedes_recursive_encoding() {
     }
     runtime
         .prepare(
-            Arc::new(PassiveFactory(PluginDescriptor::new(
-                FactoryIdentity::builtin("depth-boundary", "1"),
-            ))),
+            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                "depth-boundary",
+                "1",
+            )))),
             boundary,
         )
         .expect("the exact implementation-safe JSON depth must be accepted");
@@ -309,9 +353,9 @@ fn json_depth_hard_ceiling_is_exact_and_precedes_recursive_encoding() {
     }
     assert!(matches!(
         runtime.prepare(
-            Arc::new(PassiveFactory(PluginDescriptor::new(
-                FactoryIdentity::builtin("too-deep", "1"),
-            ))),
+            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                "too-deep", "1"
+            ),))),
             too_deep,
         ),
         Err(MetaError::InvalidConfig(_))
@@ -351,19 +395,19 @@ fn deep_owned_config_boundaries_reject_or_drop_without_recursing() {
 
 fn run_deep_config_scenario(scenario: &str) {
     let runtime = Runtime::default();
-    let descriptor = || PluginDescriptor::new(FactoryIdentity::builtin("deep-config", "1"));
+    let spec = || FactorySpec::new(FactoryIdentity::builtin("deep-config", "1"));
     match scenario {
         "prepare-input" => assert!(matches!(
-            runtime.prepare(Arc::new(PassiveFactory(descriptor())), deep_json_value()),
+            runtime.prepare(Arc::new(PassiveFactory(spec())), deep_json_value()),
             Err(MetaError::InvalidConfig(message)) if message.contains("nesting")
         )),
         "validate-output" => assert!(matches!(
-            runtime.prepare(Arc::new(DeepConfigFactory(descriptor())), Value::Null),
+            runtime.prepare(Arc::new(DeepConfigFactory(spec())), Value::Null),
             Err(MetaError::InvalidConfig(message)) if message.contains("nesting")
         )),
         "drop-apply" => {
             let root = runtime.root();
-            drop(root.apply(Arc::new(PassiveFactory(descriptor())), deep_json_value()));
+            drop(root.apply(Arc::new(PassiveFactory(spec())), deep_json_value()));
         }
         "drop-reconfigure" => {
             let executor = tokio::runtime::Builder::new_current_thread()
@@ -374,7 +418,7 @@ fn run_deep_config_scenario(scenario: &str) {
                 .block_on(
                     runtime
                         .root()
-                        .apply(Arc::new(PassiveFactory(descriptor())), Value::Null),
+                        .apply(Arc::new(PassiveFactory(spec())), Value::Null),
                 )
                 .unwrap();
             drop(fiber.reconfigure(deep_json_value()));
@@ -399,12 +443,16 @@ fn resource_snapshot_exposes_every_global_budget_with_its_validated_limit() {
     let expected = [
         (&snapshot.listeners, limits.topology.maximum_event_listeners),
         (
+            &snapshot.effect_transactions,
+            limits.topology.maximum_effect_transactions,
+        ),
+        (
             &snapshot.service_calls,
             limits.execution.maximum_concurrent_service_calls,
         ),
         (
-            &snapshot.buffered_service_bytes,
-            limits.payloads.maximum_buffered_service_bytes,
+            &snapshot.buffered_message_bytes,
+            limits.payloads.maximum_buffered_message_bytes,
         ),
         (
             &snapshot.reconciliations,
@@ -430,33 +478,37 @@ fn resource_snapshot_exposes_every_global_budget_with_its_validated_limit() {
 }
 
 #[derive(Debug)]
-struct PassiveFactory(PluginDescriptor);
+struct PassiveFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for PassiveFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.0.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
 
 #[derive(Debug)]
-struct DeepConfigFactory(PluginDescriptor);
+struct DeepConfigFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for DeepConfigFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    fn validate_config(&self, _: Value) -> Result<Value> {
-        Ok(deep_json_value())
+    fn prepare(&self, _: &Value) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(deep_json_value()))
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
@@ -466,11 +518,15 @@ struct UnexpectedFactory;
 
 #[async_trait]
 impl PluginFactory for UnexpectedFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        panic!("busy admission must precede descriptor observation")
+    fn identity(&self) -> FactoryIdentity {
+        panic!("busy admission must precede identity observation")
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, _: &Value) -> Result<PreparedActivation> {
+        panic!("busy admission must precede preparation")
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         panic!("busy admission must precede activation")
     }
 }
@@ -486,20 +542,14 @@ async fn prepared_proofs_are_runtime_bound_and_reserve_until_drop_or_disposal() 
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let descriptor =
-        || {
-            PluginDescriptor::new(FactoryIdentity::builtin("reserved", "1")).providing(
-                Provision::new("reserved.service", "test.reserved", ContractVersion(1)),
-            )
-        };
+    let factory = || FactorySpec::new(FactoryIdentity::builtin("reserved", "1"));
 
     let prepared = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor())), Value::Null)
+        .prepare(Arc::new(PassiveFactory(factory())), Value::Null)
         .unwrap();
     let reserved = runtime.resource_snapshot();
     assert_eq!(reserved.fibers.current, 1);
     assert!(reserved.retained_plugin_bytes.current > 0);
-    assert_eq!(reserved.service_declarations.current, 1);
 
     let other = Runtime::default();
     assert!(matches!(
@@ -509,7 +559,7 @@ async fn prepared_proofs_are_runtime_bound_and_reserve_until_drop_or_disposal() 
     assert_eq!(runtime.resource_snapshot().fibers.current, 0);
 
     let prepared = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor())), Value::Null)
+        .prepare(Arc::new(PassiveFactory(factory())), Value::Null)
         .unwrap();
     let fiber = runtime.root().apply_prepared(prepared).await.unwrap();
     assert_eq!(runtime.resource_snapshot().fibers.current, 1);
@@ -517,12 +567,11 @@ async fn prepared_proofs_are_runtime_bound_and_reserve_until_drop_or_disposal() 
     let released = runtime.resource_snapshot();
     assert_eq!(released.fibers.current, 0);
     assert_eq!(released.retained_plugin_bytes.current, 0);
-    assert_eq!(released.service_declarations.current, 0);
     assert_eq!(released.fibers.high_watermark, 1);
 }
 
 #[test]
-fn plugin_capacity_is_reserved_before_descriptor_observation() {
+fn plugin_capacity_is_reserved_before_identity_observation() {
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_fibers: 1,
@@ -534,9 +583,9 @@ fn plugin_capacity_is_reserved_before_descriptor_observation() {
     .unwrap();
     let proof = runtime
         .prepare(
-            Arc::new(PassiveFactory(PluginDescriptor::new(
-                FactoryIdentity::builtin("fiber", "1"),
-            ))),
+            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                "fiber", "1",
+            )))),
             Value::Null,
         )
         .unwrap();
@@ -546,30 +595,42 @@ fn plugin_capacity_is_reserved_before_descriptor_observation() {
     ));
     drop(proof);
 
-    let payloads = PayloadLimits::default();
-    let retained_limit = payloads
-        .maximum_descriptor_bytes
-        .checked_add(payloads.maximum_config_bytes)
-        .unwrap();
-    let retained_runtime = Runtime::new(RuntimeLimits {
+    let mut retained_limits = RuntimeLimits {
         topology: TopologyLimits {
-            maximum_fibers: 2,
+            maximum_fibers: 3,
             maximum_fiber_depth: 2,
+            maximum_dependency_edges: 1,
+            maximum_requirements_per_fiber: 1,
             ..TopologyLimits::default()
         },
         payloads: PayloadLimits {
-            maximum_retained_plugin_bytes: retained_limit,
-            ..payloads
+            maximum_identifier_bytes: 16,
+            maximum_prepared_state_bytes: 1,
+            maximum_config_bytes: 128,
+            ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    };
+    retained_limits.payloads.maximum_retained_plugin_bytes =
+        minimum_retained_plugin_limit(&retained_limits);
+    let maximum_config_bytes = retained_limits.payloads.maximum_config_bytes;
+    let retained_runtime = Runtime::new(retained_limits).unwrap();
     let proof = retained_runtime
         .prepare(
-            Arc::new(PassiveFactory(PluginDescriptor::new(
-                FactoryIdentity::builtin("retained", "1"),
-            ))),
-            Value::Null,
+            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                "1234567890123456",
+                "1234567890123456",
+            )))),
+            Value::String("x".repeat(maximum_config_bytes - 2)),
+        )
+        .unwrap();
+    let second_proof = retained_runtime
+        .prepare(
+            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                "abcdefghijklmnop",
+                "abcdefghijklmnop",
+            )))),
+            Value::String("y".repeat(maximum_config_bytes - 2)),
         )
         .unwrap();
     assert!(matches!(
@@ -579,13 +640,14 @@ fn plugin_capacity_is_reserved_before_descriptor_observation() {
         })
     ));
     let snapshot = retained_runtime.resource_snapshot();
-    assert_eq!(snapshot.fibers.current, 1);
+    assert_eq!(snapshot.fibers.current, 2);
     assert_eq!(snapshot.retained_plugin_bytes.rejected, 1);
     drop(proof);
+    drop(second_proof);
 }
 
 #[test]
-fn preparation_validates_descriptor_and_json_shape_before_retention() {
+fn preparation_validates_identity_requirements_and_json_shape_before_retention() {
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_requirements_per_fiber: 1,
@@ -601,13 +663,13 @@ fn preparation_validates_descriptor_and_json_shape_before_retention() {
     })
     .unwrap();
 
-    let oversized_identity = PluginDescriptor::new(FactoryIdentity::builtin("123456789", "1"));
+    let oversized_identity = FactorySpec::new(FactoryIdentity::builtin("123456789", "1"));
     assert!(matches!(
         runtime.prepare(Arc::new(PassiveFactory(oversized_identity)), Value::Null),
         Err(MetaError::InvalidInput(_))
     ));
 
-    let too_many_requirements = PluginDescriptor::new(FactoryIdentity::builtin("bounded", "1"))
+    let too_many_requirements = FactorySpec::new(FactoryIdentity::builtin("bounded", "1"))
         .requiring(Requirement::new("first", "contract", ContractVersion(1)))
         .requiring(Requirement::new("second", "contract", ContractVersion(1)));
     assert!(matches!(
@@ -615,7 +677,7 @@ fn preparation_validates_descriptor_and_json_shape_before_retention() {
         Err(MetaError::InvalidInput(_))
     ));
 
-    let valid = PluginDescriptor::new(FactoryIdentity::builtin("bounded", "1"));
+    let valid = FactorySpec::new(FactoryIdentity::builtin("bounded", "1"));
     assert!(matches!(
         runtime.prepare(Arc::new(PassiveFactory(valid.clone())), json!([[[[null]]]])),
         Err(MetaError::InvalidConfig(_))
@@ -628,125 +690,155 @@ fn preparation_validates_descriptor_and_json_shape_before_retention() {
         Err(MetaError::InvalidConfig(_))
     ));
     assert_eq!(runtime.resource_snapshot().fibers.current, 0);
+}
 
-    for payloads in [
-        PayloadLimits {
-            maximum_json_depth: 3,
-            maximum_json_nodes: 16,
-            ..PayloadLimits::default()
-        },
-        PayloadLimits {
-            maximum_json_depth: 4,
-            maximum_json_nodes: 8,
-            ..PayloadLimits::default()
-        },
-    ] {
-        let descriptor_shape_runtime = Runtime::new(RuntimeLimits {
-            payloads,
-            ..RuntimeLimits::default()
-        })
-        .unwrap();
-        let nested_descriptor = PluginDescriptor::new(FactoryIdentity::builtin("shape", "1"))
-            .requiring(Requirement::new("service", "contract", ContractVersion(1)));
-        assert!(matches!(
-            descriptor_shape_runtime
-                .prepare(Arc::new(PassiveFactory(nested_descriptor)), Value::Null,),
-            Err(MetaError::InvalidInput(_))
-        ));
+#[derive(Debug)]
+struct PreparedStateDropProbe(Arc<AtomicUsize>);
+
+impl Drop for PreparedStateDropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
+struct PreparedStateFactory {
+    spec: FactorySpec,
+    retained_bytes: usize,
+    drops: Arc<AtomicUsize>,
+    takes: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl PluginFactory for PreparedStateFactory {
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    let descriptor_runtime = Runtime::new(RuntimeLimits {
-        payloads: PayloadLimits {
-            maximum_identifier_bytes: 32,
-            maximum_descriptor_bytes: 64,
-            ..PayloadLimits::default()
-        },
-        ..RuntimeLimits::default()
-    })
-    .unwrap();
-    assert!(matches!(
-        descriptor_runtime.prepare(
-            Arc::new(PassiveFactory(PluginDescriptor::new(
-                FactoryIdentity::builtin("descriptor", "1")
-            ))),
-            Value::Null,
-        ),
-        Err(MetaError::InvalidInput(_))
-    ));
-    assert_eq!(descriptor_runtime.resource_snapshot().fibers.current, 0);
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::with_state(
+            desired.clone(),
+            PreparedStateDropProbe(Arc::clone(&self.drops)),
+            self.retained_bytes,
+        ))
+    }
+
+    async fn activate(&self, mut plan: ActivationPlan) -> Result<()> {
+        assert!(matches!(
+            plan.take_state::<String>(),
+            Err(MetaError::PreparedStateTypeMismatch { .. })
+        ));
+        let state = plan
+            .take_state::<PreparedStateDropProbe>()
+            .expect("wrong-type take must preserve opaque state");
+        assert!(matches!(
+            plan.take_state::<PreparedStateDropProbe>(),
+            Err(MetaError::PreparedStateUnavailable)
+        ));
+        self.takes.fetch_add(1, Ordering::AcqRel);
+        drop(state);
+        Ok(())
+    }
 }
 
-#[test]
-fn descriptor_config_and_retained_byte_budgets_accept_the_exact_boundary() {
-    let descriptor = PluginDescriptor::new(FactoryIdentity::builtin("exact", "1"));
-    let descriptor_bytes = serde_json::to_vec(&descriptor).unwrap().len();
+#[tokio::test]
+async fn opaque_prepared_state_is_exactly_accounted_moved_and_dropped() {
+    const STATE_BYTES: usize = 5;
     let config_bytes = serde_json::to_vec(&json!("x")).unwrap().len();
-    let retained_bytes = descriptor_bytes.checked_add(config_bytes).unwrap();
-    let runtime = Runtime::new(RuntimeLimits {
+    let mut limits = RuntimeLimits {
+        topology: TopologyLimits {
+            maximum_dependency_edges: 1,
+            maximum_requirements_per_fiber: 1,
+            ..TopologyLimits::default()
+        },
         payloads: PayloadLimits {
             maximum_identifier_bytes: "exact".len(),
-            maximum_descriptor_bytes: descriptor_bytes,
+            maximum_prepared_state_bytes: STATE_BYTES,
             maximum_config_bytes: config_bytes,
-            maximum_retained_plugin_bytes: retained_bytes,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    };
+    limits.payloads.maximum_retained_plugin_bytes = minimum_retained_plugin_limit(&limits);
+    let runtime = Runtime::new(limits).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let takes = Arc::new(AtomicUsize::new(0));
+    let factory = |retained_bytes| {
+        Arc::new(PreparedStateFactory {
+            spec: FactorySpec::new(FactoryIdentity::builtin("exact", "1")),
+            retained_bytes,
+            drops: Arc::clone(&drops),
+            takes: Arc::clone(&takes),
+        })
+    };
 
-    let proof = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor.clone())), json!("x"))
-        .unwrap();
+    let proof = runtime.prepare(factory(STATE_BYTES), json!("x")).unwrap();
     assert_eq!(
         runtime.resource_snapshot().retained_plugin_bytes.current,
-        retained_bytes
+        "exact".len() + "1".len() + config_bytes * 2 + STATE_BYTES,
     );
+    assert_eq!(drops.load(Ordering::Acquire), 0);
     drop(proof);
-    assert!(matches!(
-        runtime.prepare(Arc::new(PassiveFactory(descriptor)), json!("xx")),
-        Err(MetaError::InvalidConfig(_))
-    ));
+    assert_eq!(drops.load(Ordering::Acquire), 1);
     assert_eq!(runtime.resource_snapshot().retained_plugin_bytes.current, 0);
+
+    assert!(matches!(
+        runtime.prepare(factory(STATE_BYTES + 1), json!("x")),
+        Err(MetaError::PayloadTooLarge {
+            maximum: STATE_BYTES
+        })
+    ));
+    assert_eq!(drops.load(Ordering::Acquire), 2);
+    assert_eq!(runtime.resource_snapshot().retained_plugin_bytes.current, 0);
+
+    let fiber = runtime
+        .root()
+        .apply(factory(STATE_BYTES), json!("x"))
+        .await
+        .unwrap();
+    assert!(matches!(fiber.snapshot().state, FiberState::Active));
+    assert_eq!(takes.load(Ordering::Acquire), 1);
+    assert_eq!(drops.load(Ordering::Acquire), 3);
+    assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
 }
 
 #[test]
-fn prepared_declaration_capacity_is_global_and_released_with_the_proof() {
+fn prepared_requirement_capacity_is_global_and_released_with_the_proof() {
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_fibers: 2,
             maximum_fiber_depth: 2,
-            maximum_services: 1,
-            maximum_service_declarations: 1,
+            maximum_dependency_edges: 1,
             maximum_requirements_per_fiber: 1,
-            maximum_provisions_per_fiber: 1,
             ..TopologyLimits::default()
         },
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let descriptor = |name: &str| {
-        PluginDescriptor::new(FactoryIdentity::builtin(name, "1")).providing(Provision::new(
-            name,
+    let factory = |name: &str| {
+        FactorySpec::new(FactoryIdentity::builtin(name, "1")).requiring(Requirement::new(
+            format!("{name}-missing"),
             "contract",
             ContractVersion(1),
         ))
     };
     let first = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor("first"))), Value::Null)
+        .prepare(Arc::new(PassiveFactory(factory("first"))), Value::Null)
         .unwrap();
     assert!(matches!(
-        runtime.prepare(Arc::new(PassiveFactory(descriptor("second"))), Value::Null,),
+        runtime.prepare(Arc::new(PassiveFactory(factory("second"))), Value::Null,),
         Err(MetaError::CapacityExhausted {
-            resource: "service declarations"
+            resource: "dependency edges"
         })
     ));
-    assert_eq!(runtime.resource_snapshot().service_declarations.rejected, 1);
+    assert_eq!(runtime.resource_snapshot().dependency_edges.rejected, 1);
     drop(first);
     let replacement = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor("third"))), Value::Null)
+        .prepare(Arc::new(PassiveFactory(factory("third"))), Value::Null)
         .unwrap();
     drop(replacement);
-    assert_eq!(runtime.resource_snapshot().service_declarations.current, 0);
+    assert_eq!(runtime.resource_snapshot().dependency_edges.current, 0);
 }
 
 #[test]
@@ -821,24 +913,25 @@ impl ServiceEndpoint for NoopEndpoint {
 
 #[derive(Debug)]
 struct OwnedResourcesFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
+    services: Vec<(&'static str, &'static str, ContractVersion)>,
     effects: usize,
 }
 
 #[async_trait]
 impl PluginFactory for OwnedResourcesFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        for provision in &self.descriptor.provides {
-            context.provide(
-                provision.key.clone(),
-                provision.contract.clone(),
-                provision.version,
-                Arc::new(NoopEndpoint),
-            )?;
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
+        for (key, contract, version) in &self.services {
+            context.provide(*key, *contract, *version, Arc::new(NoopEndpoint))?;
         }
         for index in 0..self.effects {
             context.defer(
@@ -864,9 +957,11 @@ async fn staged_service_and_effect_budgets_release_after_rollback_and_disposal()
         .root()
         .apply(
             Arc::new(OwnedResourcesFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("services", "1"))
-                    .providing(Provision::new("first", "test.first", ContractVersion(1)))
-                    .providing(Provision::new("second", "test.second", ContractVersion(1))),
+                spec: FactorySpec::new(FactoryIdentity::builtin("services", "1")),
+                services: vec![
+                    ("first", "test.first", ContractVersion(1)),
+                    ("second", "test.second", ContractVersion(1)),
+                ],
                 effects: 0,
             }),
             Value::Null,
@@ -894,7 +989,8 @@ async fn staged_service_and_effect_budgets_release_after_rollback_and_disposal()
     .unwrap();
     let one_effect = || {
         Arc::new(OwnedResourcesFactory {
-            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("effect", "1")),
+            spec: FactorySpec::new(FactoryIdentity::builtin("effect", "1")),
+            services: Vec::new(),
             effects: 1,
         })
     };
@@ -921,21 +1017,21 @@ async fn staged_service_and_effect_budgets_release_after_rollback_and_disposal()
 }
 
 #[derive(Debug)]
-struct BlockingValidationFactory {
-    descriptor: PluginDescriptor,
+struct BlockingPreparationFactory {
+    spec: FactorySpec,
     entered: mpsc::SyncSender<()>,
     release: Mutex<mpsc::Receiver<()>>,
 }
 
 #[derive(Debug)]
 struct CountingReconfigurationFactory {
-    descriptor: PluginDescriptor,
-    validations: Arc<AtomicUsize>,
+    spec: FactorySpec,
+    preparations: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
 struct BlockingReactivationFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     activations: AtomicUsize,
     drop_entered: mpsc::SyncSender<()>,
     drop_release: Arc<Mutex<mpsc::Receiver<()>>>,
@@ -958,11 +1054,16 @@ impl Drop for BlockingConfigDrop {
 
 #[async_trait]
 impl PluginFactory for BlockingReactivationFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, config: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let config = Arc::clone(plan.config());
         if self.activations.fetch_add(1, Ordering::AcqRel) == 1 {
             *self.retained.lock().expect("retained config poisoned") =
                 Some(Arc::downgrade(&config));
@@ -979,64 +1080,63 @@ impl PluginFactory for BlockingReactivationFactory {
 
 #[async_trait]
 impl PluginFactory for CountingReconfigurationFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    fn validate_config(&self, config: Value) -> Result<Value> {
+    fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if !config.is_null() {
-            self.validations.fetch_add(1, Ordering::AcqRel);
+            self.preparations.fetch_add(1, Ordering::AcqRel);
         }
-        Ok(config)
+        Ok(PreparedActivation::new(config.clone()))
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
 
 #[tokio::test]
-async fn reconfiguration_staging_capacity_is_reserved_before_plugin_validation() {
+async fn reconfiguration_staging_capacity_is_reserved_before_plugin_preparation() {
     const MAXIMUM_CONFIG_BYTES: usize = 128;
-    let descriptor =
-        PluginDescriptor::new(FactoryIdentity::builtin("reconfiguration-staging", "1"));
-    let descriptor_bytes = serde_json::to_vec(&descriptor).unwrap().len();
-    let initial_bytes = serde_json::to_vec(&Value::Null).unwrap().len();
-    let proof_config = Value::String("x".repeat(120));
-    let proof_config_bytes = serde_json::to_vec(&proof_config).unwrap().len();
-    let retained_limit = descriptor_bytes
-        .checked_add(initial_bytes)
-        .and_then(|bytes| bytes.checked_add(descriptor_bytes))
-        .and_then(|bytes| bytes.checked_add(proof_config_bytes))
-        .and_then(|bytes| bytes.checked_add(MAXIMUM_CONFIG_BYTES - 1))
-        .unwrap();
-    let runtime = Runtime::new(RuntimeLimits {
+    let spec = FactorySpec::new(FactoryIdentity::builtin("reconfiguration-staging", "1"));
+    let proof_config = Value::String("x".repeat(MAXIMUM_CONFIG_BYTES - 2));
+    let mut limits = RuntimeLimits {
+        topology: TopologyLimits {
+            maximum_dependency_edges: 1,
+            maximum_requirements_per_fiber: 1,
+            ..TopologyLimits::default()
+        },
         payloads: PayloadLimits {
-            maximum_descriptor_bytes: descriptor_bytes,
+            maximum_identifier_bytes: 32,
+            maximum_prepared_state_bytes: 1,
             maximum_config_bytes: MAXIMUM_CONFIG_BYTES,
-            maximum_retained_plugin_bytes: retained_limit,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
-    let validations = Arc::new(AtomicUsize::new(0));
+    };
+    limits.payloads.maximum_retained_plugin_bytes = minimum_retained_plugin_limit(&limits);
+    let runtime = Runtime::new(limits).unwrap();
+    let preparations = Arc::new(AtomicUsize::new(0));
     let fiber = runtime
         .root()
         .apply(
             Arc::new(CountingReconfigurationFactory {
-                descriptor: descriptor.clone(),
-                validations: Arc::clone(&validations),
+                spec: spec.clone(),
+                preparations: Arc::clone(&preparations),
             }),
             Value::Null,
         )
         .await
         .unwrap();
     let proof = runtime
-        .prepare(Arc::new(PassiveFactory(descriptor)), proof_config)
+        .prepare(Arc::new(PassiveFactory(spec.clone())), proof_config.clone())
+        .unwrap();
+    let second_proof = runtime
+        .prepare(Arc::new(PassiveFactory(spec)), proof_config)
         .unwrap();
     let before = runtime.resource_snapshot().retained_plugin_bytes;
-    assert_eq!(before.limit - before.current, MAXIMUM_CONFIG_BYTES - 1);
+    assert!(before.limit - before.current < MAXIMUM_CONFIG_BYTES);
 
     assert_eq!(
         fiber.reconfigure(Value::from(1)).await.unwrap_err(),
@@ -1044,12 +1144,13 @@ async fn reconfiguration_staging_capacity_is_reserved_before_plugin_validation()
             resource: "retained plugin bytes",
         }
     );
-    assert_eq!(validations.load(Ordering::Acquire), 0);
+    assert_eq!(preparations.load(Ordering::Acquire), 0);
     let rejected = runtime.resource_snapshot().retained_plugin_bytes;
     assert_eq!(rejected.current, before.current);
     assert_eq!(rejected.rejected, before.rejected + 1);
 
     drop(proof);
+    drop(second_proof);
     let retained_after_proof = runtime.resource_snapshot().retained_plugin_bytes.current;
     assert!(matches!(
         fiber
@@ -1057,7 +1158,7 @@ async fn reconfiguration_staging_capacity_is_reserved_before_plugin_validation()
             .await,
         Err(MetaError::InvalidConfig(_))
     ));
-    assert_eq!(validations.load(Ordering::Acquire), 0);
+    assert_eq!(preparations.load(Ordering::Acquire), 0);
     assert_eq!(
         runtime.resource_snapshot().retained_plugin_bytes.current,
         retained_after_proof,
@@ -1075,13 +1176,11 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     const OLD_CONFIG_BYTES: usize = 98;
     const NEW_CONFIG_BYTES: usize = 4;
 
-    let provider_descriptor = || {
-        PluginDescriptor::new(FactoryIdentity::builtin("retained-config-provider", "1"))
-            .providing(Provision::new("dependency", "test.dependency", V1))
-    };
-    let consumer_descriptor =
-        PluginDescriptor::new(FactoryIdentity::builtin("retained-config-consumer", "1"))
-            .requiring(Requirement::new("dependency", "test.dependency", V1));
+    let provider_identity = || FactoryIdentity::builtin("retained-config-provider", "1");
+    let consumer_spec = FactorySpec::new(FactoryIdentity::builtin("retained-config-consumer", "1"))
+        .requiring(Requirement::new("dependency", "test.dependency", V1));
+    let requirement_bytes =
+        "dependency".len() + "test.dependency".len() + std::mem::size_of::<ContractVersion>();
     let old_config = Value::String("x".repeat(96));
     assert_eq!(
         serde_json::to_vec(&old_config).unwrap().len(),
@@ -1092,29 +1191,22 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
         NEW_CONFIG_BYTES
     );
 
-    let provider_bytes = serde_json::to_vec(&provider_descriptor()).unwrap().len();
-    let consumer_bytes = serde_json::to_vec(&consumer_descriptor).unwrap().len();
-    let retained_limit = provider_bytes
-        .checked_add(NEW_CONFIG_BYTES)
-        .and_then(|bytes| bytes.checked_add(consumer_bytes))
-        .and_then(|bytes| bytes.checked_add(OLD_CONFIG_BYTES))
-        .and_then(|bytes| bytes.checked_add(MAXIMUM_CONFIG_BYTES))
-        .unwrap();
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
-            maximum_descriptor_bytes: provider_bytes.max(consumer_bytes),
             maximum_config_bytes: MAXIMUM_CONFIG_BYTES,
-            maximum_retained_plugin_bytes: retained_limit,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()
     })
     .unwrap();
     let provider_factory = || {
-        Arc::new(EndpointFactory {
-            descriptor: provider_descriptor(),
-            endpoint: Arc::new(Echo),
-        })
+        Arc::new(EndpointFactory::new(
+            provider_identity(),
+            "dependency",
+            "test.dependency",
+            V1,
+            Arc::new(Echo),
+        ))
     };
     let first_provider = runtime
         .root()
@@ -1128,7 +1220,7 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
         .root()
         .apply(
             Arc::new(BlockingReactivationFactory {
-                descriptor: consumer_descriptor,
+                spec: consumer_spec,
                 activations: AtomicUsize::new(0),
                 drop_entered: drop_entered_sender,
                 drop_release: Arc::new(Mutex::new(drop_release_receiver)),
@@ -1170,8 +1262,8 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     assert_eq!(old_config.as_str().map(str::len), Some(96));
     assert_eq!(
         retained_during,
-        retained_before + NEW_CONFIG_BYTES,
-        "the old configuration allocation must remain reserved while activation owns it",
+        retained_before - OLD_CONFIG_BYTES + 2 * NEW_CONFIG_BYTES + requirement_bytes,
+        "the one-time identity and old normalized attempt coexist after the superseded raw desired is released",
     );
     drop(old_config);
 
@@ -1190,22 +1282,22 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
 }
 
 #[async_trait]
-impl PluginFactory for BlockingValidationFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+impl PluginFactory for BlockingPreparationFactory {
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    fn validate_config(&self, config: Value) -> Result<Value> {
+    fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.entered.send(()).expect("test waiter still exists");
         self.release
             .lock()
             .expect("release receiver poisoned")
             .recv()
-            .expect("test releases validation");
-        Ok(config)
+            .expect("test releases preparation");
+        Ok(PreparedActivation::new(config.clone()))
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
@@ -1225,8 +1317,8 @@ fn preparation_admission_is_fail_fast_and_reports_rejections() {
     let blocked_runtime = runtime.clone();
     let blocked = std::thread::spawn(move || {
         blocked_runtime.prepare(
-            Arc::new(BlockingValidationFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("blocked", "1")),
+            Arc::new(BlockingPreparationFactory {
+                spec: FactorySpec::new(FactoryIdentity::builtin("blocked", "1")),
                 entered: entered_tx,
                 release: Mutex::new(release_rx),
             }),
@@ -1267,8 +1359,8 @@ async fn context_apply_rejects_busy_before_starting_another_normalizer() {
         let root = runtime.root();
         async move {
             root.apply(
-                Arc::new(BlockingValidationFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin("blocked", "1")),
+                Arc::new(BlockingPreparationFactory {
+                    spec: FactorySpec::new(FactoryIdentity::builtin("blocked", "1")),
                     entered: entered_tx,
                     release: Mutex::new(release_rx),
                 }),
@@ -1311,8 +1403,8 @@ async fn dropped_apply_waiter_does_not_release_preparation_while_blocking_work_r
         let root = runtime.root();
         async move {
             root.apply(
-                Arc::new(BlockingValidationFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin("cancelled", "1")),
+                Arc::new(BlockingPreparationFactory {
+                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled", "1")),
                     entered: entered_tx,
                     release: Mutex::new(release_rx),
                 }),
@@ -1353,9 +1445,10 @@ async fn dropped_apply_waiter_does_not_release_preparation_while_blocking_work_r
     assert_eq!(released.retained_plugin_bytes.current, 0);
     let replacement = runtime
         .prepare(
-            Arc::new(PassiveFactory(PluginDescriptor::new(
-                FactoryIdentity::builtin("replacement", "1"),
-            ))),
+            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                "replacement",
+                "1",
+            )))),
             Value::Null,
         )
         .unwrap();
@@ -1363,15 +1456,11 @@ async fn dropped_apply_waiter_does_not_release_preparation_while_blocking_work_r
 }
 
 #[tokio::test]
-async fn pending_reports_bound_cycle_samples_before_snapshot_cloning() {
-    const FIBERS: usize = 16;
+async fn pending_reports_bound_missing_service_samples_before_snapshot_cloning() {
+    const REQUIREMENTS: usize = 16;
     const MAXIMUM_ENTRIES: usize = 3;
     const MAXIMUM_BYTES: usize = 20;
     let runtime = Runtime::new(RuntimeLimits {
-        topology: TopologyLimits {
-            maximum_fibers: FIBERS,
-            ..TopologyLimits::default()
-        },
         payloads: PayloadLimits {
             maximum_diagnostic_entries: MAXIMUM_ENTRIES,
             maximum_diagnostic_bytes: MAXIMUM_BYTES,
@@ -1380,134 +1469,26 @@ async fn pending_reports_bound_cycle_samples_before_snapshot_cloning() {
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let mut fibers = Vec::with_capacity(FIBERS);
-    for index in 0..FIBERS {
-        let provided = format!("service-{index:02}");
-        let required = format!("service-{:02}", (index + 1) % FIBERS);
-        fibers.push(
-            runtime
-                .root()
-                .apply(
-                    Arc::new(PassiveFactory(
-                        PluginDescriptor::new(FactoryIdentity::builtin(
-                            format!("cycle-{index:02}"),
-                            "1",
-                        ))
-                        .requiring(Requirement::new(required, "cycle", ContractVersion(1)))
-                        .providing(Provision::new(
-                            provided,
-                            "cycle",
-                            ContractVersion(1),
-                        )),
-                    )),
-                    Value::Null,
-                )
-                .await
-                .unwrap(),
-        );
+    let mut spec = FactorySpec::new(FactoryIdentity::builtin("bounded-missing", "1"));
+    for index in 0..REQUIREMENTS {
+        spec = spec.requiring(Requirement::new(
+            format!("service-{index:02}"),
+            "missing",
+            ContractVersion(1),
+        ));
     }
-
-    let snapshot = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let snapshot = fibers[FIBERS - 1].snapshot();
-            if matches!(
-                &snapshot.state,
-                FiberState::Pending(report)
-                    if report.reasons.iter().any(|reason| matches!(
-                        reason,
-                        PendingReason::DependencyCycle { .. }
-                    ))
-            ) {
-                break snapshot;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("bounded dependency-cycle diagnostics never converged");
+    let fiber = runtime
+        .root()
+        .apply(Arc::new(PassiveFactory(spec)), Value::Null)
+        .await
+        .unwrap();
+    let snapshot = fiber.snapshot();
     let FiberState::Pending(report) = &snapshot.state else {
-        panic!("cycle participant left pending state");
+        panic!("missing requirements unexpectedly activated");
     };
-    assert_bounded_cycle_report(report, MAXIMUM_ENTRIES, MAXIMUM_BYTES);
-    let serialized = serde_json::to_value(&snapshot.state).unwrap();
-    assert_eq!(serialized["pending"]["total_reasons"], 2);
-    assert_eq!(serialized["pending"]["truncated"], true);
-    assert!(serialized["pending"]["reasons"].is_array());
-    for _ in 0..64 {
-        assert_eq!(fibers[FIBERS - 1].snapshot(), snapshot);
-    }
-}
-
-#[tokio::test]
-async fn pending_report_omits_a_dependency_cycle_when_no_sample_entry_fits() {
-    const MISSING_REQUIREMENTS: usize = 254;
-    let runtime = Runtime::default();
-    let mut first_descriptor = PluginDescriptor::new(FactoryIdentity::builtin("cycle-full", "1"));
-    for index in 0..MISSING_REQUIREMENTS {
-        first_descriptor =
-            first_descriptor.requiring(Requirement::new(format!("missing-{index}"), "cycle", V1));
-    }
-    first_descriptor = first_descriptor
-        .requiring(Requirement::new("b", "cycle", V1))
-        .providing(Provision::new("a", "cycle", V1));
-    let first = runtime
-        .root()
-        .apply(Arc::new(PassiveFactory(first_descriptor)), Value::Null)
-        .await
-        .unwrap();
-    let _second = runtime
-        .root()
-        .apply(
-            Arc::new(PassiveFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("cycle-peer", "1"))
-                    .requiring(Requirement::new("a", "cycle", V1))
-                    .providing(Provision::new("b", "cycle", V1)),
-            )),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-
-    let report = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if let FiberState::Pending(report) = first.snapshot().state
-                && report.total_reasons == MISSING_REQUIREMENTS + 2
-            {
-                break report;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("cycle evidence did not converge after the diagnostic prefix filled");
-
-    assert_eq!(report.total_reasons, MISSING_REQUIREMENTS + 2);
-    assert_eq!(report.reasons.len(), MISSING_REQUIREMENTS + 1);
+    assert_eq!(report.total_reasons, REQUIREMENTS);
+    assert!(report.reasons.len() <= MAXIMUM_ENTRIES);
     assert!(report.truncated);
-    assert!(report.reasons.iter().all(|reason| !matches!(
-        reason,
-        PendingReason::DependencyCycle { services } if services.is_empty()
-    )));
-}
-
-fn assert_bounded_cycle_report(
-    report: &PendingReport,
-    maximum_entries: usize,
-    maximum_bytes: usize,
-) {
-    assert_eq!(report.total_reasons, 2);
-    assert!(report.reasons.len() <= maximum_entries);
-    assert!(report.truncated);
-    let nested_services = report
-        .reasons
-        .iter()
-        .map(|reason| match reason {
-            PendingReason::DependencyCycle { services } => services.len(),
-            _ => 0,
-        })
-        .sum::<usize>();
-    assert_eq!(nested_services, 1);
-    assert!(report.reasons.len() + nested_services <= maximum_entries);
     let retained_bytes = report
         .reasons
         .iter()
@@ -1518,18 +1499,49 @@ fn assert_bounded_cycle_report(
                 expected,
                 actual,
                 ..
-            } => service
-                .as_str()
-                .len()
-                .saturating_add(expected.as_str().len())
-                .saturating_add(actual.as_str().len()),
-            PendingReason::DependencyCycle { services } => {
-                assert!(services.len() <= maximum_entries);
-                services.iter().map(|service| service.as_str().len()).sum()
-            }
+            } => service.as_str().len() + expected.as_str().len() + actual.as_str().len(),
         })
         .sum::<usize>();
-    assert!(retained_bytes <= maximum_bytes);
+    assert!(retained_bytes <= MAXIMUM_BYTES);
+    let serialized = serde_json::to_value(&snapshot.state).unwrap();
+    assert_eq!(serialized["pending"]["total_reasons"], REQUIREMENTS);
+    assert_eq!(serialized["pending"]["truncated"], true);
+    assert!(serialized["pending"]["reasons"].is_array());
+    for _ in 0..64 {
+        assert_eq!(fiber.snapshot(), snapshot);
+    }
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn pending_report_omits_a_reason_when_no_sample_entry_fits() {
+    let runtime = Runtime::new(RuntimeLimits {
+        payloads: PayloadLimits {
+            maximum_diagnostic_entries: 1,
+            maximum_diagnostic_bytes: 3,
+            ..PayloadLimits::default()
+        },
+        ..RuntimeLimits::default()
+    })
+    .unwrap();
+    let fiber = runtime
+        .root()
+        .apply(
+            Arc::new(PassiveFactory(
+                FactorySpec::new(FactoryIdentity::builtin("omitted-missing", "1"))
+                    .requiring(Requirement::new("long", "missing", V1)),
+            )),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let FiberState::Pending(report) = fiber.snapshot().state else {
+        panic!("missing requirement unexpectedly activated");
+    };
+    assert_eq!(report.total_reasons, 1);
+    assert!(report.reasons.is_empty());
+    assert!(report.truncated);
+    assert!(fiber.dispose().await.is_clean());
 }
 
 #[tokio::test]
@@ -1547,7 +1559,7 @@ async fn pending_reports_retain_only_a_bounded_reason_prefix() {
         .root()
         .apply(
             Arc::new(PassiveFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("bounded-pending", "1"))
+                FactorySpec::new(FactoryIdentity::builtin("bounded-pending", "1"))
                     .requiring(Requirement::new("abcd", "test", ContractVersion(1)))
                     .requiring(Requirement::new("efgh", "test", ContractVersion(1)))
                     .requiring(Requirement::new("i", "test", ContractVersion(1))),

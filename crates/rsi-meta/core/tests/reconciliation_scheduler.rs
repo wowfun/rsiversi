@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    Context, ContractVersion, DeadlineLimits, ExecutionLimits, FactoryIdentity, FiberHandle,
-    FiberState, IsolationId, MetaError, PluginDescriptor, PluginFactory, Provision, Requirement,
-    Result, Runtime, RuntimeLimits, ServiceEndpoint,
+    ActivationPlan, ContractVersion, DeadlineLimits, ExecutionLimits, FactoryIdentity, FiberHandle,
+    FiberState, IsolationId, MetaError, PluginFactory, PreparedActivation, Requirement, Result,
+    Runtime, RuntimeLimits, ServiceEndpoint,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 mod support;
 
-use support::{Echo, EndpointFactory, PassiveFactory};
+use support::{Echo, EndpointFactory, FactorySpec, PassiveFactory};
 
 const V1: ContractVersion = ContractVersion(1);
 
@@ -33,33 +33,44 @@ impl ServiceEndpoint for NoopEndpoint {
 
 #[derive(Debug)]
 struct SchedulerProvider {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
 }
 
 #[async_trait]
 impl PluginFactory for SchedulerProvider {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.provide("scheduler", "test.scheduler", V1, Arc::new(NoopEndpoint))
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
+        context.provide("scheduler", "test.scheduler", V1, Arc::new(NoopEndpoint))?;
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct SchedulerConsumer {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     cleanups: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for SchedulerConsumer {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let cleanups = Arc::clone(&self.cleanups);
         context.defer(
             "scheduler consumer",
@@ -90,11 +101,8 @@ async fn retirement_yields_its_only_reconciliation_slot_to_dependents() {
         .root()
         .apply(
             Arc::new(SchedulerConsumer {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "scheduler-consumer",
-                    "1",
-                ))
-                .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
+                spec: FactorySpec::new(FactoryIdentity::builtin("scheduler-consumer", "1"))
+                    .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 cleanups: Arc::clone(&cleanups),
             }),
             Value::Null,
@@ -107,11 +115,7 @@ async fn retirement_yields_its_only_reconciliation_slot_to_dependents() {
         .root()
         .apply(
             Arc::new(SchedulerProvider {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "scheduler-provider",
-                    "1",
-                ))
-                .providing(Provision::new("scheduler", "test.scheduler", V1)),
+                spec: FactorySpec::new(FactoryIdentity::builtin("scheduler-provider", "1")),
             }),
             Value::Null,
         )
@@ -149,9 +153,10 @@ async fn saturated_reconciliation_handoffs_never_overtake_the_resource_ledger() 
             runtime
                 .root()
                 .apply(
-                    Arc::new(PassiveFactory(PluginDescriptor::new(
-                        FactoryIdentity::builtin(format!("handoff-{index}"), "1"),
-                    ))),
+                    Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
+                        format!("handoff-{index}"),
+                        "1",
+                    )))),
                     Value::Null,
                 )
                 .await
@@ -186,37 +191,47 @@ async fn saturated_reconciliation_handoffs_never_overtake_the_resource_ledger() 
 }
 
 #[derive(Debug)]
-struct NestedChild(PluginDescriptor);
+struct NestedChild(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for NestedChild {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.0.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         Ok(())
     }
 }
 
 #[derive(Debug)]
 struct AwaitingParent {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     child: Arc<Mutex<Option<FiberHandle>>>,
 }
 
 #[async_trait]
 impl PluginFactory for AwaitingParent {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let child = context
             .apply(
-                Arc::new(NestedChild(PluginDescriptor::new(
-                    FactoryIdentity::builtin("nested-scheduler-child", "1"),
-                ))),
+                Arc::new(NestedChild(FactorySpec::new(FactoryIdentity::builtin(
+                    "nested-scheduler-child",
+                    "1",
+                )))),
                 Value::Null,
             )
             .await?;
@@ -240,10 +255,7 @@ async fn parent_activation_can_await_child_apply_with_one_reconciliation_slot() 
         std::time::Duration::from_secs(1),
         runtime.root().apply(
             Arc::new(AwaitingParent {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "nested-scheduler-parent",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("nested-scheduler-parent", "1")),
                 child: Arc::clone(&captured),
             }),
             Value::Null,
@@ -271,17 +283,22 @@ async fn parent_activation_can_await_child_apply_with_one_reconciliation_slot() 
 
 #[derive(Debug)]
 struct RecordingTarget {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     configurations: Arc<Mutex<Vec<Value>>>,
 }
 
 #[async_trait]
 impl PluginFactory for RecordingTarget {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, config: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let config = Arc::clone(plan.config());
         self.configurations
             .lock()
             .expect("configuration log poisoned")
@@ -292,17 +309,21 @@ impl PluginFactory for RecordingTarget {
 
 #[derive(Debug)]
 struct AwaitingReconfiguration {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     target: FiberHandle,
 }
 
 #[async_trait]
 impl PluginFactory for AwaitingReconfiguration {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         self.target
             .reconfigure(serde_json::json!({"revision": 2}))
             .await?;
@@ -325,7 +346,7 @@ async fn activation_can_await_other_reconfiguration_with_one_reconciliation_slot
         .root()
         .apply(
             Arc::new(RecordingTarget {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                spec: FactorySpec::new(FactoryIdentity::builtin(
                     "nested-reconfiguration-target",
                     "1",
                 )),
@@ -340,7 +361,7 @@ async fn activation_can_await_other_reconfiguration_with_one_reconciliation_slot
         std::time::Duration::from_secs(1),
         runtime.root().apply(
             Arc::new(AwaitingReconfiguration {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                spec: FactorySpec::new(FactoryIdentity::builtin(
                     "nested-reconfiguration-parent",
                     "1",
                 )),
@@ -373,17 +394,21 @@ async fn activation_can_await_other_reconfiguration_with_one_reconciliation_slot
 
 #[derive(Debug)]
 struct AwaitingDisposal {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     target: FiberHandle,
 }
 
 #[async_trait]
 impl PluginFactory for AwaitingDisposal {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         let report = self.target.dispose().await;
         if report.is_clean() {
             Ok(())
@@ -408,9 +433,10 @@ async fn activation_can_await_other_disposal_with_one_reconciliation_slot() {
     let target = runtime
         .root()
         .apply(
-            Arc::new(NestedChild(PluginDescriptor::new(
-                FactoryIdentity::builtin("nested-disposal-target", "1"),
-            ))),
+            Arc::new(NestedChild(FactorySpec::new(FactoryIdentity::builtin(
+                "nested-disposal-target",
+                "1",
+            )))),
             Value::Null,
         )
         .await
@@ -420,10 +446,7 @@ async fn activation_can_await_other_disposal_with_one_reconciliation_slot() {
         std::time::Duration::from_secs(1),
         runtime.root().apply(
             Arc::new(AwaitingDisposal {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "nested-disposal-parent",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("nested-disposal-parent", "1")),
                 target: target.clone(),
             }),
             Value::Null,
@@ -446,7 +469,7 @@ async fn activation_can_await_other_disposal_with_one_reconciliation_slot() {
 
 #[derive(Debug)]
 struct ReentrantProviderDisposal {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     provider: FiberHandle,
     activations: AtomicUsize,
     entered: Arc<Notify>,
@@ -454,11 +477,15 @@ struct ReentrantProviderDisposal {
 
 #[async_trait]
 impl PluginFactory for ReentrantProviderDisposal {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         if self.activations.fetch_add(1, Ordering::AcqRel) == 0 {
             return Ok(());
         }
@@ -492,11 +519,10 @@ async fn service_change_cancels_reentrant_activation_before_the_transition_deadl
         .root()
         .apply(
             Arc::new(SchedulerProvider {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                spec: FactorySpec::new(FactoryIdentity::builtin(
                     "reentrant-disposal-provider",
                     "1",
-                ))
-                .providing(Provision::new("scheduler", "test.scheduler", V1)),
+                )),
             }),
             Value::Null,
         )
@@ -507,7 +533,7 @@ async fn service_change_cancels_reentrant_activation_before_the_transition_deadl
         .root()
         .apply(
             Arc::new(ReentrantProviderDisposal {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                spec: FactorySpec::new(FactoryIdentity::builtin(
                     "reentrant-disposal-consumer",
                     "1",
                 ))
@@ -557,17 +583,22 @@ async fn service_change_cancels_reentrant_activation_before_the_transition_deadl
 
 #[derive(Debug)]
 struct ConfigPointerConsumer {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     pointers: Arc<Mutex<Vec<usize>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ConfigPointerConsumer {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, config: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let config = Arc::clone(plan.config());
         self.pointers
             .lock()
             .expect("config pointer log poisoned")
@@ -577,12 +608,11 @@ impl PluginFactory for ConfigPointerConsumer {
 }
 
 #[tokio::test]
-async fn service_reconciliation_reuses_the_retained_configuration_arc() {
+async fn service_reconciliation_freshly_prepares_a_distinct_attempt_configuration() {
     let runtime = Runtime::default();
     let provider_factory = || {
         Arc::new(SchedulerProvider {
-            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("config-arc-provider", "1"))
-                .providing(Provision::new("scheduler", "test.scheduler", V1)),
+            spec: FactorySpec::new(FactoryIdentity::builtin("config-arc-provider", "1")),
         }) as Arc<dyn PluginFactory>
     };
     let provider = runtime
@@ -595,11 +625,8 @@ async fn service_reconciliation_reuses_the_retained_configuration_arc() {
         .root()
         .apply(
             Arc::new(ConfigPointerConsumer {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "config-arc-consumer",
-                    "1",
-                ))
-                .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
+                spec: FactorySpec::new(FactoryIdentity::builtin("config-arc-consumer", "1"))
+                    .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 pointers: Arc::clone(&pointers),
             }),
             serde_json::json!({"nested": [1, 2, 3]}),
@@ -619,25 +646,34 @@ async fn service_reconciliation_reuses_the_retained_configuration_arc() {
         .unwrap();
     let pointers = pointers.lock().expect("config pointer log poisoned");
     assert_eq!(pointers.len(), 2);
-    assert_eq!(pointers[0], pointers[1]);
+    assert_ne!(
+        pointers[0], pointers[1],
+        "a binding-identity change must not reactivate a consumed prepared value"
+    );
 }
 
 #[derive(Debug)]
-struct SpawnedAwaitingParent(PluginDescriptor);
+struct SpawnedAwaitingParent(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for SpawnedAwaitingParent {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.0.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         tokio::spawn(async move {
             context
                 .apply(
-                    Arc::new(NestedChild(PluginDescriptor::new(
-                        FactoryIdentity::builtin("spawned-nested-child", "1"),
-                    ))),
+                    Arc::new(NestedChild(FactorySpec::new(FactoryIdentity::builtin(
+                        "spawned-nested-child",
+                        "1",
+                    )))),
                     Value::Null,
                 )
                 .await
@@ -662,7 +698,7 @@ async fn paused_activation_allows_spawned_child_progress_with_one_slot() {
     let parent = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         runtime.root().apply(
-            Arc::new(SpawnedAwaitingParent(PluginDescriptor::new(
+            Arc::new(SpawnedAwaitingParent(FactorySpec::new(
                 FactoryIdentity::builtin("spawned-nested-parent", "1"),
             ))),
             Value::Null,
@@ -681,18 +717,23 @@ async fn paused_activation_allows_spawned_child_progress_with_one_slot() {
 
 #[derive(Debug)]
 struct BlockingCleanupConsumer {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
     release: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for BlockingCleanupConsumer {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
         context.defer(
@@ -713,18 +754,22 @@ impl PluginFactory for BlockingCleanupConsumer {
 
 #[derive(Debug)]
 struct SignalledAwaitingDisposal {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     target: FiberHandle,
     requested: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for SignalledAwaitingDisposal {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         self.requested.notify_one();
         let report = self.target.dispose().await;
         if report.is_clean() {
@@ -744,11 +789,7 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
         .root()
         .apply(
             Arc::new(SchedulerProvider {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "overlap-provider",
-                    "1",
-                ))
-                .providing(Provision::new("scheduler", "test.scheduler", V1)),
+                spec: FactorySpec::new(FactoryIdentity::builtin("overlap-provider", "1")),
             }),
             Value::Null,
         )
@@ -760,11 +801,8 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
         .root()
         .apply(
             Arc::new(BlockingCleanupConsumer {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "overlap-consumer",
-                    "1",
-                ))
-                .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
+                spec: FactorySpec::new(FactoryIdentity::builtin("overlap-consumer", "1"))
+                    .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 entered: Arc::clone(&cleanup_entered),
                 release: Arc::clone(&cleanup_release),
             }),
@@ -784,10 +822,7 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
         async move {
             root.apply(
                 Arc::new(SignalledAwaitingDisposal {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "overlap-disposer",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("overlap-disposer", "1")),
                     target,
                     requested: disposal_requested,
                 }),
@@ -812,17 +847,21 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
 
 #[derive(Debug)]
 struct HangingNestedChild {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for HangingNestedChild {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, _: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, _: ActivationPlan) -> Result<()> {
         self.entered.notify_one();
         std::future::pending().await
     }
@@ -830,24 +869,26 @@ impl PluginFactory for HangingNestedChild {
 
 #[derive(Debug)]
 struct AwaitingHangingChild {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     child_entered: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for AwaitingHangingChild {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         context
             .apply(
                 Arc::new(HangingNestedChild {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "cancelled-nested-child",
-                        "1",
-                    )),
+                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-nested-child", "1")),
                     entered: Arc::clone(&self.child_entered),
                 }),
                 Value::Null,
@@ -878,7 +919,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_apply_claim() {
         async move {
             root.apply(
                 Arc::new(AwaitingHangingChild {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                    spec: FactorySpec::new(FactoryIdentity::builtin(
                         "cancelled-nested-parent",
                         "1",
                     )),
@@ -916,7 +957,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_apply_claim() {
 
 #[derive(Debug)]
 struct BlockingCleanupTarget {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     cleanups: Arc<AtomicUsize>,
@@ -924,11 +965,16 @@ struct BlockingCleanupTarget {
 
 #[async_trait]
 impl PluginFactory for BlockingCleanupTarget {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
+    fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let context = plan.context().clone();
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
         let cleanups = Arc::clone(&self.cleanups);
@@ -968,10 +1014,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
         .root()
         .apply(
             Arc::new(BlockingCleanupTarget {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "cancelled-disposal-target",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-disposal-target", "1")),
                 entered: Arc::clone(&cleanup_entered),
                 release: Arc::clone(&cleanup_release),
                 cleanups: Arc::clone(&cleanups),
@@ -986,7 +1029,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
         async move {
             root.apply(
                 Arc::new(AwaitingDisposal {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
+                    spec: FactorySpec::new(FactoryIdentity::builtin(
                         "cancelled-disposal-parent",
                         "1",
                     )),

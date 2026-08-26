@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    Context, DeadlineLimits, DispatchMode, EventHandler, EventOptions, EventOutcome,
-    FactoryIdentity, InvocationContext, MetaError, PayloadLimits, PluginDescriptor, PluginFactory,
-    Result, Runtime, RuntimeLimits,
+    ActivationPlan, CallerEffect, ConfigValue, DeadlineLimits, DispatchMode, EventHandler,
+    EventOptions, EventOutcome, FactoryIdentity, InvocationContext, MetaError, PayloadLimits,
+    PluginFactory, PreparedActivation, Result, Runtime, RuntimeLimits,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 mod support;
 
-use support::{ListenerCaptureFactory, wait_active};
+use support::{ContextCaptureFactory, FactorySpec, ListenerCaptureFactory, wait_active};
 
 #[derive(Debug)]
 struct ValueIdentityHandler(Arc<Mutex<Vec<Arc<Value>>>>);
@@ -37,7 +37,7 @@ async fn parallel_listeners_share_one_immutable_input_value() {
             .root()
             .apply(
                 Arc::new(EventFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(name, "1")),
+                    spec: FactorySpec::new(FactoryIdentity::builtin(name, "1")),
                     event: "shared-value",
                     handler: Arc::new(ValueIdentityHandler(Arc::clone(&values))),
                 }),
@@ -93,16 +93,227 @@ impl EventHandler for PanickingFutureDropHandler {
 }
 
 #[derive(Debug)]
-struct HangingFactory(PluginDescriptor, Arc<Notify>);
+struct RecursivelyPanickingEventPayload;
+
+impl Drop for RecursivelyPanickingEventPayload {
+    fn drop(&mut self) {
+        std::panic::panic_any(Self);
+    }
+}
+
+#[derive(Debug)]
+struct PanicWhileConstructingEventFuture;
+
+impl EventHandler for PanicWhileConstructingEventFuture {
+    fn handle<'life0, 'async_trait>(
+        &'life0 self,
+        _: InvocationContext,
+        _: Arc<Value>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<EventOutcome>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        std::panic::panic_any(RecursivelyPanickingEventPayload)
+    }
+}
+
+struct DeferOnDropEventFuture {
+    effect: Option<CallerEffect>,
+    result: Arc<Mutex<Option<Result<()>>>>,
+    cleanups: Arc<AtomicUsize>,
+}
+
+impl std::future::Future for DeferOnDropEventFuture {
+    type Output = Result<EventOutcome>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::task::Poll::Ready(Ok(EventOutcome::Continue(Value::Null)))
+    }
+}
+
+impl Drop for DeferOnDropEventFuture {
+    fn drop(&mut self) {
+        let cleanups = Arc::clone(&self.cleanups);
+        let result = self
+            .effect
+            .take()
+            .expect("event future retains the exact caller effect")
+            .defer(
+                "event future drop cleanup",
+                Box::new(move || {
+                    Box::pin(async move {
+                        cleanups.fetch_add(1, Ordering::AcqRel);
+                        Ok(())
+                    })
+                }),
+            );
+        *self.result.lock().expect("event drop result poisoned") = Some(result);
+    }
+}
+
+#[derive(Debug)]
+struct DeferOnFutureDropHandler {
+    result: Arc<Mutex<Option<Result<()>>>>,
+    cleanups: Arc<AtomicUsize>,
+}
+
+impl EventHandler for DeferOnFutureDropHandler {
+    fn handle<'life0, 'async_trait>(
+        &'life0 self,
+        invocation: InvocationContext,
+        _: Arc<Value>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<EventOutcome>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(DeferOnDropEventFuture {
+            effect: Some(
+                invocation
+                    .caller_effect()
+                    .expect("owned event caller has callback effect")
+                    .clone(),
+            ),
+            result: Arc::clone(&self.result),
+            cleanups: Arc::clone(&self.cleanups),
+        })
+    }
+}
+
+struct ReadyThenPanickingEventFuture(Option<EventOutcome>);
+
+impl std::future::Future for ReadyThenPanickingEventFuture {
+    type Output = Result<EventOutcome>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::task::Poll::Ready(Ok(self.0.take().expect("event future is polled once")))
+    }
+}
+
+impl Drop for ReadyThenPanickingEventFuture {
+    fn drop(&mut self) {
+        panic!("completed event future drop panic evidence");
+    }
+}
+
+#[derive(Debug)]
+struct DeepOutcomeThenPanickingFutureDropHandler;
+
+impl EventHandler for DeepOutcomeThenPanickingFutureDropHandler {
+    fn handle<'life0, 'async_trait>(
+        &'life0 self,
+        _: InvocationContext,
+        _: Arc<Value>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<EventOutcome>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(ReadyThenPanickingEventFuture(Some(EventOutcome::Continue(
+            deeply_nested_event_value(),
+        ))))
+    }
+}
+
+fn deeply_nested_event_value() -> Value {
+    let mut value = Value::Null;
+    for _ in 0..100_000 {
+        value = Value::Array(vec![value]);
+    }
+    value
+}
+
+fn run_isolated_event_case(test: &str, child_variable: &str) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env(child_variable, "run")
+        .args(["--exact", test, "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated event case crashed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn completed_future_drop_panic_is_bounded_after_deep_outcome_adoption() {
+    const CHILD: &str = "RSI_META_DEEP_EVENT_FUTURE_DROP_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        executor.block_on(async {
+            let runtime = Runtime::default();
+            runtime
+                .root()
+                .apply(
+                    Arc::new(EventFactory {
+                        spec: FactorySpec::new(FactoryIdentity::builtin(
+                            "deep-event-future-drop",
+                            "1",
+                        )),
+                        event: "deep-event-future-drop",
+                        handler: Arc::new(DeepOutcomeThenPanickingFutureDropHandler),
+                    }),
+                    Value::Null,
+                )
+                .await
+                .unwrap();
+            let result = std::panic::AssertUnwindSafe(runtime.root().dispatch(
+                "deep-event-future-drop",
+                DispatchMode::Emit,
+                Value::Null,
+            ))
+            .catch_unwind()
+            .await
+            .expect("completed event future destruction escaped its callback boundary");
+            assert_eq!(
+                result.unwrap_err(),
+                MetaError::Event("event handler panicked".to_owned()),
+            );
+            assert_eq!(runtime.resource_snapshot().event_callbacks.current, 0);
+            assert!(runtime.shutdown().await.is_complete());
+        });
+        return;
+    }
+
+    run_isolated_event_case(
+        "completed_future_drop_panic_is_bounded_after_deep_outcome_adoption",
+        CHILD,
+    );
+}
+
+#[derive(Debug)]
+struct HangingFactory(FactorySpec, Arc<Notify>);
 
 #[async_trait]
 impl PluginFactory for HangingFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        self.0.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.on(
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.0.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context().on(
             "hang",
             Arc::new(HangingHandler(Arc::clone(&self.1))),
             EventOptions::default(),
@@ -134,18 +345,22 @@ impl EventHandler for CountingHandler {
 
 #[derive(Debug)]
 struct OnceEventFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     completed: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for OnceEventFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.on(
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context().on(
             "parallel-once",
             Arc::new(CountingHandler(Arc::clone(&self.completed))),
             EventOptions {
@@ -165,7 +380,7 @@ async fn concurrent_parallel_dispatches_claim_a_once_listener_exactly_once() {
         .root()
         .apply(
             Arc::new(OnceEventFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("parallel-once", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("parallel-once", "1")),
                 completed: Arc::clone(&completed),
             }),
             Value::Null,
@@ -185,25 +400,135 @@ async fn concurrent_parallel_dispatches_claim_a_once_listener_exactly_once() {
 
 #[derive(Debug)]
 struct EventFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     event: &'static str,
     handler: Arc<dyn EventHandler>,
 }
 
 #[async_trait]
 impl PluginFactory for EventFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.on(
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context().on(
             self.event,
             Arc::clone(&self.handler),
             EventOptions::default(),
         )?;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn event_future_construction_and_recursive_payload_panics_are_contained() {
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            Arc::new(EventFactory {
+                spec: FactorySpec::new(FactoryIdentity::builtin("event-constructor-panic", "1")),
+                event: "event-constructor-panic",
+                handler: Arc::new(PanicWhileConstructingEventFuture),
+            }),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+
+    let dispatch = std::panic::AssertUnwindSafe(runtime.root().dispatch(
+        "event-constructor-panic",
+        DispatchMode::Emit,
+        Value::Null,
+    ))
+    .catch_unwind()
+    .await;
+    let result = match dispatch {
+        Ok(result) => result,
+        Err(payload) => {
+            // The RED implementation returns the hostile payload to this
+            // public seam. Do not recursively destroy it in the test process.
+            std::mem::forget(payload);
+            panic!("event future construction panic escaped its callback boundary");
+        }
+    };
+    assert_eq!(
+        result.unwrap_err(),
+        MetaError::Event("event handler panicked".to_owned()),
+    );
+    assert_eq!(runtime.resource_snapshot().event_callbacks.current, 0);
+}
+
+#[tokio::test]
+async fn completed_event_future_drop_retains_exact_caller_effect_authority() {
+    let runtime = Runtime::default();
+    let result = Arc::new(Mutex::new(None));
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let listener = runtime
+        .root()
+        .apply(
+            Arc::new(EventFactory {
+                spec: FactorySpec::new(FactoryIdentity::builtin("event-future-drop-listener", "1")),
+                event: "event-future-drop-caller-effect",
+                handler: Arc::new(DeferOnFutureDropHandler {
+                    result: Arc::clone(&result),
+                    cleanups: Arc::clone(&cleanups),
+                }),
+            }),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    wait_active(&listener).await;
+    let context = Arc::new(Mutex::new(None));
+    let caller = runtime
+        .root()
+        .apply(
+            Arc::new(ContextCaptureFactory {
+                spec: FactorySpec::new(FactoryIdentity::builtin("event-future-drop-caller", "1")),
+                context: Arc::clone(&context),
+            }),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    wait_active(&caller).await;
+    let context = context
+        .lock()
+        .expect("event caller context capture poisoned")
+        .clone()
+        .expect("caller activation captures its Context");
+
+    assert_eq!(
+        context
+            .dispatch(
+                "event-future-drop-caller-effect",
+                DispatchMode::Emit,
+                Value::Null,
+            )
+            .await
+            .unwrap()
+            .invoked,
+        1,
+    );
+    assert_eq!(
+        result
+            .lock()
+            .expect("event drop result poisoned")
+            .take()
+            .expect("completed event future Drop attempted registration"),
+        Ok(()),
+    );
+    assert_eq!(cleanups.load(Ordering::Acquire), 0);
+    assert!(caller.dispose().await.is_clean());
+    assert_eq!(cleanups.load(Ordering::Acquire), 1);
+    assert!(listener.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
 }
 
 #[tokio::test]
@@ -224,7 +549,7 @@ async fn panicking_event_handlers_become_errors_without_cancelling_parallel_sibl
             .root()
             .apply(
                 Arc::new(EventFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(name, "1")),
+                    spec: FactorySpec::new(FactoryIdentity::builtin(name, "1")),
                     event: "panic",
                     handler,
                 }),
@@ -257,18 +582,22 @@ impl EventHandler for DelayedHandler {
 
 #[derive(Debug)]
 struct OnceDelayedFactory {
-    descriptor: PluginDescriptor,
+    spec: FactorySpec,
     delay: std::time::Duration,
 }
 
 #[async_trait]
 impl PluginFactory for OnceDelayedFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.spec.identity()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.on(
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        self.spec.prepare(desired)
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context().on(
             "once-timeout",
             Arc::new(DelayedHandler(self.delay)),
             EventOptions {
@@ -294,7 +623,7 @@ async fn a_timed_out_once_listener_is_still_consumed_by_its_single_attempt() {
         .root()
         .apply(
             Arc::new(OnceDelayedFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin("once-timeout", "1")),
+                spec: FactorySpec::new(FactoryIdentity::builtin("once-timeout", "1")),
                 delay: std::time::Duration::from_millis(30),
             }),
             Value::Null,
@@ -336,7 +665,7 @@ async fn one_event_deadline_bounds_the_complete_serial_dispatch() {
             .root()
             .apply(
                 Arc::new(EventFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(name, "1")),
+                    spec: FactorySpec::new(FactoryIdentity::builtin(name, "1")),
                     event: "deadline",
                     handler: Arc::new(DelayedHandler(std::time::Duration::from_millis(15))),
                 }),
@@ -369,13 +698,10 @@ async fn event_callback_deadline_bounds_the_handler() {
         .root()
         .apply(
             Arc::new(ListenerCaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "timeout-listener",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("timeout-listener", "1")),
                 context: Arc::new(Mutex::new(None)),
                 listener: Arc::new(Mutex::new(None)),
-                remove_while_staged: false,
+                dispose_during_activation: false,
             }),
             Value::Null,
         )
@@ -385,7 +711,7 @@ async fn event_callback_deadline_bounds_the_handler() {
         .root()
         .apply(
             Arc::new(HangingFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("hanging", "1")),
+                FactorySpec::new(FactoryIdentity::builtin("hanging", "1")),
                 Arc::clone(&entered),
             )),
             Value::Null,
@@ -413,10 +739,7 @@ async fn event_handler_future_drop_panic_is_a_bounded_event_error() {
         .root()
         .apply(
             Arc::new(EventFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "panicking-future-drop",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("panicking-future-drop", "1")),
                 event: "panicking-future-drop",
                 handler: Arc::new(PanickingFutureDropHandler),
             }),
@@ -455,7 +778,7 @@ impl EventHandler for OversizedOutcomeHandler {
 async fn handler_produced_event_values_obey_the_frame_bound() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
-            maximum_frame_bytes: 8,
+            maximum_message_bytes: 8,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()
@@ -465,10 +788,7 @@ async fn handler_produced_event_values_obey_the_frame_bound() {
         .root()
         .apply(
             Arc::new(EventFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "oversized-event-outcome",
-                    "1",
-                )),
+                spec: FactorySpec::new(FactoryIdentity::builtin("oversized-event-outcome", "1")),
                 event: "oversized-outcome",
                 handler: Arc::new(OversizedOutcomeHandler),
             }),
@@ -494,7 +814,7 @@ mod foundation;
 async fn dispatch_rejects_an_oversized_input_before_listener_lookup() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
-            maximum_frame_bytes: 8,
+            maximum_message_bytes: 8,
             ..PayloadLimits::default()
         },
         ..RuntimeLimits::default()

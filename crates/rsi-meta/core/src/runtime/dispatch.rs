@@ -1,6 +1,49 @@
 #![allow(clippy::wildcard_imports)] // This is one implementation partition of runtime.
 
 use super::*;
+use crate::service::LeaseGuard;
+
+struct DispatchOwnership {
+    _runtime_admission: LeaseGuard,
+    _dispatch: ResourceReservation,
+}
+
+struct DispatchListener {
+    runtime: Runtime,
+    binding: Option<Arc<ListenerBinding>>,
+    ownership: EventOwnership,
+}
+
+impl DispatchListener {
+    fn new(runtime: &Runtime, binding: Arc<ListenerBinding>) -> Self {
+        Self {
+            runtime: runtime.clone(),
+            ownership: binding.ownership.clone(),
+            binding: Some(binding),
+        }
+    }
+}
+
+impl std::ops::Deref for DispatchListener {
+    type Target = ListenerBinding;
+
+    fn deref(&self) -> &Self::Target {
+        self.binding
+            .as_deref()
+            .expect("a live dispatch snapshot owns its listener binding")
+    }
+}
+
+impl Drop for DispatchListener {
+    fn drop(&mut self) {
+        if self.binding.take().is_some_and(drop_catching_unwind) {
+            self.ownership
+                .retain_destructor_failure("event listener destructor panicked");
+            self.runtime
+                .mark_terminal_owned("event listener destruction panicked");
+        }
+    }
+}
 
 impl Runtime {
     #[allow(clippy::too_many_lines)] // Four modes share one snapshot and callback-admission seam.
@@ -10,14 +53,18 @@ impl Runtime {
         event: &EventKey,
         mode: DispatchMode,
         value: configuration::OwnedJsonValue,
-        scope: Option<&ServiceKey>,
+        target: Option<Arc<dyn EventTarget>>,
     ) -> Result<EventReceipt> {
-        let _runtime_admission = self.begin_admission(false)?;
-        let _dispatch = self.inner.resources.event_dispatches.try_reserve(1).ok_or(
+        let runtime_admission = self.begin_admission(false)?;
+        let dispatch = self.inner.resources.event_dispatches.try_reserve(1).ok_or(
             MetaError::CapacityExhausted {
                 resource: "event dispatches",
             },
         )?;
+        let ownership = DispatchOwnership {
+            _runtime_admission: runtime_admission,
+            _dispatch: dispatch,
+        };
         let deadline = tokio::time::Instant::now()
             .checked_add(self.inner.limits.deadlines.event_dispatch)
             .ok_or_else(|| {
@@ -26,18 +73,12 @@ impl Runtime {
         if let Some(owner) = context.owner {
             let fiber = self.owner_fiber(owner)?;
             let data = fiber.data.lock().expect("fiber state poisoned");
-            Self::validate_owner_data(owner, &data, true)?;
-            if !matches!(data.state, FiberState::Loading | FiberState::Active) {
-                return Err(MetaError::StaleContext {
-                    fiber: owner.fiber,
-                    generation: owner.generation,
-                });
-            }
+            Self::validate_live_owner_data(owner, &data)?;
         }
         let (value, _) = configuration::validate_owned_json_payload(
             value,
             &self.inner.limits.payloads,
-            self.inner.limits.payloads.maximum_frame_bytes,
+            self.inner.limits.payloads.maximum_message_bytes,
         )?;
         let value = Arc::new(value.into_inner());
         let candidates = {
@@ -46,18 +87,13 @@ impl Runtime {
                 .listeners
                 .get(event)
                 .map_or_else(Vec::new, ListenerRegistry::snapshot)
-        };
-        let listeners = candidates
-            .into_iter()
-            .filter(|listener| {
-                let Some(scope) = scope else {
-                    return true;
-                };
-                listener.options.global
-                    || Self::isolation_for(&context.isolation, scope)
-                        == Self::isolation_for(&listener.scope.isolation, scope)
-            })
-            .collect::<Vec<_>>();
+        }
+        .into_iter()
+        .map(|binding| DispatchListener::new(self, binding))
+        .collect();
+        let (listeners, _ownership) = self
+            .select_event_listeners(candidates, target, deadline, ownership)
+            .await?;
         let caller = context.owner.map_or(ROOT_FIBER, |owner| owner.fiber);
         match mode {
             DispatchMode::Parallel => {
@@ -176,29 +212,142 @@ impl Runtime {
         }
     }
 
-    /// Removes one staged or published listener and every reverse ownership
-    /// reference under one Runtime transaction.
-    pub(super) fn remove_listener_owned(
+    async fn select_event_listeners(
         &self,
-        owner: Owner,
-        id: EventListenerId,
-        cause: ListenerRemovalCause,
-    ) -> bool {
+        candidates: Vec<DispatchListener>,
+        target: Option<Arc<dyn EventTarget>>,
+        deadline: tokio::time::Instant,
+        ownership: DispatchOwnership,
+    ) -> Result<(Vec<DispatchListener>, DispatchOwnership)> {
+        let Some(target) = target else {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MetaError::Timeout("event dispatch"));
+            }
+            return Ok((candidates, ownership));
+        };
+        let maximum_diagnostic_bytes = self.inner.limits.payloads.maximum_diagnostic_bytes;
+        let mut selection = tokio::task::spawn_blocking(move || {
+            let selected = Self::select_event_listeners_blocking(
+                candidates,
+                target.as_ref(),
+                deadline,
+                maximum_diagnostic_bytes,
+            );
+            (ownership, selected)
+        });
+        let terminal_cancellation = self.inner.terminal_cancellation.clone();
+        let deadline_sleep = tokio::time::sleep_until(deadline);
+        tokio::pin!(deadline_sleep);
+        let completed = tokio::select! {
+            biased;
+            () = &mut deadline_sleep => {
+                return Err(MetaError::Timeout("event dispatch"));
+            }
+            completed = &mut selection => completed,
+            () = terminal_cancellation.cancelled() => {
+                return Err(self.terminal_error());
+            }
+        };
+        match completed {
+            Ok((ownership, selected)) => selected.map(|selected| (selected, ownership)),
+            Err(error) if error.is_panic() => {
+                let message = if drop_catching_unwind(error.into_panic()) {
+                    "event target selection worker panic payload destruction panicked"
+                } else {
+                    "event target selection worker panicked"
+                };
+                Err(MetaError::Event(message.to_owned()))
+            }
+            Err(_) => Err(MetaError::Event(
+                "event target selection worker was cancelled".to_owned(),
+            )),
+        }
+    }
+
+    fn select_event_listeners_blocking(
+        candidates: Vec<DispatchListener>,
+        target: &dyn EventTarget,
+        deadline: tokio::time::Instant,
+        maximum_diagnostic_bytes: usize,
+    ) -> Result<Vec<DispatchListener>> {
+        let mut selected = Vec::with_capacity(candidates.len());
+        for listener in candidates {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MetaError::Timeout("event dispatch"));
+            }
+            if listener.options.global {
+                selected.push(listener);
+                continue;
+            }
+            let view = ListenerView::new(
+                listener.owner,
+                listener.generation,
+                Arc::clone(&listener.scope.extensions),
+            );
+            let selection =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| target.select(&view)));
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MetaError::Timeout("event dispatch"));
+            }
+            let selection = match selection {
+                Ok(selection) => selection,
+                Err(payload) => {
+                    let message = if drop_catching_unwind(payload) {
+                        "event target panic payload destruction panicked"
+                    } else {
+                        "event target panicked"
+                    };
+                    return Err(MetaError::Event(message.to_owned()));
+                }
+            };
+            let matches = selection.map_err(|error| {
+                MetaError::Event(bound_formatted_diagnostic(
+                    format_args!("event target failed: {error}"),
+                    maximum_diagnostic_bytes,
+                ))
+            })?;
+            if matches {
+                selected.push(listener);
+            }
+        }
+        Ok(selected)
+    }
+
+    pub(super) async fn withdraw_listener_owned(&self, owner: Owner, id: EventListenerId) -> bool {
+        let ownership = {
+            let state = self.inner.state.lock().expect("runtime state poisoned");
+            let Some(event) = state.listener_events.get(&id) else {
+                return false;
+            };
+            let Some(listener) = state
+                .listeners
+                .get(event)
+                .and_then(|listeners| listeners.get(id))
+            else {
+                return false;
+            };
+            if listener.owner != owner.fiber || listener.generation != owner.generation {
+                return false;
+            }
+            listener.ownership.clone()
+        };
+        ownership.withdraw_for_retirement().await
+    }
+
+    /// Removes one exact listener and every reverse ownership reference under
+    /// one Runtime transaction. Only [`EventRemoval`] calls this after winning
+    /// its one-shot claim.
+    pub(super) fn remove_listener_entry(&self, owner: Owner, id: EventListenerId) -> bool {
         let mut state = self.inner.state.lock().expect("runtime state poisoned");
         let Some(event) = state.listener_events.get(&id).cloned() else {
             return false;
         };
-        let published = state
+        let listener = state
             .listeners
             .get(&event)
             .and_then(|listeners| listeners.get(id))
             .cloned();
-        let staged = state
-            .staged_listeners
-            .get(&(owner.fiber, owner.generation))
-            .and_then(|listeners| listeners.get(&id))
-            .cloned();
-        let Some(listener) = published.as_ref().or(staged.as_ref()) else {
+        let Some(listener) = listener else {
             return false;
         };
         if listener.owner != owner.fiber || listener.generation != owner.generation {
@@ -208,10 +357,7 @@ impl Runtime {
             return false;
         };
         let mut data = fiber.data.lock().expect("fiber state poisoned");
-        if data.generation != owner.generation
-            || (cause == ListenerRemovalCause::Explicit
-                && !matches!(data.state, FiberState::Loading | FiberState::Active))
-        {
+        if data.generation != owner.generation {
             return false;
         }
         let Some(active) = data.active.as_mut() else {
@@ -221,63 +367,40 @@ impl Runtime {
             return false;
         }
 
-        if published.is_some() {
-            let remove_bucket = {
-                let listeners = state
-                    .listeners
-                    .get_mut(&event)
-                    .expect("published listener event has a registry");
-                let removed = listeners.remove(id);
-                debug_assert!(removed.is_some());
-                listeners.is_empty()
-            };
-            if remove_bucket {
-                state.listeners.remove(&event);
-            }
-        } else {
-            let key = (owner.fiber, owner.generation);
-            let remove_staged = {
-                let listeners = state
-                    .staged_listeners
-                    .get_mut(&key)
-                    .expect("staged listener owner has a registry");
-                let removed = listeners.remove(&id);
-                debug_assert!(removed.is_some());
-                listeners.is_empty()
-            };
-            if remove_staged {
-                state.staged_listeners.remove(&key);
-            }
+        let (removed_listener, remove_bucket) = {
+            let listeners = state
+                .listeners
+                .get_mut(&event)
+                .expect("listener event has a registry");
+            let removed = listeners
+                .remove(id)
+                .expect("validated listener remains in its registry");
+            (removed, listeners.is_empty())
+        };
+        if remove_bucket {
+            state.listeners.remove(&event);
         }
         active.listeners.remove(&id);
         state.listener_events.remove(&id);
-        state.revision += 1;
+        state.advance_revision();
         drop(data);
         drop(state);
-        drop(published);
-        drop(staged);
+        drop(removed_listener);
+        drop(listener);
         true
     }
 
     /// Atomically consumes a once-listener immediately before invocation.
     /// Non-once listeners retain snapshot semantics.
-    fn claim_listener(&self, listener: &ListenerBinding) -> bool {
-        !listener.options.once
-            || self.remove_listener_owned(
-                Owner {
-                    fiber: listener.owner,
-                    generation: listener.generation,
-                },
-                listener.id,
-                ListenerRemovalCause::Once,
-            )
+    async fn claim_listener(&self, listener: &ListenerBinding) -> bool {
+        !listener.options.once || listener.ownership.claim_once().await
     }
 
     fn invoke_listener<'a>(
         &'a self,
         caller_context: &'a Context,
         caller: FiberId,
-        listener: Arc<ListenerBinding>,
+        listener: DispatchListener,
         value: Arc<Value>,
         deadline: tokio::time::Instant,
     ) -> BoxFuture<'a, Result<Option<EventOutcome>>> {
@@ -308,45 +431,34 @@ impl Runtime {
             let Some(_lease) = listener.lease.acquire(false) else {
                 return Ok(None);
             };
-            if !self.claim_listener(&listener) {
+            let claimed = tokio::select! {
+                biased;
+                () = terminal_cancellation.cancelled() => {
+                    return Err(self.terminal_error());
+                }
+                () = &mut deadline_sleep => {
+                    return Err(MetaError::Timeout("event dispatch"));
+                }
+                claimed = self.claim_listener(&listener) => claimed,
+            };
+            if !claimed {
                 return Ok(None);
             }
 
             let (invocation, cancellation) =
-                self.event_invocation(caller_context, caller, &listener);
-            let terminal_cancellation = self.inner.terminal_cancellation.clone();
-            let mut handler = Some(Box::pin(
-                std::panic::AssertUnwindSafe(listener.handler.handle(invocation, value))
-                    .catch_unwind(),
-            ));
-            let selected = tokio::select! {
-                biased;
-                () = terminal_cancellation.cancelled() => {
-                    cancellation.cancel();
-                    Err(self.terminal_error())
-                }
-                () = cancellation.cancelled() => Err(MetaError::Cancelled),
-                () = &mut deadline_sleep => {
-                    cancellation.cancel();
-                    Err(MetaError::Timeout("event dispatch"))
-                }
-                result = handler
-                    .as_mut()
-                    .expect("the event-handler future lives through selection")
-                    .as_mut() => match result {
-                    Ok(result) => result.map_err(|error| self.bound_listener_error(error)),
-                    Err(_) => Err(MetaError::Event("event handler panicked".to_owned())),
-                },
-            };
-            let selected = selected.map(|outcome| match outcome {
-                EventOutcome::Continue(value) => (false, configuration::OwnedJsonValue::new(value)),
-                EventOutcome::Complete(value) => (true, configuration::OwnedJsonValue::new(value)),
-            });
-            let (complete, value) = if drop_catching_unwind(handler.take()) {
-                return Err(MetaError::Event("event handler panicked".to_owned()));
-            } else {
-                selected?
-            };
+                self.event_invocation(caller_context, caller, &listener)?;
+            let callback_lease = invocation.callback_lease();
+            let (complete, value) = event_callback_driver::EventCallbackDriver {
+                handler: &listener.handler,
+                invocation,
+                value,
+                callback_lease,
+                runtime: self,
+                cancellation: &cancellation,
+                deadline,
+            }
+            .run()
+            .await?;
             Ok(Some(self.validate_event_outcome(complete, value)?))
         })
     }
@@ -356,13 +468,17 @@ impl Runtime {
         caller_context: &Context,
         caller: FiberId,
         listener: &ListenerBinding,
-    ) -> (InvocationContext, CancellationToken) {
-        let call_id = CallId(self.inner.next_call.fetch_add(1, Ordering::AcqRel) + 1);
+    ) -> Result<(InvocationContext, CancellationToken)> {
+        let call_id = self.next_call_id()?;
         let cancellation = CancellationToken::new();
         let origin = caller_context
             .trace
             .as_ref()
             .map_or(caller, |trace| trace.origin);
+        let lineage_call = caller_context
+            .trace
+            .as_ref()
+            .map_or(call_id, |trace| trace.lineage_call);
         let parent_call = caller_context
             .trace
             .as_ref()
@@ -373,18 +489,22 @@ impl Runtime {
                 fiber: listener.owner,
                 generation: listener.generation,
             }),
+            setup_effect: None,
             isolation: Arc::clone(&listener.scope.isolation),
             intercepts: Arc::clone(&listener.scope.intercepts),
+            extensions: Arc::clone(&listener.scope.extensions),
             entries: listener.scope.entries,
             encoded_bytes: listener.scope.encoded_bytes,
             trace: Some(CallTrace {
                 origin,
+                lineage_call,
                 parent_call: Some(call_id),
             }),
         };
-        (
+        Ok((
             InvocationContext::new(
                 call_id,
+                lineage_call,
                 parent_call,
                 origin,
                 caller,
@@ -396,7 +516,7 @@ impl Runtime {
                 cancellation.clone(),
             ),
             cancellation,
-        )
+        ))
     }
 
     fn validate_event_outcome(
@@ -407,7 +527,7 @@ impl Runtime {
         let (value, _) = configuration::validate_owned_json_payload(
             value,
             &self.inner.limits.payloads,
-            self.inner.limits.payloads.maximum_frame_bytes,
+            self.inner.limits.payloads.maximum_message_bytes,
         )?;
         let value = value.into_inner();
         Ok(if complete {
@@ -421,10 +541,6 @@ impl Runtime {
         self.ensure_admitting()
             .err()
             .unwrap_or(MetaError::RuntimeShuttingDown)
-    }
-
-    fn bound_listener_error(&self, error: MetaError) -> MetaError {
-        bound_event_callback_error(error, self.inner.limits.payloads.maximum_diagnostic_bytes)
     }
 }
 
@@ -590,5 +706,132 @@ pub(super) fn bound_service_callback_error(error: MetaError, maximum: usize) -> 
     match error {
         MetaError::Service(message) => MetaError::Service(bound_owned_diagnostic(message, maximum)),
         error => MetaError::Service(bound_formatted_diagnostic(format_args!("{error}"), maximum)),
+    }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use super::*;
+    use crate::PreparedActivation;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ObservedCall {
+        call: CallId,
+        lineage: CallId,
+        parent: Option<CallId>,
+        origin: FiberId,
+    }
+
+    #[derive(Debug)]
+    struct CaptureHandler(Arc<Mutex<Option<ObservedCall>>>);
+
+    #[async_trait::async_trait]
+    impl EventHandler for CaptureHandler {
+        async fn handle(
+            &self,
+            invocation: InvocationContext,
+            value: Arc<ConfigValue>,
+        ) -> Result<EventOutcome> {
+            *self.0.lock().expect("event lineage capture poisoned") = Some(ObservedCall {
+                call: invocation.call_id(),
+                lineage: invocation.lineage_call_id(),
+                parent: invocation.parent_call_id(),
+                origin: invocation.origin(),
+            });
+            Ok(EventOutcome::Continue(value.as_ref().clone()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ListenerFactory(Arc<Mutex<Option<ObservedCall>>>);
+
+    #[async_trait::async_trait]
+    impl PluginFactory for ListenerFactory {
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin("activation-lineage-listener", "1")
+        }
+
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            plan.context().on(
+                "activation-lineage",
+                Arc::new(CaptureHandler(Arc::clone(&self.0))),
+                EventOptions::default(),
+            )?;
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct DispatchFactory(Arc<Mutex<Option<CallId>>>);
+
+    #[async_trait::async_trait]
+    impl PluginFactory for DispatchFactory {
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin("activation-lineage-dispatcher", "1")
+        }
+
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            *self.0.lock().expect("activation lineage capture poisoned") =
+                Some(plan.lineage_call_id());
+            let receipt = plan
+                .context()
+                .dispatch("activation-lineage", DispatchMode::Emit, ConfigValue::Null)
+                .await?;
+            if receipt.invoked != 1 {
+                return Err(MetaError::Event(
+                    "activation lineage dispatch did not invoke one listener".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn activation_context_event_uses_seed_with_no_parent() {
+        let runtime = Runtime::default();
+        let observed = Arc::new(Mutex::new(None));
+        let listener = runtime
+            .root()
+            .apply(
+                Arc::new(ListenerFactory(Arc::clone(&observed))),
+                ConfigValue::Null,
+            )
+            .await
+            .expect("listener activates");
+        let activation_lineage = Arc::new(Mutex::new(None));
+        let dispatcher = runtime
+            .root()
+            .apply(
+                Arc::new(DispatchFactory(Arc::clone(&activation_lineage))),
+                ConfigValue::Null,
+            )
+            .await
+            .expect("dispatcher activates");
+
+        let activation_lineage = activation_lineage
+            .lock()
+            .expect("activation lineage capture poisoned")
+            .expect("activation exposes its lineage");
+        let observed = observed
+            .lock()
+            .expect("event lineage capture poisoned")
+            .expect("listener observes one event");
+        assert_ne!(activation_lineage, CallId(0));
+        assert_ne!(observed.call, activation_lineage);
+        assert_eq!(observed.lineage, activation_lineage);
+        assert_eq!(observed.parent, None);
+        assert_eq!(observed.origin, dispatcher.id());
+
+        assert!(dispatcher.dispose().await.is_clean());
+        assert!(listener.dispose().await.is_clean());
+        assert!(runtime.shutdown().await.is_complete());
     }
 }

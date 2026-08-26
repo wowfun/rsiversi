@@ -1578,6 +1578,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-meta-scope"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-meta",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-xtask"
 version = "0.0.1"
 dependencies = [
