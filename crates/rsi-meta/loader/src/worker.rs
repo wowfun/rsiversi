@@ -1,4 +1,5 @@
 use super::LoaderError;
+use crate::panic_containment::contain_result;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -10,13 +11,9 @@ pub(super) const MAX_LIVE_NATIVE_INSTANCES: usize = 65_536;
 
 type DestructionCallback = Box<dyn FnOnce() + Send + 'static>;
 
-struct DestructionJob {
-    callback: DestructionCallback,
-    queue_permit: Option<OwnedSemaphorePermit>,
-}
-
+#[derive(Clone)]
 pub(super) struct DestructionReservation {
-    _permit: OwnedSemaphorePermit,
+    _permit: Arc<OwnedSemaphorePermit>,
 }
 
 pub(super) struct InstanceReservation {
@@ -63,8 +60,7 @@ pub(super) struct ExecutorSnapshot {
 #[derive(Clone)]
 pub(super) struct NativeExecutor {
     callback_permits: Arc<Semaphore>,
-    destruction_sender: SyncSender<DestructionJob>,
-    destruction_queue_permits: Arc<Semaphore>,
+    destruction_sender: SyncSender<DestructionCallback>,
     factory_destruction_permits: Arc<Semaphore>,
     instance_permits: Arc<Semaphore>,
     stats: Arc<ExecutorStats>,
@@ -85,14 +81,10 @@ impl NativeExecutor {
         debug_assert!((1..=MAX_LIVE_NATIVE_INSTANCES).contains(&maximum_live_instances));
 
         let stats = Arc::new(ExecutorStats::default());
-        let destruction_queue_capacity = maximum_concurrent_destructions
-            .checked_add(maximum_live_factories)
-            .and_then(|capacity| capacity.checked_add(maximum_live_instances))
-            .ok_or_else(|| {
-                LoaderError::InvalidInput("native destruction capacity overflow".to_owned())
-            })?;
+        // Each live factory owns one reservation and its module queue submits
+        // at most one scheduled job, so this is the exact global queue bound.
         let (destruction_sender, destruction_receiver) =
-            std::sync::mpsc::sync_channel(destruction_queue_capacity);
+            std::sync::mpsc::sync_channel(maximum_live_factories);
         let destruction_receiver = Arc::new(Mutex::new(destruction_receiver));
         for index in 0..maximum_concurrent_destructions {
             let receiver = Arc::clone(&destruction_receiver);
@@ -105,7 +97,6 @@ impl NativeExecutor {
         Ok(Self {
             callback_permits: Arc::new(Semaphore::new(maximum_concurrent_callbacks)),
             destruction_sender,
-            destruction_queue_permits: Arc::new(Semaphore::new(maximum_concurrent_destructions)),
             factory_destruction_permits: Arc::new(Semaphore::new(maximum_live_factories)),
             instance_permits: Arc::new(Semaphore::new(maximum_live_instances)),
             stats,
@@ -174,82 +165,14 @@ impl NativeExecutor {
             })
     }
 
-    pub(super) async fn spawn_destruction<T>(
-        &self,
-        callback: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<tokio::sync::oneshot::Receiver<T>, LoaderError>
-    where
-        T: Send + 'static,
-    {
-        let pending = PendingInstanceDestruction::begin(Arc::clone(&self.stats));
-        let queue_permit = Arc::clone(&self.destruction_queue_permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| LoaderError::Callback {
-                operation: "destruction",
-                message: "native destruction executor is closed".to_owned(),
-            })?;
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let job = DestructionJob {
-            callback: Box::new(move || {
-                let _pending = pending;
-                let _ = sender.send(callback());
-            }),
-            queue_permit: Some(queue_permit),
-        };
-        self.stats
-            .queued_destructions
-            .fetch_add(1, Ordering::Relaxed);
-        self.destruction_sender.try_send(job).map_err(|error| {
-            self.stats
-                .queued_destructions
-                .fetch_sub(1, Ordering::Relaxed);
-            LoaderError::Callback {
-                operation: "destruction",
-                message: match error {
-                    TrySendError::Full(_) => "native destruction queue invariant failed",
-                    TrySendError::Disconnected(_) => "native destruction executor disconnected",
-                }
-                .to_owned(),
-            }
-        })?;
-        Ok(receiver)
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_submit_destruction(&self, callback: impl FnOnce() + Send + 'static) -> bool {
-        let Ok(queue_permit) = Arc::clone(&self.destruction_queue_permits).try_acquire_owned()
-        else {
-            self.stats
-                .rejected_destructions
-                .fetch_add(1, Ordering::Relaxed);
-            return false;
-        };
-        let job = DestructionJob {
-            callback: Box::new(callback),
-            queue_permit: Some(queue_permit),
-        };
-        self.stats
-            .queued_destructions
-            .fetch_add(1, Ordering::Relaxed);
-        if self.destruction_sender.try_send(job).is_err() {
-            self.stats
-                .queued_destructions
-                .fetch_sub(1, Ordering::Relaxed);
-            self.stats
-                .rejected_destructions
-                .fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        true
-    }
-
     pub(super) fn reserve_factory_destruction(
         &self,
     ) -> Result<DestructionReservation, LoaderError> {
         Arc::clone(&self.factory_destruction_permits)
             .try_acquire_owned()
-            .map(|permit| DestructionReservation { _permit: permit })
+            .map(|permit| DestructionReservation {
+                _permit: Arc::new(permit),
+            })
             .map_err(|_| {
                 self.stats
                     .rejected_destructions
@@ -279,6 +202,13 @@ impl NativeExecutor {
         })
     }
 
+    /// Accounts one native instance teardown from module-queue admission until
+    /// the foreign destruction call returns. The caller moves this guard into
+    /// the queued job so cancellation cannot detach the accounting lifetime.
+    pub(super) fn begin_instance_destruction(&self) -> PendingInstanceDestruction {
+        PendingInstanceDestruction::begin(Arc::clone(&self.stats))
+    }
+
     pub(super) fn submit_reserved_destruction(
         &self,
         permit: DestructionReservation,
@@ -287,36 +217,27 @@ impl NativeExecutor {
         self.submit_reserved(permit, callback);
     }
 
-    pub(super) fn submit_reserved_instance_destruction(
-        &self,
-        reservation: InstanceReservation,
-        callback: impl FnOnce(InstanceReservation) + Send + 'static,
-    ) {
-        let pending = PendingInstanceDestruction::begin(Arc::clone(&self.stats));
-        self.submit_reserved(reservation, move |reservation| {
-            let _pending = pending;
-            callback(reservation);
-        });
-    }
-
     fn submit_reserved<R>(&self, reservation: R, callback: impl FnOnce(R) + Send + 'static)
     where
         R: Send + 'static,
     {
-        let job = DestructionJob {
-            callback: Box::new(move || callback(reservation)),
-            queue_permit: None,
-        };
+        let job = Box::new(move || callback(reservation)) as DestructionCallback;
         self.stats
             .queued_destructions
             .fetch_add(1, Ordering::Relaxed);
         match self.destruction_sender.try_send(job) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                unreachable!("reserved teardown admission always owns one queue slot");
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                unreachable!("a live native executor always retains a destruction receiver");
+            Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => {
+                self.stats
+                    .queued_destructions
+                    .fetch_sub(1, Ordering::Relaxed);
+                self.stats
+                    .rejected_destructions
+                    .fetch_add(1, Ordering::Relaxed);
+                // Any invariant break at the physical teardown boundary must
+                // retain the complete job, including its mapping and reserved
+                // slot, rather than destruct foreign state on this thread.
+                std::mem::forget(job);
             }
         }
     }
@@ -341,7 +262,8 @@ impl NativeExecutor {
     }
 }
 
-struct PendingInstanceDestruction {
+#[must_use = "dropping the guard ends pending native instance destruction accounting"]
+pub(super) struct PendingInstanceDestruction {
     stats: Arc<ExecutorStats>,
 }
 
@@ -362,7 +284,7 @@ impl Drop for PendingInstanceDestruction {
     }
 }
 
-fn destruction_worker(receiver: &Mutex<Receiver<DestructionJob>>, stats: &Arc<ExecutorStats>) {
+fn destruction_worker(receiver: &Mutex<Receiver<DestructionCallback>>, stats: &Arc<ExecutorStats>) {
     loop {
         let job = receiver
             .lock()
@@ -372,13 +294,8 @@ fn destruction_worker(receiver: &Mutex<Receiver<DestructionJob>>, stats: &Arc<Ex
             return;
         };
         stats.queued_destructions.fetch_sub(1, Ordering::Relaxed);
-        let DestructionJob {
-            callback,
-            queue_permit,
-        } = job;
-        drop(queue_permit);
         let _activity = Activity::begin_destruction(Arc::clone(stats));
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        let _ = contain_result(std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)));
     }
 }
 
@@ -458,10 +375,21 @@ pub(super) async fn run_bounded_callback<T>(
         }
         receiver.await
     };
-    if completion.is_timed_out() {
-        Err(CallbackWaitError::TimedOut)
-    } else {
-        result.map_err(CallbackWaitError::Disconnected)
+    match result {
+        Ok(_) if completion.is_timed_out() => Err(CallbackWaitError::TimedOut),
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // A worker unwind disconnects before it can publish completion.
+            // Claim completion here so its watchdog does not linger until the
+            // deadline; a concurrent timeout still wins through the same
+            // transition lock.
+            completion.complete();
+            if completion.is_timed_out() {
+                Err(CallbackWaitError::TimedOut)
+            } else {
+                Err(CallbackWaitError::Disconnected(error))
+            }
+        }
     }
 }
 
@@ -559,14 +487,6 @@ impl Drop for TimeoutPublication<'_> {
             .state
             .store(CallbackCompletion::TIMED_OUT, Ordering::Release);
         self.0.finished.notify_waiters();
-    }
-}
-
-pub(super) struct CompletionOnDrop<'a>(pub(super) &'a CallbackCompletion);
-
-impl Drop for CompletionOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.complete();
     }
 }
 
@@ -757,46 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn factory_finalizer_has_reserved_capacity_when_the_ordinary_queue_is_full() {
-        let executor = NativeExecutor::new(1, 1, 1, 1).unwrap();
-        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
-        assert!(executor.try_submit_destruction(move || {
-            release_receiver.recv().unwrap();
-        }));
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while executor.snapshot().active_destructions != 1 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-        assert_eq!(executor.snapshot().active_destructions, 1);
-        assert!(executor.try_submit_destruction(|| {}));
-
-        let permit = executor.reserve_factory_destruction().unwrap();
-        let finalizer_executor = executor.clone();
-        let (submitted_sender, submitted_receiver) = std::sync::mpsc::sync_channel(1);
-        let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(1);
-        let submitter = std::thread::spawn(move || {
-            finalizer_executor.submit_reserved_destruction(permit, move |_permit| {
-                finished_sender.send(()).unwrap();
-            });
-            submitted_sender.send(()).unwrap();
-        });
-        let admission_result = submitted_receiver.recv_timeout(Duration::from_millis(100));
-        if admission_result.is_err() {
-            release_sender.send(()).unwrap();
-            submitter.join().unwrap();
-            panic!("factory finalizer waited behind ordinary queue admission");
-        }
-        assert_eq!(executor.snapshot().queued_destructions, 2);
-
-        release_sender.send(()).unwrap();
-        finished_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("reserved factory finalizer did not run");
-        submitter.join().unwrap();
-        assert_eq!(executor.snapshot().rejected_destructions, 0);
-    }
-
-    #[test]
     fn reserved_destruction_rejections_are_observable() {
         let executor = NativeExecutor::new(1, 1, 1, 1).unwrap();
         let _factory = executor.reserve_factory_destruction().unwrap();
@@ -829,46 +709,5 @@ mod tests {
         drop(second);
         drop(reused);
         assert_eq!(executor.snapshot().active_instances, 0);
-    }
-
-    #[test]
-    fn blocked_instance_finalizer_keeps_admission_and_pending_work_bounded() {
-        let executor = NativeExecutor::new(1, 1, 1, 1).unwrap();
-        let reservation = executor.reserve_instance().unwrap();
-        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
-        executor.submit_reserved_instance_destruction(reservation, move |_reservation| {
-            release_receiver.recv().unwrap();
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while executor.snapshot().active_destructions != 1 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-
-        assert!(matches!(
-            executor.reserve_instance(),
-            Err(LoaderError::Busy {
-                operation: "create"
-            })
-        ));
-        let blocked = executor.snapshot();
-        assert_eq!(blocked.active_instances, 1);
-        assert_eq!(blocked.pending_instance_destructions, 1);
-        assert_eq!(blocked.rejected_instances, 1);
-
-        release_sender.send(()).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while {
-            let snapshot = executor.snapshot();
-            (snapshot.active_instances != 0 || snapshot.pending_instance_destructions != 0)
-                && std::time::Instant::now() < deadline
-        } {
-            std::thread::yield_now();
-        }
-        let drained = executor.snapshot();
-        assert_eq!(drained.active_instances, 0);
-        assert_eq!(drained.pending_instance_destructions, 0);
-        executor
-            .reserve_instance()
-            .expect("completed finalization must release live-instance admission");
     }
 }

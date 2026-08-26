@@ -20,7 +20,7 @@ async fn callback_admission_fails_before_spawning_an_extra_native_thread() {
     wait_for_file(&entry_log).await;
     assert!(matches!(
         first.await.unwrap(),
-        Err(LoaderError::Timeout("library load, entry, or descriptor"))
+        Err(LoaderError::Timeout("native module initialization"))
     ));
     assert_eq!(catalog.snapshot().active_callbacks, 1);
 
@@ -53,6 +53,7 @@ async fn prepared_creates_fail_fast_at_the_shared_factory_gate() {
         .unwrap();
     wait_active(&upstream).await;
     let factory = catalog.load(native_fixture()).unwrap();
+    wait_for_callback_quiescence(&catalog);
     let markers = tempfile::tempdir().unwrap();
     let first_entered = markers.path().join("first-create-entered");
     let first_release = markers.path().join("first-create-release");
@@ -89,76 +90,168 @@ async fn prepared_creates_fail_fast_at_the_shared_factory_gate() {
     .await
     .expect("a busy factory accumulated a hidden create waiter")
     .unwrap();
+    let rejected_state = rejected.snapshot().state;
+    let second_entered_native = second_entered.exists();
+    let active_callbacks = catalog.snapshot().active_callbacks;
+    std::fs::write(&first_release, b"release").unwrap();
     assert!(matches!(
-        rejected.snapshot().state,
+        rejected_state,
         FiberState::Failed(ref message) if message.contains("busy")
     ));
-    assert!(!second_entered.exists(), "busy create entered native code");
-    assert_eq!(catalog.snapshot().active_callbacks, 1);
+    assert!(!second_entered_native, "busy create entered native code");
+    assert_eq!(active_callbacks, 1);
 
-    std::fs::write(&first_release, b"release").unwrap();
     let first = first_application.await.unwrap().unwrap();
     wait_active(&first).await;
     assert!(rejected.dispose().await.is_clean());
     assert!(first.dispose().await.is_clean());
     assert!(upstream.dispose().await.is_clean());
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
+}
+
+async fn assert_same_lineage_reentry(
+    catalog: &NativeCatalog,
+    service: &Capability,
+    entered: &Path,
+    release: &Path,
+) {
+    let first_same_lineage = service.clone();
+    let second_same_lineage = service.clone();
+    let first = tokio::spawn(async move {
+        first_same_lineage
+            .invoke(Message::new(b"same-lineage-first".as_slice()))
+            .await
+    });
+    wait_for_catalog_marker(entered, catalog).await;
+    assert_eq!(catalog.snapshot().active_callbacks, 1);
+
+    let second = tokio::spawn(async move {
+        second_same_lineage
+            .invoke(Message::new(b"same-lineage-second".as_slice()))
+            .await
+    });
+    let second = tokio::time::timeout(Duration::from_secs(1), second).await;
+    let active_callbacks = catalog.snapshot().active_callbacks;
+    std::fs::write(release, b"release").unwrap();
+    let second = second
+        .expect("same-lineage reentry waited instead of failing fast")
+        .unwrap();
+    assert_eq!(
+        active_callbacks, 1,
+        "same-lineage reentry spawned a native callback thread"
+    );
+    assert!(
+        matches!(second, Err(MetaError::Service(ref message)) if message.contains("reentrant")),
+        "same-lineage instance reentry did not surface REENTRANT: {second:?}"
+    );
+    assert_eq!(
+        first.await.unwrap().unwrap().as_bytes(),
+        b"serial:upstream:same-lineage-first"
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while catalog.snapshot().active_callbacks != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("same-lineage callback did not quiesce before the unrelated-lineage phase");
+}
+
+async fn assert_unrelated_lineage_contention(
+    runtime: &Runtime,
+    catalog: &NativeCatalog,
+    service: Capability,
+    entered: &Path,
+    release: &Path,
+) {
+    for marker in [entered, release] {
+        match std::fs::remove_file(marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("could not reset native callback marker: {error}"),
+        }
+    }
+    let unrelated_slot = Arc::new(Mutex::new(None));
+    let unrelated_client = runtime
+        .root()
+        .apply(
+            Arc::new(CaptureFactory::new(
+                "unrelated-lineage-client",
+                Requirement::new("echo", "fixture.echo", V1),
+                Arc::clone(&unrelated_slot),
+            )),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    wait_active(&unrelated_client).await;
+    let unrelated_service = unrelated_slot.lock().unwrap().take().unwrap();
+
+    let first = tokio::spawn(async move {
+        service
+            .invoke(Message::new(b"unrelated-first".as_slice()))
+            .await
+    });
+    wait_for_catalog_marker(entered, catalog).await;
+    assert_eq!(catalog.snapshot().active_callbacks, 1);
+    let second = tokio::spawn(async move {
+        unrelated_service
+            .invoke(Message::new(b"unrelated-second".as_slice()))
+            .await
+    });
+    let second = tokio::time::timeout(Duration::from_secs(1), second).await;
+    let active_callbacks = catalog.snapshot().active_callbacks;
+    std::fs::write(release, b"release").unwrap();
+    let second = second
+        .expect("unrelated instance contention waited instead of failing fast")
+        .unwrap();
+    assert_eq!(
+        active_callbacks, 1,
+        "unrelated contention spawned a native callback thread"
+    );
+    assert!(
+        matches!(second, Err(MetaError::Service(ref message)) if message.contains("busy")),
+        "unrelated lineage contention did not surface BUSY: {second:?}"
+    );
+    assert_eq!(
+        first.await.unwrap().unwrap().as_bytes(),
+        b"serial:upstream:unrelated-first"
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while catalog.snapshot().active_callbacks != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unrelated-lineage callback did not quiesce");
 }
 
 #[tokio::test]
-async fn instance_gate_is_acquired_before_native_callback_thread_admission() {
+async fn instance_gate_distinguishes_reentry_from_unrelated_lineage_contention() {
     let cache = tempfile::tempdir().unwrap();
     let mut options = CatalogOptions::new(cache.path());
     options.callback_timeout = Duration::from_secs(2);
     options.limits.maximum_concurrent_callbacks = 2;
     let catalog = NativeCatalog::new(options).unwrap();
     let runtime = Runtime::default();
+    let markers = tempfile::tempdir().unwrap();
+    let call_entered = markers.path().join("call-entered");
+    let call_release = markers.path().join("call-release");
     let (_native, service) = apply_delayed_native(
         &runtime,
         &catalog,
-        json!({ "prefix": "serial:", "delay_ms": 100 }),
+        json!({
+            "prefix": "serial:",
+            "call_entered_path": call_entered,
+            "call_release_path": call_release,
+        }),
     )
     .await;
 
-    let first_service = service.clone();
-    let first = tokio::spawn(async move {
-        first_service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"first".to_vec()))
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while catalog.snapshot().active_callbacks != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first native callback did not acquire admission");
-
-    let second = tokio::spawn(async move {
-        service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"second".to_vec()))
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(
-        catalog.snapshot().active_callbacks,
-        1,
-        "the serialized waiter spawned a native callback thread"
-    );
-
-    assert_eq!(
-        first.await.unwrap().unwrap().as_bytes(),
-        b"serial:upstream:first"
-    );
-    assert_eq!(
-        second.await.unwrap().unwrap().as_bytes(),
-        b"serial:upstream:second"
-    );
-    assert!(runtime.shutdown().await.is_clean());
+    assert_same_lineage_reentry(&catalog, &service, &call_entered, &call_release).await;
+    assert_unrelated_lineage_contention(&runtime, &catalog, service, &call_entered, &call_release)
+        .await;
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -180,9 +273,7 @@ async fn native_watchdog_terminalizes_even_after_core_drops_the_adapter_future()
     .await;
     assert_eq!(
         service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"slow".to_vec()))
+            .invoke(Message::new(b"slow".as_slice()))
             .await
             .unwrap_err(),
         MetaError::Timeout("service call")
@@ -207,47 +298,33 @@ async fn timed_out_native_call_defers_destruction_until_the_callback_returns() {
     let call_entered = markers.path().join("call-entered");
     let call_release = markers.path().join("call-release");
     let destroy_entered = markers.path().join("destroy-entered");
-    let (_fixture, artifact) =
-        destruction_order_fixture(&call_entered, &call_release, &destroy_entered);
     let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(500));
     let runtime = Runtime::default();
-    let native = runtime
-        .root()
-        .apply(catalog.load(artifact).unwrap(), Value::Null)
-        .await
-        .unwrap();
-    wait_active(&native).await;
-    let slot = Arc::new(Mutex::new(None));
-    let consumer = runtime
-        .root()
-        .apply(
-            Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "destruction-order-client",
-                    "1",
-                ))
-                .requiring(Requirement::new("echo", "fixture.echo", V1)),
-                slot: Arc::clone(&slot),
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    wait_active(&consumer).await;
-    let service = slot.lock().unwrap().clone().unwrap();
-    let call = tokio::spawn(async move {
-        service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(b"blocked".to_vec()))
-            .await
-    });
+    let (native, service) = apply_delayed_native(
+        &runtime,
+        &catalog,
+        json!({
+            "prefix": "native:",
+            "call_entered_path": call_entered,
+            "call_release_path": call_release,
+            "destroy_entered_path": destroy_entered,
+        }),
+    )
+    .await;
+    let call =
+        tokio::spawn(async move { service.invoke(Message::new(b"blocked".as_slice())).await });
     wait_for_file(&call_entered).await;
     let error = call.await.unwrap().unwrap_err();
-    assert!(
-        matches!(error, MetaError::Service(ref message) if message.contains("native service callback")),
-        "native endpoint timeout escaped the service boundary: {error:?}"
+    assert_eq!(
+        error,
+        MetaError::RuntimeTerminal("trusted native plugin service callback timed out".to_owned()),
+        "native endpoint timeout did not publish the Runtime terminal reason"
     );
+    let retained = catalog.snapshot();
+    assert_eq!(retained.active_callbacks, 1, "{retained:?}");
+    assert_eq!(retained.active_instances, 1, "{retained:?}");
+    assert_eq!(retained.host_capabilities, 1, "{retained:?}");
+    assert_eq!(retained.pending_instance_destructions, 0, "{retained:?}");
 
     let disposal = tokio::spawn(async move { native.dispose().await });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -259,6 +336,15 @@ async fn timed_out_native_call_defers_destruction_until_the_callback_returns() {
         !destroy_entered.exists(),
         "destruction entered while the timed-out callback still held the instance"
     );
+    let retained_during_cleanup = catalog.snapshot();
+    assert_eq!(
+        retained_during_cleanup.active_callbacks, 1,
+        "{retained_during_cleanup:?}"
+    );
+    assert_eq!(
+        retained_during_cleanup.active_instances, 1,
+        "{retained_during_cleanup:?}"
+    );
 
     std::fs::write(&call_release, b"release").unwrap();
     let report = tokio::time::timeout(Duration::from_secs(1), disposal)
@@ -266,7 +352,11 @@ async fn timed_out_native_call_defers_destruction_until_the_callback_returns() {
         .expect("cleanup did not join released native destruction")
         .unwrap();
     assert!(report.is_clean(), "{report:?}");
-    wait_for_file(&destroy_entered).await;
+    wait_for_catalog_marker(&destroy_entered, &catalog).await;
+    let released = catalog.snapshot();
+    assert_eq!(released.active_callbacks, 0, "{released:?}");
+    assert_eq!(released.active_instances, 0, "{released:?}");
+    assert_eq!(released.host_capabilities, 0, "{released:?}");
 }
 
 #[tokio::test]
@@ -274,16 +364,20 @@ async fn timed_out_factory_callback_poison_prevents_later_overlap() {
     let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(500));
     let factory = catalog.load(native_fixture()).unwrap();
     let runtime = Runtime::default();
-    assert!(matches!(
-        runtime
-            .root()
-            .apply(
-                factory.clone(),
-                json!({ "prefix": "slow:", "validate_delay_ms": 2_000 }),
-            )
-            .await,
-        Err(MetaError::Timeout("native config validation"))
-    ));
+    let timed_out = runtime
+        .root()
+        .apply(
+            factory.clone(),
+            json!({ "prefix": "slow:", "validate_delay_ms": 2_000 }),
+        )
+        .await;
+    assert!(
+        matches!(
+            timed_out,
+            Err(MetaError::Timeout("native prepare callback"))
+        ),
+        "unexpected native prepare timeout result: {timed_out:?}"
+    );
     let error = runtime
         .root()
         .apply(factory, json!({ "prefix": "later:" }))
@@ -328,13 +422,7 @@ async fn publication_failure_never_runs_native_destruction_on_the_executor() {
     wait_active(&upstream).await;
     let collision = runtime
         .root()
-        .apply(
-            Arc::new(EchoCollisionFactory(
-                PluginDescriptor::new(FactoryIdentity::builtin("echo-collision", "1"))
-                    .providing(Provision::new("echo", "fixture.echo", V1)),
-            )),
-            Value::Null,
-        )
+        .apply(Arc::new(EchoCollisionFactory), Value::Null)
         .await
         .unwrap();
     wait_active(&collision).await;
@@ -437,7 +525,7 @@ async fn dropping_all_runtime_owners_uses_the_reserved_native_finalizer() {
     drop(native);
     drop(upstream);
 
-    wait_for_file(&destroy_entered).await;
+    wait_for_catalog_marker(&destroy_entered, &catalog).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let snapshot = catalog.snapshot();
@@ -451,7 +539,12 @@ async fn dropping_all_runtime_owners_uses_the_reserved_native_finalizer() {
         }
     })
     .await
-    .expect("reserved native instance and factory finalizers did not drain");
+    .unwrap_or_else(|_| {
+        panic!(
+            "reserved native instance and factory finalizers did not drain: {:?}",
+            catalog.snapshot()
+        )
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -490,7 +583,7 @@ async fn blocked_native_finalization_enforces_the_live_instance_boundary() {
     drop(first_runtime);
     drop(first);
     drop(first_upstream);
-    wait_for_file(&destroy_entered).await;
+    wait_for_catalog_marker(&destroy_entered, &catalog).await;
 
     let blocked = catalog.snapshot();
     assert_eq!(blocked.active_instances, 1);
@@ -533,7 +626,12 @@ async fn blocked_native_finalization_enforces_the_live_instance_boundary() {
         }
     })
     .await
-    .expect("released destructor retained live-instance admission");
+    .unwrap_or_else(|_| {
+        panic!(
+            "released destructor retained live-instance admission: {:?}",
+            catalog.snapshot()
+        )
+    });
 
     let retry = second_runtime
         .root()
@@ -549,8 +647,13 @@ async fn blocked_native_finalization_enforces_the_live_instance_boundary() {
         }
     })
     .await
-    .expect("explicit cleanup did not release live-instance admission");
-    assert!(second_runtime.shutdown().await.is_clean());
+    .unwrap_or_else(|_| {
+        panic!(
+            "explicit cleanup did not release live-instance admission: {:?}",
+            catalog.snapshot()
+        )
+    });
+    assert_clean_shutdown(&second_runtime).await;
 }
 
 #[tokio::test]
@@ -562,13 +665,13 @@ async fn catalog_destruction_lane_bounds_concurrent_foreign_cleanup() {
     let catalog = NativeCatalog::new(options).unwrap();
     let first_runtime = Runtime::default();
     let second_runtime = Runtime::default();
-    let (first, _first_service) = apply_delayed_native(
+    let (first, first_service) = apply_delayed_native(
         &first_runtime,
         &catalog,
         json!({ "prefix": "first:", "destroy_delay_ms": 100 }),
     )
     .await;
-    let (second, _second_service) = apply_delayed_native(
+    let (second, second_service) = apply_delayed_native(
         &second_runtime,
         &catalog,
         json!({ "prefix": "second:", "destroy_delay_ms": 100 }),
@@ -590,8 +693,10 @@ async fn catalog_destruction_lane_bounds_concurrent_foreign_cleanup() {
     let snapshot = catalog.snapshot();
     assert_eq!(snapshot.peak_destructions, 1);
     assert_eq!(snapshot.active_destructions, 0);
-    assert!(first_runtime.shutdown().await.is_clean());
-    assert!(second_runtime.shutdown().await.is_clean());
+    drop(first_service);
+    drop(second_service);
+    assert_clean_shutdown(&first_runtime).await;
+    assert_clean_shutdown(&second_runtime).await;
 }
 
 #[test]
@@ -644,27 +749,19 @@ fn native_create_and_call_do_not_occupy_tokios_shared_blocking_pool() {
         let consumer = runtime
             .root()
             .apply(
-                Arc::new(CaptureFactory {
-                    descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                        "blocking-pool-client",
-                        "1",
-                    ))
-                    .requiring(Requirement::new("echo", "fixture.echo", V1)),
-                    slot: Arc::clone(&slot),
-                }),
+                Arc::new(CaptureFactory::new(
+                    "blocking-pool-client",
+                    Requirement::new("echo", "fixture.echo", V1),
+                    Arc::clone(&slot),
+                )),
                 Value::Null,
             )
             .await
             .unwrap();
         wait_active(&consumer).await;
-        let service = slot.lock().unwrap().clone().unwrap();
-        let call = tokio::spawn(async move {
-            service
-                .open()
-                .unwrap()
-                .unary(ServiceFrame::new(b"call".to_vec()))
-                .await
-        });
+        let service = slot.lock().unwrap().take().unwrap();
+        let call =
+            tokio::spawn(async move { service.invoke(Message::new(b"call".as_slice())).await });
         wait_for_file(&call_entered).await;
         let call_sentinel = tokio::time::timeout(
             Duration::from_millis(100),
@@ -679,6 +776,6 @@ fn native_create_and_call_do_not_occupy_tokios_shared_blocking_pool() {
         );
         assert!(create_sentinel, "native create occupied the blocking pool");
         assert!(call_sentinel, "native call occupied the blocking pool");
-        assert!(runtime.shutdown().await.is_clean());
+        assert_clean_shutdown(&runtime).await;
     });
 }

@@ -3,8 +3,8 @@ use super::{LOADER_CONTRACT_ID, LOADER_CONTRACT_VERSION, LOADER_SERVICE_KEY, Nat
 use async_trait::async_trait;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use rsi_meta::{
-    ConfigValue, Context, FactoryIdentity, FiberHandle, FiberSnapshot, MetaError, PluginDescriptor,
-    PluginFactory, ProviderChannel, Provision, Result, ServiceEndpoint, ServiceFrame,
+    ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberHandle, FiberSnapshot, Message,
+    MetaError, PluginFactory, PreparedActivation, ProviderChannel, Result, ServiceEndpoint,
 };
 use serde::ser::{SerializeMap as _, SerializeStruct as _};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,29 @@ fn valid_loader_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_LOADER_ID_BYTES
 }
 
+fn prepare_loader_config(desired: &ConfigValue) -> Result<PreparedActivation> {
+    let parsed = LoaderConfig::deserialize(desired)
+        .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+    if parsed.entries.len() > MAX_LOADER_ENTRIES {
+        return Err(MetaError::InvalidInput(format!(
+            "loader accepts at most {MAX_LOADER_ENTRIES} entries"
+        )));
+    }
+    let mut ids = BTreeSet::new();
+    if parsed
+        .entries
+        .iter()
+        .any(|entry| !valid_loader_id(&entry.id) || !ids.insert(entry.id.clone()))
+    {
+        return Err(MetaError::InvalidInput(format!(
+            "loader entry ids must be unique and contain 1..={MAX_LOADER_ID_BYTES} bytes"
+        )));
+    }
+    let normalized =
+        serde_json::to_value(parsed).map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+    Ok(PreparedActivation::new(normalized))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoaderConfig {
@@ -45,53 +68,28 @@ pub struct LoaderEntry {
 #[derive(Clone, Debug)]
 pub struct LoaderFactory {
     catalog: NativeCatalog,
-    descriptor: PluginDescriptor,
 }
 
 impl LoaderFactory {
     pub fn new(catalog: NativeCatalog) -> Self {
-        Self {
-            catalog,
-            descriptor: PluginDescriptor::new(FactoryIdentity::builtin("rsi.meta.loader", "1"))
-                .providing(Provision::new(
-                    LOADER_SERVICE_KEY,
-                    LOADER_CONTRACT_ID,
-                    LOADER_CONTRACT_VERSION,
-                )),
-        }
+        Self { catalog }
     }
 }
 
 #[async_trait]
 impl PluginFactory for LoaderFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        FactoryIdentity::builtin("rsi.meta.loader", "1")
     }
 
-    fn validate_config(&self, config: ConfigValue) -> Result<ConfigValue> {
-        let parsed: LoaderConfig = serde_json::from_value(config)
-            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        if parsed.entries.len() > MAX_LOADER_ENTRIES {
-            return Err(MetaError::InvalidInput(format!(
-                "loader accepts at most {MAX_LOADER_ENTRIES} entries"
-            )));
-        }
-        let mut ids = BTreeSet::new();
-        if parsed
-            .entries
-            .iter()
-            .any(|entry| !valid_loader_id(&entry.id) || !ids.insert(entry.id.clone()))
-        {
-            return Err(MetaError::InvalidInput(format!(
-                "loader entry ids must be unique and contain 1..={MAX_LOADER_ID_BYTES} bytes"
-            )));
-        }
-        serde_json::to_value(parsed).map_err(|error| MetaError::InvalidInput(error.to_string()))
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        prepare_loader_config(desired)
     }
 
-    async fn activate(&self, context: Context, config: Arc<ConfigValue>) -> Result<()> {
-        let parsed = LoaderConfig::deserialize(config.as_ref())
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let parsed = LoaderConfig::deserialize(plan.config().as_ref())
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        let context = plan.context().clone();
         let preflight_width = self
             .catalog
             .load_concurrency_limit()
@@ -166,7 +164,9 @@ impl PluginFactory for LoaderFactory {
                 .map_err(|error| MetaError::Activation(error.to_owned()))?
                 .publish(handle);
         }
-        context.provide(
+        // The activation root effect retains this supply through generation
+        // retirement; the exact SupplyHandle is needed only for early withdrawal.
+        let _loader_service = context.provide(
             LOADER_SERVICE_KEY,
             LOADER_CONTRACT_ID,
             LOADER_CONTRACT_VERSION,
@@ -175,7 +175,8 @@ impl PluginFactory for LoaderFactory {
                 catalog: self.catalog.clone(),
                 state,
             }),
-        )
+        )?;
+        Ok(())
     }
 }
 
@@ -369,15 +370,15 @@ impl ServiceEndpoint for LoaderEndpoint {
         invocation: rsi_meta::InvocationContext,
         mut channel: ProviderChannel<'_>,
     ) -> Result<()> {
-        let maximum_frame_bytes = invocation
+        let maximum_message_bytes = invocation
             .provider_context()
             .runtime()
             .limits()
             .payloads
-            .maximum_frame_bytes;
+            .maximum_message_bytes;
         let cancellation = channel.cancellation();
-        while let Some(frame) = channel.recv().await {
-            let mut result = match serde_json::from_slice::<LoaderCommand>(frame.as_bytes()) {
+        while let Some(message) = channel.recv().await {
+            let mut result = match serde_json::from_slice::<LoaderCommand>(message.as_bytes()) {
                 Ok(command) => {
                     tokio::select! {
                         biased;
@@ -387,8 +388,9 @@ impl ServiceEndpoint for LoaderEndpoint {
                 }
                 Err(error) => CommandResult::immediate(LoaderResponse::error(error)),
             };
-            let response = serialize_response(&result.response, &self.state, maximum_frame_bytes)?;
-            channel.send(response.frame).await?;
+            let response =
+                serialize_response(&result.response, &self.state, maximum_message_bytes)?;
+            channel.send(response.message).await?;
             if response.complete
                 && let Some(delivered) = result.delivered.take()
             {
@@ -399,13 +401,13 @@ impl ServiceEndpoint for LoaderEndpoint {
     }
 }
 
-struct FrameBudgetWriter {
+struct MessageBudgetWriter {
     bytes: Vec<u8>,
     maximum: usize,
     exceeded: bool,
 }
 
-impl FrameBudgetWriter {
+impl MessageBudgetWriter {
     fn new(maximum: usize) -> Self {
         Self {
             bytes: Vec::new(),
@@ -415,7 +417,7 @@ impl FrameBudgetWriter {
     }
 }
 
-impl io::Write for FrameBudgetWriter {
+impl io::Write for MessageBudgetWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let Some(end) = self.bytes.len().checked_add(bytes.len()) else {
             self.exceeded = true;
@@ -442,7 +444,7 @@ impl io::Write for FrameBudgetWriter {
 }
 
 struct SerializedResponse {
-    frame: ServiceFrame,
+    message: Message,
     complete: bool,
 }
 
@@ -470,10 +472,10 @@ fn serialize_response(
 }
 
 fn serialize_value(response: &impl Serialize, maximum: usize) -> Result<SerializedResponse> {
-    let mut writer = FrameBudgetWriter::new(maximum);
+    let mut writer = MessageBudgetWriter::new(maximum);
     match serde_json::to_writer(&mut writer, response) {
         Ok(()) => Ok(SerializedResponse {
-            frame: ServiceFrame::new(writer.bytes),
+            message: Message::new(writer.bytes),
             complete: true,
         }),
         Err(_) if writer.exceeded => {
@@ -482,7 +484,7 @@ fn serialize_value(response: &impl Serialize, maximum: usize) -> Result<Serializ
                 Err(MetaError::PayloadTooLarge { maximum })
             } else {
                 Ok(SerializedResponse {
-                    frame: ServiceFrame::new(RESPONSE_TOO_LARGE_JSON.to_vec()),
+                    message: Message::new(RESPONSE_TOO_LARGE_JSON.to_vec()),
                     complete: false,
                 })
             }
@@ -718,29 +720,145 @@ impl LoaderResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsi_meta::{FiberGeneration, FiberId, FiberState};
+    use rsi_meta::{FiberGeneration, FiberId, FiberState, Requirement};
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct PassiveFactory {
-        descriptor: PluginDescriptor,
+        identity: FactoryIdentity,
     }
 
     #[async_trait]
     impl PluginFactory for PassiveFactory {
-        fn descriptor(&self) -> &PluginDescriptor {
-            &self.descriptor
+        fn identity(&self) -> FactoryIdentity {
+            self.identity.clone()
         }
 
-        async fn activate(&self, _context: Context, _config: Arc<ConfigValue>) -> Result<()> {
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, _plan: ActivationPlan) -> Result<()> {
             Ok(())
         }
     }
 
     fn passive_factory(name: &'static str) -> Arc<dyn PluginFactory> {
         Arc::new(PassiveFactory {
-            descriptor: PluginDescriptor::new(FactoryIdentity::builtin(name, "1")),
+            identity: FactoryIdentity::builtin(name, "1"),
         })
+    }
+
+    #[derive(Debug)]
+    struct LoaderProbeFactory {
+        response: Arc<Mutex<Option<Value>>>,
+    }
+
+    #[async_trait]
+    impl PluginFactory for LoaderProbeFactory {
+        fn identity(&self) -> FactoryIdentity {
+            FactoryIdentity::builtin("loader-probe", "1")
+        }
+
+        fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(
+                PreparedActivation::new(desired.clone()).requiring(Requirement::new(
+                    LOADER_SERVICE_KEY,
+                    LOADER_CONTRACT_ID,
+                    LOADER_CONTRACT_VERSION,
+                )),
+            )
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            let service = plan.inject(LOADER_SERVICE_KEY).ok_or_else(|| {
+                MetaError::Activation("Loader service was not injected".to_owned())
+            })?;
+            let response = service
+                .invoke(Message::new(br#"{"operation":"inspect"}"#.as_slice()))
+                .await?;
+            let response = serde_json::from_slice(response.as_bytes())
+                .map_err(|error| MetaError::Activation(error.to_string()))?;
+            *self.response.lock().expect("probe response poisoned") = Some(response);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn preparation_retains_the_exact_normalized_loader_config() {
+        let desired = json!({
+            "entries": [{
+                "id": "normalized",
+                "artifact": "plugin.so"
+            }]
+        });
+
+        let prepared = prepare_loader_config(&desired).unwrap();
+
+        assert_eq!(
+            prepared.config(),
+            &json!({
+                "entries": [{
+                    "id": "normalized",
+                    "artifact": "plugin.so",
+                    "config": null
+                }]
+            })
+        );
+        assert!(prepared.requirements().is_empty());
+        assert_eq!(
+            desired,
+            json!({
+                "entries": [{
+                    "id": "normalized",
+                    "artifact": "plugin.so"
+                }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_root_retains_the_loader_supply_after_activation_returns() {
+        let cache = tempfile::tempdir().unwrap();
+        let catalog = NativeCatalog::new(crate::CatalogOptions::new(cache.path())).unwrap();
+        let runtime = rsi_meta::Runtime::default();
+        let loader = runtime
+            .root()
+            .apply(
+                Arc::new(LoaderFactory::new(catalog)),
+                json!({ "entries": [] }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            loader.wait_settled().await.state,
+            FiberState::Active
+        ));
+
+        let response = Arc::new(Mutex::new(None));
+        let probe = runtime
+            .root()
+            .apply(
+                Arc::new(LoaderProbeFactory {
+                    response: Arc::clone(&response),
+                }),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            probe.wait_settled().await.state,
+            FiberState::Active
+        ));
+        assert_eq!(
+            *response.lock().expect("probe response poisoned"),
+            Some(json!({ "ok": true, "fibers": {} }))
+        );
+
+        assert!(probe.dispose().await.is_clean());
+        assert!(loader.dispose().await.is_clean());
+        assert!(runtime.shutdown().await.is_complete());
     }
 
     #[test]
@@ -815,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn maximum_inspection_uses_a_frame_bounded_diagnostic() {
+    fn maximum_inspection_uses_a_message_bounded_diagnostic() {
         let entries = (0..MAX_LOADER_ENTRIES)
             .map(|index| (format!("entry-{index}"), index))
             .collect();
@@ -834,7 +952,7 @@ mod tests {
         };
 
         let serialized = serialize_value(&response, RESPONSE_TOO_LARGE_JSON.len()).unwrap();
-        assert_eq!(serialized.frame.as_bytes(), RESPONSE_TOO_LARGE_JSON);
+        assert_eq!(serialized.message.as_bytes(), RESPONSE_TOO_LARGE_JSON);
         assert!(!serialized.complete);
         assert_eq!(constructed.load(Ordering::Relaxed), 1);
         let Err(error) = serialize_value(&response, RESPONSE_TOO_LARGE_JSON.len() - 1) else {

@@ -24,6 +24,12 @@ impl StagedModuleLoad {
             .expect("a staged module load retains its artifact")
     }
 
+    pub(crate) fn catalog(&self) -> &Arc<CatalogInner> {
+        self.catalog
+            .as_ref()
+            .expect("a staged module load retains its catalog lease")
+    }
+
     pub(crate) fn into_parts(mut self) -> (StagedArtifact, Arc<CatalogInner>) {
         let artifact = self
             .artifact
@@ -55,7 +61,7 @@ impl NativeCatalog {
             .retain(|_, module| module.strong_count() != 0);
         let mut digest = Self::source_digest(source)?;
         if let Some(module) = self.live_module(&digest) {
-            return Ok(self.factory_for(module));
+            return Ok(Self::factory_for(module));
         }
 
         let mut staged = None;
@@ -73,15 +79,15 @@ impl NativeCatalog {
             }
             if let Some(module) = self.live_module(&digest) {
                 if staged.is_some() {
-                    return Ok(self.factory_for(module));
+                    return Ok(Self::factory_for(module));
                 }
                 let confirmed = Self::source_digest(source)?;
                 if confirmed == digest {
-                    return Ok(self.factory_for(module));
+                    return Ok(Self::factory_for(module));
                 }
                 let authoritative = self.stage_source(source)?;
                 if authoritative.digest == digest {
-                    return Ok(self.factory_for(module));
+                    return Ok(Self::factory_for(module));
                 }
                 digest.clone_from(&authoritative.digest);
                 staged = Some(authoritative);
@@ -100,7 +106,7 @@ impl NativeCatalog {
                 continue;
             }
             let module = self.load_staged(authoritative, &digest, &load_gate)?;
-            return Ok(self.factory_for(module));
+            return Ok(Self::factory_for(module));
         }
     }
 
@@ -149,6 +155,7 @@ impl NativeCatalog {
                         worker_digest,
                         executor,
                         factory_destruction_permit,
+                        timeout,
                     )
                 }
                 .map(Arc::new);
@@ -159,7 +166,7 @@ impl NativeCatalog {
             Ok(result) => result?,
             Err(RecvTimeoutError::Timeout) => {
                 load_gate.timed_out.store(true, Ordering::Release);
-                return Err(LoaderError::Timeout("library load, entry, or descriptor"));
+                return Err(LoaderError::Timeout("native module initialization"));
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(LoaderError::Callback {
@@ -178,12 +185,7 @@ impl NativeCatalog {
         }
     }
 
-    fn factory_for(&self, module: Arc<NativeModule>) -> Arc<NativeFactory> {
-        Arc::new(NativeFactory {
-            descriptor: module.descriptor.clone(),
-            module,
-            callback_timeout: self.inner.options.callback_timeout,
-            executor: self.inner.executor.clone(),
-        })
+    fn factory_for(module: Arc<NativeModule>) -> Arc<NativeFactory> {
+        Arc::new(NativeFactory::from_module(module))
     }
 }

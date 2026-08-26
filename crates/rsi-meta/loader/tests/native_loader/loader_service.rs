@@ -69,7 +69,7 @@ async fn initial_loader_batch_respects_a_single_catalog_load_slot() {
     assert_eq!(snapshot.peak_loads, 1);
     assert_eq!(snapshot.rejected_loads, 0);
     assert_eq!(runtime.snapshot().fibers.len(), 3);
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -151,7 +151,7 @@ async fn loader_serializes_preflight_for_entries_sharing_one_native_module() {
     );
     wait_active(&loader).await;
     assert_eq!(runtime.snapshot().fibers.len(), 3);
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -201,7 +201,7 @@ async fn loader_capacity_preflight_publishes_no_child() {
         2,
         "capacity preflight published a child Fiber"
     );
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -277,7 +277,7 @@ async fn cancelled_initial_preflight_cannot_accumulate_native_workers() {
     .await
     .expect("cancelled initial preflight retained load admission after worker exit");
     drop(rejected);
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -297,24 +297,21 @@ async fn concurrent_loader_commands_cannot_claim_the_same_id_twice() {
     let client = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "concurrent-loader-client",
-                    "1",
-                ))
-                .requiring(Requirement::new(
+            Arc::new(CaptureFactory::new(
+                "concurrent-loader-client",
+                Requirement::new(
                     LOADER_SERVICE_KEY,
                     LOADER_CONTRACT_ID,
                     LOADER_CONTRACT_VERSION,
-                )),
-                slot: Arc::clone(&slot),
-            }),
+                ),
+                Arc::clone(&slot),
+            )),
             Value::Null,
         )
         .await
         .unwrap();
     wait_active(&client).await;
-    let service = slot.lock().unwrap().clone().unwrap();
+    let service = slot.lock().unwrap().take().unwrap();
     let command = serde_json::to_vec(&json!({
         "operation": "load",
         "id": "same-id",
@@ -323,11 +320,8 @@ async fn concurrent_loader_commands_cannot_claim_the_same_id_twice() {
     }))
     .unwrap();
 
-    let first = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(command.clone()));
-    let second = service.open().unwrap().unary(ServiceFrame::new(command));
+    let first = service.invoke(Message::new(command.clone()));
+    let second = service.invoke(Message::new(command));
     let (first, second) = tokio::join!(first, second);
     let responses = [first.unwrap(), second.unwrap()]
         .map(|frame| serde_json::from_slice::<Value>(frame.as_bytes()).unwrap());
@@ -346,7 +340,8 @@ async fn concurrent_loader_commands_cannot_claim_the_same_id_twice() {
             .count(),
         1
     );
-    assert!(runtime.shutdown().await.is_clean());
+    drop(service);
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -376,11 +371,7 @@ async fn cancelled_dynamic_loads_cannot_accumulate_tasks_or_id_claims_before_adm
                 "config": {}
             }))
             .unwrap();
-            service
-                .open()
-                .unwrap()
-                .unary(ServiceFrame::new(command))
-                .await
+            service.invoke(Message::new(command)).await
         }
     });
     wait_for_file(&entry_log).await;
@@ -396,12 +387,7 @@ async fn cancelled_dynamic_loads_cannot_accumulate_tasks_or_id_claims_before_adm
             "config": {}
         }))
         .unwrap();
-        let response = service
-            .open()
-            .unwrap()
-            .unary(ServiceFrame::new(command))
-            .await
-            .unwrap();
+        let response = service.invoke(Message::new(command)).await.unwrap();
         let response: Value = serde_json::from_slice(response.as_bytes()).unwrap();
         assert_eq!(response["error"], "native operation is busy: load");
     }
@@ -427,15 +413,11 @@ async fn cancelled_dynamic_loads_cannot_accumulate_tasks_or_id_claims_before_adm
         "config": { "prefix": "retry:" }
     }))
     .unwrap();
-    let response = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(retry))
-        .await
-        .unwrap();
+    let response = service.invoke(Message::new(retry)).await.unwrap();
     let response: Value = serde_json::from_slice(response.as_bytes()).unwrap();
     assert_eq!(response["ok"], true, "{response}");
-    assert!(runtime.shutdown().await.is_clean());
+    drop(service);
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -462,24 +444,21 @@ async fn cancelling_a_loader_command_releases_its_id_reservation() {
     let client = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "cancelled-loader-client",
-                    "1",
-                ))
-                .requiring(Requirement::new(
+            Arc::new(CaptureFactory::new(
+                "cancelled-loader-client",
+                Requirement::new(
                     LOADER_SERVICE_KEY,
                     LOADER_CONTRACT_ID,
                     LOADER_CONTRACT_VERSION,
-                )),
-                slot: Arc::clone(&slot),
-            }),
+                ),
+                Arc::clone(&slot),
+            )),
             Value::Null,
         )
         .await
         .unwrap();
     wait_active(&client).await;
-    let service = slot.lock().unwrap().clone().unwrap();
+    let service = slot.lock().unwrap().take().unwrap();
     let markers = tempfile::tempdir().unwrap();
     let entered = markers.path().join("create-entered");
     let release = markers.path().join("create-release");
@@ -501,13 +480,7 @@ async fn cancelling_a_loader_command_releases_its_id_reservation() {
             }
         }))
         .unwrap();
-        async move {
-            service
-                .open()
-                .unwrap()
-                .unary(ServiceFrame::new(command))
-                .await
-        }
+        async move { service.invoke(Message::new(command)).await }
     });
     wait_for_file(&entered).await;
     first.abort();
@@ -520,12 +493,7 @@ async fn cancelling_a_loader_command_releases_its_id_reservation() {
         "config": {}
     }))
     .unwrap();
-    let overlapping = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(overlapping))
-        .await
-        .unwrap();
+    let overlapping = service.invoke(Message::new(overlapping)).await.unwrap();
     let overlapping: Value = serde_json::from_slice(overlapping.as_bytes()).unwrap();
     assert_eq!(
         overlapping["error"], "loader entry id already exists",
@@ -549,15 +517,11 @@ async fn cancelling_a_loader_command_releases_its_id_reservation() {
         "config": { "prefix": "retry:" }
     }))
     .unwrap();
-    let response = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(retry))
-        .await
-        .unwrap();
+    let response = service.invoke(Message::new(retry)).await.unwrap();
     let response: Value = serde_json::from_slice(response.as_bytes()).unwrap();
     assert_eq!(response["ok"], true, "{response}");
-    assert!(runtime.shutdown().await.is_clean());
+    drop(service);
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -584,24 +548,21 @@ async fn loader_id_remains_reserved_until_unload_cleanup_finishes() {
     let client = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "unloading-loader-client",
-                    "1",
-                ))
-                .requiring(Requirement::new(
+            Arc::new(CaptureFactory::new(
+                "unloading-loader-client",
+                Requirement::new(
                     LOADER_SERVICE_KEY,
                     LOADER_CONTRACT_ID,
                     LOADER_CONTRACT_VERSION,
-                )),
-                slot: Arc::clone(&slot),
-            }),
+                ),
+                Arc::clone(&slot),
+            )),
             Value::Null,
         )
         .await
         .unwrap();
     wait_active(&client).await;
-    let service = slot.lock().unwrap().clone().unwrap();
+    let service = slot.lock().unwrap().take().unwrap();
     let markers = tempfile::tempdir().unwrap();
     let destroy_entered = markers.path().join("destroy-entered");
     let destroy_release = markers.path().join("destroy-release");
@@ -616,12 +577,7 @@ async fn loader_id_remains_reserved_until_unload_cleanup_finishes() {
         }
     }))
     .unwrap();
-    let load_response = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(initial))
-        .await
-        .unwrap();
+    let load_response = service.invoke(Message::new(initial)).await.unwrap();
     assert_eq!(
         serde_json::from_slice::<Value>(load_response.as_bytes()).unwrap()["ok"],
         true
@@ -635,11 +591,7 @@ async fn loader_id_remains_reserved_until_unload_cleanup_finishes() {
                 "id": "stable"
             }))
             .unwrap();
-            service
-                .open()
-                .unwrap()
-                .unary(ServiceFrame::new(command))
-                .await
+            service.invoke(Message::new(command)).await
         }
     });
     wait_for_file(&destroy_entered).await;
@@ -650,12 +602,7 @@ async fn loader_id_remains_reserved_until_unload_cleanup_finishes() {
         "config": { "prefix": "conflicting:" }
     }))
     .unwrap();
-    let response = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(conflicting))
-        .await
-        .unwrap();
+    let response = service.invoke(Message::new(conflicting)).await.unwrap();
     let response: Value = serde_json::from_slice(response.as_bytes()).unwrap();
     assert_eq!(response["error"], "loader entry id already exists");
 
@@ -672,15 +619,11 @@ async fn loader_id_remains_reserved_until_unload_cleanup_finishes() {
         "config": { "prefix": "retry:" }
     }))
     .unwrap();
-    let response = service
-        .open()
-        .unwrap()
-        .unary(ServiceFrame::new(retry))
-        .await
-        .unwrap();
+    let response = service.invoke(Message::new(retry)).await.unwrap();
     let response: Value = serde_json::from_slice(response.as_bytes()).unwrap();
     assert_eq!(response["ok"], true, "{response}");
-    assert!(runtime.shutdown().await.is_clean());
+    drop(service);
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -751,7 +694,7 @@ async fn loader_preflight_runs_distinct_native_artifacts_with_bounded_concurrenc
     assert!(concurrent, "loader preflight serialized distinct artifacts");
     assert_eq!(observed_catalog.snapshot().peak_loads, 2);
     assert_eq!(observed_catalog.snapshot().rejected_loads, 0);
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
 }
 
 #[tokio::test]
@@ -831,5 +774,5 @@ async fn loader_distinct_module_preflight_respects_runtime_preparation_limit() {
     assert_eq!(preparations.high_watermark, 1);
     assert_eq!(preparations.rejected, 0);
     assert_eq!(runtime.snapshot().fibers.len(), 3);
-    assert!(runtime.shutdown().await.is_clean());
+    assert_clean_shutdown(&runtime).await;
 }

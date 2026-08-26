@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use rsi_meta::{
-    Context, ContractVersion, DeadlineLimits, ExecutionLimits, FactoryIdentity, FiberState,
-    MetaError, PluginDescriptor, PluginFactory, ProviderChannel, Provision, Requirement, Result,
-    Runtime, RuntimeLimits, ServiceEndpoint, ServiceFrame, ServiceHandle, TopologyLimits,
+    ActivationPlan, Capability, ConfigValue, ContractVersion, DeadlineLimits, ExecutionLimits,
+    FactoryIdentity, FiberState, Message, MetaError, PluginFactory, PreparedActivation,
+    ProviderChannel, Requirement, Result, Runtime, RuntimeLimits, ServiceEndpoint, TopologyLimits,
 };
 use rsi_meta_loader::{
     CatalogOptions, LOADER_CONTRACT_ID, LOADER_CONTRACT_VERSION, LOADER_SERVICE_KEY, LoaderError,
@@ -10,7 +10,7 @@ use rsi_meta_loader::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -55,7 +55,7 @@ fn catalog_with_timeout(timeout: Duration) -> (tempfile::TempDir, NativeCatalog)
 }
 
 fn wait_for_staging_release(catalog: &NativeCatalog) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while catalog.snapshot().staging_bytes != 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -63,14 +63,14 @@ fn wait_for_staging_release(catalog: &NativeCatalog) {
 }
 
 fn wait_for_callback_quiescence(catalog: &NativeCatalog) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while catalog.snapshot().active_callbacks != 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(catalog.snapshot().active_callbacks, 0);
 }
 
-fn wait_for_catalog_ownership_release(cache: &std::path::Path) -> NativeCatalog {
+fn wait_for_catalog_ownership_release(cache: &Path) -> NativeCatalog {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match NativeCatalog::new(CatalogOptions::new(cache)) {
@@ -84,407 +84,276 @@ fn wait_for_catalog_ownership_release(cache: &std::path::Path) -> NativeCatalog 
 }
 
 #[cfg(target_os = "linux")]
-fn failed_entry_fixture(status: u32) -> (tempfile::TempDir, PathBuf) {
+fn compile_c_fixture(stem: &str, code: &str) -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("failed_entry.c");
-    let library = directory.path().join("libfailed_entry.so");
-    let code = format!(
-        r#"
+    let source = directory.path().join(format!("{stem}.c"));
+    let library = directory.path().join(format!("lib{stem}.so"));
+    std::fs::write(&source, code).unwrap();
+    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let status = std::process::Command::new(compiler)
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
+        .args(["-shared", "-fPIC"])
+        .arg(&source)
+        .arg("-I")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugin/include"))
+        .arg("-o")
+        .arg(&library)
+        .status()
+        .unwrap_or_else(|error| panic!("compile {stem} native fixture: {error}"));
+    assert!(status.success(), "{stem} native fixture failed to build");
+    (directory, library)
+}
+
+#[cfg(target_os = "linux")]
+fn v1_only_fixture() -> (tempfile::TempDir, PathBuf) {
+    compile_c_fixture(
+        "v1_only",
+        r"
+#include <stdint.h>
+uint32_t rsi_meta_plugin_entry_v1(void *output, uint32_t capacity) {
+  (void)output; (void)capacity;
+  return 0;
+}
+",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn failed_entry_fixture(status: u32, exchange_log: &Path) -> (tempfile::TempDir, PathBuf) {
+    compile_c_fixture(
+        "failed_entry",
+        &format!(
+            r#"
+#include <stdio.h>
+#include <string.h>
 #include "rsi_meta_plugin.h"
 
-uint32_t rsi_meta_plugin_entry_v1(rsi_meta_plugin_api *output,
-                                  size_t capacity) {{
-  (void)output;
-  (void)capacity;
+#define ISSUER 7000u
+
+static void mark(char value) {{
+  FILE *log = fopen("{}", "ab");
+  if (log != NULL) {{ fputc(value, log); fclose(log); }}
+}}
+
+static uint32_t exchange(void *state, uint32_t opcode, const void *input,
+                         uint32_t input_size, void *output,
+                         uint32_t output_capacity) {{
+  (void)state; (void)input; (void)input_size;
+  if (opcode == RSI_META_PLUGIN_IDENTITY) {{
+    mark('i');
+    return RSI_META_STATUS_PROTOCOL_ERROR;
+  }}
+  if (opcode == RSI_META_PLUGIN_DESTROY_FACTORY ||
+      opcode == RSI_META_PLUGIN_FINALIZE) {{
+    if (output == NULL || output_capacity < sizeof(rsi_meta_basic_output))
+      return RSI_META_STATUS_BUFFER_TOO_SMALL;
+    rsi_meta_basic_output *value = output;
+    memset(value, 0, sizeof(*value));
+    value->prefix.struct_size = sizeof(*value);
+    mark(opcode == RSI_META_PLUGIN_DESTROY_FACTORY ? 'd' : 'f');
+    return RSI_META_STATUS_OK;
+  }}
+  return RSI_META_STATUS_UNSUPPORTED;
+}}
+
+uint32_t rsi_meta_plugin_entry_v2(const rsi_meta_host_table *host,
+                                  rsi_meta_plugin_table *output,
+                                  uint32_t capacity) {{
+  (void)host;
+  if (output == NULL || capacity < sizeof(*output))
+    return RSI_META_STATUS_INVALID_ARGUMENT;
+  memset(output, 0, sizeof(*output));
+  output->header = (rsi_meta_table_header){{RSI_META_ABI_MAJOR, RSI_META_ABI_MINOR,
+                                            sizeof(*output), 0u}};
+  output->issuer = ISSUER;
+  output->state = (void *)(uintptr_t)1;
+  output->exchange = exchange;
+  output->factory = (rsi_meta_cap_id){{ISSUER, 1u, 1u,
+      RSI_META_CAP_KIND_FACTORY, RSI_META_RIGHT_RETAIN | RSI_META_RIGHT_MUTATE}};
   return {status};
 }}
-"#
-    );
-    std::fs::write(&source, code).unwrap();
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-    let status = std::process::Command::new(compiler)
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
-        .args(["-shared", "-fPIC"])
-        .arg(&source)
-        .arg("-I")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugin/include"))
-        .arg("-o")
-        .arg(&library)
-        .status()
-        .expect("compile failed-entry native fixture");
-    assert!(
-        status.success(),
-        "failed-entry native fixture failed to build"
-    );
-    (directory, library)
+"#,
+            exchange_log.display()
+        ),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn malformed_buffer_fixture(release_marker: &std::path::Path) -> (tempfile::TempDir, PathBuf) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("malformed_buffer.c");
-    let library = directory.path().join("libmalformed_buffer.so");
-    let code = format!(
-        r#"
+fn malformed_output_fixture(
+    release_marker: &Path,
+    finalize_marker: &Path,
+) -> (tempfile::TempDir, PathBuf) {
+    compile_c_fixture(
+        "malformed_output",
+        &format!(
+            r#"
 #include <stdio.h>
 #include <string.h>
 #include "rsi_meta_plugin.h"
 
-static uint32_t descriptor(void *handle, rsi_meta_buffer *output) {{
-  (void)handle;
-  output->ptr = NULL;
-  output->len = 1;
-  output->capacity = 1;
-  return RSI_META_STATUS_OK;
-}}
-
-static uint32_t validate_config(void *handle, const uint8_t *input,
-                                size_t input_len, rsi_meta_buffer *output) {{
-  (void)handle; (void)input; (void)input_len;
-  *output = (rsi_meta_buffer){{NULL, 0, 0}};
-  return RSI_META_STATUS_FAILED;
-}}
-
-static uint32_t create_instance(void *handle, const uint8_t *input,
-                                size_t input_len, void **instance,
-                                rsi_meta_buffer *output) {{
-  (void)handle; (void)input; (void)input_len;
-  *instance = NULL;
-  *output = (rsi_meta_buffer){{NULL, 0, 0}};
-  return RSI_META_STATUS_FAILED;
-}}
-
-static uint32_t call_instance(void *instance, const rsi_meta_host_api *host,
-                              const uint8_t *service, size_t service_len,
-                              const uint8_t *request, size_t request_len,
-                              rsi_meta_buffer *output) {{
-  (void)instance; (void)host; (void)service; (void)service_len;
-  (void)request; (void)request_len;
-  *output = (rsi_meta_buffer){{NULL, 0, 0}};
-  return RSI_META_STATUS_FAILED;
-}}
-
-static void destroy_handle(void *handle) {{ (void)handle; }}
-
-static void release_buffer(rsi_meta_buffer buffer) {{
-  (void)buffer;
-  FILE *marker = fopen("{}", "wb");
-  if (marker != NULL) {{
-    fputs("released", marker);
-    fclose(marker);
+#define ISSUER 7001u
+static uint32_t exchange(void *state, uint32_t opcode, const void *input,
+                         uint32_t input_size, void *output,
+                         uint32_t output_capacity) {{
+  (void)state; (void)input; (void)input_size;
+  if (opcode == RSI_META_PLUGIN_IDENTITY) {{
+    if (output == NULL || output_capacity < sizeof(rsi_meta_bytes_output))
+      return RSI_META_STATUS_BUFFER_TOO_SMALL;
+    rsi_meta_bytes_output *value = output;
+    memset(value, 0, sizeof(*value));
+    value->prefix.struct_size = sizeof(*value);
+    value->prefix.release = (rsi_meta_release_id){{ISSUER, 2u, 1u}};
+    value->bytes.ptr = NULL;
+    value->bytes.len = 1u;
+    return RSI_META_STATUS_OK;
   }}
+  if (opcode == RSI_META_PLUGIN_RELEASE_OUTPUT) {{
+    FILE *marker = fopen("{}", "ab");
+    if (marker != NULL) {{ fputc('x', marker); fclose(marker); }}
+    return RSI_META_STATUS_OK;
+  }}
+  if (opcode == RSI_META_PLUGIN_DESTROY_FACTORY ||
+      opcode == RSI_META_PLUGIN_FINALIZE) {{
+    if (output == NULL || output_capacity < sizeof(rsi_meta_basic_output))
+      return RSI_META_STATUS_BUFFER_TOO_SMALL;
+    rsi_meta_basic_output *value = output;
+    memset(value, 0, sizeof(*value));
+    value->prefix.struct_size = sizeof(*value);
+    if (opcode == RSI_META_PLUGIN_FINALIZE) {{
+      FILE *marker = fopen("{}", "wb");
+      if (marker != NULL) {{ fputs("finalized", marker); fclose(marker); }}
+    }}
+    return RSI_META_STATUS_OK;
+  }}
+  return RSI_META_STATUS_UNSUPPORTED;
 }}
 
-uint32_t rsi_meta_plugin_entry_v1(rsi_meta_plugin_api *output,
-                                  size_t capacity) {{
-  if (output == NULL || capacity < sizeof(*output)) {{
+uint32_t rsi_meta_plugin_entry_v2(const rsi_meta_host_table *host,
+                                  rsi_meta_plugin_table *output,
+                                  uint32_t capacity) {{
+  (void)host;
+  if (output == NULL || capacity < sizeof(*output))
     return RSI_META_STATUS_INVALID_ARGUMENT;
-  }}
   memset(output, 0, sizeof(*output));
-  output->abi_major = RSI_META_ABI_MAJOR;
-  output->abi_minor = RSI_META_ABI_MINOR;
-  output->struct_size = sizeof(*output);
-  output->factory_handle = (void *)(uintptr_t)1;
-  output->descriptor = descriptor;
-  output->validate_config = validate_config;
-  output->create = create_instance;
-  output->call = call_instance;
-  output->destroy_instance = destroy_handle;
-  output->destroy_factory = destroy_handle;
-  output->release_buffer = release_buffer;
+  output->header = (rsi_meta_table_header){{RSI_META_ABI_MAJOR, RSI_META_ABI_MINOR,
+                                            sizeof(*output), 0u}};
+  output->issuer = ISSUER;
+  output->state = (void *)(uintptr_t)1;
+  output->exchange = exchange;
+  output->factory = (rsi_meta_cap_id){{ISSUER, 1u, 1u,
+      RSI_META_CAP_KIND_FACTORY, RSI_META_RIGHT_RETAIN | RSI_META_RIGHT_MUTATE}};
   return RSI_META_STATUS_OK;
 }}
 "#,
-        release_marker.display()
-    );
-    std::fs::write(&source, code).unwrap();
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-    let status = std::process::Command::new(compiler)
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
-        .args(["-shared", "-fPIC"])
-        .arg(&source)
-        .arg("-I")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugin/include"))
-        .arg("-o")
-        .arg(&library)
-        .status()
-        .expect("compile malformed native fixture");
-    assert!(status.success(), "malformed native fixture failed to build");
-    (directory, library)
+            release_marker.display(),
+            finalize_marker.display()
+        ),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn destruction_order_fixture(
-    call_entered: &std::path::Path,
-    call_release: &std::path::Path,
-    destroy_entered: &std::path::Path,
-) -> (tempfile::TempDir, PathBuf) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("destruction_order.c");
-    let library = directory.path().join("libdestruction_order.so");
-    let code = format!(
-        r#"
+fn blocking_entry_fixture(entry_log: &Path, entry_release: &Path) -> (tempfile::TempDir, PathBuf) {
+    compile_c_fixture(
+        "blocking_entry",
+        &format!(
+            r#"
 #include <sched.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include "rsi_meta_plugin.h"
-
-static uint32_t copy_output(const uint8_t *bytes, size_t len,
-                            rsi_meta_buffer *output) {{
-  uint8_t *copy = malloc(len);
-  if (copy == NULL) return RSI_META_STATUS_FAILED;
-  memcpy(copy, bytes, len);
-  *output = (rsi_meta_buffer){{copy, len, len}};
-  return RSI_META_STATUS_OK;
-}}
-
-static uint32_t descriptor(void *handle, rsi_meta_buffer *output) {{
-  (void)handle;
-  static const uint8_t value[] =
-      "{{\"identity\":{{\"kind\":\"builtin\",\"name\":\"fixture.destroy-order\",\"revision\":\"1\"}},"
-      "\"requires\":[],\"provides\":[{{\"key\":\"echo\",\"contract\":\"fixture.echo\",\"version\":1}}]}}";
-  return copy_output(value, sizeof(value) - 1, output);
-}}
-
-static uint32_t validate_config(void *handle, const uint8_t *input,
-                                size_t input_len, rsi_meta_buffer *output) {{
-  (void)handle;
-  return copy_output(input, input_len, output);
-}}
-
-static uint32_t create_instance(void *handle, const uint8_t *input,
-                                size_t input_len, void **instance,
-                                rsi_meta_buffer *output) {{
-  (void)handle; (void)input; (void)input_len;
-  *instance = (void *)(uintptr_t)1;
-  *output = (rsi_meta_buffer){{NULL, 0, 0}};
-  return RSI_META_STATUS_OK;
-}}
-
-static uint32_t call_instance(void *instance, const rsi_meta_host_api *host,
-                              const uint8_t *service, size_t service_len,
-                              const uint8_t *request, size_t request_len,
-                              rsi_meta_buffer *output) {{
-  (void)instance; (void)host; (void)service; (void)service_len;
-  (void)request; (void)request_len;
-  FILE *entered = fopen("{}", "wb");
-  if (entered != NULL) {{ fputs("entered", entered); fclose(entered); }}
-  while (access("{}", F_OK) != 0) sched_yield();
-  static const uint8_t response[] = "released";
-  return copy_output(response, sizeof(response) - 1, output);
-}}
-
-static void destroy_instance(void *instance) {{
-  (void)instance;
-  FILE *entered = fopen("{}", "wb");
-  if (entered != NULL) {{ fputs("entered", entered); fclose(entered); }}
-}}
-
-static void destroy_factory(void *handle) {{ (void)handle; }}
-static void release_buffer(rsi_meta_buffer buffer) {{ free(buffer.ptr); }}
-
-uint32_t rsi_meta_plugin_entry_v1(rsi_meta_plugin_api *output,
-                                  size_t capacity) {{
-  if (output == NULL || capacity < sizeof(*output)) {{
-    return RSI_META_STATUS_INVALID_ARGUMENT;
-  }}
-  memset(output, 0, sizeof(*output));
-  output->abi_major = RSI_META_ABI_MAJOR;
-  output->abi_minor = RSI_META_ABI_MINOR;
-  output->struct_size = sizeof(*output);
-  output->factory_handle = (void *)(uintptr_t)1;
-  output->descriptor = descriptor;
-  output->validate_config = validate_config;
-  output->create = create_instance;
-  output->call = call_instance;
-  output->destroy_instance = destroy_instance;
-  output->destroy_factory = destroy_factory;
-  output->release_buffer = release_buffer;
-  return RSI_META_STATUS_OK;
-}}
-"#,
-        call_entered.display(),
-        call_release.display(),
-        destroy_entered.display(),
-    );
-    std::fs::write(&source, code).unwrap();
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-    let status = std::process::Command::new(compiler)
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
-        .args(["-shared", "-fPIC"])
-        .arg(&source)
-        .arg("-I")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugin/include"))
-        .arg("-o")
-        .arg(&library)
-        .status()
-        .expect("compile destruction-order native fixture");
-    assert!(
-        status.success(),
-        "destruction-order native fixture failed to build"
-    );
-    (directory, library)
-}
-
-#[cfg(target_os = "linux")]
-fn blocking_entry_fixture(
-    entry_log: &std::path::Path,
-    entry_release: &std::path::Path,
-) -> (tempfile::TempDir, PathBuf) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("blocking_entry.c");
-    let library = directory.path().join("libblocking_entry.so");
-    let code = format!(
-        r#"
-#include <sched.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include "rsi_meta_plugin.h"
-
-uint32_t rsi_meta_plugin_entry_v1(rsi_meta_plugin_api *output,
-                                  size_t capacity) {{
-  (void)output; (void)capacity;
+uint32_t rsi_meta_plugin_entry_v2(const rsi_meta_host_table *host,
+                                  rsi_meta_plugin_table *output,
+                                  uint32_t capacity) {{
+  (void)host; (void)output; (void)capacity;
   FILE *entered = fopen("{}", "ab");
   if (entered != NULL) {{ fputc('x', entered); fclose(entered); }}
   while (access("{}", F_OK) != 0) sched_yield();
   return RSI_META_STATUS_FAILED;
 }}
 "#,
-        entry_log.display(),
-        entry_release.display(),
-    );
-    std::fs::write(&source, code).unwrap();
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-    let status = std::process::Command::new(compiler)
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
-        .args(["-shared", "-fPIC"])
-        .arg(&source)
-        .arg("-I")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugin/include"))
-        .arg("-o")
-        .arg(&library)
-        .status()
-        .expect("compile blocking-entry native fixture");
-    assert!(
-        status.success(),
-        "blocking-entry native fixture failed to build"
-    );
-    (directory, library)
+            entry_log.display(),
+            entry_release.display()
+        ),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn blocking_descriptor_fixture(
-    descriptor_entered: &std::path::Path,
-    descriptor_release: &std::path::Path,
+fn blocking_identity_fixture(
+    identity_entered: &Path,
+    identity_release: &Path,
 ) -> (tempfile::TempDir, PathBuf) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("blocking_descriptor.c");
-    let library = directory.path().join("libblocking_descriptor.so");
-    let code = format!(
-        r#"
+    compile_c_fixture(
+        "blocking_identity",
+        &format!(
+            r#"
 #include <sched.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "rsi_meta_plugin.h"
 
-static uint32_t copy_output(const uint8_t *bytes, size_t len,
-                            rsi_meta_buffer *output) {{
-  uint8_t *copy = malloc(len);
-  if (copy == NULL) return RSI_META_STATUS_FAILED;
-  memcpy(copy, bytes, len);
-  *output = (rsi_meta_buffer){{copy, len, len}};
-  return RSI_META_STATUS_OK;
-}}
+#define ISSUER 7002u
+static const uint8_t IDENTITY[] = "fixture.blocking-identity";
 
-static uint32_t descriptor(void *handle, rsi_meta_buffer *output) {{
-  (void)handle;
-  FILE *entered = fopen("{}", "wb");
-  if (entered != NULL) {{ fputs("entered", entered); fclose(entered); }}
-  while (access("{}", F_OK) != 0) sched_yield();
-  static const uint8_t value[] =
-      "{{\"identity\":{{\"kind\":\"builtin\",\"name\":\"fixture.blocking-descriptor\",\"revision\":\"1\"}},"
-      "\"requires\":[],\"provides\":[]}}";
-  return copy_output(value, sizeof(value) - 1, output);
-}}
-
-static uint32_t validate_config(void *handle, const uint8_t *input,
-                                size_t input_len, rsi_meta_buffer *output) {{
-  (void)handle;
-  return copy_output(input, input_len, output);
-}}
-
-static uint32_t create_instance(void *handle, const uint8_t *input,
-                                size_t input_len, void **instance,
-                                rsi_meta_buffer *output) {{
-  (void)handle; (void)input; (void)input_len;
-  *instance = (void *)(uintptr_t)1;
-  *output = (rsi_meta_buffer){{NULL, 0, 0}};
-  return RSI_META_STATUS_OK;
-}}
-
-static uint32_t call_instance(void *instance, const rsi_meta_host_api *host,
-                              const uint8_t *service, size_t service_len,
-                              const uint8_t *request, size_t request_len,
-                              rsi_meta_buffer *output) {{
-  (void)instance; (void)host; (void)service; (void)service_len;
-  return copy_output(request, request_len, output);
-}}
-
-static void destroy_handle(void *handle) {{ (void)handle; }}
-static void release_buffer(rsi_meta_buffer buffer) {{ free(buffer.ptr); }}
-
-uint32_t rsi_meta_plugin_entry_v1(rsi_meta_plugin_api *output,
-                                  size_t capacity) {{
-  if (output == NULL || capacity < sizeof(*output)) {{
-    return RSI_META_STATUS_INVALID_ARGUMENT;
+static uint32_t exchange(void *state, uint32_t opcode, const void *input,
+                         uint32_t input_size, void *output,
+                         uint32_t output_capacity) {{
+  (void)state; (void)input; (void)input_size;
+  if (opcode == RSI_META_PLUGIN_IDENTITY) {{
+    FILE *entered = fopen("{}", "wb");
+    if (entered != NULL) {{ fputs("entered", entered); fclose(entered); }}
+    while (access("{}", F_OK) != 0) sched_yield();
+    if (output == NULL || output_capacity < sizeof(rsi_meta_bytes_output))
+      return RSI_META_STATUS_BUFFER_TOO_SMALL;
+    rsi_meta_bytes_output *value = output;
+    memset(value, 0, sizeof(*value));
+    value->prefix.struct_size = sizeof(*value);
+    value->prefix.release = (rsi_meta_release_id){{ISSUER, 2u, 1u}};
+    value->bytes = (rsi_meta_bytes){{IDENTITY, sizeof(IDENTITY) - 1u}};
+    return RSI_META_STATUS_OK;
   }}
+  if (opcode == RSI_META_PLUGIN_RELEASE_OUTPUT)
+    return RSI_META_STATUS_OK;
+  if (opcode == RSI_META_PLUGIN_DESTROY_FACTORY ||
+      opcode == RSI_META_PLUGIN_FINALIZE) {{
+    if (output == NULL || output_capacity < sizeof(rsi_meta_basic_output))
+      return RSI_META_STATUS_BUFFER_TOO_SMALL;
+    rsi_meta_basic_output *value = output;
+    memset(value, 0, sizeof(*value));
+    value->prefix.struct_size = sizeof(*value);
+    return RSI_META_STATUS_OK;
+  }}
+  return RSI_META_STATUS_UNSUPPORTED;
+}}
+
+uint32_t rsi_meta_plugin_entry_v2(const rsi_meta_host_table *host,
+                                  rsi_meta_plugin_table *output,
+                                  uint32_t capacity) {{
+  (void)host;
+  if (output == NULL || capacity < sizeof(*output))
+    return RSI_META_STATUS_INVALID_ARGUMENT;
   memset(output, 0, sizeof(*output));
-  output->abi_major = RSI_META_ABI_MAJOR;
-  output->abi_minor = RSI_META_ABI_MINOR;
-  output->struct_size = sizeof(*output);
-  output->factory_handle = (void *)(uintptr_t)1;
-  output->descriptor = descriptor;
-  output->validate_config = validate_config;
-  output->create = create_instance;
-  output->call = call_instance;
-  output->destroy_instance = destroy_handle;
-  output->destroy_factory = destroy_handle;
-  output->release_buffer = release_buffer;
+  output->header = (rsi_meta_table_header){{RSI_META_ABI_MAJOR, RSI_META_ABI_MINOR,
+                                            sizeof(*output), 0u}};
+  output->issuer = ISSUER;
+  output->state = (void *)(uintptr_t)1;
+  output->exchange = exchange;
+  output->factory = (rsi_meta_cap_id){{ISSUER, 1u, 1u,
+      RSI_META_CAP_KIND_FACTORY, RSI_META_RIGHT_RETAIN | RSI_META_RIGHT_MUTATE}};
   return RSI_META_STATUS_OK;
 }}
 "#,
-        descriptor_entered.display(),
-        descriptor_release.display(),
-    );
-    std::fs::write(&source, code).unwrap();
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-    let status = std::process::Command::new(compiler)
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
-        .args(["-shared", "-fPIC"])
-        .arg(&source)
-        .arg("-I")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugin/include"))
-        .arg("-o")
-        .arg(&library)
-        .status()
-        .expect("compile blocking-descriptor native fixture");
-    assert!(
-        status.success(),
-        "blocking-descriptor native fixture failed to build"
-    );
-    (directory, library)
+            identity_entered.display(),
+            identity_release.display()
+        ),
+    )
 }
 
 #[derive(Debug)]
-struct UpstreamFactory(PluginDescriptor);
+struct UpstreamFactory;
 
 #[derive(Debug)]
-struct EchoCollisionFactory(PluginDescriptor);
+struct EchoCollisionFactory;
 
 #[derive(Debug)]
 struct Upstream;
@@ -496,10 +365,13 @@ impl ServiceEndpoint for Upstream {
         _: rsi_meta::InvocationContext,
         mut channel: ProviderChannel<'_>,
     ) -> Result<()> {
-        while let Some(frame) = channel.recv().await {
+        while let Some(message) = channel.recv().await {
+            let (payload, capabilities) = message.into_parts();
             let mut bytes = b"upstream:".to_vec();
-            bytes.extend(frame.into_bytes());
-            channel.send(ServiceFrame::new(bytes)).await?;
+            bytes.extend(payload);
+            channel
+                .send(Message::from_parts(bytes, capabilities))
+                .await?;
         }
         Ok(())
     }
@@ -507,58 +379,88 @@ impl ServiceEndpoint for Upstream {
 
 #[async_trait]
 impl PluginFactory for UpstreamFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        FactoryIdentity::builtin("upstream", "1")
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.provide("upstream", "fixture.upstream", V1, Arc::new(Upstream))
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context()
+            .provide("upstream", "fixture.upstream", V1, Arc::new(Upstream))?;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl PluginFactory for EchoCollisionFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.0
+    fn identity(&self) -> FactoryIdentity {
+        FactoryIdentity::builtin("echo-collision", "1")
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        context.provide("echo", "fixture.echo", V1, Arc::new(Upstream))
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        plan.context()
+            .provide("echo", "fixture.echo", V1, Arc::new(Upstream))?;
+        Ok(())
     }
 }
 
 fn upstream_factory() -> Arc<UpstreamFactory> {
-    Arc::new(UpstreamFactory(
-        PluginDescriptor::new(FactoryIdentity::builtin("upstream", "1")).providing(Provision::new(
-            "upstream",
-            "fixture.upstream",
-            V1,
-        )),
-    ))
+    Arc::new(UpstreamFactory)
 }
 
 #[derive(Debug)]
 struct CaptureFactory {
-    descriptor: PluginDescriptor,
-    slot: Arc<Mutex<Option<ServiceHandle>>>,
+    identity: FactoryIdentity,
+    requirement: Requirement,
+    slot: Arc<Mutex<Option<Capability>>>,
+}
+
+impl CaptureFactory {
+    fn new(
+        identity: impl Into<String>,
+        requirement: Requirement,
+        slot: Arc<Mutex<Option<Capability>>>,
+    ) -> Self {
+        Self {
+            identity: FactoryIdentity::builtin(identity, "1"),
+            requirement,
+            slot,
+        }
+    }
 }
 
 #[async_trait]
 impl PluginFactory for CaptureFactory {
-    fn descriptor(&self) -> &PluginDescriptor {
-        &self.descriptor
+    fn identity(&self) -> FactoryIdentity {
+        self.identity.clone()
     }
 
-    async fn activate(&self, context: Context, _: Arc<Value>) -> Result<()> {
-        let key = self.descriptor.requires[0].key.clone();
-        *self.slot.lock().expect("capture poisoned") = Some(context.service(key)?);
+    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()).requiring(self.requirement.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+        let service = plan
+            .inject(&self.requirement.key)
+            .ok_or_else(|| MetaError::ServiceUnavailable {
+                service: self.requirement.key.clone(),
+            })?
+            .clone();
+        *self.slot.lock().expect("capture poisoned") = Some(service);
         Ok(())
     }
 }
 
 async fn wait_active(handle: &rsi_meta::FiberHandle) {
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        Duration::from_secs(5),
         handle.wait_active(&CancellationToken::new()),
     )
     .await
@@ -566,12 +468,21 @@ async fn wait_active(handle: &rsi_meta::FiberHandle) {
     .expect("fiber should activate");
 }
 
-#[cfg(target_os = "linux")]
+async fn assert_clean_shutdown(runtime: &Runtime) {
+    let outcome = runtime.shutdown().await;
+    assert!(
+        outcome.is_clean(),
+        "runtime shutdown did not reach clean quiescence: outcome={outcome:?}; resources={:?}; snapshot={:?}",
+        runtime.resource_snapshot(),
+        runtime.snapshot()
+    );
+}
+
 async fn apply_loader_service(
     runtime: &Runtime,
     catalog: NativeCatalog,
     client_name: &str,
-) -> ServiceHandle {
+) -> Capability {
     let loader = runtime
         .root()
         .apply(
@@ -585,27 +496,24 @@ async fn apply_loader_service(
     let client = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    client_name.to_owned(),
-                    "1",
-                ))
-                .requiring(Requirement::new(
+            Arc::new(CaptureFactory::new(
+                client_name.to_owned(),
+                Requirement::new(
                     LOADER_SERVICE_KEY,
                     LOADER_CONTRACT_ID,
                     LOADER_CONTRACT_VERSION,
-                )),
-                slot: Arc::clone(&slot),
-            }),
+                ),
+                Arc::clone(&slot),
+            )),
             Value::Null,
         )
         .await
         .unwrap();
     wait_active(&client).await;
-    slot.lock().unwrap().clone().unwrap()
+    slot.lock().unwrap().take().unwrap()
 }
 
-async fn wait_for_file(path: &std::path::Path) {
+async fn wait_for_file(path: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !path.exists() {
             tokio::task::yield_now().await;
@@ -615,11 +523,27 @@ async fn wait_for_file(path: &std::path::Path) {
     .expect("native fixture did not publish its callback marker");
 }
 
+async fn wait_for_catalog_marker(path: &Path, catalog: &NativeCatalog) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "native fixture did not publish marker {}: catalog={:?}",
+            path.display(),
+            catalog.snapshot()
+        )
+    });
+}
+
 async fn apply_delayed_native(
     runtime: &Runtime,
     catalog: &NativeCatalog,
     config: Value,
-) -> (rsi_meta::FiberHandle, ServiceHandle) {
+) -> (rsi_meta::FiberHandle, Capability) {
     let upstream = runtime
         .root()
         .apply(upstream_factory(), Value::Null)
@@ -633,20 +557,17 @@ async fn apply_delayed_native(
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                descriptor: PluginDescriptor::new(FactoryIdentity::builtin(
-                    "delayed-native-client",
-                    "1",
-                ))
-                .requiring(Requirement::new("echo", "fixture.echo", V1)),
-                slot: Arc::clone(&slot),
-            }),
+            Arc::new(CaptureFactory::new(
+                "delayed-native-client",
+                Requirement::new("echo", "fixture.echo", V1),
+                Arc::clone(&slot),
+            )),
             Value::Null,
         )
         .await
         .unwrap();
     wait_active(&consumer).await;
-    let service = slot.lock().unwrap().clone().unwrap();
+    let service = slot.lock().unwrap().take().unwrap();
     (native, service)
 }
 
@@ -656,5 +577,9 @@ mod abi_e2e;
 mod catalog_cache;
 #[path = "native_loader/executor_lifecycle.rs"]
 mod executor_lifecycle;
+#[path = "native_loader/host_capabilities.rs"]
+mod host_capabilities;
 #[path = "native_loader/loader_service.rs"]
 mod loader_service;
+#[path = "native_loader/unload_order.rs"]
+mod unload_order;

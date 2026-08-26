@@ -195,7 +195,7 @@ fn concurrent_same_digest_loads_share_one_cache_commit_and_charge() {
         .map(|loader| loader.join().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(factories[0].descriptor(), factories[1].descriptor());
+    assert_eq!(factories[0].identity(), factories[1].identity());
     let snapshot = catalog.snapshot();
     assert_eq!(snapshot.cache_artifacts, 1);
     assert_eq!(snapshot.cache_bytes, artifact_bytes);
@@ -207,10 +207,9 @@ fn concurrent_same_digest_loads_share_one_cache_commit_and_charge() {
 #[tokio::test]
 async fn concurrent_cold_same_digest_loads_share_one_staging_artifact() {
     let markers = tempfile::tempdir().unwrap();
-    let descriptor_entered = markers.path().join("descriptor-entered");
-    let descriptor_release = markers.path().join("descriptor-release");
-    let (_fixture, artifact) =
-        blocking_descriptor_fixture(&descriptor_entered, &descriptor_release);
+    let identity_entered = markers.path().join("identity-entered");
+    let identity_release = markers.path().join("identity-release");
+    let (_fixture, artifact) = blocking_identity_fixture(&identity_entered, &identity_release);
     let artifact_bytes = std::fs::metadata(&artifact).unwrap().len();
     let cache = tempfile::tempdir().unwrap();
     let mut options = CatalogOptions::new(cache.path());
@@ -224,7 +223,7 @@ async fn concurrent_cold_same_digest_loads_share_one_staging_artifact() {
         let artifact = artifact.clone();
         move || catalog.load(artifact)
     });
-    wait_for_file(&descriptor_entered).await;
+    wait_for_file(&identity_entered).await;
     let second = tokio::task::spawn_blocking({
         let catalog = catalog.clone();
         let artifact = artifact.clone();
@@ -239,7 +238,7 @@ async fn concurrent_cold_same_digest_loads_share_one_staging_artifact() {
     }
     let active_loads = catalog.snapshot().active_loads;
     let second_finished = second.is_finished();
-    std::fs::write(&descriptor_release, b"release").unwrap();
+    std::fs::write(&identity_release, b"release").unwrap();
     assert_eq!(
         active_loads, 2,
         "the second cold load left admission before it could join the digest fence; finished={second_finished}"
@@ -250,7 +249,7 @@ async fn concurrent_cold_same_digest_loads_share_one_staging_artifact() {
         .await
         .unwrap()
         .expect("same-digest work duplicated its complete staging reservation");
-    assert_eq!(first.descriptor(), second.descriptor());
+    assert_eq!(first.identity(), second.identity());
     assert_eq!(catalog.snapshot().rejected_staging_admissions, 0);
     drop((first, second));
     wait_for_staging_release(&catalog);
@@ -260,10 +259,10 @@ async fn concurrent_cold_same_digest_loads_share_one_staging_artifact() {
 #[tokio::test]
 async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
     let markers = tempfile::tempdir().unwrap();
-    let descriptor_entered = markers.path().join("descriptor-entered");
-    let descriptor_release = markers.path().join("descriptor-release");
+    let identity_entered = markers.path().join("identity-entered");
+    let identity_release = markers.path().join("identity-release");
     let (_fixture, first_artifact) =
-        blocking_descriptor_fixture(&descriptor_entered, &descriptor_release);
+        blocking_identity_fixture(&identity_entered, &identity_release);
     let source_directory = tempfile::tempdir().unwrap();
     let source = source_directory.path().join("mutable-native.so");
     std::fs::copy(&first_artifact, &source).unwrap();
@@ -281,7 +280,7 @@ async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
         let source = source.clone();
         move || catalog.load(source)
     });
-    wait_for_file(&descriptor_entered).await;
+    wait_for_file(&identity_entered).await;
     let second = tokio::task::spawn_blocking({
         let catalog = catalog.clone();
         let source = source.clone();
@@ -296,17 +295,16 @@ async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
     let replacement = source_directory.path().join("replacement.so");
     std::fs::copy(native_fixture(), &replacement).unwrap();
     std::fs::rename(replacement, &source).unwrap();
-    std::fs::write(&descriptor_release, b"release").unwrap();
+    std::fs::write(&identity_release, b"release").unwrap();
 
     let first = first.await.unwrap().unwrap();
     let second = second.await.unwrap().unwrap();
-    let digest =
-        |factory: &Arc<rsi_meta_loader::NativeFactory>| match &factory.descriptor().identity {
-            FactoryIdentity::Artifact { sha256, .. } => sha256.clone(),
-            identity @ FactoryIdentity::Builtin { .. } => {
-                panic!("native factory retained a non-artifact identity: {identity}")
-            }
-        };
+    let digest = |factory: &Arc<rsi_meta_loader::NativeFactory>| match factory.identity() {
+        FactoryIdentity::Artifact { sha256, .. } => sha256.clone(),
+        identity @ FactoryIdentity::Builtin { .. } => {
+            panic!("native factory retained a non-artifact identity: {identity}")
+        }
+    };
     assert_eq!(digest(&first), first_digest);
     assert_eq!(digest(&second), second_digest);
 }
@@ -325,7 +323,7 @@ fn live_module_reuse_does_not_claim_a_second_staging_artifact() {
         .load(native_fixture())
         .expect("a live module identity should not need another stable staging copy");
 
-    assert_eq!(first.descriptor(), second.descriptor());
+    assert_eq!(first.identity(), second.identity());
     assert_eq!(catalog.snapshot().staging_bytes, artifact_bytes);
     drop((first, second));
     wait_for_staging_release(&catalog);
@@ -565,7 +563,7 @@ fn live_module_reuse_does_not_consult_the_durable_cache() {
     let second = catalog
         .load(native_fixture())
         .expect("a live private mapping does not depend on the durable cache");
-    assert_eq!(first.descriptor(), second.descriptor());
+    assert_eq!(first.identity(), second.identity());
 
     drop(first);
     drop(second);
@@ -623,10 +621,9 @@ async fn cache_commit_rejects_staging_mutation_after_native_validation_started()
     const MODIFIED_TRAILER: &[u8] = b"modified-trailer";
 
     let markers = tempfile::tempdir().unwrap();
-    let descriptor_entered = markers.path().join("descriptor-entered");
-    let descriptor_release = markers.path().join("descriptor-release");
-    let (_fixture, artifact) =
-        blocking_descriptor_fixture(&descriptor_entered, &descriptor_release);
+    let identity_entered = markers.path().join("identity-entered");
+    let identity_release = markers.path().join("identity-release");
+    let (_fixture, artifact) = blocking_identity_fixture(&identity_entered, &identity_release);
     let mut source = std::fs::OpenOptions::new()
         .append(true)
         .open(&artifact)
@@ -640,7 +637,7 @@ async fn cache_commit_rejects_staging_mutation_after_native_validation_started()
         let catalog = catalog.clone();
         move || catalog.load(artifact)
     });
-    wait_for_file(&descriptor_entered).await;
+    wait_for_file(&identity_entered).await;
 
     let staged = std::fs::read_dir(cache.path())
         .unwrap()
@@ -663,7 +660,7 @@ async fn cache_commit_rejects_staging_mutation_after_native_validation_started()
         .unwrap();
     staged.write_all(MODIFIED_TRAILER).unwrap();
     drop(staged);
-    std::fs::write(&descriptor_release, b"release").unwrap();
+    std::fs::write(&identity_release, b"release").unwrap();
 
     assert!(matches!(
         load.await.unwrap(),
@@ -692,7 +689,7 @@ async fn timed_out_artifact_entry_fences_reentry_until_the_worker_returns() {
     wait_for_file(&entry_log).await;
     assert!(matches!(
         first.await.unwrap(),
-        Err(LoaderError::Timeout("library load, entry, or descriptor"))
+        Err(LoaderError::Timeout("native module initialization"))
     ));
 
     assert!(matches!(

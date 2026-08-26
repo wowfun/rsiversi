@@ -4,7 +4,8 @@ use super::catalog_io::{
     streams_equal_to_digest,
 };
 use super::catalog_resources::{
-    CatalogLedger, NativeCatalogLimits, NativeCatalogSnapshot, StagingReservation,
+    CatalogLedger, HostResourceLedger, NativeCatalogLimits, NativeCatalogSnapshot,
+    StagingReservation,
 };
 use super::worker::{
     MAX_LIVE_NATIVE_INSTANCES, MAX_NATIVE_CALLBACK_THREADS, MAX_NATIVE_DESTRUCTION_THREADS,
@@ -100,6 +101,25 @@ impl CatalogOptions {
                 "maximum_live_instances must be in 1..={MAX_LIVE_NATIVE_INSTANCES}"
             )));
         }
+        if self.limits.maximum_host_capabilities == 0
+            || self.limits.maximum_host_capabilities > MAX_CACHE_ARTIFACTS
+        {
+            return Err(LoaderError::InvalidInput(format!(
+                "maximum_host_capabilities must be in 1..={MAX_CACHE_ARTIFACTS}"
+            )));
+        }
+        if self.limits.maximum_host_outputs == 0
+            || self.limits.maximum_host_outputs > MAX_CACHE_ARTIFACTS
+        {
+            return Err(LoaderError::InvalidInput(format!(
+                "maximum_host_outputs must be in 1..={MAX_CACHE_ARTIFACTS}"
+            )));
+        }
+        if self.limits.maximum_host_output_bytes == 0 {
+            return Err(LoaderError::InvalidInput(
+                "maximum_host_output_bytes must be nonzero".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -115,6 +135,7 @@ pub(super) struct CatalogInner {
     modules: Mutex<BTreeMap<String, Weak<NativeModule>>>,
     load_gates: Mutex<BTreeMap<String, Weak<LoadGate>>>,
     ledger: Arc<CatalogLedger>,
+    pub(super) host_resources: Arc<HostResourceLedger>,
     executor: NativeExecutor,
     load_admission: Arc<Semaphore>,
     load_stats: Arc<LoadStats>,
@@ -124,6 +145,21 @@ pub(super) struct CatalogInner {
     #[cfg(all(test, target_os = "linux"))]
     directory_sync_failures: AtomicUsize,
     cache_lock: File,
+}
+
+impl CatalogInner {
+    pub(super) fn host_capability_limit(&self) -> usize {
+        self.options.limits.maximum_host_capabilities
+    }
+
+    pub(super) fn host_output_limit(&self) -> usize {
+        self.options.limits.maximum_host_outputs
+    }
+
+    pub(super) fn retain_failed_finalization(&self) {
+        self.host_resources.retain_failed_finalization();
+        self.load_admission.close();
+    }
 }
 
 #[derive(Default)]
@@ -216,6 +252,7 @@ impl NativeCatalog {
             return Err(LoaderError::CachePoisoned);
         }
         let ledger = Arc::new(CatalogLedger::new(options.limits.clone(), cache_entries));
+        let host_resources = HostResourceLedger::new(&options.limits);
         let load_admission = Arc::new(Semaphore::new(options.limits.maximum_concurrent_callbacks));
         let executor = NativeExecutor::new(
             options.limits.maximum_concurrent_callbacks,
@@ -229,6 +266,7 @@ impl NativeCatalog {
                 modules: Mutex::new(BTreeMap::new()),
                 load_gates: Mutex::new(BTreeMap::new()),
                 ledger,
+                host_resources,
                 executor,
                 load_admission,
                 load_stats: Arc::new(LoadStats::default()),
@@ -246,6 +284,7 @@ impl NativeCatalog {
     pub fn snapshot(&self) -> NativeCatalogSnapshot {
         let ledger = self.inner.ledger.snapshot();
         let executor = self.inner.executor.snapshot();
+        let host = self.inner.host_resources.snapshot();
         NativeCatalogSnapshot {
             cache_bytes: ledger.cache_bytes,
             cache_artifacts: ledger.cache_artifacts,
@@ -269,6 +308,16 @@ impl NativeCatalog {
             peak_destructions: executor.peak_destructions,
             queued_destructions: executor.queued_destructions,
             rejected_destructions: executor.rejected_destructions,
+            host_capabilities: host.capabilities,
+            peak_host_capabilities: host.peak_capabilities,
+            rejected_host_capabilities: host.rejected_capabilities,
+            host_outputs: host.outputs,
+            peak_host_outputs: host.peak_outputs,
+            rejected_host_outputs: host.rejected_outputs,
+            host_output_bytes: host.output_bytes,
+            peak_host_output_bytes: host.peak_output_bytes,
+            rejected_host_output_bytes: host.rejected_output_bytes,
+            retained_failed_finalizations: host.retained_failed_finalizations,
         }
     }
 
@@ -335,6 +384,13 @@ impl NativeCatalog {
     }
 
     pub(super) fn try_reserve_load(&self) -> Result<LoadAdmission, LoaderError> {
+        if self.inner.host_resources.has_retained_failed_finalization() {
+            self.inner
+                .load_stats
+                .rejected
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(LoaderError::FinalizationPoisoned);
+        }
         if let Err(error) = self.ensure_cache_healthy() {
             self.inner
                 .load_stats
@@ -349,7 +405,11 @@ impl NativeCatalog {
                     .load_stats
                     .rejected
                     .fetch_add(1, Ordering::Relaxed);
-                LoaderError::Busy { operation: "load" }
+                if self.inner.host_resources.has_retained_failed_finalization() {
+                    LoaderError::FinalizationPoisoned
+                } else {
+                    LoaderError::Busy { operation: "load" }
+                }
             })?;
         let active = self.inner.load_stats.active.fetch_add(1, Ordering::Relaxed) + 1;
         self.inner
@@ -686,6 +746,18 @@ mod tests {
         assert!(matches!(
             catalog.try_reserve_load(),
             Err(LoaderError::CachePoisoned)
+        ));
+    }
+
+    #[test]
+    fn retained_failed_finalization_closes_later_catalog_load_admission() {
+        let cache = tempfile::tempdir().unwrap();
+        let catalog = NativeCatalog::new(CatalogOptions::new(cache.path())).unwrap();
+        catalog.inner.retain_failed_finalization();
+
+        assert!(matches!(
+            catalog.try_reserve_load(),
+            Err(LoaderError::FinalizationPoisoned)
         ));
     }
 

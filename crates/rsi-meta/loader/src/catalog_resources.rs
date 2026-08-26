@@ -1,6 +1,6 @@
 use super::LoaderError;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Aggregate disk, staging, and native-worker limits owned by one catalog.
@@ -21,6 +21,12 @@ pub struct NativeCatalogLimits {
     pub maximum_live_instances: usize,
     /// Number of dedicated foreign-destruction workers (1 through 64).
     pub maximum_concurrent_destructions: usize,
+    /// Maximum live host-issued ABI capability slots.
+    pub maximum_host_capabilities: usize,
+    /// Maximum live host-issued ABI output release tokens.
+    pub maximum_host_outputs: usize,
+    /// Maximum bytes retained behind host-issued ABI output tokens.
+    pub maximum_host_output_bytes: u64,
 }
 
 impl Default for NativeCatalogLimits {
@@ -32,6 +38,9 @@ impl Default for NativeCatalogLimits {
             maximum_concurrent_callbacks: 8,
             maximum_live_instances: 4096,
             maximum_concurrent_destructions: 2,
+            maximum_host_capabilities: 65_536,
+            maximum_host_outputs: 4_096,
+            maximum_host_output_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -75,7 +84,8 @@ pub struct NativeCatalogSnapshot {
     pub peak_instances: usize,
     /// Creates rejected before thread creation by the live-instance bound.
     pub rejected_instances: u64,
-    /// Instance destructors queued or executing on the destruction lane.
+    /// Instance destructions retained from module-queue admission until the
+    /// foreign `DESTROY_INSTANCE` call returns.
     pub pending_instance_destructions: usize,
     /// Destructors currently executing on dedicated workers.
     pub active_destructions: usize,
@@ -85,6 +95,214 @@ pub struct NativeCatalogSnapshot {
     pub queued_destructions: usize,
     /// Mapped-module finalizer reservations rejected before native entry.
     pub rejected_destructions: u64,
+    /// Live host-issued ABI capability slots.
+    pub host_capabilities: usize,
+    /// Largest observed host capability-slot total.
+    pub peak_host_capabilities: usize,
+    /// Host capability insertions rejected at the configured bound.
+    pub rejected_host_capabilities: u64,
+    /// Live host-issued ABI output release tokens.
+    pub host_outputs: usize,
+    /// Largest observed host output-token total.
+    pub peak_host_outputs: usize,
+    /// Host output insertions rejected at the configured slot bound.
+    pub rejected_host_outputs: u64,
+    /// Bytes retained behind live host output tokens.
+    pub host_output_bytes: u64,
+    /// Largest observed host output-byte total.
+    pub peak_host_output_bytes: u64,
+    /// Host output insertions rejected at the configured byte bound.
+    pub rejected_host_output_bytes: u64,
+    /// Trusted modules pinned after a persistent finalization refusal.
+    pub retained_failed_finalizations: usize,
+}
+
+#[derive(Default)]
+pub(super) struct HostResourceLedger {
+    limits: HostResourceLimits,
+    capabilities: AtomicUsize,
+    peak_capabilities: AtomicUsize,
+    rejected_capabilities: AtomicU64,
+    outputs: AtomicUsize,
+    peak_outputs: AtomicUsize,
+    rejected_outputs: AtomicU64,
+    output_bytes: AtomicU64,
+    peak_output_bytes: AtomicU64,
+    rejected_output_bytes: AtomicU64,
+    retained_failed_finalizations: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HostResourceLimits {
+    capabilities: usize,
+    outputs: usize,
+    output_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct HostResourceSnapshot {
+    pub(super) capabilities: usize,
+    pub(super) peak_capabilities: usize,
+    pub(super) rejected_capabilities: u64,
+    pub(super) outputs: usize,
+    pub(super) peak_outputs: usize,
+    pub(super) rejected_outputs: u64,
+    pub(super) output_bytes: u64,
+    pub(super) peak_output_bytes: u64,
+    pub(super) rejected_output_bytes: u64,
+    pub(super) retained_failed_finalizations: usize,
+}
+
+pub(super) struct HostCapabilityReservation {
+    ledger: Arc<HostResourceLedger>,
+}
+
+pub(super) struct HostOutputReservation {
+    ledger: Arc<HostResourceLedger>,
+    bytes: u64,
+}
+
+impl HostResourceLedger {
+    pub(super) fn new(limits: &NativeCatalogLimits) -> Arc<Self> {
+        Arc::new(Self {
+            limits: HostResourceLimits {
+                capabilities: limits.maximum_host_capabilities,
+                outputs: limits.maximum_host_outputs,
+                output_bytes: limits.maximum_host_output_bytes,
+            },
+            ..Self::default()
+        })
+    }
+
+    pub(super) fn reserve_capability(
+        self: &Arc<Self>,
+    ) -> Result<HostCapabilityReservation, LoaderError> {
+        reserve_usize(
+            &self.capabilities,
+            &self.peak_capabilities,
+            &self.rejected_capabilities,
+            self.limits.capabilities,
+            "host capabilities",
+        )?;
+        Ok(HostCapabilityReservation {
+            ledger: Arc::clone(self),
+        })
+    }
+
+    pub(super) fn reserve_output(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> Result<HostOutputReservation, LoaderError> {
+        reserve_usize(
+            &self.outputs,
+            &self.peak_outputs,
+            &self.rejected_outputs,
+            self.limits.outputs,
+            "host outputs",
+        )?;
+        if reserve_u64(
+            &self.output_bytes,
+            &self.peak_output_bytes,
+            &self.rejected_output_bytes,
+            self.limits.output_bytes,
+            bytes,
+        )
+        .is_err()
+        {
+            self.outputs.fetch_sub(1, Ordering::Relaxed);
+            return Err(LoaderError::CapacityExhausted {
+                resource: "host output bytes",
+                limit: self.limits.output_bytes,
+            });
+        }
+        Ok(HostOutputReservation {
+            ledger: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    pub(super) fn retain_failed_finalization(&self) {
+        let _ = self.retained_failed_finalizations.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| Some(current.saturating_add(1)),
+        );
+    }
+
+    pub(super) fn has_retained_failed_finalization(&self) -> bool {
+        self.retained_failed_finalizations.load(Ordering::Acquire) != 0
+    }
+
+    pub(super) fn snapshot(&self) -> HostResourceSnapshot {
+        HostResourceSnapshot {
+            capabilities: self.capabilities.load(Ordering::Relaxed),
+            peak_capabilities: self.peak_capabilities.load(Ordering::Relaxed),
+            rejected_capabilities: self.rejected_capabilities.load(Ordering::Relaxed),
+            outputs: self.outputs.load(Ordering::Relaxed),
+            peak_outputs: self.peak_outputs.load(Ordering::Relaxed),
+            rejected_outputs: self.rejected_outputs.load(Ordering::Relaxed),
+            output_bytes: self.output_bytes.load(Ordering::Relaxed),
+            peak_output_bytes: self.peak_output_bytes.load(Ordering::Relaxed),
+            rejected_output_bytes: self.rejected_output_bytes.load(Ordering::Relaxed),
+            retained_failed_finalizations: self
+                .retained_failed_finalizations
+                .load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Drop for HostCapabilityReservation {
+    fn drop(&mut self) {
+        self.ledger.capabilities.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for HostOutputReservation {
+    fn drop(&mut self) {
+        self.ledger.outputs.fetch_sub(1, Ordering::Relaxed);
+        self.ledger
+            .output_bytes
+            .fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+fn reserve_usize(
+    current: &AtomicUsize,
+    peak: &AtomicUsize,
+    rejected: &AtomicU64,
+    limit: usize,
+    resource: &'static str,
+) -> Result<(), LoaderError> {
+    let result = current.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        value.checked_add(1).filter(|next| *next <= limit)
+    });
+    let Ok(previous) = result else {
+        rejected.fetch_add(1, Ordering::Relaxed);
+        return Err(LoaderError::CapacityExhausted {
+            resource,
+            limit: u64::try_from(limit).unwrap_or(u64::MAX),
+        });
+    };
+    peak.fetch_max(previous + 1, Ordering::Relaxed);
+    Ok(())
+}
+
+fn reserve_u64(
+    current: &AtomicU64,
+    peak: &AtomicU64,
+    rejected: &AtomicU64,
+    limit: u64,
+    amount: u64,
+) -> Result<(), ()> {
+    let result = current.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        value.checked_add(amount).filter(|next| *next <= limit)
+    });
+    let Ok(previous) = result else {
+        rejected.fetch_add(1, Ordering::Relaxed);
+        return Err(());
+    };
+    peak.fetch_max(previous + amount, Ordering::Relaxed);
+    Ok(())
 }
 
 pub(super) struct CatalogLedger {
