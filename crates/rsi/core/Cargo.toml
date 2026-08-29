@@ -1,0 +1,72 @@
+[package]
+name = "rsi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "rsi"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+rsi-agent-executor = { path = "../../rsi-agent/executor" }
+rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
+rsi-agent-presets = { path = "../../rsi-agent/presets" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-agent-store-sqlite = { path = "../../rsi-agent/store-sqlite" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-ai = { path = "../../rsi-ai/core" }
+rsi-ai-deepseek = { path = "../../rsi-ai/deepseek" }
+rsi-ai-image = { path = "../../rsi-ai/image" }
+rsi-ai-openai = { path = "../../rsi-ai/openai" }
+rsi-ai-openai-compatible = { path = "../../rsi-ai/openai-compatible" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-ai-provider = { path = "../../rsi-ai/provider" }
+rsi-approval = { path = "../../rsi-approval/core" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-commands = { path = "../../rsi-commands/core" }
+rsi-commands-protocol = { path = "../../rsi-commands/protocol" }
+rsi-credentials-local = { path = "../../rsi-credentials/local" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-jobs = { path = "../../rsi-jobs/core" }
+rsi-jobs-local = { path = "../../rsi-jobs/local" }
+rsi-media = { path = "../../rsi-media/core" }
+rsi-media-local = { path = "../../rsi-media/local" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-permission-presets = { path = "../../rsi-permission-presets/core" }
+rsi-projection = { path = "../../rsi-projection/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-settings = { path = "../../rsi-settings/core" }
+rsi-settings-local = { path = "../../rsi-settings/local" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
+rsi-storage = { path = "../../rsi-storage/core" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
+rsi-tools = { path = "../../rsi-tools/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-workspace = { path = "../../rsi-workspace/core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
