@@ -5,9 +5,8 @@ async fn cancelling_apply_before_handle_acknowledgement_disposes_the_active_fibe
     let runtime = Runtime::default();
     let root = runtime.root();
     let mut application = Box::pin(root.apply(
-        Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-            "unacknowledged-apply",
-            "1",
+        crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+            FactoryIdentity::linked("unacknowledged-apply", "1"),
         )))),
         Value::Null,
     ));
@@ -66,10 +65,6 @@ impl Drop for DynamicListenerDropFactory {
 
 #[async_trait]
 impl PluginFactory for DynamicListenerDropFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -86,14 +81,14 @@ async fn dormant_dynamic_listener_does_not_retain_the_last_runtime_owner() {
     let context = Arc::new(Mutex::new(None));
     let dropped = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(DynamicListenerDropFactory {
-        spec: FactorySpec::new(FactoryIdentity::builtin("dynamic-listener-drop", "1")),
+        spec: FactorySpec::new(FactoryIdentity::linked("dynamic-listener-drop", "1")),
         context: Arc::clone(&context),
         dropped: Arc::clone(&dropped),
     });
     let factory_weak = Arc::downgrade(&factory);
     let fiber = runtime
         .root()
-        .apply(factory.clone(), Value::Null)
+        .apply(crate::resolved(factory.clone()), Value::Null)
         .await
         .unwrap();
     let context = context
@@ -102,11 +97,7 @@ async fn dormant_dynamic_listener_does_not_retain_the_last_runtime_owner() {
         .take()
         .expect("activation captured its Context");
     let listener = context
-        .on(
-            "dynamic-listener-drop",
-            Arc::new(NoopHandler),
-            EventOptions::default(),
-        )
+        .on_emit::<NoopEvent, _>(Arc::new(NoopHandler), LocalEventOptions::default())
         .unwrap();
 
     drop(listener);
@@ -131,21 +122,13 @@ struct TerminalizedActivationFactory {
 
 #[async_trait]
 impl PluginFactory for TerminalizedActivationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
 
     async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         let context = plan.context().clone();
-        context.on(
-            "terminal-publication",
-            Arc::new(NoopHandler),
-            EventOptions::default(),
-        )?;
+        context.on_emit::<NoopEvent, _>(Arc::new(NoopHandler), LocalEventOptions::default())?;
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())
@@ -163,14 +146,11 @@ async fn terminal_runtime_never_publishes_an_in_flight_activation() {
         let release = Arc::clone(&release);
         async move {
             root.apply(
-                Arc::new(TerminalizedActivationFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin(
-                        "terminalized-activation",
-                        "1",
-                    )),
+                crate::resolved(Arc::new(TerminalizedActivationFactory {
+                    spec: FactorySpec::new(FactoryIdentity::linked("terminalized-activation", "1")),
                     entered,
                     release,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -189,17 +169,12 @@ async fn terminal_runtime_never_publishes_an_in_flight_activation() {
 
 #[derive(Debug)]
 struct BlockingPreparationFactory {
-    spec: FactorySpec,
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
 }
 
 #[async_trait]
 impl PluginFactory for BlockingPreparationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.entered.wait();
         self.release.wait();
@@ -222,11 +197,7 @@ async fn shutdown_linearizes_with_apply_after_arbitrary_preparation() {
         let release = Arc::clone(&release);
         async move {
             root.apply(
-                Arc::new(BlockingPreparationFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("preparation-race", "1")),
-                    entered,
-                    release,
-                }),
+                crate::resolved(Arc::new(BlockingPreparationFactory { entered, release })),
                 Value::Null,
             )
             .await
@@ -272,11 +243,7 @@ async fn application_waiter_timeout_does_not_release_a_running_blocking_preparat
         let release = Arc::clone(&release);
         async move {
             root.apply(
-                Arc::new(BlockingPreparationFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("timed-out-preparation", "1")),
-                    entered,
-                    release,
-                }),
+                crate::resolved(Arc::new(BlockingPreparationFactory { entered, release })),
                 Value::Null,
             )
             .await
@@ -328,10 +295,6 @@ struct BlockingRootCleanupFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingRootCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -364,10 +327,6 @@ struct ExecutorPinnedCleanupFactory {
 
 #[async_trait]
 impl PluginFactory for ExecutorPinnedCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -397,11 +356,11 @@ async fn cleanup_survives_the_initiating_executor_being_dropped() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(ExecutorPinnedCleanupFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("executor-pinned-cleanup", "1")),
+            crate::resolved(Arc::new(ExecutorPinnedCleanupFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("executor-pinned-cleanup", "1")),
                 entered: Arc::clone(&entered),
                 release: release.clone(),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -449,11 +408,11 @@ async fn shutdown_survives_the_initiating_executor_being_dropped() {
     runtime
         .root()
         .apply(
-            Arc::new(ExecutorPinnedCleanupFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("executor-pinned-shutdown", "1")),
+            crate::resolved(Arc::new(ExecutorPinnedCleanupFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("executor-pinned-shutdown", "1")),
                 entered: Arc::clone(&entered),
                 release: release.clone(),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -502,12 +461,12 @@ async fn shutdown_starts_all_roots_before_waiting_for_cleanup() {
         let fiber = runtime
             .root()
             .apply(
-                Arc::new(BlockingRootCleanupFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin(label, "1")),
+                crate::resolved(Arc::new(BlockingRootCleanupFactory {
+                    spec: FactorySpec::new(FactoryIdentity::linked(label, "1")),
                     label,
                     entered: entered.clone(),
                     release: release.clone(),
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -535,17 +494,12 @@ async fn shutdown_starts_all_roots_before_waiting_for_cleanup() {
 
 #[derive(Debug)]
 struct SerializedReconfigureFactory {
-    spec: FactorySpec,
     entered: std::sync::mpsc::SyncSender<()>,
     release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 #[async_trait]
 impl PluginFactory for SerializedReconfigureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if !config.is_null() {
             self.entered.send(()).expect("test waiter still exists");
@@ -569,13 +523,12 @@ async fn concurrent_reconfigure_is_rejected_without_an_internal_waiter() {
     let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let factory = Arc::new(SerializedReconfigureFactory {
-        spec: FactorySpec::new(FactoryIdentity::builtin("serialized-reconfigure", "1")),
         entered: entered_tx,
         release: Mutex::new(release_rx),
     });
     let fiber = runtime
         .root()
-        .apply(factory.clone(), Value::Null)
+        .apply(crate::resolved(factory.clone()), Value::Null)
         .await
         .unwrap();
     let first = tokio::spawn({
@@ -600,7 +553,6 @@ async fn concurrent_reconfigure_is_rejected_without_an_internal_waiter() {
 
 #[derive(Debug)]
 struct RuntimeOwnedReconfigureFactory {
-    spec: FactorySpec,
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
     activations: Arc<Mutex<Vec<Value>>>,
@@ -608,10 +560,6 @@ struct RuntimeOwnedReconfigureFactory {
 
 #[async_trait]
 impl PluginFactory for RuntimeOwnedReconfigureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if !config.is_null() {
             self.entered.wait();
@@ -639,12 +587,11 @@ async fn admitted_reconfiguration_finishes_after_the_initiating_future_is_droppe
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(RuntimeOwnedReconfigureFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("runtime-owned-reconfigure", "1")),
+            crate::resolved(Arc::new(RuntimeOwnedReconfigureFactory {
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 activations: Arc::clone(&activations),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -716,10 +663,6 @@ struct BlockingCleanupFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -748,7 +691,6 @@ async fn shutdown_wait_reports_unresolved_work_and_later_joins_completion() {
         deadlines: DeadlineLimits {
             transition: std::time::Duration::from_millis(10),
             service_call: std::time::Duration::from_millis(10),
-            event_dispatch: std::time::Duration::from_millis(10),
             shutdown_wait: std::time::Duration::from_millis(20),
         },
         ..RuntimeLimits::default()
@@ -759,11 +701,11 @@ async fn shutdown_wait_reports_unresolved_work_and_later_joins_completion() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(BlockingCleanupFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("shutdown-deadline", "1")),
+            crate::resolved(Arc::new(BlockingCleanupFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("shutdown-deadline", "1")),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -797,10 +739,6 @@ impl Drop for PanickingDropOnlyFactory {
 
 #[async_trait]
 impl PluginFactory for PanickingDropOnlyFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -823,9 +761,9 @@ async fn factory_destructor_panic_is_contained_and_shutdown_completion_is_cached
     runtime
         .root()
         .apply(
-            Arc::new(PanickingDropOnlyFactory(FactorySpec::new(
-                FactoryIdentity::builtin("panicking-factory-drop", "1"),
-            ))),
+            crate::resolved(Arc::new(PanickingDropOnlyFactory(FactorySpec::new(
+                FactoryIdentity::linked("panicking-factory-drop", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -851,9 +789,8 @@ async fn terminalization_remains_authoritative_after_quiescent_shutdown_completi
     .unwrap();
     let prepared = runtime
         .prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "shutdown-terminal-fence",
-                "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("shutdown-terminal-fence", "1"),
             )))),
             Value::Null,
         )
@@ -890,11 +827,11 @@ async fn cancelling_the_shutdown_initiator_cannot_strand_followers() {
     runtime
         .root()
         .apply(
-            Arc::new(BlockingCleanupFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("blocking-cleanup", "1")),
+            crate::resolved(Arc::new(BlockingCleanupFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("blocking-cleanup", "1")),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
-            }),
+            })),
             Value::Null,
         )
         .await

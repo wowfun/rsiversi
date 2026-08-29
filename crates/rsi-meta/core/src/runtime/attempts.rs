@@ -1,6 +1,8 @@
 #![allow(clippy::wildcard_imports)] // This is one implementation partition of runtime.
 
 use super::*;
+use crate::Requirement;
+use crate::plugin::LocalRequirement;
 
 impl Runtime {
     pub(super) fn reconcile_fiber(&self, fiber: Arc<Fiber>) -> BoxFuture<'static, ()> {
@@ -31,7 +33,7 @@ impl Runtime {
                 let maximum = runtime.inner.limits.payloads.maximum_diagnostic_bytes;
                 let message = match cleanup {
                     Ok(report) if report.is_clean() => "plugin activation panicked".to_owned(),
-                    Ok(report) => dispatch::bound_formatted_diagnostic(
+                    Ok(report) => diagnostics::bound_formatted(
                         format_args!(
                             "plugin activation panicked; cleanup also failed: {:?}",
                             report.failures
@@ -40,7 +42,7 @@ impl Runtime {
                     ),
                     Err(_) => "plugin activation and cleanup panicked".to_owned(),
                 };
-                fiber.set_state(FiberState::Failed(dispatch::bound_owned_diagnostic(
+                fiber.set_state(FiberState::Failed(diagnostics::bound_owned(
                     message, maximum,
                 )));
             }
@@ -69,7 +71,7 @@ impl Runtime {
         if active_revision.is_some() && active_revision != Some(target_revision) {
             let cleanup = self.unload_generation(fiber).await;
             if !cleanup.is_clean() {
-                fiber.set_state(FiberState::Failed(dispatch::bound_formatted_diagnostic(
+                fiber.set_state(FiberState::Failed(diagnostics::bound_formatted(
                     format_args!("reconfiguration cleanup failed: {:?}", cleanup.failures),
                     self.inner.limits.payloads.maximum_diagnostic_bytes,
                 )));
@@ -108,9 +110,9 @@ impl Runtime {
         let (active_bindings, active_revision, target_revision, last_attempt) = {
             let data = fiber.data.lock().expect("fiber state poisoned");
             (
-                data.active
-                    .as_ref()
-                    .map(|active| binding_identities(&active.bindings)),
+                data.active.as_ref().map(|active| {
+                    binding_identities(&active.bindings, &active.local_bindings, fiber)
+                }),
                 data.active.as_ref().map(|active| active.target_revision),
                 data.target_revision,
                 data.last_attempt.clone(),
@@ -129,7 +131,7 @@ impl Runtime {
                 return;
             }
         };
-        let next_bindings = binding_identities(&bindings.bindings);
+        let next_bindings = binding_identities(&bindings.bindings, &bindings.local_bindings, fiber);
         let should_activate = {
             let data = fiber.data.lock().expect("fiber state poisoned");
             match (&data.state, active_bindings.as_ref()) {
@@ -174,7 +176,7 @@ impl Runtime {
 
         let cleanup = self.unload_generation(fiber).await;
         if !cleanup.is_clean() {
-            fiber.set_state(FiberState::Failed(dispatch::bound_formatted_diagnostic(
+            fiber.set_state(FiberState::Failed(diagnostics::bound_formatted(
                 format_args!("{cleanup_operation} cleanup failed: {:?}", cleanup.failures),
                 self.inner.limits.payloads.maximum_diagnostic_bytes,
             )));
@@ -192,7 +194,7 @@ impl Runtime {
         &self,
         fiber: &Fiber,
     ) -> std::result::Result<ResolvedBindings, PendingReport> {
-        let (attempt, requirements) = {
+        let (attempt, requirements, local_requirements) = {
             let data = fiber.data.lock().expect("fiber state poisoned");
             let attempt = data
                 .attempt
@@ -201,6 +203,7 @@ impl Runtime {
             (
                 AttemptStamp::from(attempt),
                 Arc::clone(&attempt.requirements),
+                Arc::clone(&attempt.local_requirements),
             )
         };
         let slots = requirements
@@ -216,11 +219,18 @@ impl Runtime {
                 )
             })
             .collect::<Vec<_>>();
+        let local_slots = local_requirements
+            .iter()
+            .enumerate()
+            .map(|(index, requirement)| {
+                (index, fiber.base_context.local_slot(requirement.contract))
+            })
+            .collect::<Vec<_>>();
         // One registry lock is one dependency snapshot. An activation must
         // never observe requirements from different publication revisions.
-        let candidates = {
+        let (candidates, local_candidates) = {
             let state = self.inner.state.lock().expect("runtime state poisoned");
-            slots
+            let portable = slots
                 .iter()
                 .map(|(_, _, slot)| {
                     state
@@ -229,41 +239,33 @@ impl Runtime {
                         .filter(|entry| entry.visibility == SupplyVisibility::Active)
                         .map(|entry| Arc::clone(&entry.binding))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let local = local_slots
+                .iter()
+                .map(|(_, slot)| {
+                    state
+                        .local_providers
+                        .get(slot)
+                        .filter(|entry| entry.visibility == SupplyVisibility::Active)
+                        .map(|entry| Arc::clone(&entry.binding))
+                })
+                .collect::<Vec<_>>();
+            (portable, local)
         };
-        let mut bindings = BTreeMap::new();
         let mut pending = PendingReportBuilder::new(&self.inner.limits.payloads);
-        for ((index, isolation, _), binding) in slots.into_iter().zip(candidates) {
-            let requirement = &requirements[index];
-            let Some(binding) = binding else {
-                pending.push_with(1, requirement.key.as_str().len(), || {
-                    PendingReason::MissingService {
-                        service: requirement.key.clone(),
-                        isolation,
-                    }
-                });
-                continue;
-            };
-            if binding.contract != requirement.contract || binding.version != requirement.version {
-                let retained_bytes = requirement
-                    .key
-                    .as_str()
-                    .len()
-                    .saturating_add(requirement.contract.as_str().len())
-                    .saturating_add(binding.contract.as_str().len());
-                pending.push_with(1, retained_bytes, || PendingReason::ContractMismatch {
-                    service: requirement.key.clone(),
-                    expected: requirement.contract.clone(),
-                    expected_version: requirement.version,
-                    actual: binding.contract.clone(),
-                    actual_version: binding.version,
-                });
-                continue;
-            }
-            bindings.insert(requirement.key.clone(), binding);
-        }
+        let bindings = resolve_portable_candidates(&requirements, slots, candidates, &mut pending);
+        let local_bindings = resolve_local_candidates(
+            &local_requirements,
+            local_slots,
+            local_candidates,
+            &mut pending,
+        );
         if pending.total_reasons() == 0 {
-            Ok(ResolvedBindings { attempt, bindings })
+            Ok(ResolvedBindings {
+                attempt,
+                bindings,
+                local_bindings,
+            })
         } else {
             Err(pending.finish())
         }
@@ -275,15 +277,15 @@ impl Runtime {
         previous: &PreparedAttempt,
         next: &PreparedAttempt,
     ) {
-        let previous = previous
+        let previous_portable = previous
             .required_services()
             .map(|key| fiber.base_context.service_slot(key))
             .collect::<BTreeSet<_>>();
-        let next = next
+        let next_portable = next
             .required_services()
             .map(|key| fiber.base_context.service_slot(key))
             .collect::<BTreeSet<_>>();
-        for slot in previous.difference(&next) {
+        for slot in previous_portable.difference(&next_portable) {
             let remove_slot = state.dependents.get_mut(slot).is_some_and(|fibers| {
                 fibers.remove(&fiber.id);
                 fibers.is_empty()
@@ -292,10 +294,35 @@ impl Runtime {
                 state.dependents.remove(slot);
             }
         }
-        for slot in next.difference(&previous) {
+        for slot in next_portable.difference(&previous_portable) {
             state
                 .dependents
                 .entry(slot.clone())
+                .or_default()
+                .insert(fiber.id);
+        }
+
+        let previous_local = previous
+            .required_local_services()
+            .map(|requirement| fiber.base_context.local_slot(requirement.contract))
+            .collect::<BTreeSet<_>>();
+        let next_local = next
+            .required_local_services()
+            .map(|requirement| fiber.base_context.local_slot(requirement.contract))
+            .collect::<BTreeSet<_>>();
+        for slot in previous_local.difference(&next_local) {
+            let remove_slot = state.local_dependents.get_mut(slot).is_some_and(|fibers| {
+                fibers.remove(&fiber.id);
+                fibers.is_empty()
+            });
+            if remove_slot {
+                state.local_dependents.remove(slot);
+            }
+        }
+        for slot in next_local.difference(&previous_local) {
+            state
+                .local_dependents
+                .entry(*slot)
                 .or_default()
                 .insert(fiber.id);
         }
@@ -371,13 +398,13 @@ impl Runtime {
         let prepared = match prepared {
             Ok(Ok(Ok(prepared))) => prepared,
             Err(error) | Ok(Ok(Err(error))) => {
-                return Err(dispatch::bound_formatted_diagnostic(
+                return Err(diagnostics::bound_formatted(
                     format_args!("plugin preparation failed: {error}"),
                     self.inner.limits.payloads.maximum_diagnostic_bytes,
                 ));
             }
             Ok(Err(error)) => {
-                return Err(dispatch::bound_formatted_diagnostic(
+                return Err(diagnostics::bound_formatted(
                     format_args!("plugin preparation task failed: {error}"),
                     self.inner.limits.payloads.maximum_diagnostic_bytes,
                 ));
@@ -438,9 +465,10 @@ impl Runtime {
         active_bindings: &BindingIdentities,
         preparation_error: String,
     ) {
-        let active_binding_is_still_current = self
-            .resolve_bindings(fiber)
-            .is_ok_and(|bindings| binding_identities(&bindings.bindings) == *active_bindings);
+        let active_binding_is_still_current = self.resolve_bindings(fiber).is_ok_and(|bindings| {
+            binding_identities(&bindings.bindings, &bindings.local_bindings, fiber)
+                == *active_bindings
+        });
         if active_binding_is_still_current {
             // A registry race can make a refresh attempt obsolete while the
             // already-published generation is still authoritative. Keep that
@@ -452,7 +480,7 @@ impl Runtime {
         let error = if cleanup.is_clean() {
             preparation_error
         } else {
-            dispatch::bound_formatted_diagnostic(
+            diagnostics::bound_formatted(
                 format_args!(
                     "{preparation_error}; dependency retirement cleanup also failed: {:?}",
                     cleanup.failures
@@ -462,4 +490,66 @@ impl Runtime {
         };
         fiber.set_state(FiberState::Failed(error));
     }
+}
+
+fn resolve_portable_candidates(
+    requirements: &[Requirement],
+    slots: Vec<(usize, IsolationId, ServiceSlot)>,
+    candidates: Vec<Option<Arc<ProviderBinding>>>,
+    pending: &mut PendingReportBuilder,
+) -> BTreeMap<ServiceKey, Arc<ProviderBinding>> {
+    let mut bindings = BTreeMap::new();
+    for ((index, isolation, _), binding) in slots.into_iter().zip(candidates) {
+        let requirement = &requirements[index];
+        let Some(binding) = binding else {
+            pending.push_with(1, requirement.key.as_str().len(), || {
+                PendingReason::MissingService {
+                    service: requirement.key.clone(),
+                    isolation,
+                }
+            });
+            continue;
+        };
+        if binding.contract != requirement.contract || binding.version != requirement.version {
+            let retained_bytes = requirement
+                .key
+                .as_str()
+                .len()
+                .saturating_add(requirement.contract.as_str().len())
+                .saturating_add(binding.contract.as_str().len());
+            pending.push_with(1, retained_bytes, || PendingReason::ContractMismatch {
+                service: requirement.key.clone(),
+                expected: requirement.contract.clone(),
+                expected_version: requirement.version,
+                actual: binding.contract.clone(),
+                actual_version: binding.version,
+            });
+            continue;
+        }
+        bindings.insert(requirement.key.clone(), binding);
+    }
+    bindings
+}
+
+fn resolve_local_candidates(
+    requirements: &[LocalRequirement],
+    slots: Vec<(usize, LocalSlot)>,
+    candidates: Vec<Option<Arc<LocalBinding>>>,
+    pending: &mut PendingReportBuilder,
+) -> BTreeMap<TypeId, Arc<LocalBinding>> {
+    let mut bindings = BTreeMap::new();
+    for ((index, slot), binding) in slots.into_iter().zip(candidates) {
+        let requirement = &requirements[index];
+        let Some(binding) = binding else {
+            pending.push_with(1, requirement.key.as_str().len(), || {
+                PendingReason::MissingLocal {
+                    contract: requirement.key.clone(),
+                    isolation: slot.isolation,
+                }
+            });
+            continue;
+        };
+        bindings.insert(requirement.contract, binding);
+    }
+    bindings
 }

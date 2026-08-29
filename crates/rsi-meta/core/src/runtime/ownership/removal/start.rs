@@ -40,13 +40,13 @@ impl EventRemoval {
         let runtime = self.runtime.upgrade().map(|inner| Runtime { inner });
         let result = runtime.as_ref().map_or(Ok(false), |runtime| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                runtime.remove_listener_entry(self.owner, self.id)
+                runtime.remove_local_listener_entry(self.owner, self.id)
             }))
             .map_err(|payload| {
                 if drop_catching_unwind(payload) {
-                    "event listener removal and panic payload destruction panicked".to_owned()
+                    "Local event listener removal and panic payload destruction panicked".to_owned()
                 } else {
-                    "event listener removal panicked".to_owned()
+                    "Local event listener removal panicked".to_owned()
                 }
             })
         });
@@ -72,7 +72,7 @@ impl EventRemoval {
         if result.is_err()
             && let Some(runtime) = runtime
         {
-            runtime.mark_terminal_owned("event listener removal panicked");
+            runtime.mark_terminal_owned("Local event listener removal panicked");
         }
         true
     }

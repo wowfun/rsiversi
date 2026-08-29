@@ -2,11 +2,12 @@
 
 use async_trait::async_trait;
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Context, ContractId, ContractVersion, EventHandle, EventHandler,
-    EventOptions, EventOutcome, FactoryIdentity, FiberHandle, InvocationContext, PluginFactory,
-    PreparedActivation, ProviderChannel, Requirement, Result, ServiceEndpoint, ServiceKey,
+    ActivationPlan, ConfigValue, Context, ContractId, ContractVersion, Emit, EmitEventHandler,
+    FactoryIdentity, FiberHandle, InvocationContext, LocalEvent, LocalEventHandle,
+    LocalEventOptions, PluginFactory, PreparedActivation, ProviderChannel, Requirement, Result,
+    ServiceEndpoint, ServiceKey,
 };
-use serde_json::Value;
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -72,10 +73,6 @@ impl PassiveFactory {
 
 #[async_trait]
 impl PluginFactory for PassiveFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -133,10 +130,6 @@ impl EndpointFactory {
 
 #[async_trait]
 impl PluginFactory for EndpointFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -153,20 +146,27 @@ impl PluginFactory for EndpointFactory {
 }
 
 #[derive(Debug)]
+pub(crate) struct NoopEvent;
+
+impl LocalEvent for NoopEvent {
+    const KEY: &'static str = "test.noop";
+    type Value = ();
+    type Error = Infallible;
+    type Mode = Emit;
+}
+
+#[derive(Debug)]
 pub(crate) struct NoopHandler;
 
-#[async_trait]
-impl EventHandler for NoopHandler {
-    async fn handle(&self, _: InvocationContext, value: Arc<Value>) -> Result<EventOutcome> {
-        Ok(EventOutcome::Continue((*value).clone()))
-    }
+impl EmitEventHandler<NoopEvent> for NoopHandler {
+    fn handle(&self, (): &()) {}
 }
 
 #[derive(Debug)]
 pub(crate) struct ListenerCaptureFactory {
     pub(crate) spec: FactorySpec,
     pub(crate) context: Arc<Mutex<Option<Context>>>,
-    pub(crate) listener: Arc<Mutex<Option<EventHandle>>>,
+    pub(crate) listener: Arc<Mutex<Option<LocalEventHandle>>>,
     pub(crate) dispose_during_activation: bool,
 }
 
@@ -178,10 +178,6 @@ pub(crate) struct ContextCaptureFactory {
 
 #[async_trait]
 impl PluginFactory for ContextCaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -195,17 +191,14 @@ impl PluginFactory for ContextCaptureFactory {
 
 #[async_trait]
 impl PluginFactory for ListenerCaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
 
     async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         let context = plan.context().clone();
-        let listener = context.on("authority", Arc::new(NoopHandler), EventOptions::default())?;
+        let listener =
+            context.on_emit::<NoopEvent, _>(Arc::new(NoopHandler), LocalEventOptions::default())?;
         if self.dispose_during_activation {
             assert!(listener.dispose().await.is_clean());
         }

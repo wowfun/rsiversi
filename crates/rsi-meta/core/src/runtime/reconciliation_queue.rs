@@ -564,6 +564,34 @@ impl Runtime {
         self.inner.scheduler_wakeup.notify_one();
     }
 
+    pub(super) fn notify_local_appearances(&self, services: &[LocalSlot], except: Option<FiberId>) {
+        let executor = {
+            let mut state = self.inner.state.lock().expect("runtime state poisoned");
+            let affected = Self::local_dependent_ids(&state, services, except);
+            let mut executor = None;
+            for id in affected {
+                if let Some(fiber) = state.fibers.get(&id) {
+                    executor.get_or_insert_with(|| fiber.executor.clone());
+                    fiber.reconciliation.request_revision();
+                    state.reconciliations.enqueue(id);
+                }
+            }
+            let should_spawn =
+                if !state.reconciliations.has_queued() || state.reconciliation_worker_running {
+                    false
+                } else {
+                    state.reconciliation_worker_running = true;
+                    true
+                };
+            debug_assert!(!should_spawn || executor.is_some());
+            should_spawn.then_some(executor).flatten()
+        };
+        if let Some(executor) = executor {
+            self.spawn_reconciliation_worker(&executor);
+        }
+        self.inner.scheduler_wakeup.notify_one();
+    }
+
     /// Fences every exact dependent in the same Runtime-state transaction that
     /// removes service visibility. The caller must hold `state` across both
     /// operations so a Loading generation cannot publish a withdrawn binding.
@@ -576,6 +604,37 @@ impl Runtime {
         Option<tokio::runtime::Handle>,
     ) {
         let affected = Self::dependent_ids(state, services, except);
+        let mut tickets = Vec::with_capacity(affected.len());
+        let mut executor = None;
+        for id in affected {
+            if let Some(fiber) = state.fibers.get(&id) {
+                executor.get_or_insert_with(|| fiber.executor.clone());
+                let ticket = fiber.reconciliation.request();
+                fiber.cancel_loading_activation();
+                state.reconciliations.enqueue(id);
+                tickets.push((id, ticket));
+            }
+        }
+        let should_spawn =
+            if !state.reconciliations.has_queued() || state.reconciliation_worker_running {
+                false
+            } else {
+                state.reconciliation_worker_running = true;
+                true
+            };
+        debug_assert!(!should_spawn || executor.is_some());
+        (tickets, should_spawn.then_some(executor).flatten())
+    }
+
+    pub(super) fn request_local_withdrawals_locked(
+        state: &mut RuntimeState,
+        services: &[LocalSlot],
+        except: Option<FiberId>,
+    ) -> (
+        Vec<(FiberId, ReconciliationTicket)>,
+        Option<tokio::runtime::Handle>,
+    ) {
+        let affected = Self::local_dependent_ids(state, services, except);
         let mut tickets = Vec::with_capacity(affected.len());
         let mut executor = None;
         for id in affected {
@@ -613,6 +672,20 @@ impl Runtime {
         services
             .iter()
             .filter_map(|service| state.dependents.get(service))
+            .flat_map(BTreeSet::iter)
+            .copied()
+            .filter(|id| Some(*id) != except)
+            .collect()
+    }
+
+    fn local_dependent_ids(
+        state: &RuntimeState,
+        services: &[LocalSlot],
+        except: Option<FiberId>,
+    ) -> BTreeSet<FiberId> {
+        services
+            .iter()
+            .filter_map(|service| state.local_dependents.get(service))
             .flat_map(BTreeSet::iter)
             .copied()
             .filter(|id| Some(*id) != except)
@@ -887,14 +960,10 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct PassiveFactory(FactoryIdentity);
+    struct PassiveFactory;
 
     #[async_trait::async_trait]
     impl PluginFactory for PassiveFactory {
-        fn identity(&self) -> FactoryIdentity {
-            self.0.clone()
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone()))
         }
@@ -905,14 +974,10 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct SaturationProvider(FactoryIdentity);
+    struct SaturationProvider;
 
     #[async_trait::async_trait]
     impl PluginFactory for SaturationProvider {
-        fn identity(&self) -> FactoryIdentity {
-            self.0.clone()
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone()))
         }
@@ -940,17 +1005,12 @@ mod tests {
 
     #[derive(Debug)]
     struct GatedSaturationConsumer {
-        identity: FactoryIdentity,
         started: Arc<tokio::sync::Semaphore>,
         release: Arc<tokio::sync::Semaphore>,
     }
 
     #[async_trait::async_trait]
     impl PluginFactory for GatedSaturationConsumer {
-        fn identity(&self) -> FactoryIdentity {
-            self.identity.clone()
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(
                 PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -973,7 +1033,7 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct PanickingDropFactory(FactoryIdentity);
+    struct PanickingDropFactory;
 
     impl Drop for PanickingDropFactory {
         fn drop(&mut self) {
@@ -983,10 +1043,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for PanickingDropFactory {
-        fn identity(&self) -> FactoryIdentity {
-            self.0.clone()
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone()))
         }
@@ -1001,7 +1057,8 @@ mod tests {
         let snapshot = FiberSnapshot {
             id: FiberId(1),
             generation: FiberGeneration(1),
-            factory: FactoryIdentity::builtin("settlement-race", "1"),
+            factory: FactoryIdentity::linked("settlement-race", "1"),
+            update_mode: UpdateMode::Replayable,
             state: FiberState::Active,
         };
         for _ in 0..1_024 {
@@ -1051,7 +1108,8 @@ mod tests {
         let current_snapshot = FiberSnapshot {
             id: FiberId(1),
             generation: FiberGeneration(1),
-            factory: FactoryIdentity::builtin("saturated-finish", "1"),
+            factory: FactoryIdentity::linked("saturated-finish", "1"),
+            update_mode: UpdateMode::Replayable,
             state: FiberState::Failed("current run".to_owned()),
         };
         progress.mark_settled(&run, &current_snapshot);
@@ -1060,7 +1118,8 @@ mod tests {
         let terminal_snapshot = FiberSnapshot {
             id: FiberId(1),
             generation: FiberGeneration(1),
-            factory: FactoryIdentity::builtin("saturated-finish", "1"),
+            factory: FactoryIdentity::linked("saturated-finish", "1"),
+            update_mode: UpdateMode::Replayable,
             state: FiberState::Disposed,
         };
         progress.finish(&terminal_snapshot);
@@ -1073,10 +1132,12 @@ mod tests {
         let fiber = runtime
             .root()
             .apply(
-                Arc::new(PassiveFactory(FactoryIdentity::builtin(
+                ResolvedFactory::linked(
                     "saturated-revision",
                     "1",
-                ))),
+                    UpdateMode::Replayable,
+                    Arc::new(PassiveFactory),
+                ),
                 ConfigValue::Null,
             )
             .await
@@ -1113,11 +1174,10 @@ mod tests {
         let consumer = runtime
             .root()
             .apply(
-                Arc::new(GatedSaturationConsumer {
-                    identity: FactoryIdentity::builtin("saturated-consumer", "1"),
+                crate::plugin::resolved_test_factory(Arc::new(GatedSaturationConsumer {
                     started: Arc::clone(&started),
                     release: Arc::clone(&release),
-                }),
+                })),
                 ConfigValue::Null,
             )
             .await
@@ -1139,10 +1199,12 @@ mod tests {
         let provider = runtime
             .root()
             .apply(
-                Arc::new(SaturationProvider(FactoryIdentity::builtin(
+                ResolvedFactory::linked(
                     "saturation-provider",
                     "1",
-                ))),
+                    UpdateMode::Replayable,
+                    Arc::new(SaturationProvider),
+                ),
                 ConfigValue::Null,
             )
             .await
@@ -1186,10 +1248,12 @@ mod tests {
         let fiber = runtime
             .root()
             .apply(
-                Arc::new(PanickingDropFactory(FactoryIdentity::builtin(
+                ResolvedFactory::linked(
                     "late-disposal-panic",
                     "1",
-                ))),
+                    UpdateMode::Replayable,
+                    Arc::new(PanickingDropFactory),
+                ),
                 ConfigValue::Null,
             )
             .await

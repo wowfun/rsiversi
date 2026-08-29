@@ -33,7 +33,7 @@ pub(crate) struct EventRemoval {
 }
 
 impl EventRemoval {
-    pub(super) fn new(
+    pub(in crate::runtime) fn new(
         runtime: &Runtime,
         owner: Owner,
         id: EventListenerId,
@@ -55,7 +55,10 @@ impl EventRemoval {
         self.owner
     }
 
-    pub(super) fn publish<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub(in crate::runtime) fn publish<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         let state = self
             .state
             .lock()
@@ -71,7 +74,7 @@ impl EventRemoval {
         result
     }
 
-    pub(super) fn cleanup(self: &Arc<Self>) -> Cleanup {
+    pub(in crate::runtime) fn cleanup(self: &Arc<Self>) -> Cleanup {
         let removal = Arc::clone(self);
         Box::new(move || {
             async move {

@@ -120,7 +120,16 @@ impl Runtime {
                         .iter()
                         .map(|(slot, service)| (slot.clone(), Arc::clone(&service.binding)))
                         .collect::<Vec<_>>(),
-                    listener_ids: active.listeners.keys().copied().collect::<BTreeSet<_>>(),
+                    local_services: active
+                        .local_services
+                        .iter()
+                        .map(|(slot, service)| (*slot, Arc::clone(&service.binding)))
+                        .collect::<Vec<_>>(),
+                    local_listener_ids: active
+                        .local_listener_ids
+                        .keys()
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
                     capabilities: Arc::clone(&active.capabilities),
                     lease: Arc::clone(&active.lease),
                     children: std::mem::take(&mut active.children),
@@ -141,68 +150,61 @@ impl Runtime {
                 (run, claimed)
             };
             if let Some(claimed) = claimed {
-                let generation = claimed.generation;
-                let cleanup_usage = runtime
-                    .inner
-                    .resources
-                    .cleanup_runs
-                    .try_reserve(1)
-                    .expect("one cleanup run per registered Fiber fits the Fiber limit");
-                let cleanup_runtime = runtime.clone();
-                let cleanup_fiber = Arc::clone(&fiber);
-                let owned_run = Arc::clone(&run);
-                fiber.executor.spawn(async move {
-                    let cleanup = contain_panic_result(
-                        std::panic::AssertUnwindSafe(
-                            cleanup_runtime.with_reconciliation_slot(
-                                cleanup_runtime
-                                    .run_claimed_cleanup(Arc::clone(&cleanup_fiber), claimed),
-                            ),
-                        )
-                        .catch_unwind()
-                        .await,
-                    );
-                    let report = cleanup.unwrap_or_else(|_| {
-                        let mut data = cleanup_fiber.data.lock().expect("fiber state poisoned");
-                        if data
-                            .active
-                            .as_ref()
-                            .is_some_and(|active| active.generation == generation)
-                        {
-                            data.active = None;
-                        }
-                        drop(data);
-                        // A panic outside the per-effect boundary means the
-                        // cleanup transaction could not prove that every
-                        // publication was withdrawn. Fail closed instead of
-                        // allowing a potentially stale provider generation to
-                        // remain authoritative.
-                        cleanup_runtime.mark_terminal_owned("runtime cleanup driver panicked");
-                        let mut report = CleanupReport::default();
-                        report.push_bounded(
-                            format!("fiber {} cleanup", cleanup_fiber.id.0),
-                            "cleanup run panicked",
-                            cleanup_runtime
-                                .inner
-                                .limits
-                                .payloads
-                                .maximum_diagnostic_entries,
-                            cleanup_runtime
-                                .inner
-                                .limits
-                                .payloads
-                                .maximum_diagnostic_bytes,
-                        );
-                        report
-                    });
-                    // A completed cleanup result must imply zero unfinished-run
-                    // usage to every waiter woken by `finish`.
-                    drop(cleanup_usage);
-                    owned_run.finish(report);
-                });
+                runtime.spawn_claimed_cleanup(Arc::clone(&fiber), Arc::clone(&run), claimed);
             }
             runtime.yield_reconciliation_slot(run.join()).await
         })
+    }
+
+    fn spawn_claimed_cleanup(
+        &self,
+        fiber: Arc<Fiber>,
+        run: Arc<CleanupRun>,
+        claimed: ClaimedCleanup,
+    ) {
+        let generation = claimed.generation;
+        let cleanup_usage = self
+            .inner
+            .resources
+            .cleanup_runs
+            .try_reserve(1)
+            .expect("one cleanup run per registered Fiber fits the Fiber limit");
+        let runtime = self.clone();
+        let executor = fiber.executor.clone();
+        executor.spawn(async move {
+            let cleanup = contain_panic_result(
+                std::panic::AssertUnwindSafe(runtime.with_reconciliation_slot(
+                    runtime.run_claimed_cleanup(Arc::clone(&fiber), claimed),
+                ))
+                .catch_unwind()
+                .await,
+            );
+            let report = cleanup.unwrap_or_else(|_| {
+                let mut data = fiber.data.lock().expect("fiber state poisoned");
+                if data
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.generation == generation)
+                {
+                    data.active = None;
+                }
+                drop(data);
+                // A panic outside the per-effect boundary cannot prove that
+                // every publication was withdrawn, so fail closed.
+                runtime.mark_terminal_owned("runtime cleanup driver panicked");
+                let mut report = CleanupReport::default();
+                report.push_bounded(
+                    format!("fiber {} cleanup", fiber.id.0),
+                    "cleanup run panicked",
+                    runtime.inner.limits.payloads.maximum_diagnostic_entries,
+                    runtime.inner.limits.payloads.maximum_diagnostic_bytes,
+                );
+                report
+            });
+            // Waiters observe completion only after unfinished-run usage drops.
+            drop(cleanup_usage);
+            run.finish(report);
+        });
     }
 
     async fn run_claimed_cleanup(
@@ -213,7 +215,8 @@ impl Runtime {
         let ClaimedCleanup {
             generation,
             services,
-            listener_ids,
+            local_services,
+            local_listener_ids,
             capabilities,
             lease,
             children,
@@ -227,7 +230,9 @@ impl Runtime {
         lease.close();
         self.yield_reconciliation_slot(self.revoke_capability_set(capabilities))
             .await;
-        let reconciliation = self.withdraw_generation_services(&services, Some(fiber.id));
+        let mut reconciliation = self.withdraw_generation_services(&services, Some(fiber.id));
+        reconciliation
+            .extend(self.withdraw_generation_local_services(&local_services, Some(fiber.id)));
         let owner = Owner {
             fiber: fiber.id,
             generation,
@@ -236,8 +241,8 @@ impl Runtime {
         // destroy user code. Do not retain the provider's reconciliation slot
         // while exact dependents need that same bounded capacity to converge.
         self.yield_reconciliation_slot(async {
-            for id in listener_ids {
-                self.withdraw_listener_owned(owner, id).await;
+            for id in local_listener_ids {
+                self.remove_local_listener_entry(owner, id);
             }
         })
         .await;
@@ -327,6 +332,43 @@ impl Runtime {
         tickets
     }
 
+    fn withdraw_generation_local_services(
+        &self,
+        services: &[(LocalSlot, Arc<LocalBinding>)],
+        except: Option<FiberId>,
+    ) -> Vec<(FiberId, ReconciliationTicket)> {
+        let (tickets, should_spawn) = {
+            let mut state = self.inner.state.lock().expect("runtime state poisoned");
+            let mut changed = Vec::new();
+            let mut removed_any = false;
+            for (slot, binding) in services {
+                let visibility = state
+                    .local_providers
+                    .get(slot)
+                    .filter(|entry| {
+                        entry.binding.supply == binding.supply
+                            && Arc::ptr_eq(&entry.binding, binding)
+                    })
+                    .map(|entry| entry.visibility);
+                if visibility.is_some() {
+                    state.local_providers.remove(slot);
+                    removed_any = true;
+                }
+                if visibility == Some(SupplyVisibility::Active) {
+                    changed.push(*slot);
+                }
+            }
+            if removed_any {
+                state.advance_revision();
+            }
+            let (tickets, should_spawn) =
+                Self::request_local_withdrawals_locked(&mut state, &changed, except);
+            (tickets, should_spawn)
+        };
+        self.start_reconciliation_requests(should_spawn);
+        tickets
+    }
+
     pub(super) fn dispose_fiber_instance(
         &self,
         fiber: Arc<Fiber>,
@@ -399,16 +441,21 @@ impl Runtime {
         }
         let report = self.unload_generation(&fiber).await;
         fiber.set_state(FiberState::Disposed);
-        let required_slots = {
+        let (required_slots, required_local_slots) = {
             let data = fiber.data.lock().expect("fiber state poisoned");
             let attempt = data
                 .attempt
                 .as_ref()
                 .expect("registered Fiber retains its prepared attempt");
-            attempt
+            let portable = attempt
                 .required_services()
                 .map(|service| fiber.base_context.service_slot(service))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let local = attempt
+                .required_local_services()
+                .map(|requirement| fiber.base_context.local_slot(requirement.contract))
+                .collect::<Vec<_>>();
+            (portable, local)
         };
         {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
@@ -421,6 +468,15 @@ impl Runtime {
                 });
                 if remove_entry {
                     state.dependents.remove(&slot);
+                }
+            }
+            for slot in required_local_slots {
+                let remove_entry = state.local_dependents.get_mut(&slot).is_some_and(|fibers| {
+                    fibers.remove(&id);
+                    fibers.is_empty()
+                });
+                if remove_entry {
+                    state.local_dependents.remove(&slot);
                 }
             }
             if let Some(parent) = fiber.parent
@@ -657,6 +713,7 @@ mod tests {
     use super::*;
     use crate::{ContractVersion, PreparedActivation, ProviderChannel, Requirement};
     use async_trait::async_trait;
+    use serde_json::Value;
     use std::time::Duration;
 
     const V1: ContractVersion = ContractVersion(1);
@@ -683,10 +740,6 @@ mod tests {
 
     #[async_trait]
     impl PluginFactory for ProviderFactory {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin("provider-seal", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone()))
         }
@@ -705,10 +758,6 @@ mod tests {
 
     #[async_trait]
     impl PluginFactory for ConsumerFactory {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin("provider-seal-consumer", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(
                 PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -734,16 +783,19 @@ mod tests {
         let runtime = Runtime::default();
         let provider = runtime
             .root()
-            .apply(Arc::new(ProviderFactory), Value::Null)
+            .apply(
+                crate::plugin::resolved_test_factory(Arc::new(ProviderFactory)),
+                Value::Null,
+            )
             .await
             .unwrap();
         let captured = Arc::new(Mutex::new(None));
         let consumer = runtime
             .root()
             .apply(
-                Arc::new(ConsumerFactory {
+                crate::plugin::resolved_test_factory(Arc::new(ConsumerFactory {
                     captured: Arc::clone(&captured),
-                }),
+                })),
                 Value::Null,
             )
             .await

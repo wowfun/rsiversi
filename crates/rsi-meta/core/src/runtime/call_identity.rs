@@ -27,6 +27,11 @@ impl Runtime {
         Self::next_identity(&self.inner.next_isolation, "isolation identities").map(IsolationId)
     }
 
+    pub(super) fn next_local_isolation_id(&self) -> Result<LocalIsolationId> {
+        Self::next_identity(&self.inner.next_isolation, "isolation identities")
+            .map(LocalIsolationId)
+    }
+
     pub(super) fn next_attempt_id(&self) -> Result<u64> {
         Self::next_identity(&self.inner.next_attempt, "preparation attempt identities")
     }
@@ -42,10 +47,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for CountActivation {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin("activation-lineage-exhaustion", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone()))
         }
@@ -103,7 +104,9 @@ mod tests {
         let fiber = runtime
             .root()
             .apply(
-                Arc::new(CountActivation(Arc::clone(&activations))),
+                crate::plugin::resolved_test_factory(Arc::new(CountActivation(Arc::clone(
+                    &activations,
+                )))),
                 ConfigValue::Null,
             )
             .await

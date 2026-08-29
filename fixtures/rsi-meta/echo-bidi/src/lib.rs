@@ -1,8 +1,11 @@
-use rsi_meta_plugin::{
+use rsi_meta_native::{
     Activation, Message, NativeInstance, NativePlugin, Prepared, ProviderChannel,
     ServiceRequirement, export_plugin,
 };
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static ACTIVE_VALIDATION_PROBES: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 struct EchoPlugin;
@@ -59,6 +62,7 @@ struct EchoConfig {
     destroy_release_path: Option<String>,
     validate_entered_path: Option<String>,
     validate_release_path: Option<String>,
+    validate_overlap_path: Option<String>,
 }
 
 impl EchoConfig {
@@ -85,10 +89,12 @@ impl EchoConfig {
             destroy_release_path: optional_path(value, "destroy_release_path")?,
             validate_entered_path: optional_path(value, "validate_entered_path")?,
             validate_release_path: optional_path(value, "validate_release_path")?,
+            validate_overlap_path: optional_path(value, "validate_overlap_path")?,
         })
     }
 
     fn validation_gate(&self) -> Result<(), String> {
+        let _activity = ValidationActivity::enter(self.validate_overlap_path.as_deref())?;
         signal_and_wait(
             self.validate_entered_path.as_deref(),
             self.validate_release_path.as_deref(),
@@ -125,6 +131,7 @@ impl EchoConfig {
             "destroy_release_path": self.destroy_release_path,
             "validate_entered_path": self.validate_entered_path,
             "validate_release_path": self.validate_release_path,
+            "validate_overlap_path": self.validate_overlap_path,
         })
     }
 
@@ -139,6 +146,7 @@ impl EchoConfig {
             &self.destroy_release_path,
             &self.validate_entered_path,
             &self.validate_release_path,
+            &self.validate_overlap_path,
         ];
         let path_bytes: usize = paths
             .iter()
@@ -150,6 +158,30 @@ impl EchoConfig {
     }
 }
 
+struct ValidationActivity;
+
+impl ValidationActivity {
+    fn enter(overlap_path: Option<&str>) -> Result<Option<Self>, String> {
+        let Some(overlap_path) = overlap_path else {
+            return Ok(None);
+        };
+        let previous = ACTIVE_VALIDATION_PROBES.fetch_add(1, Ordering::AcqRel);
+        if previous != 0
+            && let Err(error) = std::fs::write(overlap_path, b"overlap")
+        {
+            ACTIVE_VALIDATION_PROBES.fetch_sub(1, Ordering::AcqRel);
+            return Err(error.to_string());
+        }
+        Ok(Some(Self))
+    }
+}
+
+impl Drop for ValidationActivity {
+    fn drop(&mut self) {
+        ACTIVE_VALIDATION_PROBES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct EchoInstance {
     prefix: Vec<u8>,
     delay_ms: u64,
@@ -158,7 +190,7 @@ struct EchoInstance {
     call_release_path: Option<String>,
     destroy_entered_path: Option<String>,
     destroy_release_path: Option<String>,
-    upstream: Option<rsi_meta_plugin::Capability>,
+    upstream: Option<rsi_meta_native::Capability>,
 }
 
 impl NativeInstance for EchoInstance {
@@ -294,7 +326,7 @@ export_plugin!(EchoPlugin);
 mod tests {
     use super::*;
     use core::ffi::c_void;
-    use rsi_meta_plugin::{
+    use rsi_meta_native::{
         ABI_MAJOR, ABI_MINOR, BasicOutput, CapInput, EmptyInput, FrameHeader, HostTable,
         PLUGIN_DESTROY_FACTORY, PLUGIN_FINALIZE, PluginTable, STATUS_OK, STATUS_UNSUPPORTED,
         TableHeader,
@@ -324,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_exports_one_compatible_v2_table() {
+    fn fixture_exports_one_compatible_v3_table() {
         let host = HostTable {
             header: TableHeader::new(ABI_MINOR, HostTable::STRUCT_SIZE),
             issuer: 4_242,
@@ -335,7 +367,7 @@ mod tests {
         // SAFETY: The generated entry borrows two complete aligned tables.
         assert_eq!(
             unsafe {
-                super::rsi_meta_plugin_entry_v2(
+                super::rsi_meta_plugin_entry_v3(
                     &raw const host,
                     &raw mut plugin,
                     PluginTable::STRUCT_SIZE,

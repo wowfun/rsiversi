@@ -1,18 +1,20 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    ActivationPlan, CallId, Capability, ConfigValue, ContractVersion, DeadlineLimits, DispatchMode,
-    EventHandler, EventOptions, EventOutcome, ExecutionLimits, FactoryIdentity, FiberState,
-    InvocationContext, IsolationId, Message, MetaError, PayloadLimits, PluginFactory,
-    PreparedActivation, ProviderChannel, Requirement, Result, Runtime, RuntimeLimits,
-    ServiceEndpoint,
+    ActivationPlan, CallId, Capability, ConfigValue, ContractVersion, DeadlineLimits,
+    ExecutionLimits, FactoryIdentity, FiberState, InvocationContext, IsolationId, Message,
+    MetaError, PayloadLimits, PluginFactory, PreparedActivation, ProviderChannel, Requirement,
+    Result, Runtime, RuntimeLimits, ServiceEndpoint,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 #[path = "support/foundation_service.rs"]
 mod foundation_service;
@@ -24,17 +26,13 @@ const V1: ContractVersion = ContractVersion(1);
 
 #[derive(Debug)]
 struct CaptureFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     requirement: Requirement,
     slot: Arc<Mutex<Option<Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()).requiring(self.requirement.clone()))
     }
@@ -81,13 +79,13 @@ async fn captured_service_with_runtime(
     let provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("provider", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("provider", "1"),
                 "echo",
                 "test.echo",
                 V1,
                 endpoint,
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -97,11 +95,11 @@ async fn captured_service_with_runtime(
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("consumer", "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked("consumer", "1"),
                 requirement: Requirement::new("echo", "test.echo", V1),
                 slot: Arc::clone(&slot),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -242,121 +240,6 @@ async fn safe_rust_provider_callbacks_can_run_concurrently() {
 }
 
 #[derive(Debug)]
-struct BlockingHandler {
-    entered: Arc<Notify>,
-    release: Arc<Notify>,
-}
-
-#[async_trait]
-impl EventHandler for BlockingHandler {
-    async fn handle(&self, _: InvocationContext, value: Arc<Value>) -> Result<EventOutcome> {
-        self.entered.notify_one();
-        self.release.notified().await;
-        Ok(EventOutcome::Continue((*value).clone()))
-    }
-}
-
-#[derive(Debug)]
-struct CountingEndpoint(Arc<AtomicUsize>);
-
-#[async_trait]
-impl ServiceEndpoint for CountingEndpoint {
-    async fn serve(&self, _: InvocationContext, mut channel: ProviderChannel<'_>) -> Result<()> {
-        self.0.fetch_add(1, Ordering::AcqRel);
-        while let Some(frame) = channel.recv().await {
-            channel.send(frame).await?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct SharedCallbackFactory {
-    identity: FactoryIdentity,
-    handler: Arc<dyn EventHandler>,
-    endpoint: Arc<dyn ServiceEndpoint>,
-}
-
-#[async_trait]
-impl PluginFactory for SharedCallbackFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
-    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
-        Ok(PreparedActivation::new(desired.clone()))
-    }
-
-    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
-        plan.context()
-            .on("block", Arc::clone(&self.handler), EventOptions::default())?;
-        plan.context()
-            .provide("echo", "test.echo", V1, Arc::clone(&self.endpoint))?;
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn service_callbacks_do_not_wait_for_same_generation_event_handlers() {
-    let runtime = Runtime::new(RuntimeLimits {
-        deadlines: DeadlineLimits {
-            service_call: std::time::Duration::from_secs(1),
-            event_dispatch: std::time::Duration::from_secs(1),
-            ..DeadlineLimits::default()
-        },
-        ..RuntimeLimits::default()
-    })
-    .unwrap();
-    let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let calls = Arc::new(AtomicUsize::new(0));
-    runtime
-        .root()
-        .apply(
-            Arc::new(SharedCallbackFactory {
-                identity: FactoryIdentity::builtin("shared-lock", "1"),
-                handler: Arc::new(BlockingHandler {
-                    entered: Arc::clone(&entered),
-                    release: Arc::clone(&release),
-                }),
-                endpoint: Arc::new(CountingEndpoint(Arc::clone(&calls))),
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    let slot = Arc::new(Mutex::new(None));
-    runtime
-        .root()
-        .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("queue-client", "1"),
-                requirement: Requirement::new("echo", "test.echo", V1),
-                slot: Arc::clone(&slot),
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    let dispatch_root = runtime.root();
-    let dispatch = tokio::spawn(async move {
-        dispatch_root
-            .dispatch("block", DispatchMode::Emit, Value::Null)
-            .await
-    });
-    entered.notified().await;
-    let service = slot.lock().unwrap().clone().unwrap();
-    let response = service
-        .invoke(Message::new(b"queued".to_vec()))
-        .await
-        .unwrap();
-    assert_eq!(response.as_bytes(), b"queued");
-    assert_eq!(calls.load(Ordering::Acquire), 1);
-    release.notify_one();
-    dispatch.await.unwrap().unwrap();
-}
-
-#[derive(Debug)]
 struct TraceLeaf(Arc<Mutex<Option<CallId>>>);
 
 #[async_trait]
@@ -406,13 +289,13 @@ async fn nested_service_trace_names_the_immediate_enclosing_call() {
     let leaf = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("trace-leaf", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("trace-leaf", "1"),
                 "leaf",
                 "test.leaf",
                 V1,
                 Arc::new(TraceLeaf(Arc::clone(&leaf_parent))),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -422,9 +305,9 @@ async fn nested_service_trace_names_the_immediate_enclosing_call() {
     let bridge = runtime
         .root()
         .apply(
-            Arc::new(
+            crate::resolved(Arc::new(
                 EndpointFactory::new(
-                    FactoryIdentity::builtin("trace-bridge", "1"),
+                    FactoryIdentity::linked("trace-bridge", "1"),
                     "bridge",
                     "test.bridge",
                     V1,
@@ -433,7 +316,7 @@ async fn nested_service_trace_names_the_immediate_enclosing_call() {
                     }),
                 )
                 .requiring(Requirement::new("leaf", "test.leaf", V1)),
-            ),
+            )),
             Value::Null,
         )
         .await
@@ -443,11 +326,11 @@ async fn nested_service_trace_names_the_immediate_enclosing_call() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("trace-client", "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked("trace-client", "1"),
                 requirement: Requirement::new("bridge", "test.bridge", V1),
                 slot: Arc::clone(&slot),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -521,17 +404,13 @@ impl ServiceEndpoint for DropBlockingEndpoint {
 
 #[derive(Debug)]
 struct DrainFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     endpoint: Arc<dyn ServiceEndpoint>,
     cleaned: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for DrainFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -570,14 +449,14 @@ async fn retirement_waits_for_callback_exit_and_caller_terminal_observation() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(DrainFactory {
-                identity: FactoryIdentity::builtin("drain", "1"),
+            crate::resolved(Arc::new(DrainFactory {
+                _identity: FactoryIdentity::linked("drain", "1"),
                 endpoint: Arc::new(DrainEndpoint {
                     entered: Arc::clone(&entered),
                     release: Arc::clone(&release),
                 }),
                 cleaned: Arc::clone(&cleaned),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -586,11 +465,11 @@ async fn retirement_waits_for_callback_exit_and_caller_terminal_observation() {
     runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("drain-client", "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked("drain-client", "1"),
                 requirement: Requirement::new("echo", "test.echo", V1),
                 slot: Arc::clone(&slot),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -636,15 +515,15 @@ async fn retirement_waits_for_endpoint_future_destruction() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(DrainFactory {
-                identity: FactoryIdentity::builtin("drop-blocking-provider", "1"),
+            crate::resolved(Arc::new(DrainFactory {
+                _identity: FactoryIdentity::linked("drop-blocking-provider", "1"),
                 endpoint: Arc::new(DropBlockingEndpoint {
                     entered: Arc::clone(&entered),
                     drop_entered: Arc::clone(&drop_entered),
                     drop_release: Mutex::new(Some(drop_wait)),
                 }),
                 cleaned: Arc::clone(&cleaned),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -653,11 +532,11 @@ async fn retirement_waits_for_endpoint_future_destruction() {
     runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("drop-blocking-client", "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked("drop-blocking-client", "1"),
                 requirement: Requirement::new("echo", "test.echo", V1),
                 slot: Arc::clone(&slot),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -780,63 +659,6 @@ async fn terminal_service_error_survives_a_full_response_channel() {
         call.recv().await.unwrap_err(),
         MetaError::Timeout("service call")
     );
-}
-
-#[derive(Debug)]
-struct InvocationDebugEndpoint;
-
-#[async_trait]
-impl ServiceEndpoint for InvocationDebugEndpoint {
-    async fn serve(
-        &self,
-        invocation: InvocationContext,
-        mut channel: ProviderChannel<'_>,
-    ) -> Result<()> {
-        while channel.recv().await.is_some() {
-            channel
-                .send(Message::new(format!("{invocation:?}").into_bytes()))
-                .await?;
-        }
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn invocation_debug_output_does_not_disclose_edge_overlays() {
-    let runtime = Runtime::default();
-    runtime
-        .root()
-        .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("debug-provider", "1"),
-                "echo",
-                "test.echo",
-                V1,
-                Arc::new(InvocationDebugEndpoint),
-            )),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    let slot = Arc::new(Mutex::new(None));
-    runtime
-        .root()
-        .intercept("echo", Value::String("top-secret-overlay".to_owned()))
-        .unwrap()
-        .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("debug-client", "1"),
-                requirement: Requirement::new("echo", "test.echo", V1),
-                slot: Arc::clone(&slot),
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    let service = slot.lock().unwrap().clone().unwrap();
-    let response = service.invoke(Message::new(Vec::new())).await.unwrap();
-    let debug = std::str::from_utf8(response.as_bytes()).unwrap();
-    assert!(!debug.contains("top-secret-overlay"), "{debug}");
 }
 
 #[path = "service_invariants/foundation.rs"]

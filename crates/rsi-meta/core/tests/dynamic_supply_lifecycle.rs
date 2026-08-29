@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    ActivationPlan, Capability, ConfigValue, Context, ContractVersion, EventHandler, EventOptions,
-    EventOutcome, ExecutionLimits, FactoryIdentity, FiberHandle, FiberState, InvocationContext,
-    Message, MetaError, PluginFactory, PreparedActivation, ProviderChannel, Requirement, Result,
-    RuntimeLimits, ServiceEndpoint, SupplyHandle,
+    ActivationPlan, Capability, ConfigValue, Context, ContractVersion, Emit, EmitEventHandler,
+    ExecutionLimits, FactoryIdentity, FiberHandle, FiberState, InvocationContext, LocalEvent,
+    LocalEventOptions, Message, MetaError, PluginFactory, PreparedActivation, ProviderChannel,
+    Requirement, Result, RuntimeLimits, ServiceEndpoint, SupplyHandle,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,11 +12,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 use support::{Echo, PassiveFactory};
 
 const V1: ContractVersion = ContractVersion(1);
+
+struct WithdrawalFenceEvent;
+
+impl LocalEvent for WithdrawalFenceEvent {
+    const KEY: &'static str = "test.withdrawal-fence";
+    type Value = ();
+    type Error = std::convert::Infallible;
+    type Mode = Emit;
+}
 
 #[derive(Debug)]
 struct BlockingDropHandler {
@@ -35,24 +47,17 @@ impl Drop for BlockingDropHandler {
     }
 }
 
-#[async_trait]
-impl EventHandler for BlockingDropHandler {
-    async fn handle(&self, _: InvocationContext, value: Arc<Value>) -> Result<EventOutcome> {
-        Ok(EventOutcome::Continue((*value).clone()))
-    }
+impl EmitEventHandler<WithdrawalFenceEvent> for BlockingDropHandler {
+    fn handle(&self, (): &()) {}
 }
 
 #[derive(Debug)]
 struct WithdrawalFenceProvider {
-    handler: Mutex<Option<Arc<dyn EventHandler>>>,
+    handler: Mutex<Option<Arc<BlockingDropHandler>>>,
 }
 
 #[async_trait]
 impl PluginFactory for WithdrawalFenceProvider {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("withdrawal-fence-provider", "1")
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -71,7 +76,7 @@ impl PluginFactory for WithdrawalFenceProvider {
             .take()
             .expect("the blocking handler is registered once");
         plan.context()
-            .on("withdrawal-fence", handler, EventOptions::default())?;
+            .on_emit::<WithdrawalFenceEvent, _>(handler, LocalEventOptions::default())?;
         Ok(())
     }
 }
@@ -84,10 +89,6 @@ struct GatedWithdrawalConsumer {
 
 #[async_trait]
 impl PluginFactory for GatedWithdrawalConsumer {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("withdrawal-fence-consumer", "1")
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(
             PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -120,12 +121,12 @@ async fn service_withdrawal_fences_loading_dependents_before_listener_destructio
     let provider = runtime
         .root()
         .apply(
-            Arc::new(WithdrawalFenceProvider {
+            crate::resolved(Arc::new(WithdrawalFenceProvider {
                 handler: Mutex::new(Some(Arc::new(BlockingDropHandler {
                     entered: Mutex::new(Some(drop_entered_sender)),
                     release: Mutex::new(drop_release_receiver),
                 }))),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -140,10 +141,10 @@ async fn service_withdrawal_fences_loading_dependents_before_listener_destructio
         let activation_release = Arc::clone(&activation_release);
         async move {
             root.apply(
-                Arc::new(GatedWithdrawalConsumer {
+                crate::resolved(Arc::new(GatedWithdrawalConsumer {
                     entered: activation_entered,
                     release: activation_release,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -231,7 +232,7 @@ struct CapturedSupplies {
 
 #[derive(Debug)]
 struct TwoSupplyFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     captured: Arc<Mutex<Option<CapturedSupplies>>>,
@@ -239,10 +240,6 @@ struct TwoSupplyFactory {
 
 #[async_trait]
 impl PluginFactory for TwoSupplyFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -288,12 +285,12 @@ async fn capability_drain_yields_the_reconciliation_slot() {
     let blocked = runtime
         .root()
         .apply(
-            Arc::new(TwoSupplyFactory {
-                identity: FactoryIdentity::builtin("capability-drain-blocker", "1"),
+            crate::resolved(Arc::new(TwoSupplyFactory {
+                _identity: FactoryIdentity::linked("capability-drain-blocker", "1"),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 captured: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -301,10 +298,10 @@ async fn capability_drain_yields_the_reconciliation_slot() {
     let independent = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory::new(FactoryIdentity::builtin(
+            crate::resolved(Arc::new(PassiveFactory::new(FactoryIdentity::linked(
                 "capability-drain-independent",
                 "1",
-            ))),
+            )))),
             Value::Null,
         )
         .await
@@ -350,10 +347,10 @@ async fn one_supply_withdrawal_drains_only_its_calls_and_survives_waiter_cancell
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(
-                PassiveFactory::new(FactoryIdentity::builtin("blocking-consumer", "1"))
+            crate::resolved(Arc::new(
+                PassiveFactory::new(FactoryIdentity::linked("blocking-consumer", "1"))
                     .requiring(Requirement::new("blocking", "test.blocking", V1)),
-            ),
+            )),
             Value::Null,
         )
         .await
@@ -366,12 +363,12 @@ async fn one_supply_withdrawal_drains_only_its_calls_and_survives_waiter_cancell
     let provider = runtime
         .root()
         .apply(
-            Arc::new(TwoSupplyFactory {
-                identity: FactoryIdentity::builtin("two-supply-provider", "1"),
+            crate::resolved(Arc::new(TwoSupplyFactory {
+                _identity: FactoryIdentity::linked("two-supply-provider", "1"),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 captured: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -447,7 +444,7 @@ impl ServiceEndpoint for DropTrackedEndpoint {
 
 #[derive(Debug)]
 struct BlockingSetupDisposalFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     supply: Arc<Mutex<Option<SupplyHandle>>>,
@@ -457,10 +454,6 @@ struct BlockingSetupDisposalFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingSetupDisposalFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -507,14 +500,14 @@ async fn explicit_loading_supply_disposal_detaches_only_its_root_child_effect() 
         let root_cleanups = Arc::clone(&root_cleanups);
         async move {
             root.apply(
-                Arc::new(BlockingSetupDisposalFactory {
-                    identity: FactoryIdentity::builtin("setup-disposal", "1"),
+                crate::resolved(Arc::new(BlockingSetupDisposalFactory {
+                    _identity: FactoryIdentity::linked("setup-disposal", "1"),
                     entered,
                     release,
                     supply,
                     endpoint_drops,
                     root_cleanups,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -555,16 +548,12 @@ async fn explicit_loading_supply_disposal_detaches_only_its_root_child_effect() 
 
 #[derive(Debug)]
 struct ContextCaptureFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     context: Arc<Mutex<Option<Context>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ContextCaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -582,10 +571,10 @@ async fn withdrawn_endpoint_does_not_stay_alive_through_an_old_service_handle() 
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ContextCaptureFactory {
-                identity: FactoryIdentity::builtin("endpoint-lifetime-owner", "1"),
+            crate::resolved(Arc::new(ContextCaptureFactory {
+                _identity: FactoryIdentity::linked("endpoint-lifetime-owner", "1"),
                 context: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -618,16 +607,12 @@ async fn withdrawn_endpoint_does_not_stay_alive_through_an_old_service_handle() 
 
 #[derive(Debug)]
 struct FailingSupplyFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     drops: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for FailingSupplyFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -644,14 +629,10 @@ impl PluginFactory for FailingSupplyFactory {
 }
 
 #[derive(Debug)]
-struct ReplacementSupplyFactory(FactoryIdentity);
+struct ReplacementSupplyFactory;
 
 #[async_trait]
 impl PluginFactory for ReplacementSupplyFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -671,10 +652,10 @@ async fn loading_failure_rolls_back_the_occupied_slot_reservation_and_endpoint()
     let failed = runtime
         .root()
         .apply(
-            Arc::new(FailingSupplyFactory {
-                identity: FactoryIdentity::builtin("failing-supply", "1"),
+            crate::resolved(Arc::new(FailingSupplyFactory {
+                _identity: FactoryIdentity::linked("failing-supply", "1"),
                 drops: Arc::clone(&drops),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -686,10 +667,12 @@ async fn loading_failure_rolls_back_the_occupied_slot_reservation_and_endpoint()
     let replacement = runtime
         .root()
         .apply(
-            Arc::new(ReplacementSupplyFactory(FactoryIdentity::builtin(
+            rsi_meta::ResolvedFactory::linked(
                 "replacement-supply",
                 "1",
-            ))),
+                rsi_meta::UpdateMode::Replayable,
+                Arc::new(ReplacementSupplyFactory),
+            ),
             Value::Null,
         )
         .await

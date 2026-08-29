@@ -1,16 +1,19 @@
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Context, DispatchMode, EventHandler, EventOptions, EventOutcome,
-    FactoryIdentity, FiberState, InvocationContext, MetaError, PayloadLimits, PluginFactory,
-    PreparedActivation, Result, Runtime, RuntimeLimits, ServiceKey,
+    ActivationPlan, ConfigValue, Context, Emit, EmitEventHandler, FactoryIdentity, FiberState,
+    LocalEvent, LocalEventOptions, MetaError, PayloadLimits, PluginFactory, PreparedActivation,
+    Result, Runtime, RuntimeLimits, ServiceKey,
 };
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
-use support::{FactorySpec, NoopHandler};
+use support::FactorySpec;
 
 #[derive(Debug)]
 struct ContextCaptureFactory {
@@ -20,10 +23,6 @@ struct ContextCaptureFactory {
 
 #[async_trait]
 impl PluginFactory for ContextCaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -39,10 +38,10 @@ async fn captured_context(runtime: &Runtime) -> Context {
     runtime
         .root()
         .apply(
-            Arc::new(ContextCaptureFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("ownr", "1")),
+            crate::resolved(Arc::new(ContextCaptureFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("ownr", "1")),
                 captured: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -54,8 +53,24 @@ async fn captured_context(runtime: &Runtime) -> Context {
         .expect("activation captured its Context")
 }
 
+struct LongEvent;
+
+impl LocalEvent for LongEvent {
+    const KEY: &'static str = "event";
+    type Value = ();
+    type Error = std::convert::Infallible;
+    type Mode = Emit;
+}
+
+#[derive(Debug)]
+struct Noop;
+
+impl EmitEventHandler<LongEvent> for Noop {
+    fn handle(&self, (): &()) {}
+}
+
 #[tokio::test]
-async fn event_identifiers_are_checked_at_context_boundaries() {
+async fn local_event_identifiers_are_checked_at_context_boundaries() {
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
             maximum_identifier_bytes: 4,
@@ -68,70 +83,26 @@ async fn event_identifiers_are_checked_at_context_boundaries() {
 
     assert_eq!(
         context
-            .on("event", Arc::new(NoopHandler), EventOptions::default(),)
+            .on_emit::<LongEvent, _>(Arc::new(Noop), LocalEventOptions::default())
             .unwrap_err(),
-        MetaError::InvalidInput("event identifier exceeds the configured byte limit".to_owned(),)
+        MetaError::InvalidInput(
+            "Local event identifier exceeds the configured byte limit".to_owned(),
+        )
     );
-    assert_eq!(
-        runtime
-            .root()
-            .dispatch("event", DispatchMode::Emit, Value::Null)
-            .await
-            .unwrap_err(),
-        MetaError::InvalidInput("event identifier exceeds the configured byte limit".to_owned(),)
-    );
-    let dispatches = runtime.resource_snapshot().event_dispatches;
-    assert_eq!(dispatches.current, 0);
-    assert_eq!(dispatches.high_watermark, 0);
-    assert_eq!(dispatches.rejected, 0);
-    assert_eq!(
-        runtime
-            .root()
-            .dispatch("okay", DispatchMode::Emit, Value::Null)
-            .await
-            .unwrap()
-            .invoked,
-        0,
-    );
+    assert_eq!(runtime.resource_snapshot().listeners.current, 0);
 }
 
 #[derive(Debug)]
-struct LongDiagnosticHandler;
+struct PanickingPreparationFactory;
 
 #[async_trait]
-impl EventHandler for LongDiagnosticHandler {
-    async fn handle(&self, _: InvocationContext, _: Arc<Value>) -> Result<EventOutcome> {
-        Err(MetaError::Service("界".repeat(16)))
-    }
-}
-
-#[derive(Debug)]
-struct PanickingIdentityFactory;
-
-#[async_trait]
-impl PluginFactory for PanickingIdentityFactory {
-    fn identity(&self) -> FactoryIdentity {
-        panic!("identity panic evidence")
-    }
-
+impl PluginFactory for PanickingPreparationFactory {
     fn prepare(&self, _: &ConfigValue) -> Result<PreparedActivation> {
-        unreachable!("identity validation must finish before preparation")
+        panic!("plugin preparation panicked")
     }
 
     async fn activate(&self, _: ActivationPlan) -> Result<()> {
-        unreachable!("identity validation must finish before activation")
-    }
-}
-
-#[derive(Debug)]
-struct StructuredLongDiagnosticHandler;
-
-#[async_trait]
-impl EventHandler for StructuredLongDiagnosticHandler {
-    async fn handle(&self, _: InvocationContext, _: Arc<Value>) -> Result<EventOutcome> {
-        Err(MetaError::DuplicateProvider {
-            service: ServiceKey::from("界".repeat(16)),
-        })
+        unreachable!("panicking preparation cannot reach activation")
     }
 }
 
@@ -140,10 +111,6 @@ struct StructuredLongActivationFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for StructuredLongActivationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -156,7 +123,7 @@ impl PluginFactory for StructuredLongActivationFactory {
 }
 
 #[tokio::test]
-async fn retained_effect_labels_and_listener_errors_obey_the_diagnostic_byte_bound() {
+async fn retained_effect_and_activation_diagnostics_obey_the_byte_bound() {
     const MAXIMUM_DIAGNOSTIC_BYTES: usize = 16;
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
@@ -167,47 +134,11 @@ async fn retained_effect_labels_and_listener_errors_obey_the_diagnostic_byte_bou
     })
     .unwrap();
     let context = captured_context(&runtime).await;
-    context
-        .on(
-            "diagnostic",
-            Arc::new(LongDiagnosticHandler),
-            EventOptions::default(),
-        )
-        .unwrap();
-
-    let error = runtime
-        .root()
-        .dispatch("diagnostic", DispatchMode::Emit, Value::Null)
-        .await
-        .unwrap_err();
-    let MetaError::Event(message) = error else {
-        panic!("listener error was not normalized at the event boundary: {error:?}");
-    };
-    assert!(message.len() <= MAXIMUM_DIAGNOSTIC_BYTES);
-    assert!(std::str::from_utf8(message.as_bytes()).is_ok());
-
-    context
-        .on(
-            "structured",
-            Arc::new(StructuredLongDiagnosticHandler),
-            EventOptions::default(),
-        )
-        .unwrap();
-    let error = runtime
-        .root()
-        .dispatch("structured", DispatchMode::Emit, Value::Null)
-        .await
-        .unwrap_err();
-    let MetaError::Event(message) = error else {
-        panic!("structured listener error was not normalized at the event boundary: {error:?}");
-    };
-    assert!(message.len() <= MAXIMUM_DIAGNOSTIC_BYTES);
-    assert!(std::str::from_utf8(message.as_bytes()).is_ok());
 
     let effects_before_rejection = runtime.resource_snapshot().effects;
     assert_eq!(
         context
-            .defer("界".repeat(6), Box::new(|| async { Ok(()) }.boxed()),)
+            .defer("界".repeat(6), Box::new(|| async { Ok(()) }.boxed()))
             .unwrap_err(),
         MetaError::InvalidInput(
             "effect label exceeds the configured diagnostic byte limit".to_owned(),
@@ -222,10 +153,13 @@ async fn retained_effect_labels_and_listener_errors_obey_the_diagnostic_byte_bou
 
     let error = runtime
         .root()
-        .apply(Arc::new(PanickingIdentityFactory), Value::Null)
+        .apply(
+            crate::resolved(Arc::new(PanickingPreparationFactory)),
+            Value::Null,
+        )
         .await
         .unwrap_err();
-    let MetaError::Activation(message) = error else {
+    let MetaError::InvalidConfig(message) = error else {
         panic!("preparation task error changed category: {error:?}");
     };
     assert_eq!(message, "plug [truncated]");
@@ -233,9 +167,9 @@ async fn retained_effect_labels_and_listener_errors_obey_the_diagnostic_byte_bou
     let failed = runtime
         .root()
         .apply(
-            Arc::new(StructuredLongActivationFactory(FactorySpec::new(
-                FactoryIdentity::builtin("fail", "1"),
-            ))),
+            crate::resolved(Arc::new(StructuredLongActivationFactory(FactorySpec::new(
+                FactoryIdentity::linked("fail", "1"),
+            )))),
             Value::Null,
         )
         .await

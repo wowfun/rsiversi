@@ -6,9 +6,8 @@ The standard product gate is:
 
 ```sh
 cargo xtask rsi-meta conformance
-cargo xtask rsi-meta code-health
 cargo xtask verify-docs
-RUSTDOCFLAGS="-D warnings" cargo doc --locked -p rsi-meta -p rsi-meta-scope -p rsi-meta-plugin -p rsi-meta-loader --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked -p rsi-meta-contract -p rsi-meta -p rsi-meta-scope -p rsi-meta-profile -p rsi-meta-native -p rsi-meta-native-loader --no-deps
 ```
 
 Native failures must be reproduced through an actual dynamic library when the

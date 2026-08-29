@@ -54,6 +54,7 @@ async fn runtime_rejects_every_zero_limit() {
         topology!(maximum_dependency_edges),
         topology!(maximum_requirements_per_fiber),
         topology!(maximum_event_listeners),
+        topology!(maximum_waterfall_listeners_per_slot),
         topology!(maximum_effects_per_fiber),
         topology!(maximum_effects),
         topology!(maximum_effect_transactions_per_fiber),
@@ -78,11 +79,8 @@ async fn runtime_rejects_every_zero_limit() {
         execution!(maximum_concurrent_service_calls),
         execution!(channel_capacity),
         execution!(maximum_pending_message_sends),
-        execution!(maximum_concurrent_event_dispatches),
-        execution!(maximum_concurrent_event_callbacks),
         deadline!(transition),
         deadline!(service_call),
-        deadline!(event_dispatch),
         deadline!(shutdown_wait),
     ];
     for limits in invalid_limits {
@@ -91,6 +89,21 @@ async fn runtime_rejects_every_zero_limit() {
             Err(MetaError::InvalidInput(_))
         ));
     }
+}
+
+#[test]
+fn runtime_rejects_a_waterfall_depth_above_the_stack_safety_bound() {
+    assert!(matches!(
+        Runtime::new(RuntimeLimits {
+            topology: TopologyLimits {
+                maximum_waterfall_listeners_per_slot:
+                    rsi_meta::MAXIMUM_WATERFALL_LISTENERS_PER_SLOT + 1,
+                ..TopologyLimits::default()
+            },
+            ..RuntimeLimits::default()
+        }),
+        Err(MetaError::InvalidInput(message)) if message.contains("Waterfall listener limit")
+    ));
 }
 
 #[tokio::test]
@@ -104,13 +117,16 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let duplicate = FactorySpec::new(FactoryIdentity::builtin("duplicate", "1"))
+    let duplicate = FactorySpec::new(FactoryIdentity::linked("duplicate", "1"))
         .requiring(Requirement::new("same", "one", V1))
         .requiring(Requirement::new("same", "two", V1));
     assert!(matches!(
         runtime
             .root()
-            .apply(Arc::new(PassiveFactory(duplicate)), Value::Null)
+            .apply(
+                crate::resolved(Arc::new(PassiveFactory(duplicate))),
+                Value::Null
+            )
             .await,
         Err(MetaError::InvalidInput(_))
     ));
@@ -118,10 +134,10 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
     let pending = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(
-                FactorySpec::new(FactoryIdentity::builtin("consumer", "1"))
+            crate::resolved(Arc::new(PassiveFactory(
+                FactorySpec::new(FactoryIdentity::linked("consumer", "1"))
                     .requiring(Requirement::new("missing", "expected", V1)),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -130,9 +146,8 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
         runtime
             .root()
             .apply(
-                Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                    "over-capacity",
-                    "1"
+                crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                    FactoryIdentity::linked("over-capacity", "1")
                 )))),
                 Value::Null,
             )
@@ -150,13 +165,13 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
     let provider = mismatch_runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("provider", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("provider", "1"),
                 "slot",
                 "actual",
                 V1,
                 Arc::new(Echo),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -165,10 +180,10 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
     let consumer = mismatch_runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(
-                FactorySpec::new(FactoryIdentity::builtin("mismatch", "1"))
+            crate::resolved(Arc::new(PassiveFactory(
+                FactorySpec::new(FactoryIdentity::linked("mismatch", "1"))
                     .requiring(Requirement::new("slot", "expected", V1)),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -184,14 +199,10 @@ async fn limits_duplicates_contract_mismatches_and_wait_cancellation_fail_closed
 }
 
 #[derive(Debug)]
-struct ExpandingConfigFactory(FactorySpec);
+struct ExpandingConfigFactory;
 
 #[async_trait]
 impl PluginFactory for ExpandingConfigFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, _: &Value) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(Value::String("x".repeat(64))))
     }
@@ -202,14 +213,10 @@ impl PluginFactory for ExpandingConfigFactory {
 }
 
 #[derive(Debug)]
-struct PanickingConfigFactory(FactorySpec);
+struct PanickingConfigFactory;
 
 #[async_trait]
 impl PluginFactory for PanickingConfigFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if config.is_null() {
             Ok(PreparedActivation::new(config.clone()))
@@ -233,17 +240,20 @@ async fn plugin_config_is_bounded_before_and_after_normalization() {
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let spec = || FactorySpec::new(FactoryIdentity::builtin("bounded-configuration", "1"));
+    let spec = || FactorySpec::new(FactoryIdentity::linked("bounded-configuration", "1"));
 
     assert!(matches!(
         runtime.prepare(
-            Arc::new(PassiveFactory(spec())),
+            crate::resolved(Arc::new(PassiveFactory(spec()))),
             Value::String("x".repeat(64)),
         ),
         Err(MetaError::InvalidConfig(_))
     ));
     assert!(matches!(
-        runtime.prepare(Arc::new(ExpandingConfigFactory(spec())), Value::Null,),
+        runtime.prepare(
+            crate::resolved(Arc::new(ExpandingConfigFactory)),
+            Value::Null,
+        ),
         Err(MetaError::InvalidConfig(_))
     ));
 }
@@ -251,15 +261,17 @@ async fn plugin_config_is_bounded_before_and_after_normalization() {
 #[tokio::test]
 async fn preparation_panics_have_one_error_classification() {
     let runtime = Runtime::default();
-    let factory = Arc::new(PanickingConfigFactory(FactorySpec::new(
-        FactoryIdentity::builtin("panicking-configuration", "1"),
-    )));
+    let factory = Arc::new(PanickingConfigFactory);
     assert!(matches!(
-        runtime.prepare(factory.clone(), Value::from(1)),
+        runtime.prepare(crate::resolved(factory.clone()), Value::from(1)),
         Err(MetaError::InvalidConfig(_))
     ));
 
-    let fiber = runtime.root().apply(factory, Value::Null).await.unwrap();
+    let fiber = runtime
+        .root()
+        .apply(crate::resolved(factory), Value::Null)
+        .await
+        .unwrap();
     assert!(matches!(
         fiber.reconfigure(Value::from(1)).await,
         Err(MetaError::InvalidConfig(_))
@@ -275,10 +287,6 @@ struct QuotaFactory {
 
 #[async_trait]
 impl PluginFactory for QuotaFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -311,11 +319,11 @@ async fn service_and_effect_quotas_fail_closed_at_their_owning_seams() {
     let services = service_runtime
         .root()
         .apply(
-            Arc::new(QuotaFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("service-quota", "1")),
+            crate::resolved(Arc::new(QuotaFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("service-quota", "1")),
                 services: vec![("first", "test.first", V1), ("second", "test.second", V1)],
                 effects: 0,
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -337,11 +345,11 @@ async fn service_and_effect_quotas_fail_closed_at_their_owning_seams() {
     let effects = effect_runtime
         .root()
         .apply(
-            Arc::new(QuotaFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("effect-quota", "1")),
+            crate::resolved(Arc::new(QuotaFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("effect-quota", "1")),
                 services: Vec::new(),
                 effects: 2,
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -355,17 +363,12 @@ async fn service_and_effect_quotas_fail_closed_at_their_owning_seams() {
 
 #[derive(Debug)]
 struct NormalizingFactory {
-    spec: FactorySpec,
     preparations: Arc<AtomicUsize>,
     activated_with: Arc<Mutex<Option<Value>>>,
 }
 
 #[async_trait]
 impl PluginFactory for NormalizingFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.preparations.fetch_add(1, Ordering::AcqRel);
         Ok(PreparedActivation::new(Value::from(
@@ -388,15 +391,6 @@ struct OneShotIdentityFactory {
 
 #[async_trait]
 impl PluginFactory for OneShotIdentityFactory {
-    fn identity(&self) -> FactoryIdentity {
-        assert_eq!(
-            self.calls.fetch_add(1, Ordering::AcqRel),
-            0,
-            "identity was called more than once"
-        );
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -407,17 +401,27 @@ impl PluginFactory for OneShotIdentityFactory {
 }
 
 #[tokio::test]
-async fn factory_identity_is_captured_once_across_preparation_and_activation() {
+async fn resolver_owned_identity_never_calls_plugin_code() {
     let runtime = Runtime::default();
     let factory = Arc::new(OneShotIdentityFactory {
-        spec: FactorySpec::new(FactoryIdentity::builtin("one-shot-identity", "1")),
+        spec: FactorySpec::new(FactoryIdentity::linked("one-shot-identity", "1")),
         calls: AtomicUsize::new(0),
     });
-    let prepared = runtime.prepare(factory.clone(), Value::Null).unwrap();
+    let prepared = runtime
+        .prepare(
+            rsi_meta::ResolvedFactory::linked(
+                "one-shot-identity",
+                "1",
+                rsi_meta::UpdateMode::Replayable,
+                factory.clone(),
+            ),
+            Value::Null,
+        )
+        .unwrap();
     let fiber = runtime.root().apply_prepared(prepared).await.unwrap();
     assert!(matches!(fiber.snapshot().state, FiberState::Active));
     fiber.reconfigure(Value::from(1)).await.unwrap();
-    assert_eq!(factory.calls.load(Ordering::Acquire), 1);
+    assert_eq!(factory.calls.load(Ordering::Acquire), 0);
     assert_eq!(runtime.snapshot().fibers.len(), 1);
 }
 
@@ -428,11 +432,10 @@ async fn prepared_application_runs_a_stateful_normalizer_exactly_once() {
     let activated_with = Arc::new(Mutex::new(None));
     let prepared = runtime
         .prepare(
-            Arc::new(NormalizingFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("normalizer", "1")),
+            crate::resolved(Arc::new(NormalizingFactory {
                 preparations: Arc::clone(&preparations),
                 activated_with: Arc::clone(&activated_with),
-            }),
+            })),
             Value::from(1),
         )
         .unwrap();

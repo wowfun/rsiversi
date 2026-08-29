@@ -14,14 +14,14 @@ pub(crate) struct EventOwnership {
 }
 
 #[derive(Clone)]
-pub(super) enum EventEffect {
+pub(in crate::runtime) enum EventEffect {
     Setup(OwnedEffect),
     Dynamic(EffectHandle),
     RegistryDynamic(RegistryEffectHandle),
 }
 
 #[derive(Clone)]
-pub(super) struct RegistryEffectHandle {
+pub(in crate::runtime) struct RegistryEffectHandle {
     runtime: Weak<RuntimeInner>,
     owner: Owner,
     id: u64,
@@ -54,7 +54,7 @@ impl RegistryEffectHandle {
 }
 
 impl EventOwnership {
-    pub(super) fn new(removal: Arc<EventRemoval>, effect: EventEffect) -> Self {
+    pub(in crate::runtime) fn new(removal: Arc<EventRemoval>, effect: EventEffect) -> Self {
         Self {
             removal,
             effect,
@@ -62,7 +62,7 @@ impl EventOwnership {
         }
     }
 
-    pub(super) fn registry_clone(&self) -> Self {
+    pub(in crate::runtime) fn registry_clone(&self) -> Self {
         let effect = match &self.effect {
             EventEffect::Setup(effect) => EventEffect::Setup(effect.clone()),
             EventEffect::Dynamic(effect) => {
@@ -75,11 +75,6 @@ impl EventOwnership {
             effect,
             once_claimed: Arc::clone(&self.once_claimed),
         }
-    }
-
-    pub(crate) async fn withdraw_for_retirement(&self) -> bool {
-        self.removal.start();
-        self.removal.join().await.unwrap_or(false)
     }
 
     pub(crate) async fn dispose(&self) -> (CleanupReport, bool) {
@@ -113,11 +108,10 @@ impl EventOwnership {
         }
     }
 
-    pub(in super::super) fn retain_destructor_failure(&self, error: &str) {
-        self.removal.retain_detached_failure(error);
-    }
-
-    pub(super) fn rollback_failed_publication(&self, executor: &tokio::runtime::Handle) {
+    pub(in crate::runtime) fn rollback_failed_publication(
+        &self,
+        executor: &tokio::runtime::Handle,
+    ) {
         match &self.effect {
             EventEffect::Setup(effect) => {
                 let retention = effect.detach();

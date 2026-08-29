@@ -1,7 +1,7 @@
 # rsi-meta-fixture-echo-bidi
 
-`rsi-meta-fixture-echo-bidi` is the native ABI v2 provider intended for Loader
-integration. It exports only ABI v2 through the safe Rust SDK. Each preparation
+`rsi-meta-fixture-echo-bidi` is the native ABI v3 provider intended for Loader
+integration. It exports only ABI v3 through the safe Rust SDK. Each preparation
 declares the actual `upstream` injection and a conservative retained-byte charge
 for its prepared state. Activation opens the Runtime-installed
 effect transaction, defers cleanup, dynamically provides the `echo` port, and
@@ -17,8 +17,8 @@ test-only delay and gate fields let integration tests prove callback-watchdog
 and offloaded-destruction behavior.
 
 This plugin-owned slice proves the safe table and builds a real host-platform
-dynamic library. It does not prove that [`rsi-meta-loader`](../../../crates/rsi-meta/loader/)
-has adopted ABI v2; Loader host tables, callback/effect bridging, admission, and
+dynamic library. It does not prove that [`rsi-meta-native-loader`](../../../crates/rsi-meta/native-loader/)
+has adopted ABI v3; Loader host tables, callback/effect bridging, admission, and
 mapping/unload remain their own integration gate. This fixture is test evidence,
 not a separately supported plugin distribution. Run its standalone checks:
 
@@ -30,8 +30,8 @@ cargo test --locked --offline --manifest-path fixtures/rsi-meta/echo-bidi/Cargo.
 cargo build --release --locked --offline --manifest-path fixtures/rsi-meta/echo-bidi/Cargo.toml
 ```
 
-The unit test calls the exported entry and validates the returned v2 table
+The unit test calls the exported entry and validates the returned v3 table
 header. These commands prove only the host platform on which they run. On
 Linux, the conformance command also inspects the release artifact's ELF dynamic
-symbol table: `rsi_meta_plugin_entry_v2` must be its only
+symbol table: `rsi_meta_plugin_entry_v3` must be its only
 `rsi_meta_plugin_entry_*` export.

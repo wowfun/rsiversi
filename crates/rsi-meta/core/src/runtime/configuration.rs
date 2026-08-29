@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::Requirement;
-use crate::plugin::PreparedState;
+use crate::plugin::{LocalRequirement, PreparedState};
 use serde::Serialize;
+use serde_json::Value;
 
 impl Runtime {
     pub(super) fn normalize_config(
@@ -26,13 +27,14 @@ impl Runtime {
                 ));
             }
         };
-        let (config, requirements, state) = prepared.into_parts();
+        let (config, requirements, local_requirements, state) = prepared.into_parts();
         let config = OwnedJsonValue::new(config);
         let encoded_bytes = Self::validate_config(config.as_value(), limits)?;
         Ok(NormalizedConfig {
             value: config,
             encoded_bytes,
             requirements,
+            local_requirements,
             state,
         })
     }
@@ -43,27 +45,6 @@ impl Runtime {
         encoded_json_size_bounded(config, limits.maximum_config_bytes)
             .map_err(|error| MetaError::InvalidConfig(error.to_string()))
     }
-}
-
-pub(super) fn validate_json_payload(
-    value: &Value,
-    limits: &PayloadLimits,
-    maximum_bytes: usize,
-) -> Result<usize> {
-    validate_json_shape(value, limits.maximum_json_depth, limits.maximum_json_nodes)
-        .map_err(MetaError::InvalidInput)?;
-    encoded_json_size_bounded(value, maximum_bytes).map_err(|_| MetaError::PayloadTooLarge {
-        maximum: maximum_bytes,
-    })
-}
-
-pub(super) fn validate_owned_json_payload(
-    value: OwnedJsonValue,
-    limits: &PayloadLimits,
-    maximum_bytes: usize,
-) -> Result<(OwnedJsonValue, usize)> {
-    let encoded_bytes = validate_json_payload(value.as_value(), limits, maximum_bytes)?;
-    Ok((value, encoded_bytes))
 }
 
 pub(super) struct OwnedJsonValue {
@@ -137,6 +118,7 @@ pub(super) struct NormalizedConfig {
     pub(super) value: OwnedJsonValue,
     pub(super) encoded_bytes: usize,
     pub(super) requirements: Vec<Requirement>,
+    pub(super) local_requirements: Vec<LocalRequirement>,
     pub(super) state: Option<PreparedState>,
 }
 

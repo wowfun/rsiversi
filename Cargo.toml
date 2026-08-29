@@ -33,7 +33,8 @@ proc-macro2 = { version = "1.0", features = ["span-locations"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rustix = { version = "1.1", features = ["fs"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+rhai = { version = "1.23", features = ["serde", "sync"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"
 syn = { version = "2.0", features = ["full", "visit"] }
 tempfile = "3.20"

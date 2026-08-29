@@ -14,9 +14,11 @@ iteratively.
 Scopes are asynchronously backed by ordinary child Fibers. Layer mutations use
 the same Context for visibility and effect ownership, return owned snapshots,
 and run product callbacks without holding scope-store locks.
-`ScopeRoot::target` captures an atomic parent-chain snapshot, precomputes exact
-membership, and returns the core `EventTarget` adapter used for one scoped
-dispatch.
+`ScopedContext` explicitly pairs one core `Context` with one root-local
+`ScopeKey`; its Context-derivation methods preserve that exact key.
+`ScopeRoot::scope_of` validates this explicit association. Layer effects accept
+either a plain Context for global storage or a `ScopedContext` for one exact
+scope; there is no ambient Context extension or event-target adapter.
 Failed lazy layer construction retains neither its uninitialized cell nor the
 scope key, preserving weak-key ownership under repeated factory failure.
 Each store has an explicit exact-scope layer maximum, so a layer that cannot be

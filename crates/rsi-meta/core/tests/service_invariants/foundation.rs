@@ -7,9 +7,7 @@ async fn missing_dependency_converges_and_provider_retires_after_consumer_cleanu
     let consumer_factory = Arc::new(ConsumerFactory::new(Arc::clone(&cleanup)));
     let consumer = runtime
         .root()
-        .intercept("echo", json!({ "source": "direct-edge" }))
-        .unwrap()
-        .apply(consumer_factory.clone(), Value::Null)
+        .apply(crate::resolved(consumer_factory.clone()), Value::Null)
         .await
         .unwrap();
     assert!(matches!(consumer.snapshot().state, FiberState::Pending(_)));
@@ -17,7 +15,7 @@ async fn missing_dependency_converges_and_provider_retires_after_consumer_cleanu
     let provider_factory = Arc::new(ProviderFactory::new(Arc::clone(&cleanup)));
     let provider = runtime
         .root()
-        .apply(provider_factory.clone(), Value::Null)
+        .apply(crate::resolved(provider_factory.clone()), Value::Null)
         .await
         .unwrap();
     wait_active(&provider).await;
@@ -30,14 +28,6 @@ async fn missing_dependency_converges_and_provider_retires_after_consumer_cleanu
             .as_slice(),
         &[b"active".to_vec()]
     );
-    assert_eq!(
-        provider_factory
-            .overlays
-            .lock()
-            .expect("overlay log poisoned")[0],
-        vec![json!({ "source": "direct-edge" })]
-    );
-
     let report = provider.dispose().await;
     assert!(report.is_clean(), "{report:?}");
     assert!(matches!(consumer.snapshot().state, FiberState::Pending(_)));
@@ -51,16 +41,12 @@ async fn missing_dependency_converges_and_provider_retires_after_consumer_cleanu
 async fn captured_service_handle_is_fenced_after_its_provider_retires() {
     #[derive(Debug)]
     struct CaptureFactory {
-        identity: FactoryIdentity,
+        _identity: FactoryIdentity,
         handle: Arc<Mutex<Option<rsi_meta::Capability>>>,
     }
 
     #[async_trait]
     impl PluginFactory for CaptureFactory {
-        fn identity(&self) -> FactoryIdentity {
-            self.identity.clone()
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(
                 PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -85,7 +71,10 @@ async fn captured_service_handle_is_fenced_after_its_provider_retires() {
     let cleanup = Arc::new(Mutex::new(Vec::new()));
     let provider = runtime
         .root()
-        .apply(Arc::new(ProviderFactory::new(cleanup)), Value::Null)
+        .apply(
+            crate::resolved(Arc::new(ProviderFactory::new(cleanup))),
+            Value::Null,
+        )
         .await
         .unwrap();
     wait_active(&provider).await;
@@ -93,10 +82,10 @@ async fn captured_service_handle_is_fenced_after_its_provider_retires() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("capture", "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked("capture", "1"),
                 handle: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -115,16 +104,12 @@ async fn captured_service_handle_is_fenced_after_its_provider_retires() {
 async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
     #[derive(Debug)]
     struct CaptureFactory {
-        identity: FactoryIdentity,
+        _identity: FactoryIdentity,
         handle: Arc<Mutex<Option<rsi_meta::Capability>>>,
     }
 
     #[async_trait]
     impl PluginFactory for CaptureFactory {
-        fn identity(&self) -> FactoryIdentity {
-            self.identity.clone()
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(
                 PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -149,7 +134,9 @@ async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory::new(Arc::new(Mutex::new(Vec::new())))),
+            crate::resolved(Arc::new(ProviderFactory::new(Arc::new(Mutex::new(
+                Vec::new(),
+            ))))),
             Value::Null,
         )
         .await
@@ -159,10 +146,10 @@ async fn captured_service_handle_is_generation_fenced_after_consumer_reloads() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin("capture-reload", "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked("capture-reload", "1"),
                 handle: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -200,7 +187,7 @@ async fn service_isolation_allows_private_provider_slots() {
     let first = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory::new(Arc::clone(&cleanup))),
+            crate::resolved(Arc::new(ProviderFactory::new(Arc::clone(&cleanup)))),
             Value::Null,
         )
         .await
@@ -209,7 +196,7 @@ async fn service_isolation_allows_private_provider_slots() {
     let duplicate = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory::new(Arc::clone(&cleanup))),
+            crate::resolved(Arc::new(ProviderFactory::new(Arc::clone(&cleanup)))),
             Value::Null,
         )
         .await
@@ -218,7 +205,10 @@ async fn service_isolation_allows_private_provider_slots() {
 
     let (private, _) = runtime.root().isolate_fresh("echo").unwrap();
     let isolated = private
-        .apply(Arc::new(ProviderFactory::new(cleanup)), Value::Null)
+        .apply(
+            crate::resolved(Arc::new(ProviderFactory::new(cleanup))),
+            Value::Null,
+        )
         .await
         .unwrap();
     wait_active(&isolated).await;
@@ -234,13 +224,16 @@ async fn cloned_context_isolation_branches_remain_independent() {
 
     let left_provider = left
         .apply(
-            Arc::new(ProviderFactory::new(Arc::clone(&cleanup))),
+            crate::resolved(Arc::new(ProviderFactory::new(Arc::clone(&cleanup)))),
             Value::Null,
         )
         .await
         .unwrap();
     let right_provider = right
-        .apply(Arc::new(ProviderFactory::new(cleanup)), Value::Null)
+        .apply(
+            crate::resolved(Arc::new(ProviderFactory::new(cleanup))),
+            Value::Null,
+        )
         .await
         .unwrap();
 

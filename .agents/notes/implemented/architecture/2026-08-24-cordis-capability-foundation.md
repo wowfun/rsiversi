@@ -1,6 +1,6 @@
 ---
 name: Cordis capability foundation
-comment: Dynamic Fiber composition, transactional effects, scoped contributions, and native ABI v2
+comment: Dynamic Fiber composition, transactional effects, scoped contributions, and native ABI v3
 ---
 
 ## Problem
@@ -42,14 +42,15 @@ and effect-ownership laws.
 
 ### Preparation, activation, and actual dependencies
 
-`PluginFactory` has three adapter-neutral operations:
+Resolver-owned `ResolvedFactory` binds immutable factory identity, revision,
+provenance, and update mode before plugin code executes. `PluginFactory` has two
+adapter-neutral operations:
 
-1. `identity` returns bounded diagnostic identity.
-2. `prepare` validates desired configuration without a generation `Context` or
+1. `prepare` validates desired configuration without a generation `Context` or
    injected service. It returns one `PreparedActivation` containing immutable
    normalized configuration, exact requirements, and at most one single-owner
    opaque state value with an explicit conservative retained-byte charge.
-3. `activate` receives an `ActivationPlan` with the exact resolved
+2. `activate` receives an `ActivationPlan` with the exact resolved
    generation-fenced capabilities, normalized configuration, one activation
    lineage, and the single-use prepared state.
 
@@ -156,38 +157,34 @@ their own `call_id`, immediate `parent_call_id`, and unchanged
 and unrelated contention remain distinct typed outcomes, `Reentrant` and
 `Busy`; core safe-Rust provider callbacks are not implicitly serialized.
 
-### Context extensions, events, and scoped contributions
+### Local contracts, events, and scoped contributions
 
-Typed `ContextExtension` markers key immutable copy-on-write local metadata.
-Two markers may carry the same Rust value type without aliasing. Extension
-contents are safe-Rust `Send + Sync + 'static`, redacted from diagnostics,
-unserialized, and absent from the native ABI.
+`LocalContract` markers key direct safe-Rust services by exact `TypeId` and
+isolation. Their stable string key exists only for Host/Profile configuration
+and diagnostics. Prepared hard requirements participate in dependency
+convergence; point-of-use lookup does not create an edge. Discovery and lookup
+are fenced by the exact caller generation, and a non-repeating `LocalSupplyId`
+prevents an old handle from withdrawing a later same-slot supply. Local values
+are `Send + Sync + 'static`, unserialized, and absent from the native ABI.
 
-Event dispatch accepts an `EventTarget` that selects against immutable listener
-Context views outside Runtime locks. Global listeners bypass selection. A
-selector error or panic starts no callbacks. Synchronous selection runs on
-blocking work bounded by dispatch admission and is covered by the same absolute
-dispatch deadline as callback admission and execution. If a selector outlives
-that deadline, the caller detaches but its worker retains Runtime admission,
-the dispatch reservation, and the snapshot until return; the expired dispatch
-cannot start later selectors or callbacks. Snapshot membership survives
-concurrent ordinary removal for that dispatch, while once listeners still need
-an exact post-selection claim.
+`LocalEvent` markers fix one of `Emit`, `Parallel`, `Serial`, `Bail`, or
+`Waterfall` as an associated mode. Dispatch has no runtime-selected mode,
+selector, global bypass, JSON value, or public callback driver. Listeners are
+visible only by exact `(TypeId, LocalIsolationId)` and are generation/effect
+owned. Snapshot membership survives concurrent ordinary removal for that
+dispatch, while a once listener uses an exact claim shared across concurrent
+dispatches.
 
 `rsi-meta-scope` owns `ScopeRoot`, weak-key `ScopeKey` ancestry,
-`ScopeParentBinding`, `ScopeTarget`, `ScopedLayers`, `NamedEntries`, and
-`AnonymousEntries`. A root retains no minted-key inventory; live descendants or
-bindings retain only their observable ancestry. Rebind atomically checks depth
-and cycles and moves the original binding, but product code owns quiescence and
-notification. A root has its own explicit validated ancestry-depth limit because
-scope keys can cross Runtime contexts and therefore cannot inherit one Runtime's
-Fiber-depth configuration. Non-owning child links make that bound enforceable
-for a moved subtree without creating a root registry. A monotonic
-has-ever-been-parent fact proves that attaching an ordinary new leaf cannot
-close a cycle; possible cycle closure still walks and rejects the parent chain,
-and final uniquely owned ancestry is dismantled iteratively. `ScopeTarget`
-captures one old-or-new ancestor-chain snapshot and precomputes its membership
-set so listener selection does not multiply ancestry work by listener count.
+`ScopeParentBinding`, `ScopedContext`, `ScopedLayers`, `NamedEntries`, and
+`AnonymousEntries`. `ScopedContext` explicitly pairs one scope identity with
+its active child-generation `Context`; scope-sensitive APIs require that
+wrapper, while a plain `Context` denotes the global layer. A root retains no
+minted-key inventory; live descendants or bindings retain only their observable
+ancestry. Rebind atomically checks depth and cycles and moves the original
+binding, but product code owns quiescence and notification. Non-owning child
+links make the ancestry bound enforceable for a moved subtree without creating
+a root registry. Final uniquely owned ancestry is dismantled iteratively.
 
 Layer mutations derive visibility and effect ownership from one Context. Add is
 visible before the fallible change callback. If that callback fails, exact undo
@@ -196,14 +193,18 @@ Removal never resurrects an entry when notification fails. User callbacks,
 future destruction, reclamation, and panic-payload destruction run outside
 store locks and inside nested containment.
 
-### Native ABI v2 and Loader
+### Native ABI v3 and Loader
 
-Native ABI v2 is a clean break with one `rsi_meta_plugin_entry_v2` symbol and
-one versioned exchange port in each direction. Fixed-width frames carry bytes,
-message capability arrays, callback-local authorities, and explicit one-shot
-release IDs. Every pointer, length, alignment, table prefix, issuer, slot,
-epoch, kind, right, count, output, and operation phase is validated at its
-owning boundary before mutation or dereference.
+Native ABI v3 is a deliberate version discontinuity with one
+`rsi_meta_plugin_entry_v3` symbol and no v2 probe or compatibility path. Its
+table and frame layout otherwise remain the v2 layout; the major and entry
+symbol fence adoption rather than claiming a new wire design. The maintained
+header keeps the version-neutral `rsi_meta_plugin.h` name and carries the exact
+major macro and entry symbol. Fixed-width frames carry bytes, message
+capability arrays, callback-local authorities, and explicit one-shot release
+IDs. Every pointer, length, alignment, table prefix, issuer, slot, epoch, kind,
+right, count, output, and operation phase is validated at its owning boundary
+before mutation or dereference.
 
 Owned output capabilities, callback-borrowed capabilities, and moved cleanup
 capabilities have distinct ownership contracts. `HOST_EFFECT_DEFER` transfers a
@@ -237,10 +238,9 @@ destruction and finalization without requiring explicit Runtime shutdown.
 The Loader host exchange remains one deep module because every opcode shares
 admission, capability/output tables, callback sealing, effect phase, output
 adoption, and failure encoding. The independent `module_teardown` module owns
-the serialized destruction queue and fail-closed mapping bundle. Code-health
-keeps the global 1200 effective-line hard limit and records the exact reviewed
-Loader-region maximum rather than mechanically splitting one safety state
-machine to preserve a v1 historical line count.
+the serialized destruction queue and fail-closed mapping bundle. The optional
+repository `code-check` command can report its effective line count as a soft
+warning, but does not force a mechanical split of one safety state machine.
 
 ### Verification authority
 
@@ -248,11 +248,10 @@ machine to preserve a v1 historical line count.
 authority. It pins the queried rustc host triple, runs locked warning-denied
 package checks and tests, validates standalone fixture metadata offline, runs
 the foundation probe, builds and tests the real native fixture, verifies the
-actual exported v2 symbol, and compiles the maintained header as C11 and C++17.
-Repository documentation, Agent Note lifecycle, and code-health remain
-independent owning gates rather than hidden conformance substeps. Snapshot or
-baseline changes remain explicit contract changes rather than automatic gate
-refreshes.
+actual exported v3 symbol, and compiles the maintained header as C11 and C++17.
+Repository documentation and Agent Note lifecycle remain independent owning
+gates rather than hidden conformance substeps. Repository `code-check` remains
+an explicitly invoked diagnostic rather than a gate.
 
 ## Alternatives considered
 
@@ -275,9 +274,9 @@ prevents setup-time hooks and forces every registry to duplicate staging.
 Wrapper-first undo permits immediate bounded visibility. Services retain their
 stronger Active gate.
 
-Preserving ABI v1 through a compatibility adapter is rejected because byte-only
+Preserving an earlier ABI through a compatibility adapter is rejected because byte-only
 calls cannot faithfully carry capability possession, callback orientation, or
-effect transactions. Pre-release status permits one v2 authority.
+effect transactions. Pre-release status permits one v3 authority.
 
 Strengthening scope rebind to prove quiescence or emit generic notification is
 rejected because the scope primitive cannot observe product consumers or know

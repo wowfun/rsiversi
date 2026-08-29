@@ -8,11 +8,12 @@ impl Runtime {
         let ResolvedBindings {
             attempt: resolved_attempt,
             bindings,
+            local_bindings,
         } = resolved;
         let generation = match self.next_generation_id() {
             Ok(generation) => generation,
             Err(error) => {
-                fiber.set_state(FiberState::Failed(dispatch::bound_formatted_diagnostic(
+                fiber.set_state(FiberState::Failed(diagnostics::bound_formatted(
                     format_args!("{error}"),
                     self.inner.limits.payloads.maximum_diagnostic_bytes,
                 )));
@@ -22,7 +23,7 @@ impl Runtime {
         let activation_lineage = match self.next_call_id() {
             Ok(lineage) => lineage,
             Err(error) => {
-                fiber.set_state(FiberState::Failed(dispatch::bound_formatted_diagnostic(
+                fiber.set_state(FiberState::Failed(diagnostics::bound_formatted(
                     format_args!("{error}"),
                     self.inner.limits.payloads.maximum_diagnostic_bytes,
                 )));
@@ -31,9 +32,10 @@ impl Runtime {
         };
         let activation_cancellation = CancellationToken::new();
         let resolved_bindings = bindings.clone();
+        let resolved_local_bindings = local_bindings.clone();
         let installed = {
             let state = self.inner.state.lock().expect("runtime state poisoned");
-            if Self::bindings_remain_active(&state, fiber, &bindings) {
+            if Self::bindings_remain_active(&state, fiber, &bindings, &local_bindings) {
                 let mut data = fiber.data.lock().expect("fiber state poisoned");
                 let current_attempt = data.attempt.as_ref().map(AttemptStamp::from);
                 if resolved_attempt.permits_loading_install(
@@ -43,7 +45,7 @@ impl Runtime {
                     fiber.disposal_requested.is_cancelled(),
                 ) {
                     let target_revision = data.target_revision;
-                    let attempt = binding_identities(&bindings);
+                    let attempt = binding_identities(&bindings, &local_bindings, fiber);
                     let prepared = data
                         .attempt
                         .as_mut()
@@ -59,6 +61,7 @@ impl Runtime {
                         generation,
                         attempt_id,
                         bindings,
+                        local_bindings,
                         activation_cancellation: activation_cancellation.clone(),
                         effects: BTreeMap::new(),
                         effect_budget: Arc::new(GenerationBudget::new(
@@ -71,7 +74,8 @@ impl Runtime {
                                 .maximum_effect_transactions_per_fiber,
                         )),
                         services: BTreeMap::new(),
-                        listeners: BTreeMap::new(),
+                        local_services: BTreeMap::new(),
+                        local_listener_ids: BTreeMap::new(),
                         children: Vec::new(),
                         retired_owned_report: CleanupReport::default(),
                         cleanup: Arc::new(CleanupRun::default()),
@@ -126,7 +130,7 @@ impl Runtime {
             fiber: fiber.id,
             generation,
         };
-        let activation_label = dispatch::bound_owned_diagnostic(
+        let activation_label = diagnostics::bound_owned(
             "plugin activation root".to_owned(),
             self.inner.limits.payloads.maximum_diagnostic_bytes,
         );
@@ -135,12 +139,12 @@ impl Runtime {
             Err(error) => {
                 let cleanup = self.rollback_loading(fiber).await;
                 let error = if cleanup.is_clean() {
-                    dispatch::bound_formatted_diagnostic(
+                    diagnostics::bound_formatted(
                         format_args!("activation transaction failed: {error}"),
                         self.inner.limits.payloads.maximum_diagnostic_bytes,
                     )
                 } else {
-                    dispatch::bound_formatted_diagnostic(
+                    diagnostics::bound_formatted(
                         format_args!(
                             "activation transaction failed: {error}; rollback failed: {:?}",
                             cleanup.failures
@@ -163,12 +167,7 @@ impl Runtime {
         let inject = resolved_bindings
             .into_iter()
             .map(|(key, binding)| {
-                let overlay = context
-                    .intercepts
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_else(InterceptLayers::shared_empty);
-                self.mint_capability(&context, owner, &capabilities, binding, overlay)
+                self.mint_capability(&context, owner, &capabilities, binding)
                     .map(|capability| (key, capability))
             })
             .collect::<Result<BTreeMap<_, _>>>();
@@ -178,8 +177,13 @@ impl Runtime {
         // ready and reacquire before publication or rollback.
         let result = match inject {
             Ok(inject) => {
-                let plan =
-                    ActivationPlan::new(context, Arc::clone(&config.value), inject, prepared_state);
+                let plan = ActivationPlan::new(
+                    context,
+                    Arc::clone(&config.value),
+                    inject,
+                    resolved_local_bindings,
+                    prepared_state,
+                );
                 let deadline = tokio::time::Instant::now()
                     .checked_add(self.inner.limits.deadlines.transition)
                     .expect("validated activation deadline fits Tokio Instant");
@@ -207,7 +211,7 @@ impl Runtime {
         let maximum = self.inner.limits.payloads.maximum_diagnostic_bytes;
         let activation_error = match result {
             Ok(()) => None,
-            Err(error) => Some(dispatch::bound_formatted_diagnostic(
+            Err(error) => Some(diagnostics::bound_formatted(
                 format_args!("{error}"),
                 maximum,
             )),
@@ -221,7 +225,7 @@ impl Runtime {
             let error = if cleanup.is_clean() {
                 error
             } else {
-                dispatch::bound_formatted_diagnostic(
+                diagnostics::bound_formatted(
                     format_args!(
                         "{error}; activation rollback failed: {:?}",
                         cleanup.failures
@@ -238,12 +242,12 @@ impl Runtime {
             Err(error) => {
                 let cleanup = self.rollback_loading(fiber).await;
                 let error = if cleanup.is_clean() {
-                    dispatch::bound_formatted_diagnostic(
+                    diagnostics::bound_formatted(
                         format_args!("activation transaction commit failed: {error}"),
                         maximum,
                     )
                 } else {
-                    dispatch::bound_formatted_diagnostic(
+                    diagnostics::bound_formatted(
                         format_args!(
                             "activation transaction commit failed: {error}; rollback failed: {:?}",
                             cleanup.failures
@@ -265,9 +269,9 @@ impl Runtime {
         if let Err(error) = self.publish_generation(fiber, generation, target_revision) {
             let cleanup = self.rollback_loading(fiber).await;
             let error = if cleanup.is_clean() {
-                dispatch::bound_formatted_diagnostic(format_args!("{error}"), maximum)
+                diagnostics::bound_formatted(format_args!("{error}"), maximum)
             } else {
-                dispatch::bound_formatted_diagnostic(
+                diagnostics::bound_formatted(
                     format_args!(
                         "{error}; publication rollback failed: {:?}",
                         cleanup.failures
@@ -300,7 +304,7 @@ impl Runtime {
                 generation,
             });
         }
-        let services = {
+        let (services, local_services) = {
             let active = data.active.as_ref().ok_or(MetaError::StaleContext {
                 fiber: fiber.id,
                 generation,
@@ -319,39 +323,36 @@ impl Runtime {
             if active.activation_cancellation.is_cancelled() {
                 return Err(MetaError::Cancelled);
             }
-            if !Self::bindings_remain_active(&state, fiber, &active.bindings) {
+            if !Self::bindings_remain_active(
+                &state,
+                fiber,
+                &active.bindings,
+                &active.local_bindings,
+            ) {
                 return Err(MetaError::StaleContext {
                     fiber: fiber.id,
                     generation,
                 });
             }
-            active
+            let portable = active
                 .services
                 .iter()
                 .map(|(slot, service)| (slot.clone(), Arc::clone(&service.binding)))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let local = active
+                .local_services
+                .iter()
+                .map(|(slot, service)| (*slot, Arc::clone(&service.binding)))
+                .collect::<Vec<_>>();
+            (portable, local)
         };
-        for (slot, binding) in &services {
-            let exact_loading = state.providers.get(slot).is_some_and(|entry| {
-                entry.visibility == SupplyVisibility::Loading
-                    && entry.binding.supply == binding.supply
-                    && Arc::ptr_eq(&entry.binding, binding)
-            });
-            if !exact_loading {
-                return Err(MetaError::StaleContext {
-                    fiber: fiber.id,
-                    generation,
-                });
-            }
-        }
-        for (slot, binding) in &services {
-            let entry = state
-                .providers
-                .get_mut(slot)
-                .expect("validated Loading supply remains present under the registry lock");
-            debug_assert!(Arc::ptr_eq(&entry.binding, binding));
-            entry.visibility = SupplyVisibility::Active;
-        }
+        Self::activate_loading_supplies(
+            &mut state,
+            &services,
+            &local_services,
+            fiber.id,
+            generation,
+        )?;
         data.active
             .as_mut()
             .expect("active generation exists")
@@ -365,9 +366,61 @@ impl Runtime {
             .into_iter()
             .map(|(slot, _binding)| slot)
             .collect::<Vec<_>>();
+        let local_changed = local_services
+            .into_iter()
+            .map(|(slot, _binding)| slot)
+            .collect::<Vec<_>>();
         drop(data);
         drop(state);
         self.notify_service_appearances(&changed, Some(fiber.id));
+        self.notify_local_appearances(&local_changed, Some(fiber.id));
+        Ok(())
+    }
+
+    fn activate_loading_supplies(
+        state: &mut RuntimeState,
+        services: &[(ServiceSlot, Arc<ProviderBinding>)],
+        local_services: &[(LocalSlot, Arc<LocalBinding>)],
+        fiber: FiberId,
+        generation: FiberGeneration,
+    ) -> Result<()> {
+        let stale_context = || MetaError::StaleContext { fiber, generation };
+        for (slot, binding) in services {
+            let exact_loading = state.providers.get(slot).is_some_and(|entry| {
+                entry.visibility == SupplyVisibility::Loading
+                    && entry.binding.supply == binding.supply
+                    && Arc::ptr_eq(&entry.binding, binding)
+            });
+            if !exact_loading {
+                return Err(stale_context());
+            }
+        }
+        for (slot, binding) in local_services {
+            let exact_loading = state.local_providers.get(slot).is_some_and(|entry| {
+                entry.visibility == SupplyVisibility::Loading
+                    && entry.binding.supply == binding.supply
+                    && Arc::ptr_eq(&entry.binding, binding)
+            });
+            if !exact_loading {
+                return Err(stale_context());
+            }
+        }
+        for (slot, binding) in services {
+            let entry = state
+                .providers
+                .get_mut(slot)
+                .expect("validated Loading supply remains present under the registry lock");
+            debug_assert!(Arc::ptr_eq(&entry.binding, binding));
+            entry.visibility = SupplyVisibility::Active;
+        }
+        for (slot, binding) in local_services {
+            let entry = state
+                .local_providers
+                .get_mut(slot)
+                .expect("validated Loading Local supply remains present under the registry lock");
+            debug_assert!(Arc::ptr_eq(&entry.binding, binding));
+            entry.visibility = SupplyVisibility::Active;
+        }
         Ok(())
     }
 
@@ -375,15 +428,25 @@ impl Runtime {
         state: &RuntimeState,
         fiber: &Fiber,
         bindings: &BTreeMap<ServiceKey, Arc<ProviderBinding>>,
+        local_bindings: &BTreeMap<TypeId, Arc<LocalBinding>>,
     ) -> bool {
-        bindings.iter().all(|(key, binding)| {
+        let portable = bindings.iter().all(|(key, binding)| {
             let slot = fiber.base_context.service_slot(key);
             state.providers.get(&slot).is_some_and(|entry| {
                 entry.visibility == SupplyVisibility::Active
                     && entry.binding.supply == binding.supply
                     && Arc::ptr_eq(&entry.binding, binding)
             })
-        })
+        });
+        portable
+            && local_bindings.iter().all(|(contract, binding)| {
+                let slot = fiber.base_context.local_slot(*contract);
+                state.local_providers.get(&slot).is_some_and(|entry| {
+                    entry.visibility == SupplyVisibility::Active
+                        && entry.binding.supply == binding.supply
+                        && Arc::ptr_eq(&entry.binding, binding)
+                })
+            })
     }
 }
 

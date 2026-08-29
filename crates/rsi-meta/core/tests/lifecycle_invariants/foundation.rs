@@ -9,10 +9,6 @@ struct EffectFactory {
 
 #[async_trait]
 impl PluginFactory for EffectFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -54,11 +50,11 @@ async fn failed_setup_and_reconfigure_cleanup_in_strict_reverse_order() {
     let failed = runtime
         .root()
         .apply(
-            Arc::new(EffectFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("failed", "1")),
+            crate::resolved(Arc::new(EffectFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("failed", "1")),
                 log: Arc::clone(&failed_log),
                 fail: true,
-            }),
+            })),
             json!(1),
         )
         .await
@@ -73,11 +69,11 @@ async fn failed_setup_and_reconfigure_cleanup_in_strict_reverse_order() {
     let active = runtime
         .root()
         .apply(
-            Arc::new(EffectFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("effect", "1")),
+            crate::resolved(Arc::new(EffectFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("effect", "1")),
                 log: Arc::clone(&log),
                 fail: false,
-            }),
+            })),
             json!(1),
         )
         .await
@@ -105,17 +101,18 @@ struct ParentFactory {
 
 #[async_trait]
 impl PluginFactory for ParentFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
 
     async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         let context = plan.context();
-        context.apply(Arc::clone(&self.child), Value::Null).await?;
+        context
+            .apply(
+                crate::resolver::resolved_dyn(Arc::clone(&self.child)),
+                Value::Null,
+            )
+            .await?;
         let log = Arc::clone(&self.log);
         context.defer(
             "parent",
@@ -145,10 +142,6 @@ struct NamedChildFactory {
 
 #[async_trait]
 impl PluginFactory for NamedChildFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -178,10 +171,6 @@ struct MultiChildParentFactory {
 
 #[async_trait]
 impl PluginFactory for MultiChildParentFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -191,11 +180,11 @@ impl PluginFactory for MultiChildParentFactory {
         for label in ["first-child", "second-child"] {
             context
                 .apply(
-                    Arc::new(NamedChildFactory {
-                        spec: FactorySpec::new(FactoryIdentity::builtin(label, "1")),
+                    crate::resolved(Arc::new(NamedChildFactory {
+                        spec: FactorySpec::new(FactoryIdentity::linked(label, "1")),
                         label,
                         log: Arc::clone(&self.log),
-                    }),
+                    })),
                     Value::Null,
                 )
                 .await?;
@@ -216,10 +205,6 @@ impl PluginFactory for MultiChildParentFactory {
 
 #[async_trait]
 impl PluginFactory for ChildFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -247,14 +232,14 @@ async fn parent_disposes_children_before_its_own_effects_and_dispose_is_joinable
     let parent = runtime
         .root()
         .apply(
-            Arc::new(ParentFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("parent", "1")),
+            crate::resolved(Arc::new(ParentFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("parent", "1")),
                 child: Arc::new(ChildFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("child", "1")),
+                    spec: FactorySpec::new(FactoryIdentity::linked("child", "1")),
                     log: Arc::clone(&log),
                 }),
                 log: Arc::clone(&log),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -276,10 +261,10 @@ async fn parent_disposes_multiple_children_in_reverse_application_order() {
     let parent = runtime
         .root()
         .apply(
-            Arc::new(MultiChildParentFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("multi-child-parent", "1")),
+            crate::resolved(Arc::new(MultiChildParentFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("multi-child-parent", "1")),
                 log: Arc::clone(&log),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -300,14 +285,14 @@ async fn parent_reconfiguration_retires_the_old_child_before_publishing_a_new_ge
     let parent = runtime
         .root()
         .apply(
-            Arc::new(ParentFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("reconfigured-parent", "1")),
+            crate::resolved(Arc::new(ParentFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("reconfigured-parent", "1")),
                 child: Arc::new(ChildFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("reconfigured-child", "1")),
+                    spec: FactorySpec::new(FactoryIdentity::linked("reconfigured-child", "1")),
                     log: Arc::clone(&log),
                 }),
                 log: Arc::clone(&log),
-            }),
+            })),
             Value::Null,
         )
         .await

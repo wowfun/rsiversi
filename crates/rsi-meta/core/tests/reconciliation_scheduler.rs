@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 use support::{Echo, EndpointFactory, FactorySpec, PassiveFactory};
 
@@ -38,10 +41,6 @@ struct SchedulerProvider {
 
 #[async_trait]
 impl PluginFactory for SchedulerProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -61,10 +60,6 @@ struct SchedulerConsumer {
 
 #[async_trait]
 impl PluginFactory for SchedulerConsumer {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -100,11 +95,11 @@ async fn retirement_yields_its_only_reconciliation_slot_to_dependents() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(SchedulerConsumer {
-                spec: FactorySpec::new(FactoryIdentity::builtin("scheduler-consumer", "1"))
+            crate::resolved(Arc::new(SchedulerConsumer {
+                spec: FactorySpec::new(FactoryIdentity::linked("scheduler-consumer", "1"))
                     .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -114,9 +109,9 @@ async fn retirement_yields_its_only_reconciliation_slot_to_dependents() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(SchedulerProvider {
-                spec: FactorySpec::new(FactoryIdentity::builtin("scheduler-provider", "1")),
-            }),
+            crate::resolved(Arc::new(SchedulerProvider {
+                spec: FactorySpec::new(FactoryIdentity::linked("scheduler-provider", "1")),
+            })),
             Value::Null,
         )
         .await
@@ -153,9 +148,8 @@ async fn saturated_reconciliation_handoffs_never_overtake_the_resource_ledger() 
             runtime
                 .root()
                 .apply(
-                    Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                        format!("handoff-{index}"),
-                        "1",
+                    crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                        FactoryIdentity::linked(format!("handoff-{index}"), "1"),
                     )))),
                     Value::Null,
                 )
@@ -195,10 +189,6 @@ struct NestedChild(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for NestedChild {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -216,10 +206,6 @@ struct AwaitingParent {
 
 #[async_trait]
 impl PluginFactory for AwaitingParent {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -228,9 +214,8 @@ impl PluginFactory for AwaitingParent {
         let context = plan.context().clone();
         let child = context
             .apply(
-                Arc::new(NestedChild(FactorySpec::new(FactoryIdentity::builtin(
-                    "nested-scheduler-child",
-                    "1",
+                crate::resolved(Arc::new(NestedChild(FactorySpec::new(
+                    FactoryIdentity::linked("nested-scheduler-child", "1"),
                 )))),
                 Value::Null,
             )
@@ -254,10 +239,10 @@ async fn parent_activation_can_await_child_apply_with_one_reconciliation_slot() 
     let parent = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         runtime.root().apply(
-            Arc::new(AwaitingParent {
-                spec: FactorySpec::new(FactoryIdentity::builtin("nested-scheduler-parent", "1")),
+            crate::resolved(Arc::new(AwaitingParent {
+                spec: FactorySpec::new(FactoryIdentity::linked("nested-scheduler-parent", "1")),
                 child: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         ),
     )
@@ -289,10 +274,6 @@ struct RecordingTarget {
 
 #[async_trait]
 impl PluginFactory for RecordingTarget {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -315,10 +296,6 @@ struct AwaitingReconfiguration {
 
 #[async_trait]
 impl PluginFactory for AwaitingReconfiguration {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -345,13 +322,13 @@ async fn activation_can_await_other_reconfiguration_with_one_reconciliation_slot
     let target = runtime
         .root()
         .apply(
-            Arc::new(RecordingTarget {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
+            crate::resolved(Arc::new(RecordingTarget {
+                spec: FactorySpec::new(FactoryIdentity::linked(
                     "nested-reconfiguration-target",
                     "1",
                 )),
                 configurations: Arc::clone(&configurations),
-            }),
+            })),
             serde_json::json!({"revision": 1}),
         )
         .await
@@ -360,13 +337,13 @@ async fn activation_can_await_other_reconfiguration_with_one_reconciliation_slot
     let parent = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         runtime.root().apply(
-            Arc::new(AwaitingReconfiguration {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
+            crate::resolved(Arc::new(AwaitingReconfiguration {
+                spec: FactorySpec::new(FactoryIdentity::linked(
                     "nested-reconfiguration-parent",
                     "1",
                 )),
                 target: target.clone(),
-            }),
+            })),
             Value::Null,
         ),
     )
@@ -400,10 +377,6 @@ struct AwaitingDisposal {
 
 #[async_trait]
 impl PluginFactory for AwaitingDisposal {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -433,9 +406,8 @@ async fn activation_can_await_other_disposal_with_one_reconciliation_slot() {
     let target = runtime
         .root()
         .apply(
-            Arc::new(NestedChild(FactorySpec::new(FactoryIdentity::builtin(
-                "nested-disposal-target",
-                "1",
+            crate::resolved(Arc::new(NestedChild(FactorySpec::new(
+                FactoryIdentity::linked("nested-disposal-target", "1"),
             )))),
             Value::Null,
         )
@@ -445,10 +417,10 @@ async fn activation_can_await_other_disposal_with_one_reconciliation_slot() {
     let parent = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         runtime.root().apply(
-            Arc::new(AwaitingDisposal {
-                spec: FactorySpec::new(FactoryIdentity::builtin("nested-disposal-parent", "1")),
+            crate::resolved(Arc::new(AwaitingDisposal {
+                spec: FactorySpec::new(FactoryIdentity::linked("nested-disposal-parent", "1")),
                 target: target.clone(),
-            }),
+            })),
             Value::Null,
         ),
     )
@@ -477,10 +449,6 @@ struct ReentrantProviderDisposal {
 
 #[async_trait]
 impl PluginFactory for ReentrantProviderDisposal {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -518,12 +486,9 @@ async fn service_change_cancels_reentrant_activation_before_the_transition_deadl
     let provider = runtime
         .root()
         .apply(
-            Arc::new(SchedulerProvider {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
-                    "reentrant-disposal-provider",
-                    "1",
-                )),
-            }),
+            crate::resolved(Arc::new(SchedulerProvider {
+                spec: FactorySpec::new(FactoryIdentity::linked("reentrant-disposal-provider", "1")),
+            })),
             Value::Null,
         )
         .await
@@ -532,16 +497,13 @@ async fn service_change_cancels_reentrant_activation_before_the_transition_deadl
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(ReentrantProviderDisposal {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
-                    "reentrant-disposal-consumer",
-                    "1",
-                ))
-                .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
+            crate::resolved(Arc::new(ReentrantProviderDisposal {
+                spec: FactorySpec::new(FactoryIdentity::linked("reentrant-disposal-consumer", "1"))
+                    .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 provider: provider.clone(),
                 activations: AtomicUsize::new(0),
                 entered: Arc::clone(&entered),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -589,10 +551,6 @@ struct ConfigPointerConsumer {
 
 #[async_trait]
 impl PluginFactory for ConfigPointerConsumer {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -612,23 +570,26 @@ async fn service_reconciliation_freshly_prepares_a_distinct_attempt_configuratio
     let runtime = Runtime::default();
     let provider_factory = || {
         Arc::new(SchedulerProvider {
-            spec: FactorySpec::new(FactoryIdentity::builtin("config-arc-provider", "1")),
+            spec: FactorySpec::new(FactoryIdentity::linked("config-arc-provider", "1")),
         }) as Arc<dyn PluginFactory>
     };
     let provider = runtime
         .root()
-        .apply(provider_factory(), Value::Null)
+        .apply(
+            crate::resolver::resolved_dyn(provider_factory()),
+            Value::Null,
+        )
         .await
         .unwrap();
     let pointers = Arc::new(Mutex::new(Vec::new()));
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(ConfigPointerConsumer {
-                spec: FactorySpec::new(FactoryIdentity::builtin("config-arc-consumer", "1"))
+            crate::resolved(Arc::new(ConfigPointerConsumer {
+                spec: FactorySpec::new(FactoryIdentity::linked("config-arc-consumer", "1"))
                     .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 pointers: Arc::clone(&pointers),
-            }),
+            })),
             serde_json::json!({"nested": [1, 2, 3]}),
         )
         .await
@@ -637,7 +598,10 @@ async fn service_reconciliation_freshly_prepares_a_distinct_attempt_configuratio
     assert!(provider.dispose().await.is_clean());
     runtime
         .root()
-        .apply(provider_factory(), Value::Null)
+        .apply(
+            crate::resolver::resolved_dyn(provider_factory()),
+            Value::Null,
+        )
         .await
         .unwrap();
     consumer
@@ -657,10 +621,6 @@ struct SpawnedAwaitingParent(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for SpawnedAwaitingParent {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -670,9 +630,8 @@ impl PluginFactory for SpawnedAwaitingParent {
         tokio::spawn(async move {
             context
                 .apply(
-                    Arc::new(NestedChild(FactorySpec::new(FactoryIdentity::builtin(
-                        "spawned-nested-child",
-                        "1",
+                    crate::resolved(Arc::new(NestedChild(FactorySpec::new(
+                        FactoryIdentity::linked("spawned-nested-child", "1"),
                     )))),
                     Value::Null,
                 )
@@ -698,9 +657,9 @@ async fn paused_activation_allows_spawned_child_progress_with_one_slot() {
     let parent = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         runtime.root().apply(
-            Arc::new(SpawnedAwaitingParent(FactorySpec::new(
-                FactoryIdentity::builtin("spawned-nested-parent", "1"),
-            ))),
+            crate::resolved(Arc::new(SpawnedAwaitingParent(FactorySpec::new(
+                FactoryIdentity::linked("spawned-nested-parent", "1"),
+            )))),
             Value::Null,
         ),
     )
@@ -724,10 +683,6 @@ struct BlockingCleanupConsumer {
 
 #[async_trait]
 impl PluginFactory for BlockingCleanupConsumer {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -761,10 +716,6 @@ struct SignalledAwaitingDisposal {
 
 #[async_trait]
 impl PluginFactory for SignalledAwaitingDisposal {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -788,9 +739,9 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
     let provider = runtime
         .root()
         .apply(
-            Arc::new(SchedulerProvider {
-                spec: FactorySpec::new(FactoryIdentity::builtin("overlap-provider", "1")),
-            }),
+            crate::resolved(Arc::new(SchedulerProvider {
+                spec: FactorySpec::new(FactoryIdentity::linked("overlap-provider", "1")),
+            })),
             Value::Null,
         )
         .await
@@ -800,12 +751,12 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
     let target = runtime
         .root()
         .apply(
-            Arc::new(BlockingCleanupConsumer {
-                spec: FactorySpec::new(FactoryIdentity::builtin("overlap-consumer", "1"))
+            crate::resolved(Arc::new(BlockingCleanupConsumer {
+                spec: FactorySpec::new(FactoryIdentity::linked("overlap-consumer", "1"))
                     .requiring(Requirement::new("scheduler", "test.scheduler", V1)),
                 entered: Arc::clone(&cleanup_entered),
                 release: Arc::clone(&cleanup_release),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -821,11 +772,11 @@ async fn nested_disposal_intent_is_retained_while_the_target_is_already_reconcil
         let disposal_requested = Arc::clone(&disposal_requested);
         async move {
             root.apply(
-                Arc::new(SignalledAwaitingDisposal {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("overlap-disposer", "1")),
+                crate::resolved(Arc::new(SignalledAwaitingDisposal {
+                    spec: FactorySpec::new(FactoryIdentity::linked("overlap-disposer", "1")),
                     target,
                     requested: disposal_requested,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -853,10 +804,6 @@ struct HangingNestedChild {
 
 #[async_trait]
 impl PluginFactory for HangingNestedChild {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -875,10 +822,6 @@ struct AwaitingHangingChild {
 
 #[async_trait]
 impl PluginFactory for AwaitingHangingChild {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -887,10 +830,10 @@ impl PluginFactory for AwaitingHangingChild {
         let context = plan.context().clone();
         context
             .apply(
-                Arc::new(HangingNestedChild {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-nested-child", "1")),
+                crate::resolved(Arc::new(HangingNestedChild {
+                    spec: FactorySpec::new(FactoryIdentity::linked("cancelled-nested-child", "1")),
                     entered: Arc::clone(&self.child_entered),
-                }),
+                })),
                 Value::Null,
             )
             .await?;
@@ -918,13 +861,10 @@ async fn timed_out_parent_requeues_its_cancelled_nested_apply_claim() {
         let child_entered = Arc::clone(&child_entered);
         async move {
             root.apply(
-                Arc::new(AwaitingHangingChild {
-                    spec: FactorySpec::new(FactoryIdentity::builtin(
-                        "cancelled-nested-parent",
-                        "1",
-                    )),
+                crate::resolved(Arc::new(AwaitingHangingChild {
+                    spec: FactorySpec::new(FactoryIdentity::linked("cancelled-nested-parent", "1")),
                     child_entered,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -965,10 +905,6 @@ struct BlockingCleanupTarget {
 
 #[async_trait]
 impl PluginFactory for BlockingCleanupTarget {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -1013,12 +949,12 @@ async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
     let target = runtime
         .root()
         .apply(
-            Arc::new(BlockingCleanupTarget {
-                spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-disposal-target", "1")),
+            crate::resolved(Arc::new(BlockingCleanupTarget {
+                spec: FactorySpec::new(FactoryIdentity::linked("cancelled-disposal-target", "1")),
                 entered: Arc::clone(&cleanup_entered),
                 release: Arc::clone(&cleanup_release),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -1028,13 +964,13 @@ async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
         let target = target.clone();
         async move {
             root.apply(
-                Arc::new(AwaitingDisposal {
-                    spec: FactorySpec::new(FactoryIdentity::builtin(
+                crate::resolved(Arc::new(AwaitingDisposal {
+                    spec: FactorySpec::new(FactoryIdentity::linked(
                         "cancelled-disposal-parent",
                         "1",
                     )),
                     target,
-                }),
+                })),
                 Value::Null,
             )
             .await

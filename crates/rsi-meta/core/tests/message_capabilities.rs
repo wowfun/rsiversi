@@ -8,8 +8,11 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 #[path = "message_capabilities/support.rs"]
 mod support;
+use resolver::resolved;
 
 #[path = "message_capabilities/accounting.rs"]
 mod accounting;

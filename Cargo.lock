@@ -3,12 +3,19 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "const-random",
  "getrandom 0.3.4",
  "once_cell",
  "serde",
@@ -77,7 +84,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -96,10 +102,8 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -180,6 +184,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -215,7 +231,33 @@ checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
- "rand_core 0.10.1",
+ "rand_core",
+]
+
+[[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
+name = "const-random"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
+dependencies = [
+ "const-random-macro",
+]
+
+[[package]]
+name = "const-random-macro"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
+dependencies = [
+ "getrandom 0.2.17",
+ "once_cell",
+ "tiny-keccak",
 ]
 
 [[package]]
@@ -263,6 +305,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,12 +328,6 @@ dependencies = [
  "generic-array",
  "typenum",
 ]
-
-[[package]]
-name = "data-encoding"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dbus"
@@ -346,6 +397,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -363,10 +426,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "fluent-uri"
@@ -378,6 +460,12 @@ dependencies = [
  "ref-cast",
  "serde",
 ]
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -512,8 +600,27 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.1",
+ "rand_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "foldhash",
 ]
 
 [[package]]
@@ -521,6 +628,18 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
+dependencies = [
+ "hashbrown 0.17.1",
+]
 
 [[package]]
 name = "hex"
@@ -607,7 +726,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -738,13 +857,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "image"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
+dependencies = [
+ "bytemuck",
+ "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
+ "moxcms",
+ "num-traits",
+ "png",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -842,6 +989,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsqlite3-sys"
+version = "0.38.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "libyaml-rs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -909,6 +1067,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -917,6 +1085,25 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
+name = "no-std-compat"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
+dependencies = [
+ "spin",
 ]
 
 [[package]]
@@ -1002,6 +1189,9 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "outref"
@@ -1051,21 +1241,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "png"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+dependencies = [
+ "bitflags",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide",
+]
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
  "zerovec",
-]
-
-[[package]]
-name = "ppv-lite86"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
-dependencies = [
- "zerocopy",
 ]
 
 [[package]]
@@ -1097,6 +1297,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd348ff538bc9caeda7ee8cad2d1d48236a1f443c1fa3913c6a02fe0043b1dd3"
 
 [[package]]
+name = "pxfm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1125,7 +1337,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.2",
+ "rand",
  "rand_pcg",
  "ring",
  "rustc-hash",
@@ -1175,42 +1387,13 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
-dependencies = [
- "rand_chacha",
- "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
- "rand_core 0.10.1",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-dependencies = [
- "getrandom 0.3.4",
+ "rand_core",
 ]
 
 [[package]]
@@ -1225,7 +1408,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
- "rand_core 0.10.1",
+ "rand_core",
 ]
 
 [[package]]
@@ -1338,7 +1521,37 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots",
+]
+
+[[package]]
+name = "rhai"
+version = "1.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e6e1be9d697d537ce450766df42ad6adf1a93f25f21d73217354ad7e3d3dae1"
+dependencies = [
+ "ahash",
+ "bitflags",
+ "no-std-compat",
+ "num-traits",
+ "once_cell",
+ "rhai_codegen",
+ "serde",
+ "smallvec",
+ "smartstring",
+ "thin-vec",
+ "web-time",
+]
+
+[[package]]
+name = "rhai_codegen"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cd3a7535e50bf36857e7be7bec276d334e8c2dfa469c2201226fd01638ea5ca"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1356,57 +1569,267 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-agent-protocol"
+name = "rsi"
 version = "0.0.1"
 dependencies = [
- "jsonschema",
- "rsi-ai-protocol",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "rsi-ai"
-version = "0.0.1"
-dependencies = [
+ "async-trait",
+ "axum",
  "futures-util",
- "hex",
- "rsi-ai-auth",
+ "getrandom 0.3.4",
+ "rsi-agent-executor",
+ "rsi-agent-kernel",
+ "rsi-agent-presets",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-store-sqlite",
+ "rsi-agent-turn-protocol",
+ "rsi-ai",
+ "rsi-ai-deepseek",
+ "rsi-ai-image",
+ "rsi-ai-openai",
+ "rsi-ai-openai-compatible",
  "rsi-ai-protocol",
  "rsi-ai-provider",
- "rsi-ai-testkit",
+ "rsi-approval",
+ "rsi-approval-protocol",
+ "rsi-commands",
+ "rsi-commands-protocol",
+ "rsi-credentials-local",
+ "rsi-credentials-protocol",
+ "rsi-host",
+ "rsi-jobs",
+ "rsi-jobs-local",
+ "rsi-media",
+ "rsi-media-local",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "rsi-permission-presets",
+ "rsi-projection",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-settings",
+ "rsi-settings-local",
+ "rsi-settings-protocol",
+ "rsi-storage",
+ "rsi-storage-domain",
+ "rsi-storage-sqlite",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "rsi-workspace",
  "serde",
  "serde_json",
- "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
-name = "rsi-ai-auth"
+name = "rsi-agent-context"
 version = "0.0.1"
 dependencies = [
- "keyring",
+ "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-media-protocol",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-agent-executor"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "rsi-agent-context",
+ "rsi-agent-kernel",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-ai-testkit",
+ "rsi-approval-protocol",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-kernel"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-presets"
+version = "0.0.1"
+dependencies = [
+ "rsi-agent-session-protocol",
+ "rsi-host",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-agent-session-protocol"
+version = "0.0.1"
+dependencies = [
+ "hex",
+ "rsi-ai-protocol",
+ "rsi-approval-protocol",
+ "rsi-media-protocol",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-agent-store-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-session-protocol",
+ "rsi-meta-contract",
  "serde",
  "thiserror",
- "zeroize",
+]
+
+[[package]]
+name = "rsi-agent-store-sqlite"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-agent-testkit"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-sandbox",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-agent-turn-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta-contract",
+ "rsi-sandbox",
+ "thiserror",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ai"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "rsi-ai-protocol",
+ "rsi-ai-provider",
+ "rsi-credentials-protocol",
+ "rsi-credentials-testkit",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
 name = "rsi-ai-deepseek"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
- "rsi-ai",
- "rsi-ai-auth",
+ "hex",
  "rsi-ai-openai-compatible",
  "rsi-ai-protocol",
  "rsi-ai-provider",
+ "rsi-ai-testkit",
  "rsi-ai-transport",
+ "rsi-credentials-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "sha2",
  "tokio",
+]
+
+[[package]]
+name = "rsi-ai-image"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "rsi-ai-protocol",
+ "rsi-ai-provider",
+ "rsi-credentials-protocol",
+ "rsi-credentials-testkit",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1419,18 +1842,22 @@ dependencies = [
  "base64",
  "bytes",
  "futures-util",
+ "hex",
  "http",
  "percent-encoding",
  "rsi-ai",
- "rsi-ai-auth",
+ "rsi-ai-image",
  "rsi-ai-protocol",
  "rsi-ai-provider",
  "rsi-ai-testkit",
  "rsi-ai-transport",
+ "rsi-credentials-protocol",
+ "rsi-credentials-testkit",
+ "rsi-meta",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1438,18 +1865,20 @@ name = "rsi-ai-openai-compatible"
 version = "0.0.1"
 dependencies = [
  "async-stream",
+ "async-trait",
  "axum",
- "base64",
  "futures-util",
+ "hex",
  "http",
- "rsi-ai",
- "rsi-ai-auth",
  "rsi-ai-protocol",
  "rsi-ai-provider",
  "rsi-ai-testkit",
  "rsi-ai-transport",
+ "rsi-credentials-protocol",
+ "rsi-meta",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -1457,12 +1886,19 @@ dependencies = [
 name = "rsi-ai-protocol"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "futures-util",
  "hex",
  "jsonschema",
+ "rsi-credentials-protocol",
+ "rsi-media-protocol",
+ "rsi-meta-contract",
+ "rsi-tools-protocol",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1472,12 +1908,15 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hex",
- "rsi-ai-auth",
  "rsi-ai-protocol",
+ "rsi-credentials-protocol",
+ "rsi-media-protocol",
+ "rsi-meta-contract",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "tokio-util",
 ]
 
@@ -1485,10 +1924,11 @@ dependencies = [
 name = "rsi-ai-testkit"
 version = "0.0.1"
 dependencies = [
- "async-trait",
  "futures-util",
  "rsi-ai-protocol",
  "rsi-ai-provider",
+ "rsi-credentials-protocol",
+ "rsi-media-protocol",
 ]
 
 [[package]]
@@ -1503,8 +1943,8 @@ dependencies = [
  "http",
  "memchr",
  "reqwest",
- "rsi-ai-auth",
  "rsi-ai-protocol",
+ "rsi-credentials-protocol",
  "serde",
  "serde_json",
  "thiserror",
@@ -1514,22 +1954,183 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-ai-xiaomi"
+name = "rsi-approval"
 version = "0.0.1"
 dependencies = [
- "async-stream",
- "axum",
- "base64",
- "futures-util",
- "hex",
- "http",
- "rsi-ai",
- "rsi-ai-auth",
- "rsi-ai-protocol",
- "rsi-ai-provider",
- "rsi-ai-testkit",
- "rsi-ai-transport",
+ "async-trait",
+ "rsi-approval-protocol",
+ "rsi-meta",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-approval-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
  "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-commands"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-commands-protocol",
+ "rsi-meta",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-commands-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-media-protocol",
+ "rsi-meta-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-credentials-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "keyring",
+ "rsi-credentials-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-credentials-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "rsi-credentials-testkit"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-credentials-protocol",
+ "rsi-meta",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-host"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-meta-profile",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-jobs"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-jobs-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-jobs",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-media"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "image",
+ "rsi-media-protocol",
+ "rsi-media-testkit",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-media-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "image",
+ "libc",
+ "rsi-media",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-media-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-media-testkit"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-media-protocol",
+ "rsi-meta",
  "serde_json",
  "sha2",
  "tokio",
@@ -1541,6 +2142,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-meta-contract",
  "serde",
  "serde_json",
  "thiserror",
@@ -1549,18 +2151,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-meta-loader"
+name = "rsi-meta-contract"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-meta-native"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rsi-meta-native-loader"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "futures-util",
  "hex",
  "libc",
  "libloading",
  "rsi-meta",
- "rsi-meta-plugin",
+ "rsi-meta-native",
  "rustix",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1570,11 +2186,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-meta-plugin"
+name = "rsi-meta-profile"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "libc",
+ "rhai",
+ "rsi-meta",
+ "same-file",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -1591,6 +2217,207 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-permission-presets"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-projection"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-sandbox"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-sandbox-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "rsi-meta",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-settings"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-settings-protocol",
+ "rsi-settings-testkit",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-settings-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "rsi-meta",
+ "rsi-settings",
+ "rsi-settings-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-settings-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-settings-testkit"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-settings-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-storage"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-storage-domain"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-storage",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-storage-json"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "rsi-meta",
+ "rsi-storage",
+ "rsi-storage-domain",
+ "same-file",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-storage-sqlite"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "rsi-meta",
+ "rsi-storage",
+ "rsi-storage-domain",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-tools"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-tools-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-media-protocol",
+ "rsi-meta-contract",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-workspace"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-meta",
+ "rsi-storage",
+ "rsi-storage-domain",
+ "rsi-storage-json",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-xtask"
 version = "0.0.1"
 dependencies = [
@@ -1600,10 +2427,34 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "syn 2.0.119",
  "tempfile",
  "toml",
  "yaml_serde",
+]
+
+[[package]]
+name = "rsqlite-vfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.40.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+dependencies = [
+ "bitflags",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -1671,6 +2522,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "scopeguard"
@@ -1791,17 +2651,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest",
-]
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1829,6 +2678,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1839,6 +2694,20 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "smartstring"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
+dependencies = [
+ "autocfg",
+ "static_assertions",
+ "version_check",
+]
 
 [[package]]
 name = "socket2"
@@ -1851,10 +2720,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+dependencies = [
+ "cc",
+ "js-sys",
+ "rsqlite-vfs",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "subtle"
@@ -1918,6 +2811,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "thin-vec"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79def32ffcd477db1ff26f76dab9e3a91f0bd42a85ca96577089b24623056f9d"
+
+[[package]]
 name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1935,6 +2834,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]
@@ -1997,22 +2905,6 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "rustls",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tungstenite",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2141,24 +3033,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2226,6 +3100,12 @@ dependencies = [
  "uuid",
  "vsimd",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -2353,20 +3233,26 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.9",
-]
-
-[[package]]
-name = "webpki-roots"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2616,3 +3502,18 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
+]

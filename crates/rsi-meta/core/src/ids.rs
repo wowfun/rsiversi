@@ -51,7 +51,6 @@ string_id!(
     "Logical service slot selected by a plugin requirement."
 );
 string_id!(ContractId, "Language-neutral service contract identity.");
-string_id!(EventKey, "Language-neutral event identity.");
 
 /// Exact service contract revision. M1 deliberately performs no range negotiation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -73,7 +72,12 @@ pub struct FiberGeneration(pub u64);
 #[serde(transparent)]
 pub struct IsolationId(pub u64);
 
-/// Runtime-local event listener identity.
+/// Runtime-local isolation slot for one nominal Rust Local contract.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LocalIsolationId(pub u64);
+
+/// Runtime-local typed Local event listener identity.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EventListenerId(pub u64);
@@ -89,6 +93,34 @@ pub struct SupplyId {
     owner: FiberId,
     generation: FiberGeneration,
     token: u64,
+}
+
+/// Non-repeating identity of one generation-owned Local service supply.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LocalSupplyId {
+    owner: FiberId,
+    generation: FiberGeneration,
+    token: u64,
+}
+
+impl LocalSupplyId {
+    pub(crate) fn new(owner: FiberId, generation: FiberGeneration, token: u64) -> Self {
+        Self {
+            owner,
+            generation,
+            token,
+        }
+    }
+
+    /// Returns the exact Fiber generation that created this supply.
+    pub fn owner(&self) -> (FiberId, FiberGeneration) {
+        (self.owner, self.generation)
+    }
+
+    /// Returns the Runtime-local monotonic supply token.
+    pub fn token(&self) -> u64 {
+        self.token
+    }
 }
 
 impl SupplyId {

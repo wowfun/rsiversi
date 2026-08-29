@@ -9,7 +9,10 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 use support::{ContextCaptureFactory, FactorySpec};
 
@@ -34,10 +37,10 @@ async fn active_context(runtime: &Runtime, name: &str) -> (rsi_meta::FiberHandle
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(ContextCaptureFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin(name, "1")),
+            crate::resolved(Arc::new(ContextCaptureFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked(name, "1")),
                 context: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -68,7 +71,7 @@ fn expected_cleanup_panic() -> std::result::Result<(), String> {
 
 #[derive(Debug)]
 struct ActivationRootWitness {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     observed_transactions: Arc<std::sync::atomic::AtomicUsize>,
     cleanups: Arc<std::sync::atomic::AtomicUsize>,
     entered: Arc<Notify>,
@@ -77,10 +80,6 @@ struct ActivationRootWitness {
 
 #[async_trait]
 impl PluginFactory for ActivationRootWitness {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -126,13 +125,13 @@ async fn runtime_installs_and_closes_an_activation_root_transaction_around_plugi
         let release = Arc::clone(&release);
         async move {
             root.apply(
-                Arc::new(ActivationRootWitness {
-                    identity: FactoryIdentity::builtin("activation-root-witness", "1"),
+                crate::resolved(Arc::new(ActivationRootWitness {
+                    _identity: FactoryIdentity::linked("activation-root-witness", "1"),
                     observed_transactions,
                     cleanups,
                     entered,
                     release,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -181,16 +180,12 @@ impl ServiceEndpoint for OrderedEndpoint {
 
 #[derive(Debug)]
 struct RootLifoFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     order: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[async_trait]
 impl PluginFactory for RootLifoFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -215,10 +210,10 @@ async fn activation_root_owns_setup_effects_and_dynamic_supply_in_one_lifo_trans
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(RootLifoFactory {
-                identity: FactoryIdentity::builtin("root-lifo", "1"),
+            crate::resolved(Arc::new(RootLifoFactory {
+                _identity: FactoryIdentity::linked("root-lifo", "1"),
                 order: Arc::clone(&order),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -245,7 +240,7 @@ async fn activation_root_owns_setup_effects_and_dynamic_supply_in_one_lifo_trans
 
 #[derive(Debug)]
 struct BlockingChildCleanup {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     order: Arc<Mutex<Vec<&'static str>>>,
     entered: Arc<Notify>,
     release: Arc<Notify>,
@@ -253,10 +248,6 @@ struct BlockingChildCleanup {
 
 #[async_trait]
 impl PluginFactory for BlockingChildCleanup {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -289,17 +280,13 @@ impl PluginFactory for BlockingChildCleanup {
 
 #[derive(Debug)]
 struct PanickingParentWithChild {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     child: Arc<BlockingChildCleanup>,
     order: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[async_trait]
 impl PluginFactory for PanickingParentWithChild {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -308,7 +295,10 @@ impl PluginFactory for PanickingParentWithChild {
         plan.defer("parent root", record_cleanup(&self.order, "parent"))?;
         let _child = plan
             .context()
-            .apply(self.child.clone(), Value::Null)
+            .apply(
+                crate::resolver::resolved_dyn(self.child.clone()),
+                Value::Null,
+            )
             .await?;
         panic!("expected activation panic");
     }
@@ -327,16 +317,16 @@ async fn activation_panic_defers_the_root_claim_until_children_finish_rollback()
         let release = Arc::clone(&release);
         async move {
             root.apply(
-                Arc::new(PanickingParentWithChild {
-                    identity: FactoryIdentity::builtin("panicking-parent", "1"),
+                crate::resolved(Arc::new(PanickingParentWithChild {
+                    _identity: FactoryIdentity::linked("panicking-parent", "1"),
                     child: Arc::new(BlockingChildCleanup {
-                        identity: FactoryIdentity::builtin("blocking-child", "1"),
+                        _identity: FactoryIdentity::linked("blocking-child", "1"),
                         order: Arc::clone(&order),
                         entered,
                         release,
                     }),
                     order,
-                }),
+                })),
                 Value::Null,
             )
             .await

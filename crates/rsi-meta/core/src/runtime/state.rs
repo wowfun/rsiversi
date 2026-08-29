@@ -1,5 +1,6 @@
 use crate::{
-    ContractId, ContractVersion, FactoryIdentity, FiberGeneration, FiberId, IsolationId, ServiceKey,
+    ContractId, ContractVersion, FactoryIdentity, FiberGeneration, FiberId, IsolationId,
+    LocalContractKey, LocalIsolationId, ServiceKey, UpdateMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,13 @@ pub enum PendingReason {
         actual: ContractId,
         /// Published exact version.
         actual_version: ContractVersion,
+    },
+    /// No provider is published for one nominal Rust Local contract.
+    MissingLocal {
+        /// Stable catalog name of the missing Local contract.
+        contract: LocalContractKey,
+        /// Local isolation slot selected by the Fiber Context.
+        isolation: LocalIsolationId,
     },
 }
 
@@ -73,6 +81,8 @@ pub struct FiberSnapshot {
     pub generation: FiberGeneration,
     /// Factory identity captured during preparation.
     pub factory: FactoryIdentity,
+    /// Static configuration update policy resolved with the factory.
+    pub update_mode: UpdateMode,
     /// Current lifecycle state.
     pub state: FiberState,
 }

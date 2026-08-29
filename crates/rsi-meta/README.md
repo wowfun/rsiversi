@@ -12,8 +12,11 @@ native libraries. The independent `rsi-meta-scope` crate supplies safe Rust
 scope identity and layered contribution storage without adding a generic
 Runtime registry.
 
-The [native ABI](plugin/README.md) expresses the same capability and effect
-model through a versioned C boundary. The [Loader](loader/README.md) validates
+The independent [Profile](profile/README.md) crate owns bounded ordered source
+programs and their ordinary bootstrap plugin; it is not embedded in core.
+
+The [native ABI](native/README.md) expresses the same capability and effect
+model through a versioned C boundary. The [native loader](native-loader/README.md) validates
 and maps trusted native artifacts, then adapts them into ordinary
 `PluginFactory` values. Native loading is not privileged core behavior.
 

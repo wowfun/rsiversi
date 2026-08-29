@@ -13,12 +13,21 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 use support::{Echo, EndpointFactory, FactorySpec};
 
 const V1: ContractVersion = ContractVersion(1);
 const DEEP_CONFIG_CHILD: &str = "RSI_META_DEEP_CONFIG_CHILD";
+
+#[test]
+fn configuration_numbers_preserve_exact_decimal_text_in_package_builds() {
+    let value: Value = serde_json::from_str("1.0000000000000001").unwrap();
+    assert_eq!(value.to_string(), "1.0000000000000001");
+}
 
 fn minimum_retained_plugin_limit(limits: &RuntimeLimits) -> usize {
     let payloads = &limits.payloads;
@@ -145,8 +154,6 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
                 maximum_concurrent_service_calls: tokio_maximum,
                 channel_capacity: tokio_maximum - 1,
                 maximum_pending_message_sends: usize::MAX,
-                maximum_concurrent_event_dispatches: tokio_maximum,
-                maximum_concurrent_event_callbacks: tokio_maximum,
             },
             ..RuntimeLimits::default()
         },
@@ -154,7 +161,6 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
             deadlines: DeadlineLimits {
                 transition: Duration::from_hours(24),
                 service_call: Duration::from_hours(24),
-                event_dispatch: Duration::from_hours(24),
                 shutdown_wait: Duration::from_hours(24),
             },
             ..RuntimeLimits::default()
@@ -195,12 +201,12 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
 #[test]
 fn duplicate_prepared_requirement_diagnostic_names_the_service() {
     let runtime = Runtime::default();
-    let spec = FactorySpec::new(FactoryIdentity::builtin("duplicate-detail", "7"))
+    let spec = FactorySpec::new(FactoryIdentity::linked("duplicate-detail", "7"))
         .requiring(Requirement::new("same", "one", V1))
         .requiring(Requirement::new("same", "two", V1));
 
     let error = runtime
-        .prepare(Arc::new(PassiveFactory(spec)), Value::Null)
+        .prepare(crate::resolved(Arc::new(PassiveFactory(spec))), Value::Null)
         .expect_err("duplicate requirements must fail preparation");
     assert_eq!(
         error,
@@ -290,10 +296,9 @@ fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panickin
         maximum_concurrent_reconciliations,
         maximum_concurrent_service_calls,
         channel_capacity,
-        maximum_concurrent_event_dispatches,
-        maximum_concurrent_event_callbacks,
+        maximum_pending_message_sends,
     );
-    deadline_candidates!(transition, service_call, event_dispatch, shutdown_wait);
+    deadline_candidates!(transition, service_call, shutdown_wait);
 
     let mut accepted = 0;
     for limits in candidates {
@@ -328,9 +333,8 @@ fn json_depth_hard_ceiling_is_exact_and_precedes_recursive_encoding() {
     }
     runtime
         .prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "depth-boundary",
-                "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("depth-boundary", "1"),
             )))),
             boundary,
         )
@@ -353,9 +357,9 @@ fn json_depth_hard_ceiling_is_exact_and_precedes_recursive_encoding() {
     }
     assert!(matches!(
         runtime.prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "too-deep", "1"
-            ),))),
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("too-deep", "1"),
+            )))),
             too_deep,
         ),
         Err(MetaError::InvalidConfig(_))
@@ -395,19 +399,22 @@ fn deep_owned_config_boundaries_reject_or_drop_without_recursing() {
 
 fn run_deep_config_scenario(scenario: &str) {
     let runtime = Runtime::default();
-    let spec = || FactorySpec::new(FactoryIdentity::builtin("deep-config", "1"));
+    let spec = || FactorySpec::new(FactoryIdentity::linked("deep-config", "1"));
     match scenario {
         "prepare-input" => assert!(matches!(
-            runtime.prepare(Arc::new(PassiveFactory(spec())), deep_json_value()),
+            runtime.prepare(crate::resolved(Arc::new(PassiveFactory(spec()))), deep_json_value()),
             Err(MetaError::InvalidConfig(message)) if message.contains("nesting")
         )),
         "validate-output" => assert!(matches!(
-            runtime.prepare(Arc::new(DeepConfigFactory(spec())), Value::Null),
+            runtime.prepare(crate::resolved(Arc::new(DeepConfigFactory)), Value::Null),
             Err(MetaError::InvalidConfig(message)) if message.contains("nesting")
         )),
         "drop-apply" => {
             let root = runtime.root();
-            drop(root.apply(Arc::new(PassiveFactory(spec())), deep_json_value()));
+            drop(root.apply(
+                crate::resolved(Arc::new(PassiveFactory(spec()))),
+                deep_json_value(),
+            ));
         }
         "drop-reconfigure" => {
             let executor = tokio::runtime::Builder::new_current_thread()
@@ -415,11 +422,10 @@ fn run_deep_config_scenario(scenario: &str) {
                 .build()
                 .unwrap();
             let fiber = executor
-                .block_on(
-                    runtime
-                        .root()
-                        .apply(Arc::new(PassiveFactory(spec())), Value::Null),
-                )
+                .block_on(runtime.root().apply(
+                    crate::resolved(Arc::new(PassiveFactory(spec()))),
+                    Value::Null,
+                ))
                 .unwrap();
             drop(fiber.reconfigure(deep_json_value()));
             executor.block_on(async {
@@ -459,14 +465,6 @@ fn resource_snapshot_exposes_every_global_budget_with_its_validated_limit() {
             limits.execution.maximum_concurrent_reconciliations,
         ),
         (&snapshot.scheduler_workers, 1),
-        (
-            &snapshot.event_dispatches,
-            limits.execution.maximum_concurrent_event_dispatches,
-        ),
-        (
-            &snapshot.event_callbacks,
-            limits.execution.maximum_concurrent_event_callbacks,
-        ),
         (&snapshot.cleanup_runs, limits.topology.maximum_fibers),
     ];
     for (usage, limit) in expected {
@@ -482,10 +480,6 @@ struct PassiveFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for PassiveFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -496,14 +490,10 @@ impl PluginFactory for PassiveFactory {
 }
 
 #[derive(Debug)]
-struct DeepConfigFactory(FactorySpec);
+struct DeepConfigFactory;
 
 #[async_trait]
 impl PluginFactory for DeepConfigFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, _: &Value) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(deep_json_value()))
     }
@@ -518,10 +508,6 @@ struct UnexpectedFactory;
 
 #[async_trait]
 impl PluginFactory for UnexpectedFactory {
-    fn identity(&self) -> FactoryIdentity {
-        panic!("busy admission must precede identity observation")
-    }
-
     fn prepare(&self, _: &Value) -> Result<PreparedActivation> {
         panic!("busy admission must precede preparation")
     }
@@ -542,10 +528,13 @@ async fn prepared_proofs_are_runtime_bound_and_reserve_until_drop_or_disposal() 
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let factory = || FactorySpec::new(FactoryIdentity::builtin("reserved", "1"));
+    let factory = || FactorySpec::new(FactoryIdentity::linked("reserved", "1"));
 
     let prepared = runtime
-        .prepare(Arc::new(PassiveFactory(factory())), Value::Null)
+        .prepare(
+            crate::resolved(Arc::new(PassiveFactory(factory()))),
+            Value::Null,
+        )
         .unwrap();
     let reserved = runtime.resource_snapshot();
     assert_eq!(reserved.fibers.current, 1);
@@ -559,7 +548,10 @@ async fn prepared_proofs_are_runtime_bound_and_reserve_until_drop_or_disposal() 
     assert_eq!(runtime.resource_snapshot().fibers.current, 0);
 
     let prepared = runtime
-        .prepare(Arc::new(PassiveFactory(factory())), Value::Null)
+        .prepare(
+            crate::resolved(Arc::new(PassiveFactory(factory()))),
+            Value::Null,
+        )
         .unwrap();
     let fiber = runtime.root().apply_prepared(prepared).await.unwrap();
     assert_eq!(runtime.resource_snapshot().fibers.current, 1);
@@ -583,14 +575,14 @@ fn plugin_capacity_is_reserved_before_identity_observation() {
     .unwrap();
     let proof = runtime
         .prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "fiber", "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("fiber", "1"),
             )))),
             Value::Null,
         )
         .unwrap();
     assert!(matches!(
-        runtime.prepare(Arc::new(UnexpectedFactory), Value::Null),
+        runtime.prepare(crate::resolved(Arc::new(UnexpectedFactory)), Value::Null),
         Err(MetaError::CapacityExhausted { resource: "fibers" })
     ));
     drop(proof);
@@ -617,24 +609,22 @@ fn plugin_capacity_is_reserved_before_identity_observation() {
     let retained_runtime = Runtime::new(retained_limits).unwrap();
     let proof = retained_runtime
         .prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "1234567890123456",
-                "1234567890123456",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("1234567890123456", "1234567890123456"),
             )))),
             Value::String("x".repeat(maximum_config_bytes - 2)),
         )
         .unwrap();
     let second_proof = retained_runtime
         .prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "abcdefghijklmnop",
-                "abcdefghijklmnop",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("abcdefghijklmnop", "abcdefghijklmnop"),
             )))),
             Value::String("y".repeat(maximum_config_bytes - 2)),
         )
         .unwrap();
     assert!(matches!(
-        retained_runtime.prepare(Arc::new(UnexpectedFactory), Value::Null),
+        retained_runtime.prepare(crate::resolved(Arc::new(UnexpectedFactory)), Value::Null),
         Err(MetaError::CapacityExhausted {
             resource: "retained plugin bytes"
         })
@@ -663,28 +653,42 @@ fn preparation_validates_identity_requirements_and_json_shape_before_retention()
     })
     .unwrap();
 
-    let oversized_identity = FactorySpec::new(FactoryIdentity::builtin("123456789", "1"));
+    let oversized_identity = FactorySpec::new(FactoryIdentity::linked("123456789", "1"));
+    let resolved_identity = oversized_identity.identity();
     assert!(matches!(
-        runtime.prepare(Arc::new(PassiveFactory(oversized_identity)), Value::Null),
+        runtime.prepare(
+            rsi_meta::ResolvedFactory::new(
+                resolved_identity,
+                rsi_meta::UpdateMode::Replayable,
+                Arc::new(PassiveFactory(oversized_identity)),
+            ),
+            Value::Null,
+        ),
         Err(MetaError::InvalidInput(_))
     ));
 
-    let too_many_requirements = FactorySpec::new(FactoryIdentity::builtin("bounded", "1"))
+    let too_many_requirements = FactorySpec::new(FactoryIdentity::linked("bounded", "1"))
         .requiring(Requirement::new("first", "contract", ContractVersion(1)))
         .requiring(Requirement::new("second", "contract", ContractVersion(1)));
     assert!(matches!(
-        runtime.prepare(Arc::new(PassiveFactory(too_many_requirements)), Value::Null),
+        runtime.prepare(
+            crate::resolved(Arc::new(PassiveFactory(too_many_requirements))),
+            Value::Null
+        ),
         Err(MetaError::InvalidInput(_))
     ));
 
-    let valid = FactorySpec::new(FactoryIdentity::builtin("bounded", "1"));
+    let valid = FactorySpec::new(FactoryIdentity::linked("bounded", "1"));
     assert!(matches!(
-        runtime.prepare(Arc::new(PassiveFactory(valid.clone())), json!([[[[null]]]])),
+        runtime.prepare(
+            crate::resolved(Arc::new(PassiveFactory(valid.clone()))),
+            json!([[[[null]]]])
+        ),
         Err(MetaError::InvalidConfig(_))
     ));
     assert!(matches!(
         runtime.prepare(
-            Arc::new(PassiveFactory(valid)),
+            crate::resolved(Arc::new(PassiveFactory(valid))),
             Value::Array(vec![Value::Null; 9]),
         ),
         Err(MetaError::InvalidConfig(_))
@@ -703,7 +707,6 @@ impl Drop for PreparedStateDropProbe {
 
 #[derive(Debug)]
 struct PreparedStateFactory {
-    spec: FactorySpec,
     retained_bytes: usize,
     drops: Arc<AtomicUsize>,
     takes: Arc<AtomicUsize>,
@@ -711,10 +714,6 @@ struct PreparedStateFactory {
 
 #[async_trait]
 impl PluginFactory for PreparedStateFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         Ok(PreparedActivation::with_state(
             desired.clone(),
@@ -764,12 +763,16 @@ async fn opaque_prepared_state_is_exactly_accounted_moved_and_dropped() {
     let drops = Arc::new(AtomicUsize::new(0));
     let takes = Arc::new(AtomicUsize::new(0));
     let factory = |retained_bytes| {
-        Arc::new(PreparedStateFactory {
-            spec: FactorySpec::new(FactoryIdentity::builtin("exact", "1")),
-            retained_bytes,
-            drops: Arc::clone(&drops),
-            takes: Arc::clone(&takes),
-        })
+        rsi_meta::ResolvedFactory::linked(
+            "exact",
+            "1",
+            rsi_meta::UpdateMode::Replayable,
+            Arc::new(PreparedStateFactory {
+                retained_bytes,
+                drops: Arc::clone(&drops),
+                takes: Arc::clone(&takes),
+            }),
+        )
     };
 
     let proof = runtime.prepare(factory(STATE_BYTES), json!("x")).unwrap();
@@ -817,17 +820,23 @@ fn prepared_requirement_capacity_is_global_and_released_with_the_proof() {
     })
     .unwrap();
     let factory = |name: &str| {
-        FactorySpec::new(FactoryIdentity::builtin(name, "1")).requiring(Requirement::new(
+        FactorySpec::new(FactoryIdentity::linked(name, "1")).requiring(Requirement::new(
             format!("{name}-missing"),
             "contract",
             ContractVersion(1),
         ))
     };
     let first = runtime
-        .prepare(Arc::new(PassiveFactory(factory("first"))), Value::Null)
+        .prepare(
+            crate::resolved(Arc::new(PassiveFactory(factory("first")))),
+            Value::Null,
+        )
         .unwrap();
     assert!(matches!(
-        runtime.prepare(Arc::new(PassiveFactory(factory("second"))), Value::Null,),
+        runtime.prepare(
+            crate::resolved(Arc::new(PassiveFactory(factory("second")))),
+            Value::Null,
+        ),
         Err(MetaError::CapacityExhausted {
             resource: "dependency edges"
         })
@@ -835,14 +844,17 @@ fn prepared_requirement_capacity_is_global_and_released_with_the_proof() {
     assert_eq!(runtime.resource_snapshot().dependency_edges.rejected, 1);
     drop(first);
     let replacement = runtime
-        .prepare(Arc::new(PassiveFactory(factory("third"))), Value::Null)
+        .prepare(
+            crate::resolved(Arc::new(PassiveFactory(factory("third")))),
+            Value::Null,
+        )
         .unwrap();
     drop(replacement);
     assert_eq!(runtime.resource_snapshot().dependency_edges.current, 0);
 }
 
 #[test]
-fn context_scope_bounds_entries_identifiers_and_encoded_overlay_bytes() {
+fn context_scope_bounds_entries_and_identifiers() {
     let entry_runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_context_entries: 1,
@@ -864,23 +876,6 @@ fn context_scope_bounds_entries_identifiers_and_encoded_overlay_bytes() {
         })
     ));
 
-    let payload_runtime = Runtime::new(RuntimeLimits {
-        payloads: PayloadLimits {
-            maximum_context_bytes: 12,
-            ..PayloadLimits::default()
-        },
-        ..RuntimeLimits::default()
-    })
-    .unwrap();
-    let scoped = payload_runtime
-        .root()
-        .intercept("first", json!("a"))
-        .unwrap();
-    assert!(matches!(
-        scoped.intercept("second", json!("a")),
-        Err(MetaError::PayloadTooLarge { maximum: 12 })
-    ));
-
     let shape_runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
             maximum_identifier_bytes: 8,
@@ -893,10 +888,6 @@ fn context_scope_bounds_entries_identifiers_and_encoded_overlay_bytes() {
     .unwrap();
     assert!(matches!(
         shape_runtime.root().isolate("123456789", IsolationId(1)),
-        Err(MetaError::InvalidInput(_))
-    ));
-    assert!(matches!(
-        shape_runtime.root().intercept("bounded", json!([[null]])),
         Err(MetaError::InvalidInput(_))
     ));
 }
@@ -920,10 +911,6 @@ struct OwnedResourcesFactory {
 
 #[async_trait]
 impl PluginFactory for OwnedResourcesFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -956,14 +943,14 @@ async fn staged_service_and_effect_budgets_release_after_rollback_and_disposal()
     let service_fiber = service_runtime
         .root()
         .apply(
-            Arc::new(OwnedResourcesFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("services", "1")),
+            crate::resolved(Arc::new(OwnedResourcesFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("services", "1")),
                 services: vec![
                     ("first", "test.first", ContractVersion(1)),
                     ("second", "test.second", ContractVersion(1)),
                 ],
                 effects: 0,
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -989,20 +976,20 @@ async fn staged_service_and_effect_budgets_release_after_rollback_and_disposal()
     .unwrap();
     let one_effect = || {
         Arc::new(OwnedResourcesFactory {
-            spec: FactorySpec::new(FactoryIdentity::builtin("effect", "1")),
+            spec: FactorySpec::new(FactoryIdentity::linked("effect", "1")),
             services: Vec::new(),
             effects: 1,
         })
     };
     let active = effect_runtime
         .root()
-        .apply(one_effect(), Value::Null)
+        .apply(resolved(one_effect()), Value::Null)
         .await
         .unwrap();
     assert_eq!(effect_runtime.resource_snapshot().effects.current, 1);
     let rejected = effect_runtime
         .root()
-        .apply(one_effect(), Value::Null)
+        .apply(resolved(one_effect()), Value::Null)
         .await
         .unwrap();
     assert!(matches!(rejected.snapshot().state, FiberState::Failed(_)));
@@ -1018,14 +1005,12 @@ async fn staged_service_and_effect_budgets_release_after_rollback_and_disposal()
 
 #[derive(Debug)]
 struct BlockingPreparationFactory {
-    spec: FactorySpec,
     entered: mpsc::SyncSender<()>,
     release: Mutex<mpsc::Receiver<()>>,
 }
 
 #[derive(Debug)]
 struct CountingReconfigurationFactory {
-    spec: FactorySpec,
     preparations: Arc<AtomicUsize>,
 }
 
@@ -1054,10 +1039,6 @@ impl Drop for BlockingConfigDrop {
 
 #[async_trait]
 impl PluginFactory for BlockingReactivationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -1080,10 +1061,6 @@ impl PluginFactory for BlockingReactivationFactory {
 
 #[async_trait]
 impl PluginFactory for CountingReconfigurationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if !config.is_null() {
             self.preparations.fetch_add(1, Ordering::AcqRel);
@@ -1099,7 +1076,7 @@ impl PluginFactory for CountingReconfigurationFactory {
 #[tokio::test]
 async fn reconfiguration_staging_capacity_is_reserved_before_plugin_preparation() {
     const MAXIMUM_CONFIG_BYTES: usize = 128;
-    let spec = FactorySpec::new(FactoryIdentity::builtin("reconfiguration-staging", "1"));
+    let spec = FactorySpec::new(FactoryIdentity::linked("reconfiguration-staging", "1"));
     let proof_config = Value::String("x".repeat(MAXIMUM_CONFIG_BYTES - 2));
     let mut limits = RuntimeLimits {
         topology: TopologyLimits {
@@ -1118,22 +1095,30 @@ async fn reconfiguration_staging_capacity_is_reserved_before_plugin_preparation(
     limits.payloads.maximum_retained_plugin_bytes = minimum_retained_plugin_limit(&limits);
     let runtime = Runtime::new(limits).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
+    let resolve = |factory: Arc<dyn PluginFactory>| {
+        rsi_meta::ResolvedFactory::new(spec.identity(), rsi_meta::UpdateMode::Replayable, factory)
+    };
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(CountingReconfigurationFactory {
-                spec: spec.clone(),
+            resolve(Arc::new(CountingReconfigurationFactory {
                 preparations: Arc::clone(&preparations),
-            }),
+            })),
             Value::Null,
         )
         .await
         .unwrap();
     let proof = runtime
-        .prepare(Arc::new(PassiveFactory(spec.clone())), proof_config.clone())
+        .prepare(
+            resolve(Arc::new(PassiveFactory(spec.clone()))),
+            proof_config.clone(),
+        )
         .unwrap();
     let second_proof = runtime
-        .prepare(Arc::new(PassiveFactory(spec)), proof_config)
+        .prepare(
+            resolve(Arc::new(PassiveFactory(spec.clone()))),
+            proof_config,
+        )
         .unwrap();
     let before = runtime.resource_snapshot().retained_plugin_bytes;
     assert!(before.limit - before.current < MAXIMUM_CONFIG_BYTES);
@@ -1176,8 +1161,8 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     const OLD_CONFIG_BYTES: usize = 98;
     const NEW_CONFIG_BYTES: usize = 4;
 
-    let provider_identity = || FactoryIdentity::builtin("retained-config-provider", "1");
-    let consumer_spec = FactorySpec::new(FactoryIdentity::builtin("retained-config-consumer", "1"))
+    let provider_identity = || FactoryIdentity::linked("retained-config-provider", "1");
+    let consumer_spec = FactorySpec::new(FactoryIdentity::linked("retained-config-consumer", "1"))
         .requiring(Requirement::new("dependency", "test.dependency", V1));
     let requirement_bytes =
         "dependency".len() + "test.dependency".len() + std::mem::size_of::<ContractVersion>();
@@ -1210,7 +1195,7 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     };
     let first_provider = runtime
         .root()
-        .apply(provider_factory(), Value::Null)
+        .apply(resolved(provider_factory()), Value::Null)
         .await
         .unwrap();
     let (drop_entered_sender, drop_entered) = mpsc::sync_channel(1);
@@ -1219,13 +1204,13 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(BlockingReactivationFactory {
+            crate::resolved(Arc::new(BlockingReactivationFactory {
                 spec: consumer_spec,
                 activations: AtomicUsize::new(0),
                 drop_entered: drop_entered_sender,
                 drop_release: Arc::new(Mutex::new(drop_release_receiver)),
                 retained: Arc::clone(&retained),
-            }),
+            })),
             old_config,
         )
         .await
@@ -1234,7 +1219,7 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     assert!(first_provider.dispose().await.is_clean());
     let second_provider = runtime
         .root()
-        .apply(provider_factory(), Value::Null)
+        .apply(resolved(provider_factory()), Value::Null)
         .await
         .unwrap();
     let retained_before = runtime.resource_snapshot().retained_plugin_bytes.current;
@@ -1283,10 +1268,6 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
 
 #[async_trait]
 impl PluginFactory for BlockingPreparationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.entered.send(()).expect("test waiter still exists");
         self.release
@@ -1317,18 +1298,17 @@ fn preparation_admission_is_fail_fast_and_reports_rejections() {
     let blocked_runtime = runtime.clone();
     let blocked = std::thread::spawn(move || {
         blocked_runtime.prepare(
-            Arc::new(BlockingPreparationFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("blocked", "1")),
+            crate::resolved(Arc::new(BlockingPreparationFactory {
                 entered: entered_tx,
                 release: Mutex::new(release_rx),
-            }),
+            })),
             Value::Null,
         )
     });
     entered_rx.recv().unwrap();
 
     assert!(matches!(
-        runtime.prepare(Arc::new(UnexpectedFactory), Value::Null,),
+        runtime.prepare(crate::resolved(Arc::new(UnexpectedFactory)), Value::Null,),
         Err(MetaError::Busy {
             operation: "plugin preparation"
         })
@@ -1359,11 +1339,10 @@ async fn context_apply_rejects_busy_before_starting_another_normalizer() {
         let root = runtime.root();
         async move {
             root.apply(
-                Arc::new(BlockingPreparationFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("blocked", "1")),
+                crate::resolved(Arc::new(BlockingPreparationFactory {
                     entered: entered_tx,
                     release: Mutex::new(release_rx),
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -1374,7 +1353,7 @@ async fn context_apply_rejects_busy_before_starting_another_normalizer() {
         .unwrap();
     let error = runtime
         .root()
-        .apply(Arc::new(UnexpectedFactory), Value::Null)
+        .apply(crate::resolved(Arc::new(UnexpectedFactory)), Value::Null)
         .await
         .unwrap_err();
     assert_eq!(
@@ -1403,11 +1382,10 @@ async fn dropped_apply_waiter_does_not_release_preparation_while_blocking_work_r
         let root = runtime.root();
         async move {
             root.apply(
-                Arc::new(BlockingPreparationFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled", "1")),
+                crate::resolved(Arc::new(BlockingPreparationFactory {
                     entered: entered_tx,
                     release: Mutex::new(release_rx),
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -1418,7 +1396,7 @@ async fn dropped_apply_waiter_does_not_release_preparation_while_blocking_work_r
         .unwrap();
     first.abort();
     assert!(matches!(
-        runtime.prepare(Arc::new(UnexpectedFactory), Value::Null),
+        runtime.prepare(crate::resolved(Arc::new(UnexpectedFactory)), Value::Null),
         Err(MetaError::Busy {
             operation: "plugin preparation"
         })
@@ -1445,9 +1423,8 @@ async fn dropped_apply_waiter_does_not_release_preparation_while_blocking_work_r
     assert_eq!(released.retained_plugin_bytes.current, 0);
     let replacement = runtime
         .prepare(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "replacement",
-                "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("replacement", "1"),
             )))),
             Value::Null,
         )
@@ -1469,7 +1446,7 @@ async fn pending_reports_bound_missing_service_samples_before_snapshot_cloning()
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let mut spec = FactorySpec::new(FactoryIdentity::builtin("bounded-missing", "1"));
+    let mut spec = FactorySpec::new(FactoryIdentity::linked("bounded-missing", "1"));
     for index in 0..REQUIREMENTS {
         spec = spec.requiring(Requirement::new(
             format!("service-{index:02}"),
@@ -1479,7 +1456,7 @@ async fn pending_reports_bound_missing_service_samples_before_snapshot_cloning()
     }
     let fiber = runtime
         .root()
-        .apply(Arc::new(PassiveFactory(spec)), Value::Null)
+        .apply(crate::resolved(Arc::new(PassiveFactory(spec))), Value::Null)
         .await
         .unwrap();
     let snapshot = fiber.snapshot();
@@ -1500,6 +1477,7 @@ async fn pending_reports_bound_missing_service_samples_before_snapshot_cloning()
                 actual,
                 ..
             } => service.as_str().len() + expected.as_str().len() + actual.as_str().len(),
+            PendingReason::MissingLocal { contract, .. } => contract.as_str().len(),
         })
         .sum::<usize>();
     assert!(retained_bytes <= MAXIMUM_BYTES);
@@ -1527,10 +1505,10 @@ async fn pending_report_omits_a_reason_when_no_sample_entry_fits() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(
-                FactorySpec::new(FactoryIdentity::builtin("omitted-missing", "1"))
+            crate::resolved(Arc::new(PassiveFactory(
+                FactorySpec::new(FactoryIdentity::linked("omitted-missing", "1"))
                     .requiring(Requirement::new("long", "missing", V1)),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -1558,12 +1536,12 @@ async fn pending_reports_retain_only_a_bounded_reason_prefix() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(
-                FactorySpec::new(FactoryIdentity::builtin("bounded-pending", "1"))
+            crate::resolved(Arc::new(PassiveFactory(
+                FactorySpec::new(FactoryIdentity::linked("bounded-pending", "1"))
                     .requiring(Requirement::new("abcd", "test", ContractVersion(1)))
                     .requiring(Requirement::new("efgh", "test", ContractVersion(1)))
                     .requiring(Requirement::new("i", "test", ContractVersion(1))),
-            )),
+            ))),
             Value::Null,
         )
         .await

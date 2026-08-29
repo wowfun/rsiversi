@@ -13,7 +13,10 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 #[path = "support/foundation_service.rs"]
 mod foundation_service;
@@ -68,23 +71,21 @@ struct SaturatedResponseEndpoint {
 impl ServiceEndpoint for SaturatedResponseEndpoint {
     async fn serve(&self, _: InvocationContext, channel: ProviderChannel<'_>) -> Result<()> {
         self.entered.fetch_add(1, Ordering::AcqRel);
-        self.wakeup.notify_waiters();
+        // Retain one permit when the counter changes between the waiter's
+        // observation and its `notified()` registration.
+        self.wakeup.notify_one();
         channel.send(Message::new([1_u8])).await
     }
 }
 
 #[derive(Debug)]
 struct ProviderFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     endpoint: Arc<dyn ServiceEndpoint>,
 }
 
 #[async_trait]
 impl PluginFactory for ProviderFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -98,16 +99,12 @@ impl PluginFactory for ProviderFactory {
 
 #[derive(Debug)]
 struct ConsumerFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     captured: Arc<Mutex<Option<Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ConsumerFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(
             PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -132,10 +129,10 @@ async fn captured_service(runtime: &Runtime, endpoint: Arc<dyn ServiceEndpoint>)
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("provider", "1"),
                 endpoint,
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -150,10 +147,10 @@ async fn captured_service(runtime: &Runtime, endpoint: Arc<dyn ServiceEndpoint>)
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("consumer", "1"),
                 captured: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -370,16 +367,12 @@ async fn driver_cancellation_never_overtakes_the_terminal_after_a_frame() {
 
 #[derive(Debug)]
 struct IndependentCleanupFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     entered: Arc<Notify>,
 }
 
 #[async_trait]
 impl PluginFactory for IndependentCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -422,10 +415,10 @@ async fn unread_terminal_delays_shutdown_without_blocking_independent_cleanup() 
     runtime
         .root()
         .apply(
-            Arc::new(IndependentCleanupFactory {
-                identity: FactoryIdentity::builtin("service-independent-root", "1"),
+            crate::resolved(Arc::new(IndependentCleanupFactory {
+                _identity: FactoryIdentity::linked("service-independent-root", "1"),
                 entered: Arc::clone(&cleanup_entered),
-            }),
+            })),
             Value::Null,
         )
         .await

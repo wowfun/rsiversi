@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use rsi_meta::{
-    ActivationPlan, CleanupReport, ConfigValue, Context, ContextExtension, FactoryIdentity,
-    FiberHandle, MetaError, PluginFactory, PreparedActivation, Result as MetaResult,
+    ActivationPlan, CleanupReport, ConfigValue, Context, FiberHandle, IsolationId, LocalContract,
+    LocalEvent, LocalIsolationId, MetaError, PluginFactory, PreparedActivation, ResolvedFactory,
+    Result as MetaResult, UpdateMode,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -207,16 +208,10 @@ impl ScopeRoot {
         Ok(result)
     }
 
-    /// Reads the nearest scope key inherited by a Context.
-    ///
-    /// An absent extension is an unscoped Context. A key minted by another
-    /// root is rejected instead of being silently treated as local.
-    pub fn scope_of(&self, context: &Context) -> Result<Option<ScopeKey>, ScopeError> {
-        let Some(key) = context.extension::<ScopeContextKey>() else {
-            return Ok(None);
-        };
-        self.ensure_local(&key)?;
-        Ok(Some(key.as_ref().clone()))
+    /// Returns and validates the explicit scope carried by one wrapper.
+    pub fn scope_of(&self, context: &ScopedContext) -> Result<ScopeKey, ScopeError> {
+        self.ensure_local(context.scope())?;
+        Ok(context.scope().clone())
     }
 
     fn mint_key(&self) -> Result<ScopeKey, ScopeError> {
@@ -330,10 +325,6 @@ impl ScopeKey {
     fn new(tree: Arc<ScopeTree>, node: Arc<ScopeNode>) -> Self {
         Self { tree, node }
     }
-
-    pub(crate) fn id(&self) -> u64 {
-        self.node.id
-    }
 }
 
 impl PartialEq for ScopeKey {
@@ -436,7 +427,7 @@ impl fmt::Debug for ScopeParentBinding {
 #[derive(Clone)]
 pub struct ScopeHandle {
     key: ScopeKey,
-    context: Context,
+    context: ScopedContext,
     fiber: FiberHandle,
 }
 
@@ -446,14 +437,64 @@ impl ScopeHandle {
         &self.key
     }
 
-    /// Returns the active child-generation Context carrying this scope key.
-    pub fn context(&self) -> &Context {
+    /// Returns the explicit scope plus its active child-generation Context.
+    pub fn context(&self) -> &ScopedContext {
         &self.context
     }
 
     /// Idempotently disposes the backing Fiber and every scope-owned effect.
     pub async fn dispose(&self) -> CleanupReport {
         self.fiber.dispose().await
+    }
+}
+
+/// Explicit pairing of one Meta Context with one root-local scope identity.
+#[derive(Clone)]
+pub struct ScopedContext {
+    context: Context,
+    scope: ScopeKey,
+}
+
+impl ScopedContext {
+    /// Returns the underlying Meta Context used for Fiber and effect ownership.
+    pub fn meta(&self) -> &Context {
+        &self.context
+    }
+
+    /// Returns the exact root-local scope identity.
+    pub fn scope(&self) -> &ScopeKey {
+        &self.scope
+    }
+
+    /// Derives Portable isolation while preserving the explicit scope identity.
+    pub fn isolate(mut self, service: impl AsRef<str>, isolation: IsolationId) -> MetaResult<Self> {
+        self.context = self.context.isolate(service, isolation)?;
+        Ok(self)
+    }
+
+    /// Derives Local service isolation while preserving the explicit scope identity.
+    pub fn isolate_local<C: LocalContract>(
+        mut self,
+        isolation: LocalIsolationId,
+    ) -> MetaResult<Self> {
+        self.context = self.context.isolate_local::<C>(isolation)?;
+        Ok(self)
+    }
+
+    /// Derives typed-event isolation while preserving the explicit scope identity.
+    pub fn isolate_event<E: LocalEvent>(mut self, isolation: LocalIsolationId) -> MetaResult<Self> {
+        self.context = self.context.isolate_event::<E>(isolation)?;
+        Ok(self)
+    }
+}
+
+impl fmt::Debug for ScopedContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedContext")
+            .field("scope", &self.scope)
+            .field("context", &self.context)
+            .finish()
     }
 }
 
@@ -465,12 +506,6 @@ impl fmt::Debug for ScopeHandle {
             .field("fiber", &self.fiber)
             .finish_non_exhaustive()
     }
-}
-
-pub(crate) struct ScopeContextKey;
-
-impl ContextExtension for ScopeContextKey {
-    type Value = ScopeKey;
 }
 
 struct ScopeFiberFactory {
@@ -498,19 +533,12 @@ impl fmt::Debug for ScopeFiberFactory {
 
 #[async_trait]
 impl PluginFactory for ScopeFiberFactory {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("rsi-meta-scope.scope", "1")
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> MetaResult<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
 
     async fn activate(&self, plan: ActivationPlan) -> MetaResult<()> {
-        let context = plan
-            .context()
-            .clone()
-            .with_extension::<ScopeContextKey>(self.key.clone())?;
+        let context = plan.context().clone();
         if let Some(sender) = self
             .context
             .lock()
@@ -526,7 +554,12 @@ impl PluginFactory for ScopeFiberFactory {
 async fn create_scope_fiber(parent: &Context, key: ScopeKey) -> Result<ScopeHandle, ScopeError> {
     let (sender, receiver) = oneshot::channel();
     let factory = Arc::new(ScopeFiberFactory::new(key.clone(), sender));
-    let fiber = parent.apply(factory, Value::Null).await?;
+    let fiber = parent
+        .apply(
+            ResolvedFactory::linked("rsi-meta-scope.scope", "1", UpdateMode::Replayable, factory),
+            Value::Null,
+        )
+        .await?;
     if let Err(error) = fiber.wait_active(&CancellationToken::new()).await {
         let _cleanup = fiber.dispose().await;
         return Err(ScopeError::Runtime(error));
@@ -536,8 +569,11 @@ async fn create_scope_fiber(parent: &Context, key: ScopeKey) -> Result<ScopeHand
         return Err(ScopeError::MissingActiveContext);
     };
     Ok(ScopeHandle {
+        context: ScopedContext {
+            context,
+            scope: key.clone(),
+        },
         key,
-        context,
         fiber,
     })
 }

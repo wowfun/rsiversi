@@ -56,7 +56,6 @@ mod tests {
         assert_eq!(before.preparations.current, 0);
         assert_eq!(before.fibers.current, 0);
         assert_eq!(before.service_calls.current, 0);
-        assert_eq!(before.event_dispatches.current, 0);
 
         let first = tokio::spawn({
             let runtime = runtime.clone();
@@ -81,7 +80,6 @@ mod tests {
         assert_eq!(complete.preparations.current, 0);
         assert_eq!(complete.fibers.current, 0);
         assert_eq!(complete.service_calls.current, 0);
-        assert_eq!(complete.event_dispatches.current, 0);
     }
 
     #[tokio::test]

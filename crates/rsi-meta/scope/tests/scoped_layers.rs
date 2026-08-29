@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberHandle, MetaError, PluginFactory,
-    PreparedActivation, Result, Runtime,
+    ActivationPlan, ConfigValue, Context, FiberHandle, MetaError, PluginFactory,
+    PreparedActivation, ResolvedFactory, Result, Runtime, UpdateMode,
 };
 use rsi_meta_scope::{
     AnonymousEntries, MutationError, NamedEntries, ScopeKey, ScopeLayer, ScopeRoot, ScopedLayers,
@@ -73,16 +73,11 @@ impl ScopeLayer for CloneLayer {
 
 #[derive(Debug)]
 struct CaptureFactory {
-    identity: FactoryIdentity,
     sender: Mutex<Option<oneshot::Sender<Context>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -98,10 +93,16 @@ impl PluginFactory for CaptureFactory {
 async fn active_unscoped_context(runtime: &Runtime) -> (FiberHandle, Context) {
     let (sender, receiver) = oneshot::channel();
     let factory = Arc::new(CaptureFactory {
-        identity: FactoryIdentity::builtin("scope-test.owner", "1"),
         sender: Mutex::new(Some(sender)),
     });
-    let fiber = runtime.root().apply(factory, Value::Null).await.unwrap();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked("scope-test.owner", "1", UpdateMode::Replayable, factory),
+            Value::Null,
+        )
+        .await
+        .unwrap();
     fiber.wait_active(&CancellationToken::new()).await.unwrap();
     (fiber, receiver.await.unwrap())
 }
@@ -950,7 +951,6 @@ async fn parent_rebind_never_implicitly_notifies_a_product_registry() {
 
 #[derive(Debug)]
 struct RollbackFactory {
-    identity: FactoryIdentity,
     root: ScopeRoot,
     layers: ScopedLayers<TestLayer>,
     key: Arc<Mutex<Option<ScopeKey>>>,
@@ -958,10 +958,6 @@ struct RollbackFactory {
 
 #[async_trait]
 impl PluginFactory for RollbackFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -995,12 +991,18 @@ async fn scope_effects_follow_the_same_context_through_parent_activation_rollbac
     );
     let key = Arc::new(Mutex::new(None));
     let factory = Arc::new(RollbackFactory {
-        identity: FactoryIdentity::builtin("scope-test.rollback", "1"),
         root: scope_root,
         layers: layers.clone(),
         key: Arc::clone(&key),
     });
-    let fiber = runtime.root().apply(factory, Value::Null).await.unwrap();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked("scope-test.rollback", "1", UpdateMode::Replayable, factory),
+            Value::Null,
+        )
+        .await
+        .unwrap();
     assert!(fiber.wait_active(&CancellationToken::new()).await.is_err());
     let scope_key = key.lock().unwrap().clone().unwrap();
     assert!(layers.peek(&scope_key).unwrap().is_none());

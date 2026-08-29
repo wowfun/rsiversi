@@ -10,7 +10,7 @@ fn contract(key: &str) -> String {
 
 #[derive(Debug)]
 pub(super) struct ProviderFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     key: &'static str,
     endpoint: Arc<dyn ServiceEndpoint>,
 }
@@ -22,7 +22,7 @@ impl ProviderFactory {
         endpoint: Arc<dyn ServiceEndpoint>,
     ) -> Self {
         Self {
-            identity: FactoryIdentity::builtin(name, "1"),
+            _identity: FactoryIdentity::linked(name, "1"),
             key,
             endpoint,
         }
@@ -31,10 +31,6 @@ impl ProviderFactory {
 
 #[async_trait]
 impl PluginFactory for ProviderFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -54,17 +50,13 @@ pub(super) struct Capture {
 
 #[derive(Debug)]
 struct CaptureFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     keys: Vec<&'static str>,
     capture: Arc<Mutex<Option<Capture>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CaptureFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(self
             .keys
@@ -101,7 +93,7 @@ pub(super) async fn install_provider(
     let handle = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory::new(name, key, endpoint)),
+            crate::resolved(Arc::new(ProviderFactory::new(name, key, endpoint))),
             Value::Null,
         )
         .await
@@ -119,11 +111,11 @@ pub(super) async fn install_consumer(
     let handle = runtime
         .root()
         .apply(
-            Arc::new(CaptureFactory {
-                identity: FactoryIdentity::builtin(name, "1"),
+            crate::resolved(Arc::new(CaptureFactory {
+                _identity: FactoryIdentity::linked(name, "1"),
                 keys,
                 capture: Arc::clone(&capture),
-            }),
+            })),
             Value::Null,
         )
         .await

@@ -1,19 +1,22 @@
 use crate::Result;
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
+use std::{fmt, sync::Arc};
+
+#[cfg(test)]
 use serde_json::Value;
-use std::fmt;
 
 mod activation_plan;
 mod metadata;
 mod prepared_activation;
 pub use activation_plan::ActivationPlan;
-pub use metadata::{FactoryIdentity, Requirement};
+pub use metadata::Requirement;
 pub use prepared_activation::PreparedActivation;
-pub(crate) use prepared_activation::PreparedState;
+pub(crate) use prepared_activation::{LocalRequirement, PreparedState};
+pub use rsi_meta_contract::{
+    ConfigValue, FactoryIdentity, InstanceId, LocalContract, LocalContractKey, PluginId, UpdateMode,
+};
 
-/// Validated JSON configuration retained for one Fiber.
-pub type ConfigValue = Value;
 /// Async result returned by one owned cleanup effect.
 pub type CleanupFuture = BoxFuture<'static, std::result::Result<(), String>>;
 /// One-shot cleanup effect registered by an active plugin generation.
@@ -22,9 +25,6 @@ pub type Cleanup = Box<dyn FnOnce() -> CleanupFuture + Send + 'static>;
 /// Adapter-neutral factory seam implemented by safe-Rust and execution backends.
 #[async_trait]
 pub trait PluginFactory: fmt::Debug + Send + Sync + 'static {
-    /// Returns bounded diagnostic identity captured once for the Fiber lifetime.
-    fn identity(&self) -> FactoryIdentity;
-
     /// Validates and normalizes desired configuration and selects exact
     /// requirements for one activation attempt.
     ///
@@ -35,6 +35,86 @@ pub trait PluginFactory: fmt::Debug + Send + Sync + 'static {
     /// Activates one prepared generation using exact injected capabilities and
     /// the single-use attempt-local state.
     async fn activate(&self, plan: ActivationPlan) -> Result<()>;
+}
+
+/// Immutable resolver-owned provenance and behavior for one plugin factory.
+#[derive(Clone)]
+pub struct ResolvedFactory {
+    identity: FactoryIdentity,
+    update_mode: UpdateMode,
+    implementation: Arc<dyn PluginFactory>,
+}
+
+impl ResolvedFactory {
+    /// Binds already resolved provenance to one implementation.
+    pub fn new(
+        identity: FactoryIdentity,
+        update_mode: UpdateMode,
+        implementation: Arc<dyn PluginFactory>,
+    ) -> Self {
+        Self {
+            identity,
+            update_mode,
+            implementation,
+        }
+    }
+
+    /// Resolves one process-linked factory before plugin code executes.
+    pub fn linked(
+        plugin: impl Into<PluginId>,
+        revision: impl Into<String>,
+        update_mode: UpdateMode,
+        implementation: Arc<dyn PluginFactory>,
+    ) -> Self {
+        Self {
+            identity: FactoryIdentity::linked(plugin, revision),
+            update_mode,
+            implementation,
+        }
+    }
+
+    /// Resolves one explicitly loaded native factory before plugin code executes.
+    pub fn native(
+        plugin: impl Into<PluginId>,
+        sha256: impl Into<String>,
+        update_mode: UpdateMode,
+        implementation: Arc<dyn PluginFactory>,
+    ) -> Self {
+        Self {
+            identity: FactoryIdentity::native(plugin, sha256),
+            update_mode,
+            implementation,
+        }
+    }
+
+    /// Returns the immutable code provenance retained by every created Fiber.
+    pub const fn identity(&self) -> &FactoryIdentity {
+        &self.identity
+    }
+
+    /// Returns the factory's static configuration update policy.
+    pub const fn update_mode(&self) -> UpdateMode {
+        self.update_mode
+    }
+
+    pub(crate) fn into_parts(self) -> (FactoryIdentity, UpdateMode, Arc<dyn PluginFactory>) {
+        (self.identity, self.update_mode, self.implementation)
+    }
+}
+
+impl fmt::Debug for ResolvedFactory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedFactory")
+            .field("identity", &self.identity)
+            .field("update_mode", &self.update_mode)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn resolved_test_factory<T: PluginFactory>(factory: Arc<T>) -> ResolvedFactory {
+    ResolvedFactory::linked("test", "1", UpdateMode::Replayable, factory)
 }
 
 #[cfg(test)]
@@ -70,8 +150,13 @@ mod tests {
         let runtime = Runtime::default();
         let mut context = runtime.root();
         context.install_activation_lineage(FiberId(1), CallId(1));
-        let mut plan =
-            ActivationPlan::new(context, Arc::new(Value::Null), BTreeMap::new(), Some(state));
+        let mut plan = ActivationPlan::new(
+            context,
+            Arc::new(Value::Null),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Some(state),
+        );
         assert_eq!(plan.lineage_call_id(), CallId(1));
 
         assert_eq!(

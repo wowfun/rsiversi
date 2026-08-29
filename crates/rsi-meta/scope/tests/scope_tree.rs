@@ -173,20 +173,17 @@ async fn scopes_are_active_child_fibers_with_inherited_root_local_context_keys()
 
     let outer = root.create(&runtime.root()).await.unwrap();
     assert_eq!(runtime.resource_snapshot().fibers.current, baseline + 1);
-    assert_eq!(
-        root.scope_of(outer.context()).unwrap(),
-        Some(outer.key().clone())
-    );
+    assert_eq!(root.scope_of(outer.context()).unwrap(), outer.key().clone());
 
     let derived = outer
         .context()
         .clone()
         .isolate("probe", IsolationId(7))
         .unwrap();
-    assert_eq!(root.scope_of(&derived).unwrap(), Some(outer.key().clone()));
+    assert_eq!(root.scope_of(&derived).unwrap(), outer.key().clone());
 
     let (inner, _binding) = root
-        .create_child(outer.context(), outer.key())
+        .create_child(outer.context().meta(), outer.key())
         .await
         .unwrap();
     assert_eq!(runtime.resource_snapshot().fibers.current, baseline + 2);

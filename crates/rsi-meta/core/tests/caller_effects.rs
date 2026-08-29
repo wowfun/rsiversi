@@ -1,36 +1,29 @@
 use async_trait::async_trait;
 use rsi_meta::{
-    ActivationPlan, CallerEffect, CallerView, Capability, Cleanup, ConfigValue, ContextExtension,
-    ContractVersion, DispatchMode, EventHandler, EventOptions, EventOutcome, FactoryIdentity,
-    FiberGeneration, FiberId, FiberState, InvocationContext, Message, MetaError, PluginFactory,
-    PreparedActivation, ProviderChannel, Requirement, Result, Runtime, RuntimeLimits,
-    ServiceEndpoint, TopologyLimits,
+    ActivationPlan, CallerEffect, CallerView, Capability, Cleanup, ConfigValue, ContractVersion,
+    FactoryIdentity, FiberGeneration, FiberId, FiberState, InvocationContext, Message, MetaError,
+    PluginFactory, PreparedActivation, ProviderChannel, Requirement, Result, Runtime,
+    RuntimeLimits, ServiceEndpoint, TopologyLimits,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
+use resolver::resolved;
+
 const V1: ContractVersion = ContractVersion(1);
-
-struct CallerLabel;
-
-impl ContextExtension for CallerLabel {
-    type Value = String;
-}
 
 #[derive(Debug)]
 struct ProviderFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     endpoint: Arc<dyn ServiceEndpoint>,
 }
 
 #[async_trait]
 impl PluginFactory for ProviderFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -48,16 +41,12 @@ impl PluginFactory for ProviderFactory {
 
 #[derive(Debug)]
 struct ConsumerFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     service: Arc<Mutex<Option<Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ConsumerFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(
             PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -102,7 +91,6 @@ async fn wait_unloading(handle: &rsi_meta::FiberHandle) {
 #[derive(Debug)]
 struct CallerOwnedCleanupEndpoint {
     observed_owner: Arc<Mutex<Option<(FiberId, FiberGeneration)>>>,
-    observed_extension: Arc<Mutex<Option<String>>>,
     cleanups: Arc<AtomicUsize>,
 }
 
@@ -115,14 +103,6 @@ impl ServiceEndpoint for CallerOwnedCleanupEndpoint {
     ) -> Result<()> {
         *self.observed_owner.lock().expect("owner capture poisoned") =
             invocation.caller().owner()?;
-        *self
-            .observed_extension
-            .lock()
-            .expect("extension capture poisoned") = invocation
-            .caller()
-            .extension::<CallerLabel>()?
-            .as_deref()
-            .cloned();
         let cleanups = Arc::clone(&self.cleanups);
         let cleanup: Cleanup = Box::new(move || {
             Box::pin(async move {
@@ -145,19 +125,17 @@ impl ServiceEndpoint for CallerOwnedCleanupEndpoint {
 async fn provider_can_register_cleanup_only_on_the_exact_caller_generation() {
     let runtime = Runtime::default();
     let observed_owner = Arc::new(Mutex::new(None));
-    let observed_extension = Arc::new(Mutex::new(None));
     let cleanups = Arc::new(AtomicUsize::new(0));
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("caller-effect-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("caller-effect-provider", "1"),
                 endpoint: Arc::new(CallerOwnedCleanupEndpoint {
                     observed_owner: Arc::clone(&observed_owner),
-                    observed_extension: Arc::clone(&observed_extension),
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -165,13 +143,11 @@ async fn provider_can_register_cleanup_only_on_the_exact_caller_generation() {
     let service = Arc::new(Mutex::new(None));
     let caller = runtime
         .root()
-        .with_extension::<CallerLabel>("caller-scope".to_owned())
-        .unwrap()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("caller-effect-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("caller-effect-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -187,13 +163,6 @@ async fn provider_can_register_cleanup_only_on_the_exact_caller_generation() {
     assert_eq!(
         *observed_owner.lock().expect("owner capture poisoned"),
         Some((caller.id(), caller_snapshot.generation))
-    );
-    assert_eq!(
-        observed_extension
-            .lock()
-            .expect("extension capture poisoned")
-            .as_deref(),
-        Some("caller-scope")
     );
     assert_eq!(cleanups.load(Ordering::Acquire), 0);
     assert!(caller.dispose().await.is_clean());
@@ -284,13 +253,13 @@ async fn provider_future_drop_retains_exact_caller_effect_authority() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("future-drop-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("future-drop-provider", "1"),
                 endpoint: Arc::new(DeferOnFutureDropEndpoint {
                     result: Arc::clone(&result),
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -299,10 +268,10 @@ async fn provider_future_drop_retains_exact_caller_effect_authority() {
     let caller = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("future-drop-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("future-drop-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -356,12 +325,12 @@ async fn retained_caller_authority_is_stale_after_callback_terminal() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("retained-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("retained-caller-provider", "1"),
                 endpoint: Arc::new(RetainingEndpoint {
                     retained: Arc::clone(&retained),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -369,13 +338,11 @@ async fn retained_caller_authority_is_stale_after_callback_terminal() {
     let service = Arc::new(Mutex::new(None));
     let caller = runtime
         .root()
-        .with_extension::<CallerLabel>("retained-scope".to_owned())
-        .unwrap()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("retained-caller-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("retained-caller-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -396,7 +363,6 @@ async fn retained_caller_authority_is_stale_after_callback_terminal() {
         generation,
     };
     assert_eq!(view.owner().unwrap_err(), stale);
-    assert_eq!(view.extension::<CallerLabel>().unwrap_err(), stale);
     let resources = runtime.resource_snapshot();
     let cleanups = Arc::new(AtomicUsize::new(0));
     let cleanup_count = Arc::clone(&cleanups);
@@ -460,15 +426,11 @@ impl ServiceEndpoint for LoadingCleanupEndpoint {
 
 #[derive(Debug)]
 struct FailingLoadingConsumer {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
 }
 
 #[async_trait]
 impl PluginFactory for FailingLoadingConsumer {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(
             PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -497,12 +459,12 @@ async fn loading_caller_effect_joins_the_activation_root_rollback() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("loading-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("loading-caller-provider", "1"),
                 endpoint: Arc::new(LoadingCleanupEndpoint {
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -511,9 +473,9 @@ async fn loading_caller_effect_joins_the_activation_root_rollback() {
     let caller = runtime
         .root()
         .apply(
-            Arc::new(FailingLoadingConsumer {
-                identity: FactoryIdentity::builtin("failing-loading-caller", "1"),
-            }),
+            crate::resolved(Arc::new(FailingLoadingConsumer {
+                _identity: FactoryIdentity::linked("failing-loading-caller", "1"),
+            })),
             Value::Null,
         )
         .await
@@ -574,12 +536,12 @@ async fn active_caller_effects_commit_individually_and_retire_in_lifo_order() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("active-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("active-caller-provider", "1"),
                 endpoint: Arc::new(ActiveOrderedEndpoint {
                     order: Arc::clone(&order),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -589,10 +551,10 @@ async fn active_caller_effects_commit_individually_and_retire_in_lifo_order() {
     let caller = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("active-caller-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("active-caller-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -682,13 +644,13 @@ async fn rejected_active_registration_leaves_no_effect_wrapper() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("rejected-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("rejected-caller-provider", "1"),
                 endpoint: Arc::new(RejectedCleanupEndpoint {
                     error: Arc::clone(&error),
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -697,10 +659,10 @@ async fn rejected_active_registration_leaves_no_effect_wrapper() {
     let caller = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("rejected-caller-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("rejected-caller-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -791,15 +753,15 @@ async fn caller_disposal_fences_authority_while_the_callback_is_still_live() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("disposed-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("disposed-caller-provider", "1"),
                 endpoint: Arc::new(BlockedAuthorityEndpoint {
                     entered: Arc::clone(&entered),
                     release: Arc::clone(&release),
                     attempt: Arc::clone(&attempt),
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -808,10 +770,10 @@ async fn caller_disposal_fences_authority_while_the_callback_is_still_live() {
     let caller = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("disposed-caller-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("disposed-caller-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -855,15 +817,15 @@ async fn caller_reconfiguration_fences_authority_to_the_replaced_generation() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("reconfigured-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("reconfigured-caller-provider", "1"),
                 endpoint: Arc::new(BlockedAuthorityEndpoint {
                     entered: Arc::clone(&entered),
                     release: Arc::clone(&release),
                     attempt: Arc::clone(&attempt),
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -872,10 +834,10 @@ async fn caller_reconfiguration_fences_authority_to_the_replaced_generation() {
     let caller = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("reconfigured-caller-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("reconfigured-caller-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -958,14 +920,14 @@ async fn call_cancellation_fences_caller_view_and_effect_before_callback_termina
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ProviderFactory {
-                identity: FactoryIdentity::builtin("cancelled-caller-provider", "1"),
+            crate::resolved(Arc::new(ProviderFactory {
+                _identity: FactoryIdentity::linked("cancelled-caller-provider", "1"),
                 endpoint: Arc::new(CancelledAuthorityEndpoint {
                     entered: Arc::clone(&entered),
                     attempt: Arc::clone(&attempt),
                     cleanups: Arc::clone(&cleanups),
                 }),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -974,10 +936,10 @@ async fn call_cancellation_fences_caller_view_and_effect_before_callback_termina
     let caller = runtime
         .root()
         .apply(
-            Arc::new(ConsumerFactory {
-                identity: FactoryIdentity::builtin("cancelled-caller-consumer", "1"),
+            crate::resolved(Arc::new(ConsumerFactory {
+                _identity: FactoryIdentity::linked("cancelled-caller-consumer", "1"),
                 service: Arc::clone(&service),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -1014,89 +976,5 @@ async fn call_cancellation_fences_caller_view_and_effect_before_callback_termina
 
     assert!(caller.dispose().await.is_clean());
     assert!(provider.dispose().await.is_clean());
-    assert!(runtime.shutdown().await.is_complete());
-}
-
-#[derive(Debug)]
-struct RetainedRootInvocationHandler {
-    retained: Arc<Mutex<Option<InvocationContext>>>,
-}
-
-#[async_trait]
-impl EventHandler for RetainedRootInvocationHandler {
-    async fn handle(
-        &self,
-        invocation: InvocationContext,
-        value: Arc<Value>,
-    ) -> Result<EventOutcome> {
-        assert!(invocation.caller_effect().is_none());
-        assert_eq!(invocation.caller().owner()?, None);
-        *self.retained.lock().expect("event invocation poisoned") = Some(invocation.clone());
-        Ok(EventOutcome::Continue(value.as_ref().clone()))
-    }
-}
-
-#[derive(Debug)]
-struct RootInvocationListenerFactory {
-    identity: FactoryIdentity,
-    retained: Arc<Mutex<Option<InvocationContext>>>,
-}
-
-#[async_trait]
-impl PluginFactory for RootInvocationListenerFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
-    fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
-        Ok(PreparedActivation::new(desired.clone()))
-    }
-
-    async fn activate(&self, plan: ActivationPlan) -> Result<()> {
-        plan.context().on(
-            "root-caller-authority",
-            Arc::new(RetainedRootInvocationHandler {
-                retained: Arc::clone(&self.retained),
-            }),
-            EventOptions::default(),
-        )?;
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn retained_root_event_invocation_has_no_caller_effect_after_callback() {
-    let runtime = Runtime::default();
-    let retained = Arc::new(Mutex::new(None));
-    let listener = runtime
-        .root()
-        .apply(
-            Arc::new(RootInvocationListenerFactory {
-                identity: FactoryIdentity::builtin("root-invocation-listener", "1"),
-                retained: Arc::clone(&retained),
-            }),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-
-    runtime
-        .root()
-        .dispatch("root-caller-authority", DispatchMode::Emit, Value::Null)
-        .await
-        .unwrap();
-
-    let invocation = retained
-        .lock()
-        .expect("event invocation poisoned")
-        .take()
-        .expect("handler retained its invocation");
-    assert!(invocation.caller_effect().is_none());
-    assert_eq!(
-        invocation.caller().owner().unwrap_err(),
-        MetaError::Cancelled
-    );
-
-    assert!(listener.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_complete());
 }

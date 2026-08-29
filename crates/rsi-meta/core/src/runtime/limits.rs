@@ -9,6 +9,8 @@ use tokio::sync::{Notify, Semaphore};
 pub const MAXIMUM_OPERATION_DEADLINE: Duration = Duration::from_hours(24);
 /// Hard ceiling that keeps downstream JSON serialization within a bounded stack depth.
 pub const MAXIMUM_JSON_DEPTH: usize = 128;
+/// Hard ceiling for one synchronous nested Waterfall continuation chain.
+pub const MAXIMUM_WATERFALL_LISTENERS_PER_SLOT: usize = 256;
 
 /// Registry and ownership bounds enforced by one Runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +27,8 @@ pub struct TopologyLimits {
     pub maximum_requirements_per_fiber: usize,
     /// Maximum effect-owned event listeners.
     pub maximum_event_listeners: usize,
+    /// Maximum synchronous Waterfall middleware retained in one exact event slot.
+    pub maximum_waterfall_listeners_per_slot: usize,
     /// Maximum cleanup effects owned by one Fiber generation.
     pub maximum_effects_per_fiber: usize,
     /// Maximum cleanup effects retained across the Runtime.
@@ -33,7 +37,7 @@ pub struct TopologyLimits {
     pub maximum_effect_transactions_per_fiber: usize,
     /// Maximum open or committed effect transactions retained across the Runtime.
     pub maximum_effect_transactions: usize,
-    /// Maximum isolation, intercept, and typed-extension entries retained by one Context.
+    /// Maximum isolation entries retained by one Context.
     pub maximum_context_entries: usize,
     /// Maximum unique Runtime-issued capability entries.
     pub maximum_capability_entries: usize,
@@ -52,6 +56,7 @@ impl Default for TopologyLimits {
             maximum_dependency_edges: 65_536,
             maximum_requirements_per_fiber: 256,
             maximum_event_listeners: 16_384,
+            maximum_waterfall_listeners_per_slot: 256,
             maximum_effects_per_fiber: 4_096,
             maximum_effects: 65_536,
             maximum_effect_transactions_per_fiber: 4_096,
@@ -78,7 +83,7 @@ pub struct PayloadLimits {
     /// Maximum identity, desired and normalized configuration, requirement
     /// metadata, and prepared-state bytes retained by Fibers and proofs.
     pub maximum_retained_plugin_bytes: usize,
-    /// Maximum logical isolation and encoded-intercept bytes retained by one Context.
+    /// Maximum logical isolation-key bytes retained by one Context.
     pub maximum_context_bytes: usize,
     /// Maximum logical Message bytes queued across the Runtime.
     pub maximum_buffered_message_bytes: usize,
@@ -123,10 +128,6 @@ pub struct ExecutionLimits {
     pub channel_capacity: usize,
     /// Maximum send futures waiting to atomically enter a Message channel.
     pub maximum_pending_message_sends: usize,
-    /// Maximum event dispatches executing concurrently.
-    pub maximum_concurrent_event_dispatches: usize,
-    /// Maximum event callbacks executing concurrently.
-    pub maximum_concurrent_event_callbacks: usize,
 }
 
 impl Default for ExecutionLimits {
@@ -137,8 +138,6 @@ impl Default for ExecutionLimits {
             maximum_concurrent_service_calls: 1_024,
             channel_capacity: 32,
             maximum_pending_message_sends: 65_536,
-            maximum_concurrent_event_dispatches: 64,
-            maximum_concurrent_event_callbacks: 64,
         }
     }
 }
@@ -150,8 +149,6 @@ pub struct DeadlineLimits {
     pub transition: Duration,
     /// Complete service-stream deadline from admission.
     pub service_call: Duration,
-    /// Complete event-dispatch deadline from admission.
-    pub event_dispatch: Duration,
     /// Maximum time one shutdown caller waits for the persistent shutdown run.
     pub shutdown_wait: Duration,
 }
@@ -161,7 +158,6 @@ impl Default for DeadlineLimits {
         Self {
             transition: Duration::from_secs(30),
             service_call: Duration::from_mins(1),
-            event_dispatch: Duration::from_mins(1),
             shutdown_wait: Duration::from_secs(90),
         }
     }
@@ -215,6 +211,7 @@ fn validate_nonzero(limits: &RuntimeLimits) -> Result<()> {
         topology.maximum_dependency_edges,
         topology.maximum_requirements_per_fiber,
         topology.maximum_event_listeners,
+        topology.maximum_waterfall_listeners_per_slot,
         topology.maximum_effects_per_fiber,
         topology.maximum_effects,
         topology.maximum_effect_transactions_per_fiber,
@@ -239,13 +236,10 @@ fn validate_nonzero(limits: &RuntimeLimits) -> Result<()> {
         execution.maximum_concurrent_service_calls,
         execution.channel_capacity,
         execution.maximum_pending_message_sends,
-        execution.maximum_concurrent_event_dispatches,
-        execution.maximum_concurrent_event_callbacks,
     ];
     let deadlines = [
         limits.deadlines.transition,
         limits.deadlines.service_call,
-        limits.deadlines.event_dispatch,
         limits.deadlines.shutdown_wait,
     ];
     if capacities.contains(&0) || deadlines.iter().any(Duration::is_zero) {
@@ -258,6 +252,11 @@ fn validate_nonzero(limits: &RuntimeLimits) -> Result<()> {
 
 fn validate_relationships(limits: &RuntimeLimits) -> Result<()> {
     let payloads = &limits.payloads;
+    if limits.topology.maximum_waterfall_listeners_per_slot > MAXIMUM_WATERFALL_LISTENERS_PER_SLOT {
+        return Err(MetaError::InvalidInput(format!(
+            "Waterfall listener limit exceeds the implementation maximum of {MAXIMUM_WATERFALL_LISTENERS_PER_SLOT}"
+        )));
+    }
     if payloads.maximum_json_depth > MAXIMUM_JSON_DEPTH {
         return Err(MetaError::InvalidInput(format!(
             "JSON depth limit exceeds the implementation maximum of {MAXIMUM_JSON_DEPTH}"
@@ -307,8 +306,6 @@ fn validate_tokio_bounds(limits: &RuntimeLimits) -> Result<()> {
         || execution.maximum_concurrent_preparations > Semaphore::MAX_PERMITS
         || execution.maximum_concurrent_reconciliations > Semaphore::MAX_PERMITS
         || execution.maximum_concurrent_service_calls > Semaphore::MAX_PERMITS
-        || execution.maximum_concurrent_event_dispatches > Semaphore::MAX_PERMITS
-        || execution.maximum_concurrent_event_callbacks > Semaphore::MAX_PERMITS
         || payloads.maximum_buffered_message_bytes > Semaphore::MAX_PERMITS
         || payloads.maximum_message_bytes > u32::MAX as usize
     {
@@ -323,7 +320,6 @@ fn validate_deadlines(limits: &RuntimeLimits) -> Result<()> {
     let deadlines = [
         limits.deadlines.transition,
         limits.deadlines.service_call,
-        limits.deadlines.event_dispatch,
         limits.deadlines.shutdown_wait,
     ];
     if deadlines.iter().any(|deadline| {
@@ -369,7 +365,7 @@ pub struct RuntimeResourceSnapshot {
     pub effects: ResourceUsageSnapshot,
     /// Open or committed wrapper-first effect transactions.
     pub effect_transactions: ResourceUsageSnapshot,
-    /// Effect-owned event listeners.
+    /// Effect-owned typed Local event listeners.
     pub listeners: ResourceUsageSnapshot,
     /// Unique Runtime-issued capability entries.
     pub capability_entries: ResourceUsageSnapshot,
@@ -385,10 +381,6 @@ pub struct RuntimeResourceSnapshot {
     pub reconciliations: ResourceUsageSnapshot,
     /// Runtime-owned reconciliation scheduler workers; the limit is always one.
     pub scheduler_workers: ResourceUsageSnapshot,
-    /// Admitted event dispatch operations.
-    pub event_dispatches: ResourceUsageSnapshot,
-    /// Event callbacks holding a global execution slot.
-    pub event_callbacks: ResourceUsageSnapshot,
     /// Runtime-owned cleanup runs that have not completed.
     pub cleanup_runs: ResourceUsageSnapshot,
 }
@@ -409,8 +401,6 @@ pub(super) struct RuntimeResources {
     pub(super) pending_message_sends: Arc<ResourceLedger>,
     pub(super) reconciliations: Arc<ResourceLedger>,
     pub(super) scheduler_workers: Arc<ResourceLedger>,
-    pub(super) event_dispatches: Arc<ResourceLedger>,
-    pub(super) event_callbacks: Arc<ResourceLedger>,
     pub(super) cleanup_runs: Arc<ResourceLedger>,
 }
 
@@ -455,12 +445,6 @@ impl RuntimeResources {
                 limits.execution.maximum_concurrent_reconciliations,
             )),
             scheduler_workers: Arc::new(ResourceLedger::new(1)),
-            event_dispatches: Arc::new(ResourceLedger::new(
-                limits.execution.maximum_concurrent_event_dispatches,
-            )),
-            event_callbacks: Arc::new(ResourceLedger::new(
-                limits.execution.maximum_concurrent_event_callbacks,
-            )),
             cleanup_runs: Arc::new(ResourceLedger::new(limits.topology.maximum_fibers)),
         }
     }
@@ -482,8 +466,6 @@ impl RuntimeResources {
             pending_message_sends: self.pending_message_sends.snapshot(),
             reconciliations: self.reconciliations.snapshot(),
             scheduler_workers: self.scheduler_workers.snapshot(),
-            event_dispatches: self.event_dispatches.snapshot(),
-            event_callbacks: self.event_callbacks.snapshot(),
             cleanup_runs: self.cleanup_runs.snapshot(),
         }
     }
@@ -505,8 +487,6 @@ impl RuntimeResources {
             self.pending_message_sends.wait_zero(),
             self.reconciliations.wait_zero(),
             self.scheduler_workers.wait_zero(),
-            self.event_dispatches.wait_zero(),
-            self.event_callbacks.wait_zero(),
             self.cleanup_runs.wait_zero(),
         );
     }

@@ -4,14 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl EventOwnership {
-    pub(crate) async fn claim_once(&self) -> bool {
-        let Some(claim) = self.begin_once_claim() else {
-            return false;
-        };
-        claim.finish().await
-    }
-
-    pub(super) fn begin_once_claim(&self) -> Option<OnceClaim> {
+    pub(in crate::runtime) fn begin_once_claim(&self) -> Option<OnceClaim> {
         if self
             .once_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -48,7 +41,7 @@ impl EventOwnership {
     }
 }
 
-pub(super) enum OnceClaim {
+pub(in crate::runtime) enum OnceClaim {
     Setup {
         removal: Arc<EventRemoval>,
         retention: EffectRetention,
@@ -60,7 +53,7 @@ pub(super) enum OnceClaim {
 }
 
 impl OnceClaim {
-    pub(super) async fn finish(self) -> bool {
+    pub(in crate::runtime) async fn finish(self) -> bool {
         match self {
             Self::Setup { removal, retention } => {
                 let result = removal.join().await;

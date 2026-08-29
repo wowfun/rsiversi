@@ -295,11 +295,11 @@ impl Runtime {
         // supply. If insertion or commit races retirement, the same exact
         // record removes any successfully inserted binding.
         let maximum_diagnostic_bytes = self.inner.limits.payloads.maximum_diagnostic_bytes;
-        let transaction_label = dispatch::bound_owned_diagnostic(
+        let transaction_label = diagnostics::bound_owned(
             "dynamic service supply".to_owned(),
             maximum_diagnostic_bytes,
         );
-        let cleanup_label = dispatch::bound_owned_diagnostic(
+        let cleanup_label = diagnostics::bound_owned(
             "withdraw dynamic service supply".to_owned(),
             maximum_diagnostic_bytes,
         );
@@ -326,13 +326,7 @@ impl Runtime {
                         .capabilities,
                 )
             };
-            Some(self.mint_capability(
-                context,
-                owner,
-                &capabilities,
-                Arc::clone(&binding),
-                InterceptLayers::shared_empty(),
-            )?)
+            Some(self.mint_capability(context, owner, &capabilities, Arc::clone(&binding))?)
         } else {
             None
         };

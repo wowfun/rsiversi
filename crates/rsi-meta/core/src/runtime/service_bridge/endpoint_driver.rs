@@ -83,7 +83,7 @@ impl EndpointDriver<'_> {
                     ),
                     Ok(Ok(())) => (Ok(()), CallTerminationSource::Endpoint, None),
                     Ok(Err(error)) => (
-                        Err(super::super::dispatch::bound_service_callback_error(
+                        Err(super::super::diagnostics::bound_service_error(
                             error,
                             runtime.inner.limits.payloads.maximum_diagnostic_bytes,
                         )),

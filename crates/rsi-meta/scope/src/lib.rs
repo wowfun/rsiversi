@@ -7,9 +7,7 @@
 mod scope;
 mod scoped_layers;
 mod store;
-mod target;
 
-pub use scope::{ScopeError, ScopeHandle, ScopeKey, ScopeParentBinding, ScopeRoot};
-pub use scoped_layers::{MutationError, ScopeLayer, ScopedLayers};
+pub use scope::{ScopeError, ScopeHandle, ScopeKey, ScopeParentBinding, ScopeRoot, ScopedContext};
+pub use scoped_layers::{LayerContext, MutationError, ScopeLayer, ScopedLayers};
 pub use store::{AnonymousEntries, NamedEntries, ScopeUndo};
-pub use target::ScopeTarget;

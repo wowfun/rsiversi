@@ -15,7 +15,7 @@ impl Runtime {
             service: key.clone(),
         })?;
         let fiber = self.owner_fiber(owner)?;
-        let (binding, overlay, capabilities) = {
+        let (binding, capabilities) = {
             let data = fiber.data.lock().expect("fiber state poisoned");
             Self::validate_live_owner_data(owner, &data)?;
             let active = data
@@ -28,25 +28,18 @@ impl Runtime {
                 key: key.clone(),
                 isolation: Self::isolation_for(&context.isolation, key),
             };
-            let (binding, overlay) = if let Some(supply) = active.services.get(&slot) {
-                (Arc::clone(&supply.binding), InterceptLayers::shared_empty())
+            let binding = if let Some(supply) = active.services.get(&slot) {
+                Arc::clone(&supply.binding)
             } else if let Some(binding) = active.bindings.get(key) {
-                (
-                    Arc::clone(binding),
-                    context
-                        .intercepts
-                        .get(key)
-                        .cloned()
-                        .unwrap_or_else(InterceptLayers::shared_empty),
-                )
+                Arc::clone(binding)
             } else {
                 return Err(MetaError::ServiceUnavailable {
                     service: key.clone(),
                 });
             };
-            (binding, overlay, Arc::clone(&active.capabilities))
+            (binding, Arc::clone(&active.capabilities))
         };
-        self.mint_capability(context, owner, &capabilities, binding, overlay)
+        self.mint_capability(context, owner, &capabilities, binding)
     }
 
     #[allow(clippy::too_many_lines)] // Admission, tracing, channels, and the owned task form one seam.
@@ -114,7 +107,6 @@ impl Runtime {
             immediate_caller,
             handle.entry.binding.provider,
             handle.entry.binding.generation,
-            Arc::clone(&handle.entry.overlay),
             handle.holder.clone(),
             provider_context,
             cancellation.clone(),
@@ -298,10 +290,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for ChainFactory {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin(self.hop, "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             let prepared = PreparedActivation::new(desired.clone());
             Ok(if let Some(next) = self.next {
@@ -331,10 +319,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for CaptureFactory {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin("lineage-client", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone())
                 .requiring(Requirement::new("a-head", CONTRACT, V1)))
@@ -363,12 +347,12 @@ mod tests {
                 runtime
                     .root()
                     .apply(
-                        Arc::new(ChainFactory {
+                        crate::plugin::resolved_test_factory(Arc::new(ChainFactory {
                             hop,
                             service,
                             next,
                             observed: Arc::clone(&observed),
-                        }),
+                        })),
                         ConfigValue::Null,
                     )
                     .await
@@ -380,7 +364,9 @@ mod tests {
             runtime
                 .root()
                 .apply(
-                    Arc::new(CaptureFactory(Arc::clone(&captured))),
+                    crate::plugin::resolved_test_factory(Arc::new(CaptureFactory(Arc::clone(
+                        &captured,
+                    )))),
                     ConfigValue::Null,
                 )
                 .await

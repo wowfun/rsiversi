@@ -1,7 +1,7 @@
 # rsi-meta security boundary
 
 `rsi-meta` is a bounded composition kernel for safe Rust plus deliberately
-trusted native adapters. Core denies unsafe code. The plugin ABI and Loader are
+trusted native adapters. Core denies unsafe code. The native ABI and loader are
 the only unsafe subtrees and document every pointer, layout, lifetime, mapping,
 and allocator contract at the operation that relies on it.
 
@@ -10,12 +10,14 @@ and allocator contract at the operation that relies on it.
 `Runtime::new` validates topology, payload, execution, and deadline groups
 before constructing a downstream primitive. Zero widths, arithmetic overflow,
 Tokio primitive maxima, inconsistent aggregate/per-item limits, and deadlines
-above the 24-hour hard ceiling are rejected. Accepted policy values are trusted
-typed Rust state.
+above the 24-hour hard ceiling are rejected. Synchronous Waterfall continuations
+also have a hard 256-listener per-slot ceiling so configuration cannot turn their
+nested call contract into unbounded stack use. Accepted policy values are
+trusted typed Rust state.
 
-Factory identity, configuration, requirements, service keys, event keys,
-effect labels, native adapter metadata, and diagnostics are bounded at their owning
-input boundary. JSON configuration and intercept data are checked iteratively
+Resolved factory identity, configuration, requirements, Portable keys, stable
+Local configuration keys, effect labels, native adapter metadata, and diagnostics are bounded at their owning
+input boundary. JSON configuration is checked iteratively
 for encoded bytes, depth, and node count before retention. The configured depth
 cannot exceed 128 because compact serialization remains recursive. Rejected,
 normalized, unpolled, and callback-returned owned JSON values enter an
@@ -23,8 +25,9 @@ iterative-destruction guard before fallible work can drop them.
 
 Preparation reserves Fiber, desired configuration, attempt configuration,
 maximum prepared-state bytes, and worst-case requirement capacity before plugin
-code. Factory identity is called once, bounded, and charged independently for
-the Fiber lifetime. Each desired configuration is validated once at its owning
+code. Factory identity is supplied by the resolver, bounded, and charged
+independently for the Fiber lifetime; executable plugin code cannot change it.
+Each desired configuration is validated once at its owning
 input boundary and retained as typed proof; the Runtime reuses that proof when it
 borrows the value into later preparation attempts. Plugin code cannot replace it
 or receive a previous attempt's normalized value as input, and every normalized
@@ -57,7 +60,7 @@ private owner guard applies the same activation-future destruction boundary when
 deadline, cancellation, or caller loss selects another branch.
 
 Before plugin activation entry, core uses the same checked nonwrapping call-ID
-allocator as service and event dispatch to mint one nonzero lineage seed. It
+allocator as Portable service dispatch to mint one nonzero lineage seed. It
 installs that seed in the activation Context with the current Fiber as origin
 and no parent. Exhaustion fails the Fiber before plugin code runs. Nested call
 lineage is carried only by immutable Context values; it uses no thread-local or
@@ -69,17 +72,30 @@ the installed desired value, Active generation, and requirement watchers remain
 unchanged. Installing a successful replacement changes the desired value,
 prepared attempt, and watcher set under one Runtime state transition.
 
+## Profile source authority
+
+`rsi-meta-profile` accepts an explicitly selected root Profile and follows
+bounded file/include steps, including absolute paths. The Host process must
+therefore already be authorized to read every selected source; successful
+compilation and the resulting `source_digest` reveal that those bytes were
+readable and parsed as a Profile. Profile loading is not a filesystem sandbox
+or an allowlist. It rejects symlinks and special files at its owned reader
+boundary before reading, verifies the opened regular-file identity, caps source
+and group depth, count, bytes, and total expression work across one rebuild, and retains
+only bounded redacted diagnostics. The digest includes native path bytes and is
+therefore a host-platform-scoped identity, not a portable cache key. Products
+that need a path policy place it before Profile source selection.
+
 ## Contexts and effects
 
-Context isolation and intercept builders account each retained key, container
-delimiter, separator, and value rather than estimating only payload values.
-Typed extensions accept only `Send + Sync + 'static` safe-Rust values and are
-bounded by Context entry count. Their contents are never serialized, inspected
-by core, or exported through native ABI v2.
+Context isolation builders account each retained key and container rather than
+estimating only payload values. Product scope and settings are explicit typed
+modules above core; Context contains no arbitrary extension value or intercept
+map that can become ambient authority.
 
 Every mutable plugin operation validates Runtime, Fiber, generation, and
 transaction state while holding the owning state lock. User setup, cleanup,
-notification, selector, service, and listener callbacks run without Runtime or
+notification, Local object/event, Portable service, and listener callbacks run without Runtime or
 scope-store locks.
 
 An `EffectTxn` reserves and installs its wrapper before user setup. Defer
@@ -98,12 +114,17 @@ and cannot abort the remaining last-in, first-out undos.
 retargeted, serialized, used after closure, or retained by a native callback
 beyond an issued host capability's lifetime.
 
-## Supplies and calls
+## Local and Portable supplies
 
-A service slot is the full service key plus isolation. Dynamic provide
+A Local slot is exact contract TypeId plus Local isolation. Dynamic provision
 atomically checks the owner generation, reserves capacity, rejects an occupied
-slot, creates a non-repeating `SupplyId`, inserts the Loading supply, and
-advances the registry revision. Notification occurs after unlocking.
+slot, creates a non-repeating `LocalSupplyId`, inserts the Loading supply, and
+advances the registry revision. Active lookup clones an `Arc`; core does not
+inspect, serialize, meter, revoke, or drain arbitrary safe-Rust object state.
+
+A Portable slot is the complete service key plus Portable isolation. Its
+provision uses the same atomic ownership rules and additionally publishes a
+bounded endpoint behind generation-fenced capability admission.
 
 External lookup and injection require the provider to be Active and retain the
 exact `SupplyId`. Call opening acquires provider admission, then revalidates
@@ -151,40 +172,29 @@ observation destroys the response inbox immediately, releasing late queued
 Messages even if the public call value remains live, while the bounded terminal
 result remains cached so later reads cannot turn an error into clean EOF.
 
-## Events and scoped storage
+## Local events and scoped storage
 
 Event registration, once claiming, explicit disposal, activation rollback, and
-unload share one owner token. Dispatch snapshots bounded immutable listener
-views, releases the registry lock, then evaluates its host-owned
-`EventTarget`. A target panic or error is normalized and bounded before any
-ordinary callback admission. Global listeners bypass selection without giving
-the selector authority to mutate listener ownership. Synchronous selectors run
-outside asynchronous Runtime workers on blocking work bounded by dispatch
-admission. The absolute dispatch deadline can detach the caller, but the
-blocking worker retains Runtime admission, its dispatch reservation, and the
-snapshot until it actually returns, so hostile selectors cannot create
-untracked work or callbacks after expiry.
+unload share one owner token. Dispatch snapshots the exact event TypeId and
+Local isolation, then releases the registry lock before invoking callbacks.
+There is no user selector, global bypass, ancestor traversal, common dispatch
+deadline, or Runtime-owned callback driver.
 
-`EventHandle::dispose` withdraws registry membership but is not a drain fence
-for ordinary bindings already retained by a dispatch snapshot. Generation
-retirement separately closes and drains callback admission. Once listeners are
-claimed through their exact effect ownership after selection, so concurrent
+`LocalEventHandle::dispose` withdraws registry membership but is not a drain
+fence for ordinary bindings already retained by a dispatch snapshot. Once
+listeners are claimed through their exact effect ownership after selection, so concurrent
 disposal can prevent a once callback rather than leave duplicate authority.
 Listener destruction happens after Runtime locks are released. If user-owned
 listener state panics while being destroyed, the exact removal still publishes
 completion, the failure is retained in its cleanup report, and the Runtime
 terminalizes because safe continued execution is no longer provable.
 
-Parallel dispatch admits callbacks lazily under separate dispatch and callback
-limits. It consumes outcomes as they complete, so one slow sibling cannot
-retain every completed result or callback permit. Input, output, panic, and
-aggregate diagnostics share payload and entry bounds.
-
-The private event callback driver contains handler-future construction,
-polling, returned-value adoption, future destruction, and caught panic-payload
-destruction. Returned JSON enters iterative owned storage before any
-user-controlled destructor runs. The callback lease remains open through all
-of that teardown and closes only after callback-owned state is gone.
+Each event marker fixes one typed dispatch mode. Parallel callbacks are
+caller-owned Futures and are consumed all-settled; the other modes preserve
+their documented ordering and typed break behavior. Panic and Drop semantics
+are ordinary safe-Rust semantics rather than a serialized foreign boundary.
+Parallel claims a once listener only as that callback enters the bounded
+polling window, so cancellation cannot spend unpolled once authority.
 
 `rsi-meta-scope` keys belong to one `ScopeRoot` and cannot cross roots.
 Parent cycle check and link replacement are one critical section. The library
@@ -199,18 +209,18 @@ Built-in entry insertion records its exact undo with the active layer action
 before returning to product code. An action error or panic after insertion
 therefore aborts through that recorded undo instead of leaving silent state.
 
-## Native trust and ABI v2
+## Native trust and ABI v3
 
 Native plugins are trusted process code. A loaded artifact can read or corrupt
 memory, access the operating system, spawn untracked threads, or abort the
 process. Hashing identifies the mapped top-level bytes; it does not sandbox the
 plugin or authenticate its transitive operating-system dependencies. Products
-that need artifact policy place it in front of Loader authority.
+that need artifact policy place it in front of explicit native-loader authority.
 
-ABI v2 has no v1 compatibility path. The Loader treats every native table,
+ABI v3 has no earlier-version compatibility path. The native loader treats every native table,
 frame, pointer range, token, status, and output as hostile until it has validated
 and adopted the value into typed Safe Rust ownership. The maintained
-[`rsi_meta_plugin.h`](../plugin/include/rsi_meta_plugin.h) owns the exact raw
+[`rsi_meta_plugin.h`](../native/include/rsi_meta_plugin.h) owns the exact raw
 layouts, validation order, statuses, operation state machines, and one-shot
 release rules.
 
@@ -219,7 +229,7 @@ effect transactions are sealed when foreign code returns and cannot become
 durable product state. Explicitly transferable capabilities retain the mapped
 module and issuer authority until their safe owner releases them. No
 capability-table, cache, or Runtime lock is held while entering foreign code;
-Loader admission rejects reentry or contention instead of waiting across that
+Native-loader admission rejects reentry or contention instead of waiting across that
 trust seam.
 
 A native create or call timeout atomically poisons the adapter and terminalizes
@@ -228,15 +238,16 @@ cannot be forcibly stopped safely, so timeout seals later admission but retains
 the callback thread, frame, library, capabilities, effect ownership, instance
 gate, cache lease, and accounting until foreign code actually returns.
 
-## Catalog and shutdown
+## Native mapping and shutdown
 
-`NativeCatalog` owns a dedicated content-addressed cache and its callback,
+The native loader owns a dedicated content-addressed staging cache and its callback,
 instance, destruction, staging, and durable-byte limits. It accepts regular
 non-symlink files, hashes through bounded private staging, validates ABI before
-durable publication, and maps the verified stable copy. Unix operations resolve
+mapping, and records the digest of the exact stable copy. It performs no package
+discovery or version resolution. Unix operations resolve
 against the pinned and locked directory object; Windows support requires an
 exclusive private writer followed by a read-only handle denying write and
-delete sharing. The [Loader README](../loader/README.md) owns the complete
+delete sharing. The native-loader README owns the complete
 cache and finalization contract.
 
 Runtime completion is published only after external admission is closed and

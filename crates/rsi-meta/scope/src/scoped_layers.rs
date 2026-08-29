@@ -1,5 +1,5 @@
 use crate::store::ScopeUndoCapture;
-use crate::{NamedEntries, ScopeError, ScopeKey, ScopeRoot, ScopeUndo};
+use crate::{NamedEntries, ScopeError, ScopeKey, ScopeRoot, ScopeUndo, ScopedContext};
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use rsi_meta::{Context, EffectHandle};
@@ -10,6 +10,45 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Sealed explicit selector for a global or scoped layer mutation.
+pub trait LayerContext: sealed::Sealed {
+    /// Returns the Meta Context that owns the mutation effect.
+    #[doc(hidden)]
+    fn meta_context(&self) -> &Context;
+
+    /// Returns the explicit scope selection, or `None` for the global layer.
+    #[doc(hidden)]
+    fn selected_scope(&self) -> Option<&ScopeKey>;
+}
+
+impl sealed::Sealed for Context {}
+
+impl LayerContext for Context {
+    fn meta_context(&self) -> &Context {
+        self
+    }
+
+    fn selected_scope(&self) -> Option<&ScopeKey> {
+        None
+    }
+}
+
+impl sealed::Sealed for ScopedContext {}
+
+impl LayerContext for ScopedContext {
+    fn meta_context(&self) -> &Context {
+        self.meta()
+    }
+
+    fn selected_scope(&self) -> Option<&ScopeKey> {
+        Some(self.scope())
+    }
+}
 
 mod change;
 mod cleanup;
@@ -348,26 +387,30 @@ impl<L: ScopeLayer> ScopedLayers<L> {
     /// The Context selects both scope visibility and generation effect owner.
     /// Initial notification runs after visibility. Its failure joins exact undo
     /// and one compensating notification before returning [`MutationError`].
-    pub async fn effect<A, E>(
+    pub async fn effect<C, A, E>(
         &self,
-        context: &Context,
+        context: &C,
         label: impl Into<String>,
         action: A,
     ) -> Result<EffectHandle, MutationError>
     where
+        C: LayerContext + ?Sized,
         A: FnOnce(&L) -> Result<ScopeUndo, E>,
         E: fmt::Display,
     {
-        let maximum = context.runtime().limits().payloads.maximum_diagnostic_bytes;
+        let meta = context.meta_context();
+        let maximum = meta.runtime().limits().payloads.maximum_diagnostic_bytes;
         let label = label.into();
-        let mut transaction = context
+        let mut transaction = meta
             .begin_effect(label.clone())
             .map_err(|error| MutationError::from_primary(error, maximum))?;
-        let scope = self
-            .inner
-            .root
-            .scope_of(context)
-            .map_err(|error| MutationError::from_primary(error, maximum))?;
+        let scope = context.selected_scope().cloned();
+        if let Some(scope) = &scope {
+            self.inner
+                .root
+                .ensure_local(scope)
+                .map_err(|error| MutationError::from_primary(error, maximum))?;
+        }
 
         let (cell, slot, mutation) = match self.begin_mutation(scope.as_ref()).await {
             Ok(selected) => selected,

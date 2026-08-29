@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Barrier;
 
+#[path = "support/resolver.rs"]
+mod resolver;
+use resolver::resolved;
+
 const SERVICE: &str = "race-service";
 const CONTRACT: &str = "test.dynamic-race";
 const V1: ContractVersion = ContractVersion(1);
@@ -29,16 +33,12 @@ impl ServiceEndpoint for Echo {
 
 #[derive(Debug)]
 struct CapturingFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     context: Arc<Mutex<Option<Context>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CapturingFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -51,17 +51,13 @@ impl PluginFactory for CapturingFactory {
 
 #[derive(Debug)]
 struct InitialProviderFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     context: Arc<Mutex<Option<Context>>>,
     supply: Arc<Mutex<Option<SupplyHandle>>>,
 }
 
 #[async_trait]
 impl PluginFactory for InitialProviderFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -77,17 +73,13 @@ impl PluginFactory for InitialProviderFactory {
 
 #[derive(Debug)]
 struct CountingConsumerFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     activations: Arc<AtomicUsize>,
     services: Arc<Mutex<Vec<Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CountingConsumerFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone())
             .requiring(Requirement::new(SERVICE, CONTRACT, V1)))
@@ -161,10 +153,10 @@ async fn active_context(runtime: &Runtime, identity: &'static str) -> (FiberHand
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(CapturingFactory {
-                identity: FactoryIdentity::builtin(identity, "1"),
+            crate::resolved(Arc::new(CapturingFactory {
+                _identity: FactoryIdentity::linked(identity, "1"),
                 context: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -186,11 +178,11 @@ async fn active_reprovide_mints_a_new_supply_and_an_old_handle_cannot_remove_it(
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CountingConsumerFactory {
-                identity: FactoryIdentity::builtin("race-consumer", "1"),
+            crate::resolved(Arc::new(CountingConsumerFactory {
+                _identity: FactoryIdentity::linked("race-consumer", "1"),
                 activations: Arc::clone(&activations),
                 services: Arc::clone(&injected_services),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -203,11 +195,11 @@ async fn active_reprovide_mints_a_new_supply_and_an_old_handle_cannot_remove_it(
     let provider = runtime
         .root()
         .apply(
-            Arc::new(InitialProviderFactory {
-                identity: FactoryIdentity::builtin("race-provider", "1"),
+            crate::resolved(Arc::new(InitialProviderFactory {
+                _identity: FactoryIdentity::linked("race-provider", "1"),
                 context: Arc::clone(&captured_context),
                 supply: Arc::clone(&captured_supply),
-            }),
+            })),
             Value::Null,
         )
         .await

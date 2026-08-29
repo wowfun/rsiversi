@@ -2,16 +2,12 @@ use super::*;
 
 #[derive(Debug)]
 struct CaptureOnlyFactory {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     handle: Arc<Mutex<Option<rsi_meta::Capability>>>,
 }
 
 #[async_trait]
 impl PluginFactory for CaptureOnlyFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(
             PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -46,8 +42,8 @@ async fn bounded_frames_are_rejected_at_the_calling_seam() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(foundation_service::ProviderFactory::new(Arc::clone(
-                &cleanup,
+            crate::resolved(Arc::new(foundation_service::ProviderFactory::new(
+                Arc::clone(&cleanup),
             ))),
             Value::Null,
         )
@@ -58,10 +54,10 @@ async fn bounded_frames_are_rejected_at_the_calling_seam() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(CaptureOnlyFactory {
-                identity: FactoryIdentity::builtin("capture-only", "1"),
+            crate::resolved(Arc::new(CaptureOnlyFactory {
+                _identity: FactoryIdentity::linked("capture-only", "1"),
                 handle: Arc::clone(&capture),
-            }),
+            })),
             Value::Null,
         )
         .await

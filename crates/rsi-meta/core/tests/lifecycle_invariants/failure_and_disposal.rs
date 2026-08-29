@@ -5,10 +5,6 @@ struct PanickingActivationFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for PanickingActivationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -27,7 +23,6 @@ struct HangingActivationFactory {
 
 #[derive(Debug)]
 struct BlockingReconfigurationFactory {
-    spec: FactorySpec,
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
     activated: Arc<Notify>,
@@ -36,10 +31,6 @@ struct BlockingReconfigurationFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingReconfigurationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if *config == 1 {
             self.entered.wait();
@@ -61,10 +52,6 @@ impl PluginFactory for BlockingReconfigurationFactory {
 
 #[async_trait]
 impl PluginFactory for HangingActivationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -94,7 +81,6 @@ async fn activation_waiter_timeout_keeps_runtime_owned_rollback_exactly_once() {
         deadlines: DeadlineLimits {
             transition: std::time::Duration::from_millis(10),
             service_call: std::time::Duration::from_millis(10),
-            event_dispatch: std::time::Duration::from_millis(10),
             shutdown_wait: std::time::Duration::from_millis(20),
         },
         ..RuntimeLimits::default()
@@ -108,11 +94,11 @@ async fn activation_waiter_timeout_keeps_runtime_owned_rollback_exactly_once() {
         let cleanups = Arc::clone(&cleanups);
         async move {
             root.apply(
-                Arc::new(HangingActivationFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("hanging-activation", "1")),
+                crate::resolved(Arc::new(HangingActivationFactory {
+                    spec: FactorySpec::new(FactoryIdentity::linked("hanging-activation", "1")),
                     entered,
                     cleanups,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -162,13 +148,12 @@ async fn reconfiguration_waiter_timeout_leaves_one_busy_runtime_owned_transactio
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(BlockingReconfigurationFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("timed-out-reconfiguration", "1")),
+            crate::resolved(Arc::new(BlockingReconfigurationFactory {
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 activated: Arc::clone(&activated),
                 configurations: Arc::clone(&configurations),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -229,9 +214,9 @@ async fn activation_panics_become_failed_fibers_without_poisoning_the_runtime() 
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(PanickingActivationFactory(FactorySpec::new(
-                FactoryIdentity::builtin("panicking-activation", "1"),
-            ))),
+            crate::resolved(Arc::new(PanickingActivationFactory(FactorySpec::new(
+                FactoryIdentity::linked("panicking-activation", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -243,9 +228,8 @@ async fn activation_panics_become_failed_fibers_without_poisoning_the_runtime() 
     let healthy = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "healthy-after-panic",
-                "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("healthy-after-panic", "1"),
             )))),
             Value::Null,
         )
@@ -259,10 +243,6 @@ struct PanickingCleanupFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for PanickingCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -282,9 +262,9 @@ async fn cleanup_panics_become_joinable_failures() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(PanickingCleanupFactory(FactorySpec::new(
-                FactoryIdentity::builtin("panicking-cleanup", "1"),
-            ))),
+            crate::resolved(Arc::new(PanickingCleanupFactory(FactorySpec::new(
+                FactoryIdentity::linked("panicking-cleanup", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -316,10 +296,6 @@ struct PanickingDropFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for PanickingDropFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -342,9 +318,9 @@ async fn endpoint_destructor_panics_are_owned_cleanup_failures_not_runtime_termi
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(PanickingDropFactory(FactorySpec::new(
-                FactoryIdentity::builtin("panicking-drop", "1"),
-            ))),
+            crate::resolved(Arc::new(PanickingDropFactory(FactorySpec::new(
+                FactoryIdentity::linked("panicking-drop", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -366,9 +342,8 @@ async fn endpoint_destructor_panics_are_owned_cleanup_failures_not_runtime_termi
     let survivor = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "post-endpoint-panic",
-                "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("post-endpoint-panic", "1"),
             )))),
             Value::Null,
         )
@@ -392,10 +367,6 @@ impl Drop for DropFactory {
 
 #[async_trait]
 impl PluginFactory for DropFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -412,10 +383,10 @@ async fn dropping_all_public_owners_releases_registered_fibers() {
     let handle = runtime
         .root()
         .apply(
-            Arc::new(DropFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("drop-probe", "1")),
+            crate::resolved(Arc::new(DropFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("drop-probe", "1")),
                 dropped: Arc::clone(&dropped),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -430,10 +401,6 @@ struct FailingCleanupFactory(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for FailingCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -457,10 +424,6 @@ struct CancelledDisposalFactory {
 
 #[async_trait]
 impl PluginFactory for CancelledDisposalFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -494,12 +457,12 @@ async fn cancelling_public_dispose_does_not_cancel_runtime_owned_cleanup() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(CancelledDisposalFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-disposal", "1")),
+            crate::resolved(Arc::new(CancelledDisposalFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("cancelled-disposal", "1")),
                 entered: Arc::clone(&entered),
                 release: release.clone(),
                 cleaned: Arc::clone(&cleaned),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -542,10 +505,6 @@ impl Drop for PanickingFactoryDrop {
 
 #[async_trait]
 impl PluginFactory for PanickingFactoryDrop {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("panicking-factory-drop", "1")
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -561,15 +520,14 @@ async fn reconciliation_contains_a_panicking_caught_payload_destructor() {
     let factory = Arc::new(PanickingFactoryDrop);
     let broken = runtime
         .root()
-        .apply(factory.clone(), Value::Null)
+        .apply(crate::resolved(factory.clone()), Value::Null)
         .await
         .unwrap();
     let survivor = runtime
         .root()
         .apply(
-            Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                "payload-drop-survivor",
-                "1",
+            crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                FactoryIdentity::linked("payload-drop-survivor", "1"),
             )))),
             Value::Null,
         )
@@ -598,9 +556,9 @@ async fn dispose_and_shutdown_are_joinable_and_preserve_cleanup_reports() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(FailingCleanupFactory(FactorySpec::new(
-                FactoryIdentity::builtin("cleanup", "1"),
-            ))),
+            crate::resolved(Arc::new(FailingCleanupFactory(FactorySpec::new(
+                FactoryIdentity::linked("cleanup", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -614,9 +572,9 @@ async fn dispose_and_shutdown_are_joinable_and_preserve_cleanup_reports() {
     runtime
         .root()
         .apply(
-            Arc::new(FailingCleanupFactory(FactorySpec::new(
-                FactoryIdentity::builtin("shutdown-cleanup", "1"),
-            ))),
+            crate::resolved(Arc::new(FailingCleanupFactory(FactorySpec::new(
+                FactoryIdentity::linked("shutdown-cleanup", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -628,8 +586,8 @@ async fn dispose_and_shutdown_are_joinable_and_preserve_cleanup_reports() {
         runtime
             .root()
             .apply(
-                Arc::new(PassiveFactory(FactorySpec::new(FactoryIdentity::builtin(
-                    "late", "1"
+                crate::resolved(Arc::new(PassiveFactory(FactorySpec::new(
+                    FactoryIdentity::linked("late", "1")
                 )))),
                 Value::Null,
             )

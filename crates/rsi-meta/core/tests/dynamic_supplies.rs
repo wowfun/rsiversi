@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 use support::{Echo, PassiveFactory};
 
@@ -18,7 +21,7 @@ const V1: ContractVersion = ContractVersion(1);
 
 #[derive(Debug)]
 struct BlockingDynamicProvider {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     supply: Arc<Mutex<Option<SupplyHandle>>>,
@@ -28,10 +31,6 @@ struct BlockingDynamicProvider {
 
 #[async_trait]
 impl PluginFactory for BlockingDynamicProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -57,14 +56,10 @@ impl PluginFactory for BlockingDynamicProvider {
 }
 
 #[derive(Debug)]
-struct ImmediateDynamicProvider(FactoryIdentity);
+struct ImmediateDynamicProvider;
 
 #[async_trait]
 impl PluginFactory for ImmediateDynamicProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -79,16 +74,12 @@ impl PluginFactory for ImmediateDynamicProvider {
 
 #[derive(Debug)]
 struct LastOwnerDynamicProvider {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     endpoint_drops: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for LastOwnerDynamicProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -122,16 +113,12 @@ impl ServiceEndpoint for DropEndpoint {
 
 #[derive(Debug)]
 struct DuplicateCaptureProvider {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     rejected_endpoint_drops: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for DuplicateCaptureProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -222,16 +209,12 @@ struct IsolatedSupplies {
 
 #[derive(Debug)]
 struct IsolatedDynamicProvider {
-    identity: FactoryIdentity,
+    _identity: FactoryIdentity,
     captured: Arc<Mutex<Option<IsolatedSupplies>>>,
 }
 
 #[async_trait]
 impl PluginFactory for IsolatedDynamicProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -306,10 +289,10 @@ async fn provide_and_capture_reserves_capability_before_supply_publication() -> 
     let owner = runtime
         .root()
         .apply(
-            Arc::new(support::ContextCaptureFactory {
-                spec: support::FactorySpec::new(FactoryIdentity::builtin("capture-owner", "1")),
+            crate::resolved(Arc::new(support::ContextCaptureFactory {
+                spec: support::FactorySpec::new(FactoryIdentity::linked("capture-owner", "1")),
                 context: Arc::clone(&context),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -365,10 +348,10 @@ async fn rejected_loading_capture_detaches_its_unpublished_cleanup_and_endpoint(
     let owner = runtime
         .root()
         .apply(
-            Arc::new(DuplicateCaptureProvider {
-                identity: FactoryIdentity::builtin("duplicate-capture", "1"),
+            crate::resolved(Arc::new(DuplicateCaptureProvider {
+                _identity: FactoryIdentity::linked("duplicate-capture", "1"),
                 rejected_endpoint_drops: Arc::clone(&rejected_endpoint_drops),
-            }),
+            })),
             Value::Null,
         )
         .await?;
@@ -387,11 +370,14 @@ async fn dormant_supply_cleanup_does_not_retain_the_last_runtime_owner() -> Resu
     let runtime = Runtime::default();
     let endpoint_drops = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(LastOwnerDynamicProvider {
-        identity: FactoryIdentity::builtin("last-owner-dynamic-provider", "1"),
+        _identity: FactoryIdentity::linked("last-owner-dynamic-provider", "1"),
         endpoint_drops: Arc::clone(&endpoint_drops),
     });
     let factory_weak = Arc::downgrade(&factory);
-    let owner = runtime.root().apply(factory.clone(), Value::Null).await?;
+    let owner = runtime
+        .root()
+        .apply(resolved(factory.clone()), Value::Null)
+        .await?;
     support::wait_active(&owner).await;
     assert_eq!(runtime.resource_snapshot().services.current, 1);
 
@@ -413,10 +399,10 @@ async fn loading_supply_occupies_the_slot_is_self_visible_and_publishes_only_whe
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(
-                PassiveFactory::new(FactoryIdentity::builtin("dynamic-consumer", "1"))
+            crate::resolved(Arc::new(
+                PassiveFactory::new(FactoryIdentity::linked("dynamic-consumer", "1"))
                     .requiring(Requirement::new("dynamic", "test.dynamic", V1)),
-            ),
+            )),
             Value::Null,
         )
         .await
@@ -437,14 +423,14 @@ async fn loading_supply_occupies_the_slot_is_self_visible_and_publishes_only_whe
         let self_response = Arc::clone(&self_response);
         async move {
             root.apply(
-                Arc::new(BlockingDynamicProvider {
-                    identity: FactoryIdentity::builtin("dynamic-provider", "1"),
+                crate::resolved(Arc::new(BlockingDynamicProvider {
+                    _identity: FactoryIdentity::linked("dynamic-provider", "1"),
                     entered,
                     release,
                     supply,
                     self_service,
                     self_response,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -466,10 +452,12 @@ async fn loading_supply_occupies_the_slot_is_self_visible_and_publishes_only_whe
     let contender = runtime
         .root()
         .apply(
-            Arc::new(ImmediateDynamicProvider(FactoryIdentity::builtin(
+            rsi_meta::ResolvedFactory::linked(
                 "dynamic-contender",
                 "1",
-            ))),
+                rsi_meta::UpdateMode::Replayable,
+                Arc::new(ImmediateDynamicProvider),
+            ),
             Value::Null,
         )
         .await
@@ -514,10 +502,10 @@ async fn one_generation_can_own_the_same_key_in_two_complete_isolation_slots() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(IsolatedDynamicProvider {
-                identity: FactoryIdentity::builtin("isolated-dynamic-provider", "1"),
+            crate::resolved(Arc::new(IsolatedDynamicProvider {
+                _identity: FactoryIdentity::linked("isolated-dynamic-provider", "1"),
                 captured: Arc::clone(&captured),
-            }),
+            })),
             Value::Null,
         )
         .await

@@ -5,29 +5,29 @@ The foundation has one composition graph and one lifetime graph:
 ```text
 Runtime
   └─ persistent Context
-       └─ apply PluginFactory
+       └─ apply ResolvedFactory
             └─ Fiber generation
-                 ├─ prepared injections
-                 ├─ dynamic service supplies
+                 ├─ prepared Local and Portable requirements
+                 ├─ dynamic Local and Portable supplies
                  ├─ listeners and child Fibers
                  ├─ transferable capabilities
                  └─ reverse-ordered effects
 ```
 
-No product registry, file loader, native branch, daemon, or persistence
-mechanism is embedded in core. An execution backend implements
-`PluginFactory`; a product authority is a plugin Fiber; a passive leaf value is
-an effect-owned contribution to that authority.
+No product registry, factory catalog, Profile loader, native branch, daemon, or
+persistence mechanism is embedded in core. `PluginFactory` contains execution
+behavior; callers resolve immutable identity and update policy before applying
+it. A product authority is a plugin Fiber; a passive leaf value is an
+effect-owned contribution to that authority.
 
 ## Context and ownership
 
 A `Runtime` owns all mutable registries, admission, scheduling, resource
 accounting, persistent cleanup, and shutdown. A `Context` is a cloned
 capability value that retains its Runtime and optional owning Fiber generation.
-Copy-on-write service isolation, direct-edge intercept values, call trace, and
-typed safe-Rust extensions derive child contexts without changing their parent.
-An extension is keyed by Rust type identity, cannot cross the native ABI, and
-has no global string namespace.
+Lane-specific isolation and Portable call trace derive child contexts without
+changing their parent. Product scope is carried by an explicit wrapper above
+core; Context has no generic extension store or configuration intercept map.
 
 Every structural mutation validates the Context's Runtime, Fiber, and
 generation at its linearization point. A stale Context can be inspected but
@@ -36,12 +36,14 @@ Contexts can apply root plugins but cannot impersonate a plugin generation.
 
 ## Preparation, injection, and activation
 
-`PluginFactory` exposes bounded identity, per-attempt preparation, and
-activation. The Runtime calls `identity` exactly once while preparing a new
-Fiber, validates and accounts that identity for the Fiber lifetime, and never
-consults it again during re-preparation. The Runtime validates each desired
+`ResolvedFactory` contains one already bounded `FactoryIdentity`, static
+`UpdateMode`, and the `PluginFactory` implementation. The Runtime validates and
+accounts the captured identity for the Fiber lifetime but never asks executable
+plugin code to report it. The Runtime validates each desired
 configuration at its owning input boundary, then retains that bounded value as
-the proof reused by later attempts. Every preparation borrows that unchanged
+the proof reused by later attempts. Configuration numbers use the workspace's
+exact JSON representation, including decimal text that binary floating point
+cannot reproduce. Every preparation borrows that unchanged
 desired value without repeating boundary validation; it never receives a
 previous attempt's normalized output. Plugin-returned normalized configuration
 is independently validated before retention. Preparation has no generation
@@ -59,13 +61,12 @@ value, because core cannot observe whether the plugin moved it into
 generation-owned state. This is deliberately conservative rather than a claim
 of byte-exact early release.
 
-The Runtime resolves required services from one registry revision. Only an
-actual supply owned by an Active provider generation can satisfy an external
-injection. Missing supplies leave the Fiber `Pending`; diagnostics report a
-bounded prefix of missing actual requirements and failures. There are no
-factory-global provider declarations, declaration index, or
-declaration-derived cycles. Two plugins that intend to provide each other's
-missing service remain missing until a real supply exists.
+The Runtime resolves exact hard Local and Portable requirements from one
+registry revision. Only an actual supply owned by an Active provider generation
+can satisfy an external requirement. Missing supplies leave the Fiber
+`Pending`; diagnostics report a bounded prefix of missing actual requirements
+and failures. Optional Local lookup is point-of-use discovery and never becomes
+a dependency edge. Portable has no optional discovery.
 
 When all requirements resolve, the Runtime constructs one `ActivationPlan`
 with capabilities minted directly from the exact resolved supply bindings plus
@@ -151,16 +152,26 @@ behalf of its exact caller generation. Contributions made through that handle
 retire with the caller, not the provider. The handle is generation-fenced and
 cannot register after its owner transaction closes.
 
-## Dynamic supplies
+## Local and Portable supplies
 
-`Context::provide` is the only service-supply authority. It dynamically
-claims an isolated slot and returns a `SupplyId`-fenced disposer. A
-`SupplyId` includes owner Fiber, generation, and a changing supply token,
-so withdraw and re-provide in the same generation cannot create an ABA match.
+The two contract lanes share Fiber effect ownership and dependency convergence,
+but not their call interfaces.
+
+`Context::provide_local<C>` registers one safe-Rust object in the exact
+`(TypeId, LocalIsolationId)` slot and returns a `LocalSupplyId`-fenced disposer.
+`PreparedActivation::requiring_local<C>` creates a hard managed edge;
+`Context::lookup_local<C>` observes only an Active supply and creates no edge.
+One exact slot has one provider. Withdraw and re-provide in the same generation
+allocate a new supply token, fence stale removal, and replay exact hard
+consumers. Escaped `Arc` values remain ordinary caller-owned Rust objects and
+are not revoked or drained by Runtime.
+
+Portable `Context::provide` remains the authority for a serialized endpoint.
+It claims one isolated slot and returns a `SupplyId`-fenced disposer.
 `Context::provide_and_capture` additionally returns the provider generation's
 own `Capability`. It reserves and registers that capability before the supply
-can enter the service registry, so any capability failure leaves no supply to
-observe or withdraw.
+can enter the registry, so any capability failure leaves no supply to observe
+or withdraw.
 
 A Loading supply occupies its slot immediately and is available to its own
 providing generation, but it cannot satisfy external lookup, injection, or
@@ -172,12 +183,13 @@ while their owner is Loading because their exact undo is already installed.
 Activation failure therefore permits a bounded visible-add/visible-remove
 sequence and then awaits deterministic rollback.
 
-Active add and withdrawal notify only consumers of the complete service slot,
-including isolation and exact `SupplyId`. Withdrawal removes external
-visibility and, in the same registry transaction, fences every exact dependent
-Loading attempt and queues its reconciliation. It then converges those captured
-dependents, drains calls admitted before closure, and finally drops the
-endpoint. No notification is derived from a declaration.
+Active add and withdrawal notify only consumers of the complete lane-specific
+slot and exact supply identity. Withdrawal removes external visibility and, in
+the same registry transaction, fences every exact dependent Loading attempt and
+queues its reconciliation. Local withdrawal joins that convergence and then
+drops Runtime ownership without waiting for escaped objects. Portable
+withdrawal additionally drains calls admitted before closure. No notification
+is derived from a declaration.
 
 A dormant supply cleanup retains its exact owner, slot, binding, executor, and
 resource reservations, but only a weak Runtime reference. The Runtime already
@@ -248,60 +260,60 @@ recursion remain distinct typed terminals: `MetaError::Busy` and
 recovering authority semantics from diagnostic text. Core safe-Rust provider
 callbacks are not implicitly serialized by this adapter rule.
 
-Every service or event callback receives three distinct call facts. `call_id`
+Every Portable service callback receives three distinct call facts. `call_id`
 names that callback, `parent_call_id` names only its immediate enclosing call,
 and `lineage_call_id` names the activation seed for the complete chain. The
 first callback opened from an activation Context therefore has a distinct
 `call_id`, no parent, and the plan's lineage. A provider Context carries that
-lineage and its current call into subsequent service or event calls, so
+lineage and its current call into subsequent service calls, so
 arbitrary re-entry preserves one root identity without thread-local or global
 tracing state.
 
-## Events
+## Local events
+
+Each `LocalEvent` marker fixes its argument, output, and one of the five dispatch
+modes in its type. Callers dispatch the marker and cannot select a mode at the
+call site. Emit is synchronous ordered fail-fast; Parallel is asynchronous
+all-settled with aggregate errors; Serial is asynchronous ordered first-break;
+Bail is synchronous ordered first-break; Waterfall is a synchronous typed
+continuation chain. Because Waterfall's around/short-circuit contract requires
+nested continuations, each exact Waterfall event slot has its own configured
+listener ceiling in addition to the Runtime-wide listener ceiling. Runtime
+construction rejects a per-slot ceiling above the hard stack-safety bound of
+256 listeners.
 
 Listener registration is an immediate effect-owned mutation, including while a
-generation is Loading. Registration, once claiming, explicit disposal,
-activation rollback, and Fiber retirement share one generation-fenced removal
-transaction.
+generation is Loading. Append is default; prepend and atomic once are explicit.
+Registration, once claiming, explicit disposal, activation rollback, and Fiber
+retirement share one generation-fenced removal transaction.
 
-Dispatch snapshots listener bindings before selection. An `EventTarget`
-evaluates immutable `ListenerView` values outside Runtime locks and before
-callback admission. Target selection runs on blocking workers bounded by the
-dispatch-admission limit, and the dispatch's absolute deadline includes the
-complete selection pass. If a synchronous selector outlives that deadline, the
-caller returns while Runtime admission, the dispatch reservation, and the
-listener snapshot remain owned by the worker until the selector returns; no
-later listener view or callback starts from that expired dispatch after the
-currently running selector returns. A dispatch without a target selects all
-listeners;
-explicitly global listeners bypass selection. Every other match, including the
-meaning of a missing product extension, belongs to the target implementation.
-The `rsi-meta-scope` adapter treats a listener without a scope extension as
-global. A false selection does not consume a once listener. Selector error or
-panic returns bounded failure before any ordinary listener callback starts.
-An ordinary binding already present in the dispatch snapshot remains eligible
-for that dispatch if its handle is concurrently disposed; disposal removes it
-from future snapshots. A once binding still requires its exact claim after
-selection and therefore cannot run after another path has claimed removal.
-Host code may implement selectors; native code receives only host-minted opaque
-target capabilities, never a Rust callback pointer.
+Dispatch snapshots exact `(TypeId, LocalIsolationId)` listener bindings and
+releases registry locks before callbacks. There is no target callback, ancestor
+selection, or global bypass. An ordinary binding already present in the
+snapshot remains eligible for that dispatch if its handle is concurrently
+disposed; disposal removes it from future snapshots. A once binding still
+requires its exact atomic claim and cannot run twice across concurrent
+dispatches.
 
-One private callback driver contains handler-future construction, polling,
-future destruction, and caught panic-payload destruction. It converts every
-returned event value to iterative owned JSON before any user-controlled Drop,
-keeps the callback lease open through that complete teardown, and closes it
-only afterward. Callback-local caller effects can therefore register their
-exact cleanup from a completed future's destructor.
+The registry preserves append/prepend order with stable internal ordering keys;
+exact-handle removal uses the listener identity's indexed location and never
+shifts the remaining slot membership.
 
-Serial, parallel, waterfall, and emit modes share one absolute deadline across
-target selection, callback admission, and callback execution, plus separate
-dispatch and callback admission bounds. Parallel execution admits lazily and
-consumes completed outcomes rather than retaining work for every listener at
-once.
+Local callbacks execute directly. Runtime does not add a common deadline,
+spawn, cancellation token, call identity, or dispatch resource tracker. Errors,
+panics, and typed breaks follow ordinary safe-Rust semantics and the marker's
+mode. Parallel constructs one caller-owned all-settled Future from the exact
+snapshot, preserves listener order in its aggregate errors, and polls at most
+64 callback futures concurrently. A Parallel once binding is claimed only when
+that dispatch admits its callback into the polling window; dropping the Future
+does not consume bindings that the window never admitted.
 
 ## Scoped contributions
 
-`rsi-meta-scope` is a library above core, not a Runtime service. A
+`rsi-meta-scope` is a library above core, not a Runtime service. The retired
+generic `ContextExtension` metadata facility was removed without migration to
+Local contracts; product-specific immutable metadata belongs in an explicit
+typed wrapper or owning module. A
 `ScopeRoot` is constructed with an explicit maximum complete ancestry depth in
 the inclusive range `1..=4,096`; the key itself counts toward that depth. The
 root mints opaque `ScopeKey` identities and serializes parent-link changes, but
@@ -316,16 +328,9 @@ or parent binding retains only the ancestry it can still observe, and otherwise
 dropping the last key iteratively reclaims the complete unreachable chain
 without a root-side sweep, recursive final destruction, or historical-key
 bound.
-`ScopeHandle` is created asynchronously through an ordinary no-op child
-Fiber, so scope-owned registrations use the same cleanup path as every plugin.
-
-`ScopeRoot::target` snapshots one target key's complete ancestor chain under
-the same tree lock used by rebind and precomputes a set for exact-key
-membership. The returned `ScopeTarget` implements core's `EventTarget`: an
-unscoped listener is global, a same-root listener is selected with one set
-lookup, and a foreign-root listener is a bounded selector error. One dispatch
-therefore cannot mix the old and new halves of a concurrent rebind or rescan
-the ancestor snapshot for each listener.
+`ScopedContext { Context, ScopeKey }` is the explicit product-facing wrapper.
+Scope-owned registrations use its owning Fiber effects; scope never becomes a
+generic Context extension and does not participate in Local event targeting.
 
 `ScopedLayers` owns one eager global layer and lazy exact-scope aggregate
 layers. Effective named snapshots apply global values, then ancestor overlays
@@ -372,24 +377,27 @@ after insertion cannot strand an unowned visible entry.
 The native path remains an adapter chain:
 
 ```text
-Loader Fiber -> NativeCatalog -> verified mapping -> ABI v2 capability port
-             -> NativeFactory -> ordinary child Fiber
+explicit path -> verified staged mapping -> ABI v3 Portable capability port
+              -> ResolvedFactory -> ordinary Fiber
 ```
 
-ABI v2 carries core Messages, capability ownership, dynamic provide, and setup
-effects across one exchange port. The Loader maps native handles into the same
-core authorities used by Rust plugins; it does not introduce a second
-declaration registry or lifecycle model. Callback-bound channel and effect
-authority cannot become durable product state. The maintained
-[`rsi_meta_plugin.h`](../plugin/include/rsi_meta_plugin.h) owns the exact entry,
+ABI v3 carries bounded Messages, capability ownership, exact Portable contract
+metadata, dynamic provide, and setup effects across one exchange port. The
+native loader maps foreign handles into the same core authorities used by
+Portable Rust adapters; it does not introduce a second declaration registry or
+lifecycle model. Callback-bound channel and effect authority cannot become
+durable product state. The maintained
+[`rsi_meta_plugin.h`](../native/include/rsi_meta_plugin.h) owns the exact entry,
 version, frame, opcode, status, and one-shot release contract.
 
-Native code is trusted process code, not a sandbox. A create or call timeout
+Native code is trusted process code selected by explicit artifact path, not a
+package or sandbox. Host computes and records the exact staged-byte digest on
+start or requested reload; the artifact path is not watched. A create or call timeout
 terminalizes its Runtime, but the callback frame, thread, mapped library,
 capabilities, cache lease, and accounting remain retained until foreign code
 actually returns. Loader admission is fail-fast and preserves callback lineage
 across nested calls so native callbacks cannot turn serialization into a
-deadlock. The [Loader contract](../loader/README.md) owns cache, finalization,
+deadlock. The [Loader contract](../native-loader/README.md) owns cache, finalization,
 and platform details.
 
 ## Retirement and shutdown

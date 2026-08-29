@@ -1,6 +1,6 @@
-use super::{ConfigValue, Requirement};
+use super::{ConfigValue, LocalContract, LocalContractKey, Requirement};
 use crate::{MetaError, Result};
-use std::any::{Any, type_name};
+use std::any::{Any, TypeId, type_name};
 use std::fmt;
 
 type OpaqueState = Box<dyn Any + Send + 'static>;
@@ -66,7 +66,14 @@ impl Drop for PreparedState {
 pub struct PreparedActivation {
     config: ConfigValue,
     requirements: Vec<Requirement>,
+    local_requirements: Vec<LocalRequirement>,
     state: Option<PreparedState>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct LocalRequirement {
+    pub(crate) contract: TypeId,
+    pub(crate) key: LocalContractKey,
 }
 
 impl fmt::Debug for PreparedActivation {
@@ -75,6 +82,7 @@ impl fmt::Debug for PreparedActivation {
             .debug_struct("PreparedActivation")
             .field("config", &"<redacted>")
             .field("requirements", &self.requirements)
+            .field("local_requirements", &self.local_requirements)
             .field("state", &self.state.as_ref().map(|_| "<redacted>"))
             .finish()
     }
@@ -86,6 +94,7 @@ impl PreparedActivation {
         Self {
             config,
             requirements: Vec::new(),
+            local_requirements: Vec::new(),
             state: None,
         }
     }
@@ -104,6 +113,7 @@ impl PreparedActivation {
         Self {
             config,
             requirements: Vec::new(),
+            local_requirements: Vec::new(),
             state: Some(PreparedState::new(state, retained_bytes)),
         }
     }
@@ -112,6 +122,16 @@ impl PreparedActivation {
     #[must_use]
     pub fn requiring(mut self, requirement: Requirement) -> Self {
         self.requirements.push(requirement);
+        self
+    }
+
+    /// Appends one exact nominal safe-Rust Local service requirement.
+    #[must_use]
+    pub fn requiring_local<C: LocalContract>(mut self) -> Self {
+        self.local_requirements.push(LocalRequirement {
+            contract: TypeId::of::<C>(),
+            key: LocalContractKey::new(C::KEY),
+        });
         self
     }
 
@@ -125,7 +145,19 @@ impl PreparedActivation {
         &self.requirements
     }
 
-    pub(crate) fn into_parts(self) -> (ConfigValue, Vec<Requirement>, Option<PreparedState>) {
-        (self.config, self.requirements, self.state)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ConfigValue,
+        Vec<Requirement>,
+        Vec<LocalRequirement>,
+        Option<PreparedState>,
+    ) {
+        (
+            self.config,
+            self.requirements,
+            self.local_requirements,
+            self.state,
+        )
     }
 }

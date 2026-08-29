@@ -1,7 +1,7 @@
 # rsi-meta testing
 
-Tests exercise public `Runtime`, `Context`, `FiberHandle`, factory,
-effect, Message/capability, event, scope, ABI, and Loader seams. They assert
+Tests exercise public `Runtime`, `Context`, `FiberHandle`, resolved factory,
+effect, Local/Portable contract, typed event, scope, ABI, and native-loader seams. They assert
 observable state and resource ownership, not private container shape. Failure,
 cancellation, timeout, panic, saturation, and teardown are first-class paths.
 
@@ -18,10 +18,12 @@ Evidence covers:
   access;
 - every attempt preparing from the retained desired configuration rather than
   the preceding attempt's normalized output;
+- package-only configuration parsing preserving exact decimal JSON text, so
+  workspace feature unification cannot change convergence semantics;
 - per-attempt injection derived together with that attempt's normalized
   configuration;
-- exact once-only identity capture and independent Fiber-lifetime identity
-  accounting;
+- immutable resolver-owned identity and independent Fiber-lifetime identity
+  accounting, with no executable identity callback;
 - opaque prepared state transferred once into activation, wrong-type take
   preserving it, trusted state-byte admission, redacted diagnostics, and
   contained destruction on rejection, replacement, cancellation, and disposal;
@@ -60,7 +62,7 @@ conformance does not turn host scheduling noise into a correctness failure.
 Every terminal disposal path settles already registered reconciliation tickets,
 including a caught late panic.
 
-## Effects and dynamic supply
+## Effects and Local/Portable supply
 
 Wrapper-first tests reproduce reentrant unload during setup: unload observes the
 SettingUp record, waits for setup or failure, and runs every registered undo
@@ -75,17 +77,20 @@ but a closed or stale transaction cannot mutate a later generation.
 Dynamic supply tests cover:
 
 - Loading slot occupation and duplicate rejection;
-- provider self-lookup during Loading while external lookup, injection, and
-  call opening remain unavailable;
+- Local provider self-lookup during Loading while external lookup and hard
+  dependency resolution remain unavailable;
 - activation failure withdrawing the internal supply without ever binding a
   consumer;
 - Active add waking a Pending consumer;
-- withdrawal closing admission, converging exact dependents, draining an
-  admitted call, and dropping the endpoint in order, including a blocked
-  listener destructor proving that no Loading dependent can publish after
-  visibility is removed;
-- same-generation withdraw/re-provide minting a new `SupplyId` and rejecting
-  the old handle;
+- Local withdrawal removing lookup visibility, converging exact hard
+  dependents, and dropping Runtime ownership without waiting for an escaped
+  `Arc`;
+- Portable withdrawal additionally closing admission and draining admitted
+  calls before endpoint drop;
+- same-generation withdraw/re-provide minting a new lane-specific supply ID,
+  rejecting the old handle, and replaying hard consumers;
+- optional Local lookup creating no watcher or replay edge and Portable
+  optional discovery being absent;
 - isolation changes notifying only the complete matching slot;
 - owner failure, resource saturation, notification races, and final zero
   service/call/effect resources.
@@ -103,7 +108,7 @@ limits, and queued-reference limits. Safe Rust has no raw-token or import
 interface. Native ABI tests exercise their independent hostile `CapId`
 boundary separately.
 
-Nested service/event tests distinguish the current, immediate-parent, and root
+Nested Portable service tests distinguish the current, immediate-parent, and root
 lineage call identities. The activation plan exposes the nonzero root seed; the
 first service callback has a distinct current ID and no parent. Re-entering an
 earlier provider must retain the activation seed while each nested hop reports
@@ -129,37 +134,29 @@ unchanged nonfitting candidates performs no scheduler scan. Receiving,
 dropping, terminal observation, cancellation, and shutdown each release
 retained Messages, waiters, and handles exactly once.
 
-## Events
+## Typed Local events
 
-Loading listener tests dispatch while activation is blocked, then force
-activation failure and prove rollback removes the listener and reservation.
-Registration, once claiming, explicit disposal, rollback, and unload are raced
-against dispatch under one owner token.
+Loading-listener rollback is exercised through cancelled activation and exact
+capacity reuse. Registration, once claiming, explicit disposal, rollback, and
+unload use the same owner token.
 
-Target tests cover no-target select-all, matching and nonmatching listener
-views, explicit global bypass, false selection preserving once, selector error
-and panic before any callback, selector reentrant Runtime access and listener
-registration without deadlock, snapshot ordering, and a deterministic
-selection barrier proving that concurrent disposal preserves only the current
-ordinary snapshot. The same barrier covers a rejected snapshot whose final
-listener destructor panics after concurrent removal. Selector and listener
-callbacks never run under the registry lock. A separate blocking-selector
-barrier proves the absolute dispatch deadline returns before selector release,
-starts no later selector or callback, and retains bounded dispatch ownership
-until the blocking worker really exits. Exact-dispose tests also use a
-panicking listener destructor to prove that removal completion and its bounded
-cleanup failure remain joinable.
+Visibility tests cover exact event TypeId and Local isolation, append/prepend
+ordering, exact disposal, capacity rejection/reuse, and a dormant-listener
+last-owner regression. Sixty-four concurrent dispatches prove once is claimed
+globally exactly once. A panicking listener destructor proves registry
+membership and capacity are released, bounded cleanup evidence is retained,
+and the Runtime terminalizes.
 
-Callback-boundary tests use handwritten `EventHandler` implementations to
-cover panic during future construction, recursive panic-payload destruction,
-completed-future Drop registration through `caller_effect`, and future Drop
-panic. They prove returned JSON is iteratively owned before teardown and the
-callback lease closes only after future and panic-payload destruction.
-
-Emit, serial, waterfall, and parallel modes share deadline, input, output,
-diagnostic, dispatch, and callback bounds. Parallel tests prove lazy admission,
-completion-order resource release, sibling independence, and bounded aggregate
-failure collection.
+Marker-level behavior proves Emit ordering, Parallel all-settled aggregate
+errors with a 64-callback polling ceiling, Serial asynchronous first-break,
+Bail synchronous first-break, and Waterfall typed continuation
+replacement/veto. Synchronous and asynchronous listener panics prove the same
+documented ordinary safe-Rust propagation rather than an implicit Runtime
+containment boundary. Cancelling a saturated Parallel dispatch proves once
+listeners outside its polling window remain eligible for a later dispatch.
+Compile-time use proves callers cannot select a different mode or pass an
+untyped JSON payload. The public API exposes no Runtime-owned callback deadline,
+cancellation token, call identity, or dispatch handle.
 
 ## Scoped contributions
 
@@ -172,20 +169,16 @@ Context/Fiber:
   rejection/reuse when reclamation itself fails, plus fail-closed version
   exhaustion without ABA wrap;
 - root-local opaque keys, explicit ancestry-depth validation at construction
-  and topology mutation, async scope creation, inherited Context extension,
+  and topology mutation, explicit `ScopedContext`,
   nearest-first parent chains, duplicate bind, self-cycle and ancestor-cycle
   rejection, iterative deepest-key destruction on a 64 KiB stack, and proof
   that the root retains no dropped key or unreachable parent-chain nodes;
 - unique binding authority and atomic old-or-new parent snapshots during
   rebind, with no implicit registry notification;
-- `ScopeTarget` exact-key and ancestor routing, unscoped listener admission,
-  foreign-root rejection before callbacks, and one immutable chain snapshot
-  across rebind;
 - deterministic structural and operation-count probes proving that append-only
   leaf attachment performs constant ancestor work, a closing cycle is still
-  traversed and rejected, target construction visits the bounded chain once,
-  exact layer lookup performs no ancestor walk, and listener selection uses
-  precomputed set membership rather than rescanning that chain;
+  traversed and rejected, exact layer lookup performs no ancestor walk, and
+  explicit effective-layer resolution visits the bounded chain once;
 - global then farthest-to-nearest named shadowing, stable unrelated insertion
   order, cloning only final visible effective values, caller-owned duplicate
   diagnostics, and independent equal anonymous values;
@@ -205,7 +198,21 @@ Context/Fiber:
 Product-specific validation, filtering, sorting, schema, and observer behavior
 remain in product tests; the scope crate does not invent generic policy tests.
 
-## Native ABI and Loader
+## Profile composition
+
+`rsi-meta-profile` tests the ordered linked/file/include/launch program, strict
+JSON-compatible TOML, pure frozen Rhai environment, global identities, patch
+operation whitelist, source depth/count/byte bounds, one rebuild-wide Rhai
+operation budget, and redacted diagnostics.
+Control tests cross real Runtime Fibers for all-before-mutation preparation,
+Pending acceptance, healthy equality, restart-required publication,
+apply/rollback/degraded recovery, same-source degraded retry, exact required
+source watching, watcher fault/recovery, subscriptions, and bounded shutdown.
+Host tests additionally prove frozen catalog/marker ownership, launch-patch
+order, group isolation mapping, direct single Profile bootstrap, and startup
+rollback.
+
+## Native ABI and loader
 
 ABI unit tests compile the C11 header and C++17 inclusion seam, validate fixed
 layout and version direction, and cover null/zero combinations, arithmetic
@@ -214,10 +221,10 @@ slot, epoch, kind and rights, operation state, output token ownership, and panic
 containment. Every success and rejection path asserts one-shot release exactly
 once.
 
-Loader evidence crosses a real dynamic-library boundary on the executing host.
-The happy fixture performs preparation, dynamic provide, one complete
+Native-loader evidence crosses a real dynamic-library boundary on the executing host.
+The happy fixture performs preparation, Portable dynamic provide, one complete
 bidirectional callback, nested capability use, effect defer/commit, activation
-rollback, unload, and destruction. A v1-only artifact is rejected because no
+rollback, unload, and destruction. A v2-only artifact is rejected because no
 fallback symbol exists.
 
 Complete Loader evidence requires hostile fixtures for partial entry and create
@@ -237,7 +244,8 @@ Gate barriers cover both admission paused between poison observation and claim,
 and callback return paused before completion/timeout publication.
 
 Catalog tests retain existing real filesystem coverage: stable-copy hashing,
-same-digest contention, source mutation, symlinks and special files, cache and
+same-digest contention, one source mutation with correct rekeying, exact
+source-rekey budget exhaustion, symlinks and special files, cache and
 staging quotas, durability failure, path replacement, pinned Unix directory
 authority, Windows sharing behavior on Windows, bounded callback admission, and
 reserved destruction/finalization lanes.
@@ -264,23 +272,25 @@ For the complete foundation cutover, run from the repository root:
 
 ```sh
 cargo xtask rsi-meta conformance
-cargo xtask rsi-meta code-health
 cargo xtask verify-docs
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --lib --no-deps
 cargo test --locked --workspace --doc
 ```
 
-`cargo xtask rsi-meta conformance` owns the package, scope, ABI, Loader, and
+`cargo xtask rsi-meta conformance` owns the contract, core, scope, Profile,
+native ABI, native-loader, and
 standalone-fixture sequence so local and CI evidence cannot silently diverge.
 After its root package checks have materialized the shared locked dependencies,
 it loads each standalone manifest with locked offline metadata. It then runs
 offline lint, test, release build, and release probe operations as applicable.
-The echo fixture's unit test exercises its v2 table header; its Linux release
-artifact must export only `rsi_meta_plugin_entry_v2`. The ABI package tests own
+The echo fixture's unit test exercises its v3 table header; its Linux release
+artifact must export only `rsi_meta_plugin_entry_v3`. The ABI package tests own
 C11/C++17 compilation of the maintained public header. Repository CI
-additionally runs the non-rsi-meta remainder of the root workspace; the
+additionally runs independent rsi-ai, rsi-agent, repository-tool,
+documentation, dependency-audit, and Windows rsi-meta failure domains; the
 conformance command remains the only CI authority that enumerates rsi-meta
-packages and fixtures. CI runs that native suite on each claimed platform.
+packages and fixtures. CI runs the full native suite on Linux and macOS, while
+the Windows job exercises rsi-meta conformance only.
 
 The final implementation report lists every command actually exercised,
 including iteration/stress counts and target triple, and records native Windows

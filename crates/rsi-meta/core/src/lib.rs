@@ -18,9 +18,8 @@
 
 mod cleanup;
 mod error;
-mod events;
 mod ids;
-mod listener_registry;
+mod local_events;
 mod plugin;
 mod runtime;
 mod service;
@@ -30,23 +29,27 @@ pub use cleanup::{
     UnresolvedCleanupReport,
 };
 pub use error::{MetaError, Result};
-pub use events::{
-    DispatchMode, EventHandler, EventOptions, EventOutcome, EventReceipt, EventTarget, ListenerView,
-};
 pub use ids::{
-    CallId, ContractId, ContractVersion, EventKey, EventListenerId, FiberGeneration, FiberId,
-    IsolationId, ServiceKey, SupplyId,
+    CallId, ContractId, ContractVersion, EventListenerId, FiberGeneration, FiberId, IsolationId,
+    LocalIsolationId, LocalSupplyId, ServiceKey, SupplyId,
+};
+pub use local_events::{
+    Bail, BailEventHandler, Emit, EmitEventHandler, LocalEvent, LocalEventMode, LocalEventOptions,
+    LocalEventSnapshot, MAXIMUM_PARALLEL_EVENT_CALLBACKS, Parallel, ParallelEventHandler, Serial,
+    SerialEventHandler, Waterfall, WaterfallEventHandler,
 };
 pub use plugin::{
-    ActivationPlan, Cleanup, CleanupFuture, ConfigValue, FactoryIdentity, PluginFactory,
-    PreparedActivation, Requirement,
+    ActivationPlan, Cleanup, CleanupFuture, ConfigValue, FactoryIdentity, InstanceId,
+    LocalContract, LocalContractKey, PluginFactory, PluginId, PreparedActivation, Requirement,
+    ResolvedFactory, UpdateMode,
 };
+pub use rsi_meta_contract::LocalEventKey;
 pub use runtime::{
-    CallerEffect, Context, ContextExtension, DeadlineLimits, DetachedCapability, EffectHandle,
-    EffectTxn, EventHandle, ExecutionLimits, FiberHandle, FiberSnapshot, FiberState,
-    MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, PayloadLimits, PendingReason, PendingReport,
-    PreparedPlugin, ResourceUsageSnapshot, Runtime, RuntimeLimits, RuntimeResourceSnapshot,
-    RuntimeSnapshot, SupplyHandle, TopologyLimits,
+    CallerEffect, Context, DeadlineLimits, DetachedCapability, EffectHandle, EffectTxn,
+    ExecutionLimits, FiberHandle, FiberSnapshot, FiberState, LocalEventHandle, LocalSupplyHandle,
+    MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, MAXIMUM_WATERFALL_LISTENERS_PER_SLOT,
+    PayloadLimits, PendingReason, PendingReport, PreparedPlugin, ResourceUsageSnapshot, Runtime,
+    RuntimeLimits, RuntimeResourceSnapshot, RuntimeSnapshot, SupplyHandle, TopologyLimits,
 };
 pub use service::{
     CallerView, CancellationObserver, Capability, CapabilityCall, InvocationContext, Message,

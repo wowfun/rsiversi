@@ -91,7 +91,7 @@ impl ActivationDriver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FactoryIdentity, PreparedActivation};
+    use crate::PreparedActivation;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -131,10 +131,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for PendingFactory {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin("pending-driver-test", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::new(desired.clone()))
         }
@@ -159,6 +155,7 @@ mod tests {
         let plan = ActivationPlan::new(
             context,
             Arc::new(ConfigValue::Null),
+            BTreeMap::new(),
             BTreeMap::new(),
             Some(crate::plugin::PreparedState::new_for_test(CountState(
                 Arc::clone(&drops),

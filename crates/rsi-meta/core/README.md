@@ -14,8 +14,10 @@ than allocator RSS.
 All public async operations require a Tokio runtime with time enabled. A Fiber
 captures its executor at insertion so Runtime-owned transitions, rollback, and
 cleanup remain schedulable when the initiating waiter is dropped on another
-thread. Synchronous capability opening uses the captured executor and does not
-require an ambient Tokio context.
+thread. The embedding Tokio runtime must outlive `Runtime::shutdown`; a Tokio
+`Handle` does not retain an executor after its owner shuts down. Synchronous
+capability opening uses the captured executor and does not require an ambient
+Tokio context.
 
 `Runtime::snapshot` captures bounded registry membership under the Runtime
 lock, releases it, and then observes individual Fibers. It is an operational
@@ -24,17 +26,17 @@ deterministic quiescence boundary.
 
 ## Context
 
-A cloned `Context` retains its Runtime, owner generation, service-isolation
-map, direct-edge intercepts, call trace, and typed extensions. Builders consume
-the selected value and use copy-on-write storage, so cloned siblings remain
-independent. Identifiers, entries, intercept JSON shape, and retained encoding
-are validated before the new Context exists.
+A cloned `Context` retains its Runtime, owner generation, lane-specific
+isolation maps, and Portable call trace. Builders consume the selected value
+and use copy-on-write storage, so cloned siblings remain independent. Isolation
+identifiers, entry count, and retained key bytes are validated before the new
+Context exists. Product scope and settings use explicit wrappers or Local
+contracts above core; Context has no generic extension store or JSON intercept
+map.
 
-Typed extensions are safe-Rust values keyed by a marker type. They are inherited
-by derived Contexts, may be shadowed without mutating siblings, and are not
-serialized or passed through native ABI v2.
-
-`Context::apply` inserts one child Fiber. Application preparation is
+`Context::apply` accepts only a resolver-produced `ResolvedFactory` and inserts
+one child Fiber. Executable `PluginFactory` code does not report its own
+identity or update policy. Application preparation is
 Runtime-bound, fail-fast, and capacity-reserved. The factory's per-attempt
 `prepare` step borrows the Fiber's bounded retained desired configuration
 without a generation Context and returns one single-use `PreparedActivation`.
@@ -131,31 +133,34 @@ are revalidated after admission and before driver creation. Provider panic is
 call-local; retiring a provider closes new admission and waits for calls already
 admitted.
 
-Each `InvocationContext` distinguishes its own `call_id`, the immediate
+Each Portable `InvocationContext` distinguishes its own `call_id`, the immediate
 `parent_call_id`, and the activation seed `lineage_call_id` for the nested
-service/event chain. A first call from the activation Context has a distinct
+service chain. A first call from the activation Context has a distinct
 current ID and no parent. Provider Contexts propagate lineage and current-call
 facts into subsequent calls; the lineage therefore survives re-entry without
 ambient thread-local state.
 
-## Events
+## Typed Local events
 
-Registration returns an effect-owned disposer. Loading listeners are visible,
-and activation rollback removes them. Dispatch snapshots listeners, evaluates
-an optional `EventTarget` against immutable listener views outside locks on
-blocking workers bounded by dispatch admission, and only then admits callbacks.
-The absolute dispatch deadline includes selection; an over-deadline selector
-starts no later selector or callback and retains its dispatch ownership until
-the blocking worker returns. Explicitly global listeners bypass targeting;
-selection failure starts no callbacks. Disposing an ordinary listener removes
-future membership without invalidating a binding already held by one snapshot.
+Each `LocalEvent` marker fixes its safe-Rust value, error, and dispatch mode.
+`Emit`, `Parallel`, `Serial`, `Bail`, and `Waterfall` therefore cannot be changed
+at a call site. Registration is generation/effect-owned and returns an exact
+`LocalEventHandle`; loading rollback, once claim, explicit disposal, and Fiber
+retirement share its indexed removal transaction. Waterfall's nested
+continuation semantics have a per-slot configured listener ceiling in addition
+to the Runtime-wide listener ceiling; the configured value cannot exceed the
+hard stack-safety bound of 256 listeners.
 
-Emit, serial, waterfall, and parallel modes share bounded inputs, outputs,
-diagnostics, callback admission, and one dispatch deadline. Parallel dispatch
-admits lazily. Once claiming and every removal path share the same owner token.
-One private driver contains handler-future construction, polling, iterative
-outcome adoption, future and panic-payload destruction, then callback-lease
-closure in that order.
+Dispatch snapshots the exact `(TypeId, LocalIsolationId)` slot and releases the
+registry lock before direct callbacks. There are no string event keys, JSON
+payloads, selectors, global bypass, Runtime callback tasks, common deadline, or
+call identity. Parallel returns a caller-owned all-settled Future; the other
+modes preserve their declared ordering and typed break behavior. Ordinary
+snapshot bindings remain valid across concurrent disposal, while once is an
+atomic global claim made as a callback enters Parallel's bounded polling
+window. Listener membership is bounded, and listener destruction occurs
+outside Runtime locks; a destructor panic is retained as cleanup evidence and
+terminalizes the Runtime.
 
 ## Persistent operations
 

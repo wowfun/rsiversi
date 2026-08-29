@@ -1,17 +1,17 @@
-use crate::listener_registry::{ListenerBinding, ListenerRegistry};
+use crate::local_events::{LocalEventBinding, LocalEventSnapshot};
 use crate::service::{AdmissionLease, BufferedMessageAdmission, ProviderBinding};
 use crate::{
     ActivationPlan, CallId, Capability, CapabilityCall, Cleanup, CleanupPhase, CleanupReport,
-    ConfigValue, ContractId, ContractVersion, DispatchMode, EventHandler, EventKey,
-    EventListenerId, EventOptions, EventOutcome, EventReceipt, EventTarget, FactoryIdentity,
-    FiberGeneration, FiberId, InvocationContext, IsolationId, ListenerView, MetaError,
-    PluginFactory, Result, ServiceEndpoint, ServiceKey, ShutdownOutcome, SupplyId,
-    UnresolvedCleanup, UnresolvedCleanupReport,
+    ConfigValue, ContractId, ContractVersion, EventListenerId, FactoryIdentity, FiberGeneration,
+    FiberId, InvocationContext, IsolationId, LocalContract, LocalContractKey, LocalEvent,
+    LocalEventMode, LocalEventOptions, LocalIsolationId, LocalSupplyId, MetaError, PluginFactory,
+    ResolvedFactory, Result, ServiceEndpoint, ServiceKey, ShutdownOutcome, SupplyId,
+    UnresolvedCleanup, UnresolvedCleanupReport, UpdateMode,
 };
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use futures_util::stream::StreamExt as _;
-use serde_json::Value;
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -27,13 +27,13 @@ mod capabilities;
 mod configuration;
 mod context_api;
 mod context_scope;
-mod dispatch;
+mod diagnostics;
 mod effects;
-mod event_callback_driver;
-mod extensions;
 mod generation_activation;
 mod lifecycle;
 mod limits;
+mod local_event_registry;
+mod local_services;
 mod ownership;
 mod panic_containment;
 mod pending_report;
@@ -47,19 +47,21 @@ pub use capabilities::DetachedCapability;
 use capabilities::GenerationCapabilitySet;
 pub(crate) use capabilities::{CapabilityEntry, CapabilityUse};
 use context_api::binding_identities;
-pub(crate) use context_scope::InterceptLayers;
 pub(crate) use effects::CallbackLease;
 pub use effects::{CallerEffect, EffectHandle, EffectTxn};
 use effects::{EffectRecord, EffectRetention, EffectScope, GenerationBudget, OwnedEffect};
-pub use extensions::ContextExtension;
-pub(crate) use extensions::ContextExtensions;
 pub use limits::{
-    DeadlineLimits, ExecutionLimits, MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, PayloadLimits,
-    ResourceUsageSnapshot, RuntimeLimits, RuntimeResourceSnapshot, TopologyLimits,
+    DeadlineLimits, ExecutionLimits, MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE,
+    MAXIMUM_WATERFALL_LISTENERS_PER_SLOT, PayloadLimits, ResourceUsageSnapshot, RuntimeLimits,
+    RuntimeResourceSnapshot, TopologyLimits,
 };
 pub(crate) use limits::{ResourceLedger, ResourceReservation};
 use limits::{RuntimeResources, ValidatedRuntimeLimits};
-pub use ownership::EventHandle;
+pub use local_event_registry::LocalEventHandle;
+use local_event_registry::{LocalEventListeners, LocalEventSlot, LocalListenerLocation};
+pub(crate) use local_services::LocalBinding;
+pub use local_services::LocalSupplyHandle;
+use local_services::{LocalSlot, LocalSupplyEntry};
 pub(crate) use ownership::EventOwnership;
 pub(crate) use panic_containment::{contain_panic_result, drop_catching_unwind};
 use pending_report::PendingReportBuilder;
@@ -107,7 +109,6 @@ struct RuntimeInner {
     reconciliation_admission: Arc<Semaphore>,
     service_call_admission: Arc<Semaphore>,
     message_admission: Arc<BufferedMessageAdmission>,
-    event_callback_admission: Arc<Semaphore>,
     next_fiber: AtomicU64,
     next_generation: AtomicU64,
     next_isolation: AtomicU64,
@@ -116,6 +117,7 @@ struct RuntimeInner {
     next_call: AtomicU64,
     next_effect: AtomicU64,
     next_supply: AtomicU64,
+    next_local_supply: AtomicU64,
     next_attempt: AtomicU64,
 }
 
@@ -124,8 +126,10 @@ struct RuntimeState {
     fibers: BTreeMap<FiberId, Arc<Fiber>>,
     dependents: HashMap<ServiceSlot, BTreeSet<FiberId>>,
     providers: HashMap<ServiceSlot, SupplyEntry>,
-    listeners: HashMap<EventKey, ListenerRegistry>,
-    listener_events: HashMap<EventListenerId, EventKey>,
+    local_dependents: HashMap<LocalSlot, BTreeSet<FiberId>>,
+    local_providers: HashMap<LocalSlot, LocalSupplyEntry>,
+    local_listeners: HashMap<LocalEventSlot, LocalEventListeners>,
+    local_listener_events: HashMap<EventListenerId, LocalListenerLocation>,
     reconciliations: ReconciliationFrontier,
     reconciliation_worker_running: bool,
     terminal: Option<String>,
@@ -166,6 +170,7 @@ struct Fiber {
 
 struct FiberData {
     identity: FactoryIdentity,
+    update_mode: UpdateMode,
     factory: Option<RetainedFactory>,
     desired: Option<DesiredConfig>,
     attempt: Option<PreparedAttempt>,
@@ -197,7 +202,11 @@ impl RetainedConfig {
     }
 }
 
-type BindingIdentities = BTreeMap<ServiceKey, SupplyId>;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BindingIdentities {
+    portable: BTreeMap<ServiceKey, SupplyId>,
+    local: BTreeMap<LocalSlot, LocalSupplyId>,
+}
 type ActivationAttempt = (u64, BindingIdentities);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,18 +245,21 @@ impl From<&PreparedAttempt> for AttemptStamp {
 struct ResolvedBindings {
     attempt: AttemptStamp,
     bindings: BTreeMap<ServiceKey, Arc<ProviderBinding>>,
+    local_bindings: BTreeMap<TypeId, Arc<LocalBinding>>,
 }
 
 struct GenerationData {
     generation: FiberGeneration,
     attempt_id: u64,
     bindings: BTreeMap<ServiceKey, Arc<ProviderBinding>>,
+    local_bindings: BTreeMap<TypeId, Arc<LocalBinding>>,
     activation_cancellation: CancellationToken,
     effects: BTreeMap<u64, Arc<EffectRecord>>,
     effect_budget: Arc<GenerationBudget>,
     effect_transaction_budget: Arc<GenerationBudget>,
     services: BTreeMap<ServiceSlot, StagedService>,
-    listeners: BTreeMap<EventListenerId, ResourceReservation>,
+    local_services: BTreeMap<LocalSlot, StagedLocalService>,
+    local_listener_ids: BTreeMap<EventListenerId, ResourceReservation>,
     children: Vec<Arc<Fiber>>,
     retired_owned_report: CleanupReport,
     cleanup: Arc<CleanupRun>,
@@ -262,10 +274,16 @@ struct StagedService {
     _reservation: ResourceReservation,
 }
 
+struct StagedLocalService {
+    binding: Arc<LocalBinding>,
+    _reservation: ResourceReservation,
+}
+
 struct ClaimedCleanup {
     generation: FiberGeneration,
     services: Vec<(ServiceSlot, Arc<ProviderBinding>)>,
-    listener_ids: BTreeSet<EventListenerId>,
+    local_services: Vec<(LocalSlot, Arc<LocalBinding>)>,
+    local_listener_ids: BTreeSet<EventListenerId>,
     capabilities: Arc<GenerationCapabilitySet>,
     lease: Arc<AdmissionLease>,
     children: Vec<Arc<Fiber>>,
@@ -345,8 +363,8 @@ struct CallTrace {
 #[derive(Clone, Debug)]
 pub(crate) struct ContextScope {
     isolation: Arc<BTreeMap<ServiceKey, IsolationId>>,
-    intercepts: Arc<BTreeMap<ServiceKey, Arc<InterceptLayers>>>,
-    extensions: Arc<ContextExtensions>,
+    local_isolation: Arc<BTreeMap<TypeId, LocalIsolationId>>,
+    event_isolation: Arc<BTreeMap<TypeId, LocalIsolationId>>,
     entries: usize,
     encoded_bytes: usize,
     trace: Option<CallTrace>,
@@ -359,8 +377,8 @@ pub struct Context {
     owner: Option<Owner>,
     setup_effect: Option<EffectScope>,
     isolation: Arc<BTreeMap<ServiceKey, IsolationId>>,
-    intercepts: Arc<BTreeMap<ServiceKey, Arc<InterceptLayers>>>,
-    extensions: Arc<ContextExtensions>,
+    local_isolation: Arc<BTreeMap<TypeId, LocalIsolationId>>,
+    event_isolation: Arc<BTreeMap<TypeId, LocalIsolationId>>,
     entries: usize,
     encoded_bytes: usize,
     trace: Option<CallTrace>,
@@ -417,9 +435,6 @@ impl Runtime {
             limits.topology.maximum_queued_capability_references,
             Arc::clone(&resources.pending_message_sends),
         ));
-        let event_callback_admission = Arc::new(Semaphore::new(
-            limits.execution.maximum_concurrent_event_callbacks,
-        ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 limits,
@@ -429,8 +444,10 @@ impl Runtime {
                     fibers: BTreeMap::new(),
                     dependents: HashMap::new(),
                     providers: HashMap::new(),
-                    listeners: HashMap::new(),
-                    listener_events: HashMap::new(),
+                    local_dependents: HashMap::new(),
+                    local_providers: HashMap::new(),
+                    local_listeners: HashMap::new(),
+                    local_listener_events: HashMap::new(),
                     reconciliations: ReconciliationFrontier::default(),
                     reconciliation_worker_running: false,
                     terminal: None,
@@ -446,7 +463,6 @@ impl Runtime {
                 reconciliation_admission,
                 service_call_admission,
                 message_admission,
-                event_callback_admission,
                 next_fiber: AtomicU64::new(0),
                 next_generation: AtomicU64::new(0),
                 next_isolation: AtomicU64::new(0),
@@ -455,6 +471,7 @@ impl Runtime {
                 next_call: AtomicU64::new(0),
                 next_effect: AtomicU64::new(0),
                 next_supply: AtomicU64::new(0),
+                next_local_supply: AtomicU64::new(0),
                 next_attempt: AtomicU64::new(0),
             }),
         })
@@ -467,8 +484,8 @@ impl Runtime {
             owner: None,
             setup_effect: None,
             isolation: Arc::new(BTreeMap::new()),
-            intercepts: Arc::new(BTreeMap::new()),
-            extensions: Arc::new(ContextExtensions::default()),
+            local_isolation: Arc::new(BTreeMap::new()),
+            event_isolation: Arc::new(BTreeMap::new()),
             entries: 0,
             encoded_bytes: 0,
             trace: None,
@@ -512,7 +529,7 @@ impl Runtime {
     }
 
     pub(super) fn mark_terminal_owned(&self, reason: impl Into<String>) {
-        let reason = dispatch::bound_owned_diagnostic(
+        let reason = diagnostics::bound_owned(
             reason.into(),
             self.inner.limits.payloads.maximum_diagnostic_bytes,
         );
@@ -551,6 +568,7 @@ impl Runtime {
             runtime,
             admission,
             identity,
+            update_mode,
             factory,
             desired,
             attempt,
@@ -594,8 +612,8 @@ impl Runtime {
         }
         let base_context = ContextScope {
             isolation: Arc::clone(&parent.isolation),
-            intercepts: Arc::clone(&parent.intercepts),
-            extensions: Arc::clone(&parent.extensions),
+            local_isolation: Arc::clone(&parent.local_isolation),
+            event_isolation: Arc::clone(&parent.event_isolation),
             entries: parent.entries,
             encoded_bytes: parent.encoded_bytes,
             trace: parent.trace.clone(),
@@ -604,12 +622,17 @@ impl Runtime {
             .required_services()
             .map(|service| base_context.service_slot(service))
             .collect::<Vec<_>>();
+        let required_local_slots = attempt
+            .required_local_services()
+            .map(|requirement| base_context.local_slot(requirement.contract))
+            .collect::<Vec<_>>();
 
         let id = self.next_fiber_id()?;
         let initial = FiberSnapshot {
             id,
             generation: FiberGeneration(0),
             factory: identity.clone(),
+            update_mode,
             state: FiberState::Pending(PendingReport::default()),
         };
         let (watch, _) = watch::channel(initial);
@@ -635,6 +658,7 @@ impl Runtime {
             cleanup_phase: Mutex::new(CleanupPhase::Scheduled),
             data: Mutex::new(FiberData {
                 identity,
+                update_mode,
                 factory: Some(factory),
                 desired: Some(desired),
                 attempt: Some(attempt),
@@ -688,6 +712,9 @@ impl Runtime {
             }
             for slot in &required_slots {
                 state.dependents.entry(slot.clone()).or_default().insert(id);
+            }
+            for slot in &required_local_slots {
+                state.local_dependents.entry(*slot).or_default().insert(id);
             }
             state.fibers.insert(id, Arc::clone(&fiber));
             state.advance_revision();

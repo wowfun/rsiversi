@@ -23,26 +23,243 @@ impl Context {
         self.owner.map(|owner| (owner.fiber, owner.generation))
     }
 
-    /// Consumes this value and associates one immutable safe-Rust extension.
+    /// Returns the currently visible safe-Rust Local object, if any.
     ///
-    /// A new marker type consumes one Context entry. Replacing the value for
-    /// an existing marker does not consume another entry. Cloned sibling
-    /// Contexts continue to observe their original values.
-    pub fn with_extension<K: ContextExtension>(mut self, value: K::Value) -> Result<Self> {
-        let _runtime_admission = self.runtime.begin_admission(false)?;
-        if !self.extensions.contains::<K>() {
-            self.entries = self.next_context_entry_count()?;
+    /// This point-in-time lookup does not create a managed dependency edge.
+    /// An escaped `Arc` continues to name that ordinary Rust value after its
+    /// supply is withdrawn.
+    pub fn lookup_local<C: LocalContract>(&self) -> Option<Arc<C::Service>> {
+        self.runtime.lookup_local::<C>(self)
+    }
+
+    /// Supplies one generation-owned safe-Rust Local object directly.
+    pub fn provide_local<C: LocalContract>(
+        &self,
+        service: Arc<C::Service>,
+    ) -> Result<LocalSupplyHandle> {
+        if C::KEY.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "Local contract identifier exceeds the configured byte limit".to_owned(),
+            ));
         }
-        Arc::make_mut(&mut self.extensions).insert::<K>(value);
+        self.runtime.provide_local::<C>(self, service)
+    }
+
+    /// Consumes this value and selects an explicit isolation for one Local contract.
+    pub fn isolate_local<C: LocalContract>(self, isolation: LocalIsolationId) -> Result<Self> {
+        if C::KEY.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "Local contract identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        self.isolate_local_type(TypeId::of::<C>(), C::KEY, isolation)
+    }
+
+    /// Selects an explicit isolation for one resolver-validated Local type.
+    ///
+    /// Generic Hosts use this after mapping `catalog_key` to its frozen nominal
+    /// [`TypeId`]. The Runtime derives accounting from that exact key. Product plugins should prefer
+    /// [`Self::isolate_local`].
+    pub fn isolate_local_type(
+        mut self,
+        contract: TypeId,
+        catalog_key: &str,
+        isolation: LocalIsolationId,
+    ) -> Result<Self> {
+        let _runtime_admission = self.runtime.begin_admission(false)?;
+        if catalog_key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "Local contract identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        if !self.local_isolation.contains_key(&contract) {
+            self.entries = self.next_context_entry_count()?;
+            self.encoded_bytes = self.next_context_bytes(
+                catalog_key
+                    .len()
+                    .checked_add(std::mem::size_of::<LocalIsolationId>())
+                    .ok_or(MetaError::PayloadTooLarge {
+                        maximum: self.runtime.inner.limits.payloads.maximum_context_bytes,
+                    })?,
+            )?;
+        }
+        Arc::make_mut(&mut self.local_isolation).insert(contract, isolation);
         Ok(self)
     }
 
-    /// Returns the immutable value associated with one extension marker.
-    ///
-    /// Reading an absent marker returns `None` without extending this Context
-    /// or consuming Context-entry capacity.
-    pub fn extension<K: ContextExtension>(&self) -> Option<Arc<K::Value>> {
-        self.extensions.get::<K>()
+    /// Consumes this value and selects a newly allocated Local isolation identity.
+    pub fn isolate_local_fresh<C: LocalContract>(self) -> Result<(Self, LocalIsolationId)> {
+        let isolation = self.runtime.next_local_isolation_id()?;
+        Ok((self.isolate_local::<C>(isolation)?, isolation))
+    }
+
+    /// Allocates and selects an isolation for one resolver-validated Local type.
+    pub fn isolate_local_type_fresh(
+        self,
+        contract: TypeId,
+        catalog_key: &str,
+    ) -> Result<(Self, LocalIsolationId)> {
+        let isolation = self.runtime.next_local_isolation_id()?;
+        Ok((
+            self.isolate_local_type(contract, catalog_key, isolation)?,
+            isolation,
+        ))
+    }
+
+    /// Consumes this value and selects an explicit isolation for one typed Local event.
+    pub fn isolate_event<E: LocalEvent>(self, isolation: LocalIsolationId) -> Result<Self> {
+        if E::KEY.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "Local event identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        self.isolate_event_type(TypeId::of::<E>(), E::KEY, isolation)
+    }
+
+    /// Selects an explicit isolation for one resolver-validated Local event type.
+    /// The Runtime derives accounting from the exact resolver-owned `catalog_key`.
+    pub fn isolate_event_type(
+        mut self,
+        event: TypeId,
+        catalog_key: &str,
+        isolation: LocalIsolationId,
+    ) -> Result<Self> {
+        let _runtime_admission = self.runtime.begin_admission(false)?;
+        if catalog_key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "Local event identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        if !self.event_isolation.contains_key(&event) {
+            self.entries = self.next_context_entry_count()?;
+            self.encoded_bytes = self.next_context_bytes(
+                catalog_key
+                    .len()
+                    .checked_add(std::mem::size_of::<LocalIsolationId>())
+                    .ok_or(MetaError::PayloadTooLarge {
+                        maximum: self.runtime.inner.limits.payloads.maximum_context_bytes,
+                    })?,
+            )?;
+        }
+        Arc::make_mut(&mut self.event_isolation).insert(event, isolation);
+        Ok(self)
+    }
+
+    /// Consumes this value and selects a newly allocated typed-event isolation.
+    pub fn isolate_event_fresh<E: LocalEvent>(self) -> Result<(Self, LocalIsolationId)> {
+        let isolation = self.runtime.next_local_isolation_id()?;
+        Ok((self.isolate_event::<E>(isolation)?, isolation))
+    }
+
+    /// Allocates and selects an isolation for one resolver-validated event type.
+    pub fn isolate_event_type_fresh(
+        self,
+        event: TypeId,
+        catalog_key: &str,
+    ) -> Result<(Self, LocalIsolationId)> {
+        let isolation = self.runtime.next_local_isolation_id()?;
+        Ok((
+            self.isolate_event_type(event, catalog_key, isolation)?,
+            isolation,
+        ))
+    }
+
+    /// Registers one effect-owned synchronous [`crate::Emit`] listener.
+    pub fn on_emit<E, H>(
+        &self,
+        handler: Arc<H>,
+        options: LocalEventOptions,
+    ) -> Result<LocalEventHandle>
+    where
+        E: LocalEvent<Mode = crate::Emit>,
+        H: crate::EmitEventHandler<E>,
+    {
+        self.validate_local_event_key::<E>()?;
+        let handler: Arc<dyn crate::EmitEventHandler<E>> = handler;
+        self.runtime
+            .add_local_listener::<E, _>(self, handler, options)
+    }
+
+    /// Registers one effect-owned asynchronous [`crate::Parallel`] listener.
+    pub fn on_parallel<E, H>(
+        &self,
+        handler: Arc<H>,
+        options: LocalEventOptions,
+    ) -> Result<LocalEventHandle>
+    where
+        E: LocalEvent<Mode = crate::Parallel>,
+        H: crate::ParallelEventHandler<E>,
+    {
+        self.validate_local_event_key::<E>()?;
+        let handler: Arc<dyn crate::ParallelEventHandler<E>> = handler;
+        self.runtime
+            .add_local_listener::<E, _>(self, handler, options)
+    }
+
+    /// Registers one effect-owned asynchronous [`crate::Serial`] listener.
+    pub fn on_serial<E, H>(
+        &self,
+        handler: Arc<H>,
+        options: LocalEventOptions,
+    ) -> Result<LocalEventHandle>
+    where
+        E: LocalEvent<Mode = crate::Serial>,
+        H: crate::SerialEventHandler<E>,
+    {
+        self.validate_local_event_key::<E>()?;
+        let handler: Arc<dyn crate::SerialEventHandler<E>> = handler;
+        self.runtime
+            .add_local_listener::<E, _>(self, handler, options)
+    }
+
+    /// Registers one effect-owned synchronous [`crate::Bail`] listener.
+    pub fn on_bail<E, H>(
+        &self,
+        handler: Arc<H>,
+        options: LocalEventOptions,
+    ) -> Result<LocalEventHandle>
+    where
+        E: LocalEvent<Mode = crate::Bail>,
+        H: crate::BailEventHandler<E>,
+    {
+        self.validate_local_event_key::<E>()?;
+        let handler: Arc<dyn crate::BailEventHandler<E>> = handler;
+        self.runtime
+            .add_local_listener::<E, _>(self, handler, options)
+    }
+
+    /// Registers one effect-owned synchronous [`crate::Waterfall`] middleware.
+    pub fn on_waterfall<E, H>(
+        &self,
+        handler: Arc<H>,
+        options: LocalEventOptions,
+    ) -> Result<LocalEventHandle>
+    where
+        E: LocalEvent<Mode = crate::Waterfall>,
+        H: crate::WaterfallEventHandler<E>,
+    {
+        self.validate_local_event_key::<E>()?;
+        let handler: Arc<dyn crate::WaterfallEventHandler<E>> = handler;
+        self.runtime
+            .add_local_listener::<E, _>(self, handler, options)
+    }
+
+    /// Dispatches one typed Local event using the mode fixed by its marker.
+    pub fn dispatch_local<E: LocalEvent>(
+        &self,
+        value: E::Value,
+    ) -> Result<<E::Mode as LocalEventMode<E>>::Dispatch> {
+        let snapshot = self.runtime.snapshot_local_event::<E>(self)?;
+        Ok(E::Mode::dispatch(snapshot, value))
+    }
+
+    fn validate_local_event_key<E: LocalEvent>(&self) -> Result<()> {
+        if E::KEY.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "Local event identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Consumes this value and selects an explicit isolation for one service.
@@ -83,84 +300,10 @@ impl Context {
         ))
     }
 
-    /// Consumes this value and appends one bounded direct-edge overlay layer.
-    ///
-    /// Only the selected layer list is copied when a cloned sibling shares it;
-    /// the accumulated encoded length is maintained incrementally.
-    pub fn intercept(mut self, service: impl AsRef<str>, layer: Value) -> Result<Self> {
-        let layer = configuration::OwnedJsonValue::new(layer);
-        let _runtime_admission = self.runtime.begin_admission(false)?;
-        let service = service.as_ref();
-        self.validate_context_key(service)?;
-        let service = ServiceKey::new(service);
-        let payloads = &self.runtime.inner.limits.payloads;
-        let (layer, layer_bytes) = configuration::validate_owned_json_payload(
-            layer,
-            payloads,
-            payloads.maximum_message_bytes,
-        )?;
-        let existing = self.intercepts.get(&service);
-        let is_new_entry = existing.is_none();
-        let previous_service_bytes = existing.map_or(2, |layers| layers.encoded_bytes);
-        let separator_bytes = usize::from(existing.is_some_and(|layers| !layers.values.is_empty()));
-        let encoded_bytes = previous_service_bytes
-            .checked_add(separator_bytes)
-            .and_then(|size| size.checked_add(layer_bytes))
-            .ok_or(MetaError::PayloadTooLarge {
-                maximum: payloads.maximum_message_bytes,
-            })?;
-        if encoded_bytes > payloads.maximum_message_bytes {
-            return Err(MetaError::PayloadTooLarge {
-                maximum: payloads.maximum_message_bytes,
-            });
-        }
-        let key_bytes = if is_new_entry {
-            configuration::encoded_json_size_bounded(
-                service.as_str(),
-                payloads.maximum_context_bytes,
-            )
-            .map_err(|_| MetaError::PayloadTooLarge {
-                maximum: payloads.maximum_context_bytes,
-            })?
-        } else {
-            0
-        };
-        let added_bytes = key_bytes
-            .checked_add(if is_new_entry { 2 } else { 0 })
-            .and_then(|size| size.checked_add(separator_bytes))
-            .and_then(|size| size.checked_add(layer_bytes))
-            .ok_or(MetaError::PayloadTooLarge {
-                maximum: payloads.maximum_context_bytes,
-            })?;
-        let context_bytes = self.next_context_bytes(added_bytes)?;
-        if is_new_entry {
-            self.entries = self.next_context_entry_count()?;
-        }
-        let intercepts = Arc::make_mut(&mut self.intercepts);
-        let layers = Arc::make_mut(
-            intercepts
-                .entry(service)
-                .or_insert_with(|| Arc::new(InterceptLayers::empty())),
-        );
-        layers.values.push(layer.into_inner());
-        layers.encoded_bytes = encoded_bytes;
-        self.encoded_bytes = context_bytes;
-        Ok(self)
-    }
-
     fn validate_context_key(&self, service: &str) -> Result<()> {
         if service.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
             return Err(MetaError::InvalidInput(
                 "context service identifier exceeds the configured byte limit".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_event_key(&self, event: &str) -> Result<()> {
-        if event.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
-            return Err(MetaError::InvalidInput(
-                "event identifier exceeds the configured byte limit".to_owned(),
             ));
         }
         Ok(())
@@ -200,33 +343,32 @@ impl Context {
     /// caller cancellation cannot stop blocking work or Runtime-owned rollback.
     pub fn apply(
         &self,
-        factory: Arc<dyn PluginFactory>,
+        factory: ResolvedFactory,
         config: ConfigValue,
     ) -> impl std::future::Future<Output = Result<FiberHandle>> + '_ {
-        let factory = RetainedFactory::new(factory);
         let config = configuration::OwnedJsonValue::new(config);
         async move {
-            let deadline = tokio::time::Instant::now()
-                .checked_add(self.runtime.inner.limits.deadlines.transition)
-                .expect("validated transition deadline fits Tokio Instant");
             let maximum_diagnostic_bytes =
                 self.runtime.inner.limits.payloads.maximum_diagnostic_bytes;
             let runtime = self.runtime.clone();
             let preparation = runtime.begin_plugin_preparation()?;
+            let (identity, update_mode, implementation) = factory.into_parts();
+            let factory = RetainedFactory::new(implementation);
+            let deadline = tokio::time::Instant::now()
+                .checked_add(self.runtime.inner.limits.deadlines.transition)
+                .expect("validated transition deadline fits Tokio Instant");
             let preparation = self.runtime.yield_reconciliation_slot(async move {
                 tokio::task::spawn_blocking(move || {
-                    runtime.prepare_admitted(factory, config, preparation)
+                    runtime.prepare_admitted(identity, update_mode, factory, config, preparation)
                 })
                 .await
                 .map_err(|error| {
-                    MetaError::Activation(super::dispatch::bound_formatted_diagnostic(
+                    MetaError::Activation(super::diagnostics::bound_formatted(
                         format_args!("plugin preparation task failed: {error}"),
                         maximum_diagnostic_bytes,
                     ))
                 })?
-                .map_err(|error| {
-                    super::dispatch::bound_error_diagnostic(error, maximum_diagnostic_bytes)
-                })
+                .map_err(|error| super::diagnostics::bound_error(error, maximum_diagnostic_bytes))
             });
             let prepared = tokio::time::timeout_at(deadline, preparation)
                 .await
@@ -367,67 +509,6 @@ impl Context {
         }
         self.runtime.service(self, &ServiceKey::new(key))
     }
-
-    /// Immediately registers one effect-owned event listener.
-    ///
-    /// Loading listeners are visible because their exact removal effect is
-    /// already installed. The returned handle can dispose only this listener.
-    pub fn on(
-        &self,
-        event: impl AsRef<str>,
-        handler: Arc<dyn EventHandler>,
-        options: EventOptions,
-    ) -> Result<EventHandle> {
-        let event = event.as_ref();
-        self.validate_event_key(event)?;
-        let event = EventKey::new(event);
-        self.runtime.add_listener(self, event, handler, options)
-    }
-
-    /// Dispatches a bounded event to the complete listener snapshot.
-    ///
-    /// No target is evaluated; every snapshotted listener remains eligible.
-    /// This future must be polled inside a Tokio runtime.
-    pub fn dispatch<'a>(
-        &'a self,
-        event: impl AsRef<str> + 'a,
-        mode: DispatchMode,
-        value: Value,
-    ) -> impl std::future::Future<Output = Result<EventReceipt>> + 'a {
-        let value = configuration::OwnedJsonValue::new(value);
-        async move {
-            let event = event.as_ref();
-            self.validate_event_key(event)?;
-            let event = EventKey::new(event);
-            self.runtime
-                .dispatch_event(self, &event, mode, value, None)
-                .await
-        }
-    }
-
-    /// Dispatches a bounded event through one generic listener target.
-    ///
-    /// The complete listener snapshot is selected before any callback
-    /// admission or once claim. Selection runs on dispatch-bounded blocking
-    /// work and is covered by the event deadline. Explicitly global listeners
-    /// bypass `target`. This future must be polled inside a Tokio runtime.
-    pub fn dispatch_targeted<'a>(
-        &'a self,
-        event: impl AsRef<str> + 'a,
-        mode: DispatchMode,
-        value: Value,
-        target: Arc<dyn EventTarget>,
-    ) -> impl std::future::Future<Output = Result<EventReceipt>> + 'a {
-        let value = configuration::OwnedJsonValue::new(value);
-        async move {
-            let event = event.as_ref();
-            self.validate_event_key(event)?;
-            let event = EventKey::new(event);
-            self.runtime
-                .dispatch_event(self, &event, mode, value, Some(target))
-                .await
-        }
-    }
 }
 
 impl FiberHandle {
@@ -553,13 +634,13 @@ impl FiberHandle {
                 })
                 .await
                 .map_err(|error| {
-                    MetaError::InvalidConfig(super::dispatch::bound_formatted_diagnostic(
+                    MetaError::InvalidConfig(super::diagnostics::bound_formatted(
                         format_args!("validation task failed: {error}"),
                         maximum_diagnostic_bytes,
                     ))
                 })?
                 .map_err(|error| {
-                    super::dispatch::bound_error_diagnostic(error, maximum_diagnostic_bytes)
+                    super::diagnostics::bound_error(error, maximum_diagnostic_bytes)
                 })?;
                 let (retired_desired, retired_attempts) = {
                     let mut state = runtime.inner.state.lock().expect("runtime state poisoned");
@@ -611,14 +692,12 @@ impl FiberHandle {
                 .await
                 .map_err(|_| MetaError::Timeout("plugin transition"))?
                 .map_err(|error| {
-                    MetaError::Activation(super::dispatch::bound_formatted_diagnostic(
+                    MetaError::Activation(super::diagnostics::bound_formatted(
                         format_args!("reconfiguration task failed: {error}"),
                         maximum_diagnostic_bytes,
                     ))
                 })?
-                .map_err(|error| {
-                    super::dispatch::bound_error_diagnostic(error, maximum_diagnostic_bytes)
-                })
+                .map_err(|error| super::diagnostics::bound_error(error, maximum_diagnostic_bytes))
         }
     }
 
@@ -654,8 +733,8 @@ impl Fiber {
             }),
             setup_effect: None,
             isolation: Arc::clone(&self.base_context.isolation),
-            intercepts: Arc::clone(&self.base_context.intercepts),
-            extensions: Arc::clone(&self.base_context.extensions),
+            local_isolation: Arc::clone(&self.base_context.local_isolation),
+            event_isolation: Arc::clone(&self.base_context.event_isolation),
             entries: self.base_context.entries,
             encoded_bytes: self.base_context.encoded_bytes,
             trace: self.base_context.trace.clone(),
@@ -683,6 +762,7 @@ impl FiberData {
             id,
             generation: self.generation,
             factory: self.identity.clone(),
+            update_mode: self.update_mode,
             state: self.state.clone(),
         }
     }
@@ -690,9 +770,17 @@ impl FiberData {
 
 pub(super) fn binding_identities(
     bindings: &BTreeMap<ServiceKey, Arc<ProviderBinding>>,
-) -> BTreeMap<ServiceKey, SupplyId> {
-    bindings
-        .iter()
-        .map(|(key, binding)| (key.clone(), binding.supply))
-        .collect()
+    local_bindings: &BTreeMap<TypeId, Arc<LocalBinding>>,
+    fiber: &Fiber,
+) -> BindingIdentities {
+    BindingIdentities {
+        portable: bindings
+            .iter()
+            .map(|(key, binding)| (key.clone(), binding.supply))
+            .collect(),
+        local: local_bindings
+            .iter()
+            .map(|(contract, binding)| (fiber.base_context.local_slot(*contract), binding.supply))
+            .collect(),
+    }
 }

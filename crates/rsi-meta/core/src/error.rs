@@ -1,4 +1,4 @@
-use crate::{FiberGeneration, FiberId, ServiceKey};
+use crate::{FiberGeneration, FiberId, LocalContractKey, ServiceKey};
 
 /// Result type returned by the `rsi-meta` foundation.
 pub type Result<T> = std::result::Result<T, MetaError>;
@@ -50,6 +50,18 @@ pub enum MetaError {
         /// Conflicting service key.
         service: ServiceKey,
     },
+    /// No active provider is available for one nominal Rust Local contract.
+    #[error("Local contract {contract} is not bound")]
+    LocalUnavailable {
+        /// Stable catalog name of the unavailable Local contract.
+        contract: LocalContractKey,
+    },
+    /// Another provider already occupies the same Local contract and isolation slot.
+    #[error("Local contract slot already has a provider: {contract}")]
+    DuplicateLocalProvider {
+        /// Conflicting stable Local contract catalog name.
+        contract: LocalContractKey,
+    },
     /// An encoded Message, configuration, or value exceeds its owning byte bound.
     #[error("payload exceeds the configured {maximum}-byte limit")]
     PayloadTooLarge {
@@ -98,9 +110,6 @@ pub enum MetaError {
     /// A service endpoint unwound instead of returning a bounded error.
     #[error("service endpoint panicked")]
     ServiceEndpointPanicked,
-    /// Event dispatch or one of its listeners failed.
-    #[error("event dispatch failed: {0}")]
-    Event(String),
     /// A named bounded operation exceeded its configured deadline.
     #[error("operation timed out: {0}")]
     Timeout(&'static str),

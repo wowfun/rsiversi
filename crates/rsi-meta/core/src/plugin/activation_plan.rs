@@ -1,5 +1,7 @@
 use super::{Cleanup, ConfigValue, PreparedState};
-use crate::{Capability, Context, MetaError, Result, ServiceKey};
+use crate::runtime::LocalBinding;
+use crate::{Capability, Context, LocalContract, MetaError, Result, ServiceKey};
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -10,6 +12,7 @@ pub struct ActivationPlan {
     context: Context,
     config: Arc<ConfigValue>,
     inject: BTreeMap<ServiceKey, Capability>,
+    local_inject: BTreeMap<TypeId, Arc<LocalBinding>>,
     state: Option<PreparedState>,
 }
 
@@ -20,6 +23,10 @@ impl fmt::Debug for ActivationPlan {
             .field("owner", &self.context.owner())
             .field("lineage_call_id", &self.lineage_call_id())
             .field("inject", &self.inject.keys().collect::<Vec<_>>())
+            .field(
+                "local_inject",
+                &self.local_inject.keys().collect::<Vec<_>>(),
+            )
             .field("state", &self.state.as_ref().map(|_| "<redacted>"))
             .finish_non_exhaustive()
     }
@@ -30,6 +37,7 @@ impl ActivationPlan {
         context: Context,
         config: Arc<ConfigValue>,
         inject: BTreeMap<ServiceKey, Capability>,
+        local_inject: BTreeMap<TypeId, Arc<LocalBinding>>,
         state: Option<PreparedState>,
     ) -> Self {
         debug_assert!(context.activation_lineage().is_some());
@@ -37,6 +45,7 @@ impl ActivationPlan {
             context,
             config,
             inject,
+            local_inject,
             state,
         }
     }
@@ -62,6 +71,16 @@ impl ActivationPlan {
     /// Returns one exact injected service capability.
     pub fn inject(&self, key: impl AsRef<str>) -> Option<&Capability> {
         self.inject.get(&ServiceKey::new(key.as_ref()))
+    }
+
+    /// Clones the exact safe-Rust Local object selected for this activation.
+    pub fn local<C: LocalContract>(&self) -> Result<Arc<C::Service>> {
+        self.local_inject
+            .get(&TypeId::of::<C>())
+            .map(|binding| binding.service::<C>())
+            .ok_or_else(|| MetaError::LocalUnavailable {
+                contract: C::KEY.into(),
+            })
     }
 
     /// Takes the opaque prepared state as `T` exactly once.

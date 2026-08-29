@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use tokio::sync::Notify;
 
+#[path = "support/resolver.rs"]
+mod resolver;
 mod support;
+use resolver::resolved;
 
 use support::FactorySpec;
 
@@ -80,10 +83,6 @@ struct UnexpectedActivation(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for UnexpectedActivation {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -98,14 +97,14 @@ async fn dropping_inserted_apply_waiter_off_executor_still_disposes_the_fiber() 
     let runtime = Runtime::default();
     let prepared = runtime
         .prepare(
-            Arc::new(UnexpectedActivation(
-                FactorySpec::new(FactoryIdentity::builtin("off-executor-apply-drop", "1"))
+            crate::resolved(Arc::new(UnexpectedActivation(
+                FactorySpec::new(FactoryIdentity::linked("off-executor-apply-drop", "1"))
                     .requiring(Requirement::new(
                         "missing",
                         "test.missing",
                         ContractVersion(1),
                     )),
-            )),
+            ))),
             Value::Null,
         )
         .unwrap();
@@ -150,10 +149,6 @@ async fn dropping_inserted_apply_waiter_off_executor_still_disposes_the_fiber() 
 
 #[async_trait]
 impl PluginFactory for FailingActivationWithBlockingCleanup {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -212,12 +207,12 @@ async fn dropping_apply_during_rollback_cannot_cancel_claimed_cleanup() {
         let cleanups = Arc::clone(&cleanups);
         async move {
             root.apply(
-                Arc::new(FailingActivationWithBlockingCleanup {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("cancelled-rollback", "1")),
+                crate::resolved(Arc::new(FailingActivationWithBlockingCleanup {
+                    spec: FactorySpec::new(FactoryIdentity::linked("cancelled-rollback", "1")),
                     cleanup_entered,
                     cleanup_release,
                     cleanups,
-                }),
+                })),
                 Value::Null,
             )
             .await
@@ -251,10 +246,6 @@ struct BlockingShutdownCleanup {
 
 #[async_trait]
 impl PluginFactory for BlockingShutdownCleanup {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -298,12 +289,12 @@ async fn shutdown_timeout_is_a_waiter_outcome_and_later_join_reaches_complete() 
     runtime
         .root()
         .apply(
-            Arc::new(BlockingShutdownCleanup {
-                spec: FactorySpec::new(FactoryIdentity::builtin("blocking-shutdown", "1")),
+            crate::resolved(Arc::new(BlockingShutdownCleanup {
+                spec: FactorySpec::new(FactoryIdentity::linked("blocking-shutdown", "1")),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -347,10 +338,6 @@ struct IndependentShutdownCleanup {
 
 #[async_trait]
 impl PluginFactory for IndependentShutdownCleanup {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -386,20 +373,20 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
     runtime
         .root()
         .apply(
-            Arc::new(IndependentShutdownCleanup {
-                spec: FactorySpec::new(FactoryIdentity::builtin("proof-independent-root", "1")),
+            crate::resolved(Arc::new(IndependentShutdownCleanup {
+                spec: FactorySpec::new(FactoryIdentity::linked("proof-independent-root", "1")),
                 entered: Arc::clone(&cleanup_entered),
-            }),
+            })),
             Value::Null,
         )
         .await
         .unwrap();
     let proof = runtime
         .prepare(
-            Arc::new(RetainedFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("held-shutdown-proof", "1")),
+            crate::resolved(Arc::new(RetainedFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("held-shutdown-proof", "1")),
                 _retained: Arc::new(()),
-            }),
+            })),
             Value::Null,
         )
         .unwrap();
@@ -419,10 +406,10 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
     let held = runtime.resource_snapshot();
     assert!(matches!(
         runtime.prepare(
-            Arc::new(RetainedFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("post-close-proof", "1",)),
+            crate::resolved(Arc::new(RetainedFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("post-close-proof", "1",)),
                 _retained: Arc::new(()),
-            }),
+            })),
             Value::Null,
         ),
         Err(MetaError::RuntimeShuttingDown)
@@ -442,17 +429,15 @@ async fn held_prepared_proof_delays_completion_without_blocking_root_cleanup() {
     assert_eq!(complete.preparations.current, 0);
     assert_eq!(complete.fibers.current, 0);
     assert_eq!(complete.service_calls.current, 0);
-    assert_eq!(complete.event_dispatches.current, 0);
-    assert_eq!(complete.event_callbacks.current, 0);
     assert_eq!(complete.cleanup_runs.current, 0);
     assert_eq!(complete.scheduler_workers.current, 0);
     let revision = runtime.snapshot().revision;
     assert!(matches!(
         runtime.prepare(
-            Arc::new(RetainedFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("after-complete-proof", "1",)),
+            crate::resolved(Arc::new(RetainedFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("after-complete-proof", "1",)),
                 _retained: Arc::new(()),
-            }),
+            })),
             Value::Null,
         ),
         Err(MetaError::RuntimeShuttingDown)
@@ -470,10 +455,6 @@ struct RetainedFactory {
 
 #[async_trait]
 impl PluginFactory for RetainedFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -491,10 +472,15 @@ async fn disposed_handle_retains_only_small_snapshot_state() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(RetainedFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("released", "1")),
-                _retained: retained,
-            }),
+            rsi_meta::ResolvedFactory::linked(
+                "released",
+                "1",
+                rsi_meta::UpdateMode::Replayable,
+                Arc::new(RetainedFactory {
+                    spec: FactorySpec::new(FactoryIdentity::linked("released", "1")),
+                    _retained: retained,
+                }),
+            ),
             Value::String("configuration payload".repeat(1_024)),
         )
         .await
@@ -505,7 +491,7 @@ async fn disposed_handle_retains_only_small_snapshot_state() {
     assert!(retained_weak.upgrade().is_none());
     assert_eq!(
         fiber.snapshot().factory,
-        FactoryIdentity::builtin("released", "1")
+        FactoryIdentity::linked("released", "1")
     );
     assert_eq!(runtime.resource_snapshot().retained_plugin_bytes.current, 0);
 }
@@ -515,10 +501,6 @@ struct LongCleanupFailure(FactorySpec);
 
 #[async_trait]
 impl PluginFactory for LongCleanupFailure {
-    fn identity(&self) -> FactoryIdentity {
-        self.0.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.0.prepare(desired)
     }
@@ -545,9 +527,9 @@ async fn cleanup_failures_are_utf8_bounded_while_they_are_formatted() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(LongCleanupFailure(FactorySpec::new(
-                FactoryIdentity::builtin("bounded-cleanup", "1"),
-            ))),
+            crate::resolved(Arc::new(LongCleanupFailure(FactorySpec::new(
+                FactoryIdentity::linked("bounded-cleanup", "1"),
+            )))),
             Value::Null,
         )
         .await
@@ -564,7 +546,6 @@ async fn cleanup_failures_are_utf8_bounded_while_they_are_formatted() {
 
 #[derive(Debug)]
 struct BlockingReconfigurationFactory {
-    spec: FactorySpec,
     normalization_entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     normalization_release: Arc<(Mutex<bool>, Condvar)>,
     cleanup_entered: Arc<Notify>,
@@ -574,10 +555,6 @@ struct BlockingReconfigurationFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingReconfigurationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if !config.is_null() {
             if let Some(entered) = self.normalization_entered.lock().unwrap().take() {
@@ -621,14 +598,13 @@ async fn disposal_does_not_deadlock_behind_a_blocking_reconfiguration() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(BlockingReconfigurationFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("blocking-reconfiguration", "1")),
+            crate::resolved(Arc::new(BlockingReconfigurationFactory {
                 normalization_entered: Mutex::new(Some(normalization_entered_tx)),
                 normalization_release: Arc::clone(&normalization_release),
                 cleanup_entered: Arc::clone(&cleanup_entered),
                 cleanup_release: Arc::clone(&cleanup_release),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -696,10 +672,6 @@ struct ControlledCleanupFactory {
 
 #[async_trait]
 impl PluginFactory for ControlledCleanupFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -738,12 +710,12 @@ async fn shutdown_joins_a_disposal_captured_before_registry_removal() {
     let target = runtime
         .root()
         .apply(
-            Arc::new(ControlledCleanupFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("reported-disposal", "1")),
+            crate::resolved(Arc::new(ControlledCleanupFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("reported-disposal", "1")),
                 entered: Arc::clone(&target_entered),
                 release: Arc::clone(&target_release),
                 failure: Some("captured cleanup failure"),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -753,12 +725,12 @@ async fn shutdown_joins_a_disposal_captured_before_registry_removal() {
     runtime
         .root()
         .apply(
-            Arc::new(ControlledCleanupFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("shutdown-ordering-blocker", "1")),
+            crate::resolved(Arc::new(ControlledCleanupFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("shutdown-ordering-blocker", "1")),
                 entered: Arc::clone(&blocker_entered),
                 release: Arc::clone(&blocker_release),
                 failure: None,
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -801,10 +773,6 @@ struct ParentWithControlledChild {
 
 #[async_trait]
 impl PluginFactory for ParentWithControlledChild {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -812,7 +780,9 @@ impl PluginFactory for ParentWithControlledChild {
     async fn activate(&self, plan: ActivationPlan) -> Result<()> {
         let context = plan.context().clone();
         let factory: Arc<dyn PluginFactory> = self.child.clone();
-        let child = context.apply(factory, Value::Null).await?;
+        let child = context
+            .apply(crate::resolver::resolved_dyn(factory), Value::Null)
+            .await?;
         *self.child_handle.lock().unwrap() = Some(child);
         Ok(())
     }
@@ -834,16 +804,16 @@ async fn shutdown_preserves_a_child_report_removed_before_parent_cleanup() {
     runtime
         .root()
         .apply(
-            Arc::new(ParentWithControlledChild {
-                spec: FactorySpec::new(FactoryIdentity::builtin("parent-of-reported-child", "1")),
+            crate::resolved(Arc::new(ParentWithControlledChild {
+                spec: FactorySpec::new(FactoryIdentity::linked("parent-of-reported-child", "1")),
                 child: Arc::new(ControlledCleanupFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("reported-child", "1")),
+                    spec: FactorySpec::new(FactoryIdentity::linked("reported-child", "1")),
                     entered: Arc::clone(&child_entered),
                     release: Arc::clone(&child_release),
                     failure: Some("captured child cleanup failure"),
                 }),
                 child_handle: Arc::clone(&child_handle),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -883,16 +853,16 @@ async fn parent_and_public_child_disposal_join_one_descendant_report() {
     let parent = runtime
         .root()
         .apply(
-            Arc::new(ParentWithControlledChild {
-                spec: FactorySpec::new(FactoryIdentity::builtin("joining-parent", "1")),
+            crate::resolved(Arc::new(ParentWithControlledChild {
+                spec: FactorySpec::new(FactoryIdentity::linked("joining-parent", "1")),
                 child: Arc::new(ControlledCleanupFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin("joining-child", "1")),
+                    spec: FactorySpec::new(FactoryIdentity::linked("joining-child", "1")),
                     entered: Arc::clone(&child_entered),
                     release: Arc::clone(&child_release),
                     failure: Some("joined child cleanup failure"),
                 }),
                 child_handle: Arc::clone(&child_handle),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -926,10 +896,6 @@ struct OrderedCleanupFailures {
 
 #[async_trait]
 impl PluginFactory for OrderedCleanupFailures {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -954,10 +920,6 @@ struct ParentWithOrderedCleanupFailures {
 
 #[async_trait]
 impl PluginFactory for ParentWithOrderedCleanupFailures {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -966,7 +928,9 @@ impl PluginFactory for ParentWithOrderedCleanupFailures {
         let context = plan.context().clone();
         for child in &self.children {
             let factory: Arc<dyn PluginFactory> = child.clone();
-            context.apply(factory, Value::Null).await?;
+            context
+                .apply(crate::resolver::resolved_dyn(factory), Value::Null)
+                .await?;
         }
         Ok(())
     }
@@ -983,23 +947,23 @@ async fn merged_cleanup_reports_never_retain_entries_after_an_omitted_failure() 
     })
     .unwrap();
     let earlier_child = Arc::new(OrderedCleanupFailures {
-        spec: FactorySpec::new(FactoryIdentity::builtin("earlier-child", "1")),
+        spec: FactorySpec::new(FactoryIdentity::linked("earlier-child", "1")),
         // Cleanup is LIFO, so the four-byte failure is observed first.
         failures: &[("", "z"), ("aa", "bb")],
     });
     let later_child = Arc::new(OrderedCleanupFailures {
-        spec: FactorySpec::new(FactoryIdentity::builtin("later-child", "1")),
+        spec: FactorySpec::new(FactoryIdentity::linked("later-child", "1")),
         failures: &[("aaaa", "bbbb")],
     });
     let parent = runtime
         .root()
         .apply(
-            Arc::new(ParentWithOrderedCleanupFailures {
-                spec: FactorySpec::new(FactoryIdentity::builtin("ordered-cleanup-parent", "1")),
+            crate::resolved(Arc::new(ParentWithOrderedCleanupFailures {
+                spec: FactorySpec::new(FactoryIdentity::linked("ordered-cleanup-parent", "1")),
                 // Child cleanup is LIFO, so later_child consumes eight bytes
                 // before earlier_child's four-byte then one-byte failures.
                 children: vec![earlier_child, later_child],
-            }),
+            })),
             Value::Null,
         )
         .await

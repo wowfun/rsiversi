@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::Requirement;
-use crate::plugin::PreparedState;
+use crate::plugin::{LocalRequirement, PreparedState};
 use crate::service::LeaseGuard;
 use limits::{ResourceReservation, RuntimeResources};
 use std::ops::Deref;
@@ -17,6 +17,7 @@ pub struct PreparedPlugin {
     pub(super) runtime: Weak<RuntimeInner>,
     pub(super) admission: LeaseGuard,
     pub(super) identity: FactoryIdentity,
+    pub(super) update_mode: UpdateMode,
     pub(super) factory: RetainedFactory,
     pub(super) desired: DesiredConfig,
     pub(super) attempt: PreparedAttempt,
@@ -81,6 +82,7 @@ pub(super) struct PreparedAttempt {
     pub(super) id: u64,
     pub(super) desired_revision: u64,
     pub(super) requirements: Arc<[Requirement]>,
+    pub(super) local_requirements: Arc<[LocalRequirement]>,
     pub(super) config: Arc<RetainedConfig>,
     pub(super) state: Option<PreparedState>,
     pub(super) consumed: bool,
@@ -92,6 +94,10 @@ pub(super) struct PreparedAttempt {
 impl PreparedAttempt {
     pub(super) fn required_services(&self) -> impl Iterator<Item = &ServiceKey> {
         self.requirements.iter().map(|requirement| &requirement.key)
+    }
+
+    pub(super) fn required_local_services(&self) -> impl Iterator<Item = &LocalRequirement> {
+        self.local_requirements.iter()
     }
 }
 
@@ -185,20 +191,17 @@ impl AttemptReservations {
 }
 
 impl Runtime {
-    /// Captures bounded factory identity, reserves retained resources, and
+    /// Retains bounded resolved identity, reserves retained resources, and
     /// prepares one attempt from the unchanged desired configuration.
     ///
     /// The returned proof belongs to this Runtime and can be consumed by
     /// [`Context::apply_prepared`] without invoking preparation again.
-    pub fn prepare(
-        &self,
-        factory: Arc<dyn PluginFactory>,
-        config: ConfigValue,
-    ) -> Result<PreparedPlugin> {
-        let factory = RetainedFactory::new(factory);
-        let config = configuration::OwnedJsonValue::new(config);
+    pub fn prepare(&self, factory: ResolvedFactory, config: ConfigValue) -> Result<PreparedPlugin> {
         let preparation = self.begin_plugin_preparation()?;
-        self.prepare_admitted(factory, config, preparation)
+        let (identity, update_mode, implementation) = factory.into_parts();
+        let factory = RetainedFactory::new(implementation);
+        let config = configuration::OwnedJsonValue::new(config);
+        self.prepare_admitted(identity, update_mode, factory, config, preparation)
     }
 
     pub(super) fn begin_preparation(&self) -> Result<PreparationAdmission> {
@@ -318,6 +321,8 @@ impl Runtime {
 
     pub(super) fn prepare_admitted(
         &self,
+        identity: FactoryIdentity,
+        update_mode: UpdateMode,
         factory: RetainedFactory,
         config: configuration::OwnedJsonValue,
         preparation: PluginPreparation,
@@ -330,7 +335,6 @@ impl Runtime {
         } = preparation;
         let (runtime_admission, _preparation) = admission.into_parts();
         let desired = self.retain_desired_config(config, 1)?;
-        let identity = capture_factory_identity(&factory)?;
         validate_factory_identity(&identity, payloads.maximum_identifier_bytes)?;
         fiber_reservation
             .reserve_identity(&self.inner.resources, factory_identity_bytes(&identity)?)?;
@@ -344,6 +348,7 @@ impl Runtime {
             runtime: Arc::downgrade(&self.inner),
             admission: runtime_admission,
             identity,
+            update_mode,
             factory,
             desired,
             attempt,
@@ -396,6 +401,23 @@ impl Runtime {
             topology.maximum_requirements_per_fiber,
             payloads.maximum_identifier_bytes,
         )?;
+        let local_requirement_bytes = validate_local_requirements(
+            &normalized.local_requirements,
+            topology.maximum_requirements_per_fiber,
+            payloads.maximum_identifier_bytes,
+        )?;
+        let requirement_count = normalized
+            .requirements
+            .len()
+            .checked_add(normalized.local_requirements.len())
+            .ok_or(MetaError::InvalidInput(
+                "prepared activation has too many requirements".to_owned(),
+            ))?;
+        if requirement_count > topology.maximum_requirements_per_fiber {
+            return Err(MetaError::InvalidInput(
+                "prepared activation has too many requirements".to_owned(),
+            ));
+        }
         let state_bytes = normalized
             .state
             .as_ref()
@@ -405,23 +427,27 @@ impl Runtime {
                 maximum: payloads.maximum_prepared_state_bytes,
             });
         }
-        let non_config_bytes =
-            requirement_bytes
-                .checked_add(state_bytes)
-                .ok_or(MetaError::CapacityExhausted {
-                    resource: "retained plugin bytes",
-                })?;
+        let non_config_bytes = requirement_bytes
+            .checked_add(local_requirement_bytes)
+            .ok_or(MetaError::CapacityExhausted {
+                resource: "retained plugin bytes",
+            })?
+            .checked_add(state_bytes)
+            .ok_or(MetaError::CapacityExhausted {
+                resource: "retained plugin bytes",
+            })?;
         let retained_bytes = non_config_bytes
             .checked_add(normalized.encoded_bytes)
             .ok_or(MetaError::CapacityExhausted {
                 resource: "retained plugin bytes",
             })?;
-        reservations.shrink_to(retained_bytes, normalized.requirements.len());
+        reservations.shrink_to(retained_bytes, requirement_count);
         let config_reservation = reservations.split_retained_config(non_config_bytes);
         Ok(PreparedAttempt {
             id: self.next_attempt_id()?,
             desired_revision,
             requirements: normalized.requirements.into(),
+            local_requirements: normalized.local_requirements.into(),
             config: Arc::new(RetainedConfig::new_validated(
                 normalized.value.into_inner(),
                 config_reservation,
@@ -433,30 +459,26 @@ impl Runtime {
     }
 }
 
-fn capture_factory_identity(factory: &RetainedFactory) -> Result<FactoryIdentity> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory.identity())) {
-        Ok(identity) => Ok(identity),
-        Err(payload) => {
-            drop_catching_unwind(payload);
-            Err(MetaError::Activation(
-                "plugin factory identity panicked".to_owned(),
-            ))
-        }
-    }
-}
-
 fn validate_factory_identity(identity: &FactoryIdentity, maximum: usize) -> Result<()> {
     let valid = match identity {
-        FactoryIdentity::Builtin { name, revision } => {
-            name.len() <= maximum && revision.len() <= maximum
+        FactoryIdentity::Linked { plugin, revision } => {
+            !plugin.as_str().is_empty()
+                && plugin.as_str().len() <= maximum
+                && !revision.is_empty()
+                && revision.len() <= maximum
         }
-        FactoryIdentity::Artifact { plugin, sha256 } => {
-            plugin.len() <= maximum && sha256.len() <= maximum
+        FactoryIdentity::Native { plugin, sha256 } => {
+            !plugin.as_str().is_empty()
+                && plugin.as_str().len() <= maximum
+                && sha256.len() == 64
+                && sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         }
     };
     if !valid {
         return Err(MetaError::InvalidInput(
-            "plugin factory identifier exceeds the configured byte limit".to_owned(),
+            "plugin factory provenance is empty, malformed, or exceeds its byte limit".to_owned(),
         ));
     }
     Ok(())
@@ -464,8 +486,8 @@ fn validate_factory_identity(identity: &FactoryIdentity, maximum: usize) -> Resu
 
 fn factory_identity_bytes(identity: &FactoryIdentity) -> Result<usize> {
     let (first, second) = match identity {
-        FactoryIdentity::Builtin { name, revision } => (name.len(), revision.len()),
-        FactoryIdentity::Artifact { plugin, sha256 } => (plugin.len(), sha256.len()),
+        FactoryIdentity::Linked { plugin, revision } => (plugin.as_str().len(), revision.len()),
+        FactoryIdentity::Native { plugin, sha256 } => (plugin.as_str().len(), sha256.len()),
     };
     first
         .checked_add(second)
@@ -519,6 +541,39 @@ fn validate_requirements(
     Ok(retained_bytes)
 }
 
+fn validate_local_requirements(
+    requirements: &[LocalRequirement],
+    maximum_count: usize,
+    maximum_identifier_bytes: usize,
+) -> Result<usize> {
+    if requirements.len() > maximum_count {
+        return Err(MetaError::InvalidInput(
+            "prepared activation has too many requirements".to_owned(),
+        ));
+    }
+    let mut contracts = BTreeSet::new();
+    let mut retained_bytes = 0_usize;
+    for requirement in requirements {
+        if requirement.key.as_str().len() > maximum_identifier_bytes {
+            return Err(MetaError::InvalidInput(
+                "prepared Local contract identifier exceeds the configured byte limit".to_owned(),
+            ));
+        }
+        if !contracts.insert(requirement.contract) {
+            return Err(MetaError::InvalidInput(format!(
+                "prepared activation requires Local contract {} more than once",
+                requirement.key
+            )));
+        }
+        retained_bytes = retained_bytes
+            .checked_add(requirement.key.as_str().len())
+            .ok_or(MetaError::CapacityExhausted {
+                resource: "retained plugin bytes",
+            })?;
+    }
+    Ok(retained_bytes)
+}
+
 fn validate_service_identity(
     key: &ServiceKey,
     contract: &ContractId,
@@ -548,7 +603,6 @@ mod tests {
     }
 
     struct CountingFactory {
-        identity_calls: Arc<AtomicUsize>,
         prepare_calls: Arc<AtomicUsize>,
         state_drops: Arc<AtomicUsize>,
         state_bytes: usize,
@@ -562,11 +616,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for CountingFactory {
-        fn identity(&self) -> FactoryIdentity {
-            self.identity_calls.fetch_add(1, Ordering::AcqRel);
-            FactoryIdentity::builtin("counted", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             self.prepare_calls.fetch_add(1, Ordering::AcqRel);
             Ok(PreparedActivation::with_state(
@@ -595,10 +644,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginFactory for TakingStateFactory {
-        fn identity(&self) -> FactoryIdentity {
-            FactoryIdentity::builtin("taking-state", "1")
-        }
-
         fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
             Ok(PreparedActivation::with_state(
                 desired.clone(),
@@ -623,37 +668,31 @@ mod tests {
 
     fn counting_factory(
         state_bytes: usize,
-    ) -> (
-        Arc<CountingFactory>,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-    ) {
-        let identity_calls = Arc::new(AtomicUsize::new(0));
+    ) -> (Arc<CountingFactory>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let prepare_calls = Arc::new(AtomicUsize::new(0));
         let state_drops = Arc::new(AtomicUsize::new(0));
         (
             Arc::new(CountingFactory {
-                identity_calls: Arc::clone(&identity_calls),
                 prepare_calls: Arc::clone(&prepare_calls),
                 state_drops: Arc::clone(&state_drops),
                 state_bytes,
             }),
-            identity_calls,
             prepare_calls,
             state_drops,
         )
     }
 
     #[test]
-    fn identity_attempt_and_state_have_exact_independent_accounting() {
+    fn resolved_identity_attempt_and_state_have_exact_independent_accounting() {
         let runtime = Runtime::default();
-        let (factory, identity_calls, prepare_calls, state_drops) = counting_factory(5);
+        let (factory, prepare_calls, state_drops) = counting_factory(5);
         let proof = runtime
-            .prepare(factory, ConfigValue::Null)
+            .prepare(
+                ResolvedFactory::linked("counted", "1", UpdateMode::Replayable, factory),
+                ConfigValue::Null,
+            )
             .expect("bounded preparation succeeds");
 
-        assert_eq!(identity_calls.load(Ordering::Acquire), 1);
         assert_eq!(prepare_calls.load(Ordering::Acquire), 1);
         let config_bytes = serde_json::to_vec(&ConfigValue::Null).unwrap().len();
         let identity_bytes = "counted".len() + "1".len();
@@ -679,13 +718,17 @@ mod tests {
         let mut limits = RuntimeLimits::default();
         limits.payloads.maximum_prepared_state_bytes = 1;
         let runtime = Runtime::new(limits).unwrap();
-        let (factory, identity_calls, prepare_calls, state_drops) = counting_factory(2);
+        let (factory, prepare_calls, state_drops) = counting_factory(2);
 
         assert_eq!(
-            runtime.prepare(factory, ConfigValue::Null).unwrap_err(),
+            runtime
+                .prepare(
+                    ResolvedFactory::linked("counted", "1", UpdateMode::Replayable, factory),
+                    ConfigValue::Null,
+                )
+                .unwrap_err(),
             MetaError::PayloadTooLarge { maximum: 1 }
         );
-        assert_eq!(identity_calls.load(Ordering::Acquire), 1);
         assert_eq!(prepare_calls.load(Ordering::Acquire), 1);
         assert_eq!(state_drops.load(Ordering::Acquire), 1);
         let released = runtime.resource_snapshot();
@@ -705,7 +748,10 @@ mod tests {
         });
         let fiber = runtime
             .root()
-            .apply(factory, ConfigValue::Null)
+            .apply(
+                ResolvedFactory::linked("taking-state", "1", UpdateMode::Replayable, factory),
+                ConfigValue::Null,
+            )
             .await
             .expect("state-taking activation succeeds");
 
@@ -723,12 +769,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reprepare_uses_unchanged_factory_identity_without_reinvoking_it() {
+    async fn reprepare_reuses_the_resolver_owned_factory_identity() {
         let runtime = Runtime::default();
-        let (factory, identity_calls, prepare_calls, _state_drops) = counting_factory(0);
+        let (factory, prepare_calls, _state_drops) = counting_factory(0);
         let fiber = runtime
             .root()
-            .apply(factory, ConfigValue::Null)
+            .apply(
+                ResolvedFactory::linked("counted", "1", UpdateMode::Replayable, factory),
+                ConfigValue::Null,
+            )
             .await
             .expect("initial apply is admitted");
         assert!(matches!(fiber.snapshot().state, FiberState::Pending(_)));
@@ -737,7 +786,6 @@ mod tests {
             .await
             .expect("replacement preparation settles");
 
-        assert_eq!(identity_calls.load(Ordering::Acquire), 1);
         assert_eq!(prepare_calls.load(Ordering::Acquire), 2);
         assert!(fiber.dispose().await.is_clean());
         assert!(runtime.shutdown().await.is_complete());

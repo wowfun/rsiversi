@@ -7,10 +7,6 @@ async fn mutual_missing_requirements_report_honest_missing_services_without_acti
 
     #[async_trait]
     impl PluginFactory for CycleFactory {
-        fn identity(&self) -> FactoryIdentity {
-            self.0.identity()
-        }
-
         fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
             self.0.prepare(desired)
         }
@@ -21,24 +17,25 @@ async fn mutual_missing_requirements_report_honest_missing_services_without_acti
     }
 
     let runtime = Runtime::default();
-    let left = runtime
-        .root()
-        .apply(
-            Arc::new(CycleFactory(
-                FactorySpec::new(FactoryIdentity::builtin("left", "1"))
-                    .requiring(Requirement::new("right", "test.right", V1)),
-            )),
-            Value::Null,
-        )
-        .await
-        .unwrap();
+    let left =
+        runtime
+            .root()
+            .apply(
+                crate::resolved(Arc::new(CycleFactory(
+                    FactorySpec::new(FactoryIdentity::linked("left", "1"))
+                        .requiring(Requirement::new("right", "test.right", V1)),
+                ))),
+                Value::Null,
+            )
+            .await
+            .unwrap();
     let right = runtime
         .root()
         .apply(
-            Arc::new(CycleFactory(
-                FactorySpec::new(FactoryIdentity::builtin("right", "1"))
+            crate::resolved(Arc::new(CycleFactory(
+                FactorySpec::new(FactoryIdentity::linked("right", "1"))
                     .requiring(Requirement::new("left", "test.left", V1)),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -72,13 +69,13 @@ async fn provider_withdrawal_notifies_only_dependents_in_its_exact_isolation_slo
     let default_provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("default-slot-provider", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("default-slot-provider", "1"),
                 "isolated",
                 "test.isolation",
                 V1,
                 Arc::new(Echo),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -88,16 +85,16 @@ async fn provider_withdrawal_notifies_only_dependents_in_its_exact_isolation_slo
     let retiring_provider = runtime
         .root()
         .apply(
-            Arc::new(
+            crate::resolved(Arc::new(
                 EndpointFactory::new(
-                    FactoryIdentity::builtin("retiring-provider", "1"),
+                    FactoryIdentity::linked("retiring-provider", "1"),
                     "upstream",
                     "test.isolation",
                     V1,
                     Arc::new(Echo),
                 )
                 .requiring(Requirement::new("isolated", "test.isolation", V1)),
-            ),
+            )),
             Value::Null,
         )
         .await
@@ -109,16 +106,16 @@ async fn provider_withdrawal_notifies_only_dependents_in_its_exact_isolation_slo
         .isolate("isolated", IsolationId(7))
         .unwrap()
         .apply(
-            Arc::new(
+            crate::resolved(Arc::new(
                 EndpointFactory::new(
-                    FactoryIdentity::builtin("isolated-dependent", "1"),
+                    FactoryIdentity::linked("isolated-dependent", "1"),
                     "isolated",
                     "test.isolation",
                     V1,
                     Arc::new(Echo),
                 )
                 .requiring(Requirement::new("upstream", "test.isolation", V1)),
-            ),
+            )),
             Value::Null,
         )
         .await

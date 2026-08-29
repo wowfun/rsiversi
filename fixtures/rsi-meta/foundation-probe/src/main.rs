@@ -7,8 +7,8 @@ use rsi_meta::{
     ActivationPlan, CleanupFuture, ConfigValue, Context, ContractVersion, FactoryIdentity,
     FiberHandle, FiberSnapshot, FiberState, InvocationContext, IsolationId, Message, MetaError,
     PendingReason, PluginFactory, PreparedActivation, ProviderChannel, Requirement,
-    ResourceUsageSnapshot, Result, Runtime, RuntimeLimits, RuntimeResourceSnapshot,
-    ServiceEndpoint, SupplyHandle, TopologyLimits,
+    ResolvedFactory, ResourceUsageSnapshot, Result, Runtime, RuntimeLimits,
+    RuntimeResourceSnapshot, ServiceEndpoint, SupplyHandle, TopologyLimits, UpdateMode,
 };
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -22,15 +22,18 @@ const DENSE_FIBERS: usize = 4_096;
 const DENSE_EDGES: usize = DENSE_PROVIDERS * DENSE_CONSUMERS;
 const DENSE_EDGE_LIMIT: usize = DENSE_EDGES * 2;
 
+fn linked<T: PluginFactory>(
+    name: impl Into<rsi_meta::PluginId>,
+    factory: Arc<T>,
+) -> ResolvedFactory {
+    ResolvedFactory::linked(name, "1", UpdateMode::Replayable, factory)
+}
+
 #[derive(Debug)]
 struct MissingFactory;
 
 #[async_trait]
 impl PluginFactory for MissingFactory {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("foundation-probe-missing", "1")
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(
             PreparedActivation::new(desired.clone()).requiring(Requirement::new(
@@ -61,15 +64,13 @@ impl ServiceEndpoint for EchoEndpoint {
 
 #[derive(Debug)]
 struct PreparedFactory {
-    identity: FactoryIdentity,
     requirements: Vec<Requirement>,
     activations: Option<Arc<AtomicUsize>>,
 }
 
 impl PreparedFactory {
-    fn new(identity: FactoryIdentity) -> Self {
+    fn new() -> Self {
         Self {
-            identity,
             requirements: Vec::new(),
             activations: None,
         }
@@ -93,10 +94,6 @@ impl PreparedFactory {
 
 #[async_trait]
 impl PluginFactory for PreparedFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         let mut prepared = PreparedActivation::new(desired.clone());
         for requirement in &self.requirements {
@@ -115,17 +112,12 @@ impl PluginFactory for PreparedFactory {
 
 #[derive(Debug)]
 struct DenseProvider {
-    identity: FactoryIdentity,
     service: String,
     cleanup_latch: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 #[async_trait]
 impl PluginFactory for DenseProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -159,7 +151,6 @@ struct ProviderCapture {
 
 #[derive(Debug)]
 struct BlockingProvider {
-    identity: FactoryIdentity,
     activation_entered: Arc<Notify>,
     activation_release: Arc<Notify>,
     cleanup_entered: Arc<Notify>,
@@ -169,10 +160,6 @@ struct BlockingProvider {
 
 #[async_trait]
 impl PluginFactory for BlockingProvider {
-    fn identity(&self) -> FactoryIdentity {
-        self.identity.clone()
-    }
-
     fn prepare(&self, desired: &ConfigValue) -> Result<PreparedActivation> {
         Ok(PreparedActivation::new(desired.clone()))
     }
@@ -251,7 +238,7 @@ fn assert_missing(handle: &FiberHandle, expected: &str) {
 
 fn resource_usages(
     resources: &RuntimeResourceSnapshot,
-) -> [(&'static str, &ResourceUsageSnapshot); 17] {
+) -> [(&'static str, &ResourceUsageSnapshot); 15] {
     [
         ("preparations", &resources.preparations),
         ("fibers", &resources.fibers),
@@ -270,8 +257,6 @@ fn resource_usages(
         ("buffered_message_bytes", &resources.buffered_message_bytes),
         ("reconciliations", &resources.reconciliations),
         ("scheduler_workers", &resources.scheduler_workers),
-        ("event_dispatches", &resources.event_dispatches),
-        ("event_callbacks", &resources.event_callbacks),
         ("cleanup_runs", &resources.cleanup_runs),
     ]
 }
@@ -329,14 +314,17 @@ async fn exercise_foundation_lifecycle() -> RuntimeResourceSnapshot {
     let activations = Arc::new(AtomicUsize::new(0));
     let consumer = root
         .apply(
-            Arc::new(
-                PreparedFactory::new(FactoryIdentity::builtin("foundation-consumer", "1"))
-                    .requiring(Requirement::new(
-                        "foundation-service",
-                        "fixture.foundation",
-                        V1,
-                    ))
-                    .counting(Arc::clone(&activations)),
+            linked(
+                "foundation-consumer",
+                Arc::new(
+                    PreparedFactory::new()
+                        .requiring(Requirement::new(
+                            "foundation-service",
+                            "fixture.foundation",
+                            V1,
+                        ))
+                        .counting(Arc::clone(&activations)),
+                ),
             ),
             Value::Null,
         )
@@ -345,7 +333,7 @@ async fn exercise_foundation_lifecycle() -> RuntimeResourceSnapshot {
     assert_missing(&consumer, "foundation-service");
     assert_eq!(activations.load(Ordering::Acquire), 0);
 
-    let provider_identity = FactoryIdentity::builtin("foundation-provider", "1");
+    let provider_identity = FactoryIdentity::linked("foundation-provider", "1");
     let activation_entered = Arc::new(Notify::new());
     let activation_release = Arc::new(Notify::new());
     let cleanup_entered = Arc::new(Notify::new());
@@ -361,14 +349,17 @@ async fn exercise_foundation_lifecycle() -> RuntimeResourceSnapshot {
         let captured = Arc::clone(&captured);
         async move {
             root.apply(
-                Arc::new(BlockingProvider {
-                    identity: provider_identity,
-                    activation_entered,
-                    activation_release,
-                    cleanup_entered,
-                    cleanup_release,
-                    captured,
-                }),
+                ResolvedFactory::new(
+                    provider_identity,
+                    UpdateMode::Replayable,
+                    Arc::new(BlockingProvider {
+                        activation_entered,
+                        activation_release,
+                        cleanup_entered,
+                        cleanup_release,
+                        captured,
+                    }),
+                ),
                 Value::Null,
             )
             .await
@@ -470,12 +461,12 @@ async fn exercise_foundation_lifecycle() -> RuntimeResourceSnapshot {
 async fn measure_missing(population: usize) -> (Duration, RuntimeResourceSnapshot) {
     let runtime = Runtime::default();
     let root = runtime.root();
-    let factory: Arc<dyn PluginFactory> = Arc::new(MissingFactory);
+    let factory = linked("foundation-probe-missing", Arc::new(MissingFactory));
     let mut fibers = Vec::with_capacity(population);
     let started = Instant::now();
     for _ in 0..population {
         fibers.push(
-            root.apply(Arc::clone(&factory), Value::Null)
+            root.apply(factory.clone(), Value::Null)
                 .await
                 .expect("the bounded missing requirement remains a valid Pending Fiber"),
         );
@@ -558,12 +549,14 @@ async fn dense_runtime() -> (
         let service = format!("dense-{index}");
         providers.push(
             root.apply(
-                Arc::new(DenseProvider {
-                    identity: FactoryIdentity::builtin(format!("dense-provider-{index}"), "1"),
-                    service,
-                    cleanup_latch: (index == 0)
-                        .then(|| (Arc::clone(&cleanup_entered), Arc::clone(&cleanup_release))),
-                }),
+                linked(
+                    format!("dense-provider-{index}"),
+                    Arc::new(DenseProvider {
+                        service,
+                        cleanup_latch: (index == 0)
+                            .then(|| (Arc::clone(&cleanup_entered), Arc::clone(&cleanup_release))),
+                    }),
+                ),
                 Value::Null,
             )
             .await
@@ -571,12 +564,9 @@ async fn dense_runtime() -> (
         );
     }
 
-    let filler: Arc<dyn PluginFactory> = Arc::new(PreparedFactory::new(FactoryIdentity::builtin(
-        "dense-filler",
-        "1",
-    )));
+    let filler = linked("dense-filler", Arc::new(PreparedFactory::new()));
     for _ in DENSE_PROVIDERS..(DENSE_FIBERS - DENSE_CONSUMERS) {
-        root.apply(Arc::clone(&filler), Value::Null)
+        root.apply(filler.clone(), Value::Null)
             .await
             .expect("filler Fiber activates");
     }
@@ -584,14 +574,14 @@ async fn dense_runtime() -> (
     let requirements = (0..DENSE_PROVIDERS)
         .map(|index| Requirement::new(format!("dense-{index}"), "fixture.dense", V1))
         .collect();
-    let consumer: Arc<dyn PluginFactory> = Arc::new(
-        PreparedFactory::new(FactoryIdentity::builtin("dense-consumer", "1"))
-            .requiring_all(requirements),
+    let consumer = linked(
+        "dense-consumer",
+        Arc::new(PreparedFactory::new().requiring_all(requirements)),
     );
     let mut consumers = Vec::with_capacity(DENSE_CONSUMERS);
     for _ in 0..DENSE_CONSUMERS {
         let handle = root
-            .apply(Arc::clone(&consumer), Value::Null)
+            .apply(consumer.clone(), Value::Null)
             .await
             .expect("dense consumer activates from actual supplies");
         assert!(matches!(handle.snapshot().state, FiberState::Active));
@@ -599,7 +589,7 @@ async fn dense_runtime() -> (
     }
     assert_eq!(runtime.snapshot().fibers.len(), DENSE_FIBERS);
 
-    let rejected = root.apply(Arc::clone(&filler), Value::Null).await;
+    let rejected = root.apply(filler.clone(), Value::Null).await;
     assert!(matches!(
         rejected,
         Err(MetaError::CapacityExhausted { resource: "fibers" })

@@ -2,17 +2,12 @@ use super::*;
 
 #[derive(Debug)]
 struct PreparedInjectionFactory {
-    spec: FactorySpec,
     prepare_count: Arc<AtomicUsize>,
     activation_count: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for PreparedInjectionFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.prepare_count.fetch_add(1, Ordering::AcqRel);
         Ok(
@@ -39,11 +34,10 @@ async fn prepared_injection_waits_for_an_actual_active_supply() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(PreparedInjectionFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("prepared-consumer", "1")),
+            crate::resolved(Arc::new(PreparedInjectionFactory {
                 prepare_count: Arc::clone(&prepare_count),
                 activation_count: Arc::clone(&activation_count),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -56,13 +50,13 @@ async fn prepared_injection_waits_for_an_actual_active_supply() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("prepared-provider", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("prepared-provider", "1"),
                 "prepared-dependency",
                 "test.prepared",
                 V1,
                 Arc::new(Echo),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -78,17 +72,12 @@ async fn prepared_injection_waits_for_an_actual_active_supply() {
 
 #[derive(Debug)]
 struct ConfigSelectedInjectionFactory {
-    spec: FactorySpec,
     prepare_count: Arc<AtomicUsize>,
     providers: Arc<Mutex<Vec<(rsi_meta::FiberId, rsi_meta::FiberGeneration)>>>,
 }
 
 #[async_trait]
 impl PluginFactory for ConfigSelectedInjectionFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.prepare_count.fetch_add(1, Ordering::AcqRel);
         let key = config
@@ -126,13 +115,13 @@ async fn reconfigure_retains_the_fresh_prepared_injection_and_updates_dependents
     let provider_a = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("provider-a", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("provider-a", "1"),
                 "attempt-a",
                 "test.prepared-config",
                 V1,
                 Arc::new(Echo),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -142,11 +131,10 @@ async fn reconfigure_retains_the_fresh_prepared_injection_and_updates_dependents
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(ConfigSelectedInjectionFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("config-selected-consumer", "1")),
+            crate::resolved(Arc::new(ConfigSelectedInjectionFactory {
                 prepare_count: Arc::clone(&prepare_count),
                 providers: Arc::clone(&providers),
-            }),
+            })),
             Value::String("attempt-a".to_owned()),
         )
         .await
@@ -176,13 +164,13 @@ async fn reconfigure_retains_the_fresh_prepared_injection_and_updates_dependents
     let provider_b = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("provider-b", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("provider-b", "1"),
                 "attempt-b",
                 "test.prepared-config",
                 V1,
                 Arc::new(Echo),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -222,10 +210,6 @@ struct ReplaceableProviderFactory {
 
 #[async_trait]
 impl PluginFactory for ReplaceableProviderFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, desired: &Value) -> Result<PreparedActivation> {
         self.spec.prepare(desired)
     }
@@ -246,7 +230,6 @@ impl PluginFactory for ReplaceableProviderFactory {
 
 #[derive(Debug)]
 struct BindingFencedAttemptFactory {
-    spec: FactorySpec,
     prepare_count: Arc<AtomicUsize>,
     activation_count: Arc<AtomicUsize>,
     first_entered: Arc<Notify>,
@@ -255,10 +238,6 @@ struct BindingFencedAttemptFactory {
 
 #[async_trait]
 impl PluginFactory for BindingFencedAttemptFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if *config != json!({ "raw": "desired" }) {
             return Err(MetaError::InvalidConfig(
@@ -308,11 +287,11 @@ async fn binding_change_fences_loading_and_freshly_prepares_the_replacement_atte
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ReplaceableProviderFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("replaceable-provider", "1")),
+            crate::resolved(Arc::new(ReplaceableProviderFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("replaceable-provider", "1")),
                 context: Arc::clone(&provider_context),
                 supply: Arc::clone(&provider_supply),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -331,16 +310,12 @@ async fn binding_change_fences_loading_and_freshly_prepares_the_replacement_atte
         let responses = Arc::clone(&responses);
         async move {
             root.apply(
-                Arc::new(BindingFencedAttemptFactory {
-                    spec: FactorySpec::new(FactoryIdentity::builtin(
-                        "binding-fenced-consumer",
-                        "1",
-                    )),
+                crate::resolved(Arc::new(BindingFencedAttemptFactory {
                     prepare_count,
                     activation_count,
                     first_entered,
                     responses,
-                }),
+                })),
                 json!({ "raw": "desired" }),
             )
             .await
@@ -385,7 +360,6 @@ async fn binding_change_fences_loading_and_freshly_prepares_the_replacement_atte
 
 #[derive(Debug)]
 struct ActiveBindingReplacementFactory {
-    spec: FactorySpec,
     prepare_count: AtomicUsize,
     activation_count: Arc<AtomicUsize>,
     replacement_prepare_entered: Arc<Barrier>,
@@ -401,10 +375,6 @@ struct PreparationPressureConsumer {
 
 #[async_trait]
 impl PluginFactory for PreparationPressureConsumer {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("preparation-pressure-consumer", "1")
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.preparations.fetch_add(1, Ordering::AcqRel);
         Ok(
@@ -431,10 +401,6 @@ struct PreparationSlotBlocker {
 
 #[async_trait]
 impl PluginFactory for PreparationSlotBlocker {
-    fn identity(&self) -> FactoryIdentity {
-        FactoryIdentity::builtin("preparation-slot-blocker", "1")
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         self.entered.send(()).expect("test waits for preparation");
         self.release
@@ -461,10 +427,10 @@ async fn occupy_preparation_slot(
     let preparing_runtime = runtime.clone();
     let blocker = std::thread::spawn(move || {
         preparing_runtime.prepare(
-            Arc::new(PreparationSlotBlocker {
+            crate::resolved(Arc::new(PreparationSlotBlocker {
                 entered: entered_tx,
                 release: Mutex::new(release_rx),
-            }),
+            })),
             Value::Null,
         )
     });
@@ -499,14 +465,14 @@ async fn automatic_binding_refresh_waits_for_transient_preparation_capacity() {
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ReplaceableProviderFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
+            crate::resolved(Arc::new(ReplaceableProviderFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked(
                     "preparation-pressure-provider",
                     "1",
                 )),
                 context: Arc::clone(&provider_context),
                 supply: Arc::clone(&provider_supply),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -518,10 +484,10 @@ async fn automatic_binding_refresh_waits_for_transient_preparation_capacity() {
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(PreparationPressureConsumer {
+            crate::resolved(Arc::new(PreparationPressureConsumer {
                 preparations: Arc::clone(&preparations),
                 activations: Arc::clone(&activations),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -600,10 +566,6 @@ async fn automatic_binding_refresh_waits_for_transient_preparation_capacity() {
 
 #[async_trait]
 impl PluginFactory for ActiveBindingReplacementFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if self.prepare_count.fetch_add(1, Ordering::AcqRel) == 1 {
             self.replacement_prepare_entered.wait();
@@ -642,14 +604,11 @@ async fn active_binding_change_prepares_before_retirement_and_reuses_no_attempt(
     let provider = runtime
         .root()
         .apply(
-            Arc::new(ReplaceableProviderFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
-                    "active-replacement-provider",
-                    "1",
-                )),
+            crate::resolved(Arc::new(ReplaceableProviderFactory {
+                spec: FactorySpec::new(FactoryIdentity::linked("active-replacement-provider", "1")),
                 context: Arc::clone(&provider_context),
                 supply: Arc::clone(&provider_supply),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -663,17 +622,13 @@ async fn active_binding_change_prepares_before_retirement_and_reuses_no_attempt(
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(ActiveBindingReplacementFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
-                    "active-binding-replacement-consumer",
-                    "1",
-                )),
+            crate::resolved(Arc::new(ActiveBindingReplacementFactory {
                 prepare_count: AtomicUsize::new(0),
                 activation_count: Arc::clone(&activation_count),
                 replacement_prepare_entered: Arc::clone(&entered),
                 replacement_prepare_release: Arc::clone(&release),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -726,17 +681,12 @@ async fn active_binding_change_prepares_before_retirement_and_reuses_no_attempt(
 
 #[derive(Debug)]
 struct RejectingBindingReplacementFactory {
-    spec: FactorySpec,
     prepare_count: AtomicUsize,
     cleanups: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl PluginFactory for RejectingBindingReplacementFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if self.prepare_count.fetch_add(1, Ordering::AcqRel) != 0 {
             return Err(MetaError::InvalidConfig(
@@ -773,13 +723,13 @@ async fn invalidated_active_binding_and_rejected_fresh_prepare_settles_failed() 
     let provider = runtime
         .root()
         .apply(
-            Arc::new(EndpointFactory::new(
-                FactoryIdentity::builtin("rejected-binding-provider", "1"),
+            crate::resolved(Arc::new(EndpointFactory::new(
+                FactoryIdentity::linked("rejected-binding-provider", "1"),
                 "fenced-attempt",
                 "test.fenced-attempt",
                 V1,
                 Arc::new(Echo),
-            )),
+            ))),
             Value::Null,
         )
         .await
@@ -788,11 +738,10 @@ async fn invalidated_active_binding_and_rejected_fresh_prepare_settles_failed() 
     let consumer = runtime
         .root()
         .apply(
-            Arc::new(RejectingBindingReplacementFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("rejected-binding-consumer", "1")),
+            crate::resolved(Arc::new(RejectingBindingReplacementFactory {
                 prepare_count: AtomicUsize::new(0),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::Null,
         )
         .await
@@ -821,17 +770,12 @@ async fn invalidated_active_binding_and_rejected_fresh_prepare_settles_failed() 
 
 #[derive(Debug)]
 struct RejectingReconfigurationFactory {
-    spec: FactorySpec,
     cleanups: Arc<AtomicUsize>,
     context: Arc<Mutex<Option<Context>>>,
 }
 
 #[async_trait]
 impl PluginFactory for RejectingReconfigurationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if *config == Value::String("reject".to_owned()) {
             return Err(MetaError::InvalidConfig(
@@ -871,11 +815,10 @@ async fn rejected_reconfigure_keeps_the_existing_generation_active() {
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(RejectingReconfigurationFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin("rejecting-reconfiguration", "1")),
+            crate::resolved(Arc::new(RejectingReconfigurationFactory {
                 cleanups: Arc::clone(&cleanups),
                 context: Arc::clone(&context),
-            }),
+            })),
             Value::String("accepted".to_owned()),
         )
         .await
@@ -913,7 +856,6 @@ async fn rejected_reconfigure_keeps_the_existing_generation_active() {
 
 #[derive(Debug)]
 struct BlockingReplacementPreparationFactory {
-    spec: FactorySpec,
     prepare_count: AtomicUsize,
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
@@ -922,10 +864,6 @@ struct BlockingReplacementPreparationFactory {
 
 #[async_trait]
 impl PluginFactory for BlockingReplacementPreparationFactory {
-    fn identity(&self) -> FactoryIdentity {
-        self.spec.identity()
-    }
-
     fn prepare(&self, config: &Value) -> Result<PreparedActivation> {
         if self.prepare_count.fetch_add(1, Ordering::AcqRel) == 1 {
             self.entered.wait();
@@ -957,16 +895,12 @@ async fn replacement_preparation_retains_the_active_generation_and_accounts_both
     let fiber = runtime
         .root()
         .apply(
-            Arc::new(BlockingReplacementPreparationFactory {
-                spec: FactorySpec::new(FactoryIdentity::builtin(
-                    "blocking-replacement-preparation",
-                    "1",
-                )),
+            crate::resolved(Arc::new(BlockingReplacementPreparationFactory {
                 prepare_count: AtomicUsize::new(0),
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
                 cleanups: Arc::clone(&cleanups),
-            }),
+            })),
             Value::String("old desired payload".to_owned()),
         )
         .await

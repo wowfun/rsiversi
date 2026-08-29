@@ -1,9 +1,6 @@
 use super::CancellationObserver;
 use crate::runtime::CallbackLease;
-use crate::{
-    CallId, CallerEffect, Context, ContextExtension, FiberGeneration, FiberId, MetaError, Result,
-};
-use serde_json::Value;
+use crate::{CallId, CallerEffect, Context, FiberGeneration, FiberId, MetaError, Result};
 use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -18,7 +15,6 @@ pub struct InvocationContext {
     immediate_caller: FiberId,
     provider: FiberId,
     provider_generation: FiberGeneration,
-    edge_overlay: Arc<crate::runtime::InterceptLayers>,
     caller: CallerView,
     caller_effect: Option<CallerEffect>,
     callback: Arc<CallbackLease>,
@@ -51,14 +47,6 @@ impl CallerView {
         self.callback.with_open(self.callback_closed(), || {
             self.context.validate_callback_view(&self.cancellation)?;
             Ok(self.context.owner())
-        })
-    }
-
-    /// Returns one immutable typed extension inherited by the caller.
-    pub fn extension<K: ContextExtension>(&self) -> Result<Option<Arc<K::Value>>> {
-        self.callback.with_open(self.callback_closed(), || {
-            self.context.validate_callback_view(&self.cancellation)?;
-            Ok(self.context.extension::<K>())
         })
     }
 }
@@ -97,7 +85,6 @@ impl InvocationContext {
         immediate_caller: FiberId,
         provider: FiberId,
         provider_generation: FiberGeneration,
-        edge_overlay: Arc<crate::runtime::InterceptLayers>,
         caller_context: Context,
         provider_context: Context,
         cancellation: CancellationToken,
@@ -118,7 +105,6 @@ impl InvocationContext {
             immediate_caller,
             provider,
             provider_generation,
-            edge_overlay,
             caller,
             caller_effect,
             callback,
@@ -156,11 +142,6 @@ impl InvocationContext {
     /// Returns the provider Fiber and generation admitted for this call.
     pub fn provider(&self) -> (FiberId, FiberGeneration) {
         (self.provider, self.provider_generation)
-    }
-
-    /// Returns immutable intercept layers attached to this direct requirement edge.
-    pub fn edge_overlay(&self) -> &[Value] {
-        self.edge_overlay.as_slice()
     }
 
     /// Returns the callback-lifetime immutable caller view.
