@@ -11,21 +11,21 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+async-trait.workspace = true
 futures-util.workspace = true
 hex.workspace = true
-rsi-ai-auth = { path = "../auth" }
 rsi-ai-protocol = { path = "../protocol" }
 rsi-ai-provider = { path = "../provider" }
-serde.workspace = true
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-rsi-ai-testkit = { path = "../testkit" }
-tokio.workspace = true
+rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
 
 [lints]
 workspace = true

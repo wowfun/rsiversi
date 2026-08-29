@@ -1,14 +1,28 @@
 use std::sync::Arc;
 
 use axum::{Router, routing::post};
-use rsi_ai::{ModelRef, Registry};
-use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_deepseek::{DeepSeekAdapter, DeepSeekConfig};
 use rsi_ai_protocol::{
     LanguageModelLimits, LanguageRequest, LanguageSettings, Message, ReasoningEffort,
 };
-use rsi_ai_provider::ProviderRegistration;
+use rsi_ai_provider::MissingMediaResolver;
+use rsi_ai_testkit::{complete_language, language_context};
 use rsi_ai_transport::ReqwestTransport;
+use rsi_credentials_protocol::{CredentialSource, ResolvedCredential, SecretValue};
+
+fn context(model: &str) -> rsi_ai_provider::PrepareContext {
+    language_context(
+        "deepseek",
+        "deepseek",
+        model,
+        Some(ResolvedCredential {
+            secret: SecretValue::new("test").expect("secret"),
+            source: CredentialSource::Keyring,
+        }),
+        Arc::new(MissingMediaResolver),
+        0,
+    )
+}
 
 #[tokio::test]
 async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
@@ -35,35 +49,14 @@ async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("deepseek", "test")
-            .expect("credential")
-            .build(),
+    let output = complete_language(
+        &adapter,
+        context("deepseek-chat"),
+        "deepseek-chat",
+        LanguageRequest::new(vec![Message::user_text("hi").expect("message")]).expect("request"),
     )
-    .register(
-        ProviderRegistration::builder("deepseek", "deepseek")
-            .expect("registration")
-            .with_credential(
-                CredentialRequirement::new("deepseek", ["DEEPSEEK_API_KEY"])
-                    .expect("credential requirement"),
-            )
-            .with_language(adapter)
-            .build()
-            .expect("provider"),
-    )
-    .expect("register")
-    .build()
-    .expect("registry");
-    let output = registry
-        .language(ModelRef::new("deepseek", "deepseek-chat").expect("model"))
-        .expect("language")
-        .complete(
-            LanguageRequest::new(vec![Message::user_text("hi").expect("message")])
-                .expect("request"),
-        )
-        .await
-        .expect("complete");
+    .await
+    .expect("complete");
     assert_eq!(output.visible_text(), "ok");
 }
 
@@ -80,36 +73,19 @@ async fn deepseek_rejects_unsupported_settings_during_prepare() {
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("deepseek", "test")
-            .expect("credential")
-            .build(),
-    )
-    .register(
-        ProviderRegistration::builder("deepseek", "deepseek")
-            .expect("registration")
-            .with_credential(
-                CredentialRequirement::new("deepseek", ["DEEPSEEK_API_KEY"])
-                    .expect("credential requirement"),
-            )
-            .with_language(adapter)
-            .build()
-            .expect("provider"),
-    )
-    .expect("register")
-    .build()
-    .expect("registry");
     let request = LanguageRequest::new(vec![Message::user_text("hi").expect("message")])
         .expect("request")
         .with_settings(LanguageSettings::default().with_reasoning_effort(ReasoningEffort::High))
         .expect("request settings");
-    let error = registry
-        .language(ModelRef::new("deepseek", "deepseek-reasoner").expect("model"))
-        .expect("language")
-        .complete(request)
-        .await
-        .expect_err("unsupported setting");
-    assert_eq!(error.code(), "provider.unsupported");
-    assert!(error.to_string().contains("reasoning_effort"));
+    let error = complete_language(
+        &adapter,
+        context("deepseek-reasoner"),
+        "deepseek-reasoner",
+        request,
+    )
+    .await
+    .expect_err("unsupported setting");
+    let provider = error.provider_error().expect("provider failure");
+    assert_eq!(provider.kind().code(), "provider.unsupported");
+    assert!(provider.to_string().contains("reasoning_effort"));
 }

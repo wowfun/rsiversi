@@ -1,50 +1,44 @@
 # rsi-ai
 
-`rsi-ai` is the provider-neutral AI integration product. It exposes separate,
-strongly typed language, image generation, transcription, speech, and Realtime
-capabilities. A caller selects an exact provider deployment and model, prepares
-a validated one-shot call without provider I/O, persists the redacted snapshot
-when durability matters, and then starts the external effect.
+`rsi-ai` owns the provider-neutral Language and Image capabilities. Each
+runtime capability is an ordinary `rsi-meta` Local service: routers and concrete
+deployments are independent plugins whose availability follows their supplying
+Fiber generation. There is no AI-specific Meta bridge or credential subsystem;
+credentials and media come from the Base contracts that own them.
 
-## Components
+The protocol package owns validated requests, normalized events, stream
+grammars, exact `ModelRef` routing, and redacted prepared-call snapshots. The
+Language and Image router packages publish their Local contracts. Provider
+packages register exact deployments with those routers and remain unaware of
+Agent session semantics. Shared transport code performs one bounded HTTP/SSE
+attempt and never schedules retries. Deterministic test support is keyless.
 
-| Package | Responsibility |
-|---|---|
-| [`rsi-ai-protocol`](protocol/README.md) | Closed semantic requests, normalized events/results, stream grammars, media descriptors, and binary framing |
-| [`rsi-ai-auth`](auth/README.md) | Redacted secrets and deterministic standalone credential resolution |
-| [`rsi-ai-provider`](provider/README.md) | Capability-specific provider-author seams and prepared-call snapshots |
-| [`rsi-ai`](core/README.md) | Exact-routing registry and the small standalone façade |
-| [`rsi-ai-transport`](transport/README.md) | Shared bounded HTTP body and SSE machinery |
-| [`rsi-ai-openai-compatible`](openai-compatible/README.md) | Generic Chat Completions language adapter |
-| [`rsi-ai-deepseek`](deepseek/README.md) | DeepSeek language policy and reasoning replay |
-| [`rsi-ai-openai`](openai/README.md) | OpenAI Responses, Images, transcription, speech, and Realtime adapters |
-| [`rsi-ai-xiaomi`](xiaomi/README.md) | Xiaomi transcription and speech adapters |
-| [`rsi-ai-testkit`](testkit/README.md) | Deterministic adapters and media resolver for keyless tests |
-
-Request schemas are owned by [`schemas/rsi-ai`](../../schemas/rsi-ai/README.md).
-The product currently has no active `rsi-meta` adapter. A future integration
-must be an ordinary plugin over the Context/Fiber foundation.
+The two request schemas are owned by
+[`schemas/rsi-ai`](../../schemas/rsi-ai/README.md).
 
 ## Contract
 
-Provider routing is fixed when a `Registry` is built. `ModelRef` always names a
-deployment and model exactly; there is no alias, fallback, or request-level
-endpoint override. `prepare` validates request/provider compatibility and
+Each router generation owns an exact deployment table populated by
+generation-bound provider leases. `ModelRef` always names a deployment and
+model exactly; there is no alias, fallback, or request-level endpoint override.
+`prepare` validates request/provider compatibility and
 freezes the route, config generation, credential source, request digest, and
 retry facts. `start` consumes that prepared value and performs one provider
-attempt. Convenience completion methods drain the same validated stream.
+attempt. Callers validate terminal success by draining the normalized stream
+through the matching assembler.
 
-Deferred language work is explicit rather than a retry mode. A supporting
-provider returns a persistable `DeferredLanguageCheckpoint`; each poll, stream
-resume, or cancel method makes one request. Resumed output arrives as atomic
-event/checkpoint batches so callers can commit progress without guessing
-whether an SSE cursor covers already-observed semantic events.
+Deferred Language work remains an explicit provider API rather than a retry
+mode. It is reachable through the same generation-pinned Language Local
+service as direct calls; prepare/restore and each submit, poll, resume, or
+cancel operation preserve the frozen route and perform at most one request.
 
-Media JSON contains only bounded descriptors. Bytes cross a `MediaResolver` at
-Start time or bounded binary frames in the plugin protocol. Language and media
-assemblers reject malformed sequence, duplicate terminal/usage data, oversized
-output, and EOF without a terminal event. Realtime is a separate live,
-non-replayable plane.
+Media JSON contains only bounded descriptors. Prepare rejects a request whose
+unique declared media bytes exceed the 256 MiB process resident budget. Bytes
+cross a `MediaResolver` at Start time only after the prepared call acquires its
+complete request weight atomically. Language and Image assemblers reject malformed order, duplicate
+terminal data, zero-progress deltas, excessive event counts, oversized output,
+and EOF without a terminal event. Durable Image consumers may move each closed
+body out of the assembler before accepting the next output.
 
 See [architecture](docs/architecture.md), [security](docs/security.md), and
 [testing](docs/testing.md).

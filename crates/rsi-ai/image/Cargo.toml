@@ -1,31 +1,27 @@
 [package]
-name = "rsi-ai-protocol"
+name = "rsi-ai-image"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
-[lib]
-path = "src/lib.rs"
-doctest = false
-
 [dependencies]
 async-trait.workspace = true
-futures-util.workspace = true
 hex.workspace = true
+rsi-ai-protocol = { path = "../protocol" }
+rsi-ai-provider = { path = "../provider" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
-rsi-meta-contract = { path = "../../rsi-meta/contract" }
-rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
-serde.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-jsonschema.workspace = true
+futures-util.workspace = true
+rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -12,27 +12,111 @@ use axum::{
     routing::post,
 };
 use futures_util::StreamExt as _;
-use rsi_ai::{ModelRef, Registry};
-use rsi_ai_auth::{CredentialManager, CredentialRequirement};
-use rsi_ai_openai::{
-    OpenAiConfig, OpenAiImageAdapter, OpenAiResponsesAdapter, OpenAiSpeechAdapter,
-    OpenAiTranscriptionAdapter,
-};
+use rsi_ai_openai::{OpenAiConfig, OpenAiImageAdapter, OpenAiResponsesAdapter};
 use rsi_ai_protocol::{
-    ContentBlock, ErrorKind, FreeformFormat, FreeformToolDefinition, HostedTool, ImageEvent,
-    ImageRequest, LanguageModelLimits, LanguageRequest, LanguageSettings, MediaDescriptor,
-    MediaKind, Message, MessageContent, ReasoningEffort, ResponseFormat, SpeechFormat,
-    SpeechRequest, ToolCall, ToolChoice, ToolDefinition, TranscriptionRequest,
+    AiCapability, AiError, ContentBlock, ErrorKind, FreeformFormat, FreeformToolDefinition,
+    ImageAssembler, ImageEvent, ImageRequest, LanguageAssembler, LanguageAssemblyError,
+    LanguageModelLimits, LanguageOutput, LanguageRequest, MediaDescriptor, MediaKind, Message,
+    MessageContent, PreparedCallSnapshot, ProviderExtension, RetryPolicy, ToolCall, ToolCallKind,
+    ToolChoice, ToolDefinition,
 };
-use rsi_ai_provider::{LanguageAdapter, ProviderRegistration};
+use rsi_ai_provider::{AbortSignal, ImageAdapter, LanguageAdapter, PrepareContext};
 use rsi_ai_testkit::InMemoryMediaResolver;
 use rsi_ai_transport::ReqwestTransport;
+use rsi_credentials_protocol::{CredentialSource, ResolvedCredential, SecretValue};
 use serde_json::{Value, json};
 
 type CapturedCall = (String, HeaderMap, Vec<u8>);
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<CapturedCall>>>);
+
+fn context(
+    capability: AiCapability,
+    media: InMemoryMediaResolver,
+    media_admission_bytes: u64,
+) -> PrepareContext {
+    PrepareContext::new(
+        PreparedCallSnapshot {
+            call_id: "test-call".into(),
+            deployment_id: "openai".into(),
+            provider_family: "openai".into(),
+            capability,
+            model: match capability {
+                AiCapability::Language => "gpt-5",
+                AiCapability::Image => "gpt-image-1",
+            }
+            .into(),
+            protocol: "openai-responses".into(),
+            transport: "http".into(),
+            endpoint_fingerprint: "test-endpoint".into(),
+            config_generation: 1,
+            credential_source: Some(CredentialSource::Keyring),
+            retry_policy: RetryPolicy::default(),
+            request_sha256: "0".repeat(64),
+        },
+        Some(ResolvedCredential {
+            secret: SecretValue::new("openai-secret").expect("secret"),
+            source: CredentialSource::Keyring,
+        }),
+        Arc::new(media),
+        media_admission_bytes,
+    )
+    .expect("test provider context")
+}
+
+#[derive(Debug)]
+enum CompleteError {
+    Provider(AiError),
+    Assembly(LanguageAssemblyError),
+}
+
+impl CompleteError {
+    fn provider_error(&self) -> Option<&AiError> {
+        match self {
+            Self::Provider(error)
+            | Self::Assembly(LanguageAssemblyError::Provider { error, .. }) => Some(error),
+            Self::Assembly(LanguageAssemblyError::Protocol(_)) => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TestLanguageModel {
+    adapter: OpenAiResponsesAdapter,
+    media: InMemoryMediaResolver,
+    media_admission_bytes: u64,
+}
+
+impl TestLanguageModel {
+    async fn complete(&self, request: LanguageRequest) -> Result<LanguageOutput, CompleteError> {
+        let prepared = self
+            .adapter
+            .prepare(
+                context(
+                    AiCapability::Language,
+                    self.media.clone(),
+                    self.media_admission_bytes,
+                ),
+                "gpt-5".into(),
+                request,
+            )
+            .await
+            .map_err(CompleteError::Provider)?;
+        let mut stream = prepared
+            .start(AbortSignal::new())
+            .await
+            .map_err(CompleteError::Provider)?;
+        let mut assembler = LanguageAssembler::new();
+        while let Some(event) = stream.next().await {
+            let event = event.map_err(CompleteError::Provider)?;
+            assembler
+                .push(&event)
+                .map_err(|error| CompleteError::Assembly(error.into()))?;
+        }
+        assembler.finish().map_err(CompleteError::Assembly)
+    }
+}
 
 fn language_config(endpoint: impl Into<String>) -> OpenAiConfig {
     OpenAiConfig::new(endpoint)
@@ -88,6 +172,99 @@ fn responses_describe_uses_the_exact_configured_model_capacity() {
     );
 }
 
+#[test]
+fn responses_rejects_known_incompatible_history_during_prepare_validation() {
+    let adapter = OpenAiResponsesAdapter::new(
+        language_config("http://127.0.0.1:9"),
+        Arc::new(ReqwestTransport::new().expect("transport")),
+    );
+    let audio = |mime: &str| {
+        MediaDescriptor::new(MediaKind::Audio, mime, 1, "0".repeat(64)).expect("audio descriptor")
+    };
+    let image = || {
+        MediaDescriptor::new(MediaKind::Image, "image/png", 1, "1".repeat(64))
+            .expect("image descriptor")
+    };
+    let call = ToolCall {
+        id: "call-1".into(),
+        name: "echo".into(),
+        arguments: "{}".into(),
+        kind: ToolCallKind::Function,
+    };
+    let cases = [
+        LanguageRequest::new(vec![
+            Message::assistant(vec![MessageContent::Reasoning {
+                text: "prior reasoning".into(),
+                evidence: None,
+            }])
+            .expect("assistant reasoning"),
+        ])
+        .expect("request"),
+        LanguageRequest::new(vec![
+            Message::assistant(vec![MessageContent::Image(image())]).expect("assistant media"),
+        ])
+        .expect("request"),
+        LanguageRequest::new(vec![
+            Message::user(vec![MessageContent::Audio(audio("audio/ogg"))]).expect("user audio"),
+        ])
+        .expect("request"),
+        LanguageRequest::new(vec![
+            Message::assistant(vec![MessageContent::ToolCall(call.clone())])
+                .expect("assistant tool call"),
+            Message::tool_result(
+                call.id.clone(),
+                vec![MessageContent::Audio(audio("audio/wav"))],
+                false,
+            )
+            .expect("audio tool result"),
+        ])
+        .expect("request"),
+    ];
+
+    for request in cases {
+        let error = adapter
+            .validate_request("gpt-5", &request)
+            .expect_err("known incompatible request must fail validation");
+        assert_eq!(error.phase(), rsi_ai_protocol::ErrorPhase::Prepare);
+        assert_eq!(
+            error.dispatch_status(),
+            rsi_ai_protocol::DispatchStatus::NotStarted
+        );
+    }
+}
+
+#[test]
+fn responses_replay_extension_is_fully_validated_before_start() {
+    let adapter = OpenAiResponsesAdapter::new(
+        language_config("http://127.0.0.1:9"),
+        Arc::new(ReqwestTransport::new().expect("transport")),
+    );
+    for extension in [
+        ProviderExtension {
+            namespace: "another.provider".into(),
+            version: 0,
+            value: json!({"response_id":"resp-1"}),
+        },
+        ProviderExtension {
+            namespace: "openai.responses.replay".into(),
+            version: 0,
+            value: json!({"response_id":""}),
+        },
+        ProviderExtension {
+            namespace: "openai.responses.replay".into(),
+            version: 0,
+            value: json!({}),
+        },
+    ] {
+        let request = LanguageRequest::new(vec![Message::user_text("continue").unwrap()])
+            .unwrap()
+            .with_extensions(vec![extension])
+            .unwrap();
+        assert!(adapter.validate_request("gpt-5", &request).is_err());
+    }
+}
+
+#[allow(clippy::too_many_lines)] // One local HTTP fixture enumerates bounded provider wire cases.
 async fn endpoint(
     State(capture): State<Capture>,
     uri: Uri,
@@ -115,7 +292,77 @@ async fn endpoint(
             .expect("custom tool response");
     }
     if uri.path() == "/v1/responses"
+        && body
+            .windows(b"deep-json-case".len())
+            .any(|part| part == b"deep-json-case")
+    {
+        let nested = format!("{}null{}", "[".repeat(65), "]".repeat(65));
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(format!(
+                "data: {{\"type\":\"response.completed\",\"response\":{{}},\"extra\":{nested}}}\n\ndata: [DONE]\n\n"
+            )))
+            .expect("deep JSON response");
+    }
+    if uri.path() == "/v1/responses"
+        && body
+            .windows(b"large-terminal-frame-case".len())
+            .any(|part| part == b"large-terminal-frame-case")
+    {
+        let echoed_output = "x".repeat(300 * 1024);
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(format!(
+                concat!(
+                    "data: {{\"type\":\"response.output_text.delta\",",
+                    "\"item_id\":\"msg-large-terminal\",\"content_index\":0,",
+                    "\"delta\":\"visible\"}}\n\n",
+                    "data: {{\"type\":\"response.completed\",",
+                    "\"response\":{{\"id\":\"resp-large-terminal\",",
+                    "\"status\":\"completed\",\"output\":[{{\"text\":\"{}\"}}]}}}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+                echoed_output
+            )))
+            .expect("large terminal response");
+    }
+    if uri.path() == "/v1/responses"
+        && body
+            .windows(b"queued-event-case".len())
+            .any(|part| part == b"queued-event-case")
+    {
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(concat!(
+                "data: {\"type\":\"response.queued\",\"response\":{\"id\":\"resp-queued\",\"status\":\"queued\"},\"sequence_number\":1}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-queued\",\"content_index\":0,\"delta\":\"ready\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-queued\",\"status\":\"completed\"}}\n\n",
+                "data: [DONE]\n\n"
+            )))
+            .expect("queued response");
+    }
+    if uri.path() == "/v1/responses"
+        && body
+            .windows(b"refusal-event-case".len())
+            .any(|part| part == b"refusal-event-case")
+    {
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(concat!(
+                "data: {\"type\":\"response.refusal.delta\",\"item_id\":\"msg-refusal\",\"output_index\":0,\"content_index\":0,\"delta\":\"I cannot help with that.\",\"sequence_number\":1}\n\n",
+                "data: {\"type\":\"response.refusal.done\",\"item_id\":\"msg-refusal\",\"output_index\":0,\"content_index\":0,\"refusal\":\"I cannot help with that.\",\"sequence_number\":2}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-refusal\",\"status\":\"completed\"}}\n\n",
+                "data: [DONE]\n\n"
+            )))
+            .expect("refusal response");
+    }
+    if uri.path() == "/v1/responses"
         && let Some(response) = responses_failure_fixture(&body)
+    {
+        return response;
+    }
+    if uri.path() == "/v1/responses"
+        && let Some(response) = completed_status_conflict_fixture(&body)
     {
         return response;
     }
@@ -163,27 +410,30 @@ async fn endpoint(
             )))
             .expect("response"),
         "/v1/images/generations" | "/v1/images/edits" => Response::new(Body::from(
-            json!({"data":[{"b64_json":"iVBORw=="}]}).to_string(),
+            json!({"data":[{"b64_json":"iVBORw0KGgo="}]}).to_string(),
         )),
-        "/v1/audio/transcriptions" => {
-            let text = format!("{}é", "a".repeat(65_535));
-            Response::new(Body::from(json!({
-                "text":text,
-                "language":"en",
-                "segments":[{"id":0,"start":0.0,"end":1.25,"text":text}]
-            })
-            .to_string()))
-        }
-        "/v1/audio/speech" => Response::builder()
-            .header("content-type", "audio/mpeg")
-            .body(Body::from(vec![0_u8, 1, 2, 3]))
-            .expect("speech"),
         path => panic!("unexpected path {path}"),
     }
 }
 
+fn completed_status_conflict_fixture(body: &[u8]) -> Option<Response> {
+    let marker = b"completed-failed-status-case";
+    body.windows(marker.len())
+        .any(|part| part == marker)
+        .then(|| {
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(Body::from(concat!(
+                    "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-inconsistent\",\"content_index\":0,\"delta\":\"must not succeed\"}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-inconsistent\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"failed despite completed event\"}}}\n\n",
+                    "data: [DONE]\n\n"
+                )))
+                .expect("inconsistent completed response")
+        })
+}
+
 fn responses_failure_fixture(body: &[u8]) -> Option<Response> {
-    const FIXTURES: [(&[u8], &str, &str); 5] = [
+    const FIXTURES: [(&[u8], &str, &str); 6] = [
         (
             b"context-limit-case",
             r#"{"type":"response.failed","response":{"id":"resp-context-limit","status":"failed","error":{"code":"context_length_exceeded","message":"input exceeds this model's context window"}}}"#,
@@ -209,6 +459,11 @@ fn responses_failure_fixture(body: &[u8]) -> Option<Response> {
             r#"{"type":"error","code":"context_length_exceeded","message":"top-level context limit","param":null,"sequence_number":1}"#,
             "top-level error response",
         ),
+        (
+            b"stream-auth-case",
+            r#"{"type":"error","code":"invalid_api_key","message":"invalid credential"}"#,
+            "stream authentication response",
+        ),
     ];
     let (_, event, label) = FIXTURES
         .into_iter()
@@ -222,7 +477,40 @@ fn responses_failure_fixture(body: &[u8]) -> Option<Response> {
 }
 
 async fn one_image() -> Response {
-    Response::new(Body::from(r#"{"data":[{"b64_json":"iVBORw=="}]}"#))
+    Response::new(Body::from(r#"{"data":[{"b64_json":"iVBORw0KGgo="}]}"#))
+}
+
+async fn non_png_image() -> Response {
+    Response::new(Body::from(r#"{"data":[{"b64_json":"bm90LWEtcG5n"}]}"#))
+}
+
+#[tokio::test]
+async fn image_output_is_validated_before_png_is_declared() {
+    let app = Router::new().route("/v1/images/generations", post(non_png_image));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+    let image = OpenAiImageAdapter::new(
+        OpenAiConfig::new(format!("http://{address}")).expect("config"),
+        Arc::new(ReqwestTransport::new().expect("transport")),
+    );
+    let prepared = image
+        .prepare(
+            context(AiCapability::Image, InMemoryMediaResolver::default(), 0),
+            "gpt-image-1".into(),
+            ImageRequest::new("not a png", 1).expect("request"),
+        )
+        .await
+        .expect("prepare");
+    let mut generation = prepared.start(AbortSignal::new()).await.expect("start");
+    let error = generation
+        .next()
+        .await
+        .expect("one outcome")
+        .expect_err("invalid bytes must fail before an output is declared");
+    assert_eq!(error.kind(), ErrorKind::OutputValidation);
 }
 
 #[tokio::test]
@@ -233,36 +521,27 @@ async fn image_count_mismatch_follows_completed_image_events_with_output_validat
         .expect("listen");
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
-    let registration = ProviderRegistration::builder("openai", "openai")
-        .expect("registration")
-        .with_credential(credential())
-        .with_image(OpenAiImageAdapter::new(
-            OpenAiConfig::new(format!("http://{address}")).expect("config"),
-            Arc::new(ReqwestTransport::new().expect("transport")),
-        ))
-        .build()
-        .expect("provider");
-    let image = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("openai", "openai-secret")
-            .expect("credential")
-            .build(),
-    )
-    .register(registration)
-    .expect("registration")
-    .build()
-    .expect("registry")
-    .image(ModelRef::new("openai", "gpt-image-1").expect("model"))
-    .expect("image");
-
-    let mut generation = image
-        .prepare(ImageRequest::new("two dots", 2).expect("request"))
+    let image = OpenAiImageAdapter::new(
+        OpenAiConfig::new(format!("http://{address}")).expect("config"),
+        Arc::new(ReqwestTransport::new().expect("transport")),
+    );
+    let prepared = image
+        .prepare(
+            context(AiCapability::Image, InMemoryMediaResolver::default(), 0),
+            "gpt-image-1".into(),
+            ImageRequest::new("two dots", 2).expect("request"),
+        )
         .await
-        .expect("prepare")
-        .start()
-        .await
-        .expect("start");
-    let events = generation.by_ref().collect::<Vec<_>>().await;
+        .expect("prepare");
+    let mut generation = prepared.start(AbortSignal::new()).await.expect("start");
+    let mut events = Vec::new();
+    let error = loop {
+        match generation.next().await {
+            Some(Ok(event)) => events.push(event),
+            Some(Err(error)) => break error,
+            None => panic!("count mismatch must fail"),
+        }
+    };
     assert_eq!(
         events,
         vec![
@@ -273,21 +552,15 @@ async fn image_count_mismatch_follows_completed_image_events_with_output_validat
             ImageEvent::OutputChunk {
                 index: 0,
                 sequence: 1,
-                bytes: vec![137, 80, 78, 71],
+                bytes: vec![137, 80, 78, 71, 13, 10, 26, 10],
             },
             ImageEvent::OutputFinished { index: 0 },
         ]
     );
-    let error = generation
-        .finish()
-        .expect_err("one image cannot satisfy a two-image request");
-    assert_eq!(
-        error.provider_error().map(rsi_ai_protocol::AiError::kind),
-        Some(ErrorKind::OutputValidation)
-    );
+    assert_eq!(error.kind(), ErrorKind::OutputValidation);
 }
 
-async fn language_model(capture: Capture) -> rsi_ai::LanguageModel {
+async fn language_model(capture: Capture) -> TestLanguageModel {
     let app = Router::new()
         .route("/v1/responses", post(endpoint))
         .with_state(capture);
@@ -296,27 +569,14 @@ async fn language_model(capture: Capture) -> rsi_ai::LanguageModel {
         .expect("listen");
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
-    let registration = ProviderRegistration::builder("openai", "openai")
-        .expect("registration")
-        .with_credential(credential())
-        .with_language(OpenAiResponsesAdapter::new(
+    TestLanguageModel {
+        adapter: OpenAiResponsesAdapter::new(
             language_config(format!("http://{address}")),
             Arc::new(ReqwestTransport::new().expect("transport")),
-        ))
-        .build()
-        .expect("provider");
-    Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("openai", "openai-secret")
-            .expect("credential")
-            .build(),
-    )
-    .register(registration)
-    .expect("registration")
-    .build()
-    .expect("registry")
-    .language(ModelRef::new("openai", "gpt-5").expect("model"))
-    .expect("language")
+        ),
+        media: InMemoryMediaResolver::default(),
+        media_admission_bytes: 0,
+    }
 }
 
 #[tokio::test]
@@ -492,6 +752,83 @@ async fn responses_failed_event_preserves_the_context_limit_error() {
 }
 
 #[tokio::test]
+async fn responses_completed_event_rejects_a_conflicting_embedded_status() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("completed-failed-status-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect_err("conflicting terminal status must not become success");
+    assert_eq!(
+        error.provider_error().expect("provider error").kind(),
+        ErrorKind::Protocol
+    );
+}
+
+#[tokio::test]
+async fn responses_reject_json_beyond_the_shared_structure_bound() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![Message::user_text("deep-json-case").expect("message")])
+                .expect("request"),
+        )
+        .await
+        .expect_err("deep provider JSON must fail before event interpretation");
+    let provider = error.provider_error().expect("provider error facts");
+    assert_eq!(provider.kind(), ErrorKind::Protocol);
+    assert_eq!(
+        provider.safe_summary(),
+        "OpenAI response exceeds the JSON structure limits"
+    );
+}
+
+#[tokio::test]
+async fn responses_accepts_a_terminal_snapshot_larger_than_the_default_delta_frame() {
+    let output = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("large-terminal-frame-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect("the terminal snapshot repeats already streamed output within its body bound");
+    assert_eq!(output.visible_text(), "visible");
+}
+
+#[tokio::test]
+async fn responses_accepts_documented_queued_and_refusal_events() {
+    let model = language_model(Capture::default()).await;
+    let queued = model
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("queued-event-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect("documented queued event");
+    assert_eq!(queued.visible_text(), "ready");
+
+    let refusal = model
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("refusal-event-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect("documented refusal events");
+    assert_eq!(refusal.visible_text(), "I cannot help with that.");
+}
+
+#[tokio::test]
 async fn responses_top_level_error_event_preserves_provider_facts() {
     let error = language_model(Capture::default())
         .await
@@ -507,6 +844,23 @@ async fn responses_top_level_error_event_preserves_provider_facts() {
     assert_eq!(provider.kind(), ErrorKind::ContextLimit);
     assert_eq!(provider.provider_code(), Some("context_length_exceeded"));
     assert_eq!(provider.safe_summary(), "top-level context limit");
+}
+
+#[tokio::test]
+async fn responses_stream_authentication_error_is_not_retryable_as_a_server_failure() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("stream-auth-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect_err("authentication event must fail");
+    let provider = error.provider_error().expect("provider error facts");
+    assert_eq!(provider.kind(), ErrorKind::Authentication);
+    assert_eq!(provider.provider_code(), Some("invalid_api_key"));
 }
 
 #[tokio::test]
@@ -567,20 +921,12 @@ async fn responses_adapter_bounds_source_ids_for_maximum_provider_item_ids() {
     assert!(source_id.starts_with("openai-source-"));
 }
 
-fn credential() -> CredentialRequirement {
-    CredentialRequirement::new("openai", ["OPENAI_API_KEY"]).expect("requirement")
-}
-
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // One end-to-end test proves all four HTTP capabilities.
-async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
+async fn responses_and_image_edit_share_credential_and_start_time_media_resolution() {
     let capture = Capture::default();
     let app = Router::new()
         .route("/v1/responses", post(endpoint))
-        .route("/v1/images/generations", post(endpoint))
         .route("/v1/images/edits", post(endpoint))
-        .route("/v1/audio/transcriptions", post(endpoint))
-        .route("/v1/audio/speech", post(endpoint))
         .with_state(capture.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -590,207 +936,69 @@ async fn openai_http_adapters_cover_responses_images_asr_and_tts() {
 
     let config = language_config(format!("http://{address}"));
     let transport = Arc::new(ReqwestTransport::new().expect("transport"));
-    let registration = ProviderRegistration::builder("openai", "openai")
-        .expect("registration")
-        .with_credential(credential())
-        .with_language(OpenAiResponsesAdapter::new(
-            config.clone(),
-            transport.clone(),
-        ))
-        .with_image(OpenAiImageAdapter::new(config.clone(), transport.clone()))
-        .with_transcription(OpenAiTranscriptionAdapter::new(
-            config.clone(),
-            transport.clone(),
-        ))
-        .with_speech(OpenAiSpeechAdapter::new(config, transport))
-        .build()
-        .expect("provider");
-    let audio_digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-    let image_digest = "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543";
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("openai", "openai-secret")
-            .expect("credential")
-            .build(),
-    )
-    .with_media_resolver(InMemoryMediaResolver::new(BTreeMap::from([
-        (audio_digest.to_owned(), b"hello world".to_vec()),
-        (image_digest.to_owned(), vec![137, 80, 78, 71]),
-    ])))
-    .register(registration)
-    .expect("register")
-    .build()
-    .expect("registry");
-    let image_media =
-        MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest).expect("image input");
-
-    let language = registry
-        .language(ModelRef::new("openai", "gpt-5").expect("model"))
-        .expect("language")
-        .complete(
-            LanguageRequest::new(vec![
-                Message::assistant(vec![
-                    MessageContent::Text {
-                        text: "before".to_owned(),
-                    },
-                    MessageContent::ToolCall(ToolCall {
-                        id: "call-1".to_owned(),
-                        name: "lookup".to_owned(),
-                        arguments: "{}".to_owned(),
-                        kind: rsi_ai_protocol::ToolCallKind::Function,
-                    }),
-                ])
-                .expect("assistant history"),
-                Message::tool_result(
-                    "call-1",
-                    vec![
-                        MessageContent::Text {
-                            text: "tool text".to_owned(),
-                        },
-                        MessageContent::Image(image_media.clone()),
-                    ],
-                    false,
-                )
-                .expect("rich tool result"),
-                Message::user(vec![
-                    MessageContent::Text {
-                        text: "hello".to_owned(),
-                    },
-                    MessageContent::Image(image_media.clone()),
-                ])
-                .expect("message"),
+    let digest = "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543";
+    let media =
+        InMemoryMediaResolver::new(BTreeMap::from([(digest.to_owned(), vec![137, 80, 78, 71])]));
+    let descriptor =
+        MediaDescriptor::new(MediaKind::Image, "image/png", 4, digest).expect("image input");
+    let language = TestLanguageModel {
+        adapter: OpenAiResponsesAdapter::new(config.clone(), transport.clone()),
+        media: media.clone(),
+        media_admission_bytes: 4,
+    }
+    .complete(
+        LanguageRequest::new(vec![
+            Message::user(vec![
+                MessageContent::Text {
+                    text: "hello".to_owned(),
+                },
+                MessageContent::Image(descriptor.clone()),
             ])
-            .expect("request")
-            .with_hosted_tools(vec![HostedTool::WebSearch { max_uses: None }])
-            .expect("hosted tool")
-            .with_settings(
-                LanguageSettings::default()
-                    .with_max_output_tokens(800)
-                    .expect("tokens")
-                    .with_sampling(Some(0.2), Some(0.75))
-                    .expect("sampling")
-                    .with_reasoning_effort(ReasoningEffort::High),
-            )
-            .expect("settings")
-            .with_response_format(
-                ResponseFormat::json_schema(
-                    "answer",
-                    None,
-                    json!({"type":"string", "const":"\0rsi-media-0\0"}),
-                )
-                .expect("response format"),
-            )
-            .expect("structured output"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(
-        language.content,
-        vec![ContentBlock::Text {
-            text: "hello".to_owned()
-        }]
-    );
-    assert_eq!(language.sources.len(), 1);
-    assert_eq!(
-        language.sources[0].url.as_deref(),
-        Some("https://example.test/source")
-    );
-    assert_eq!(
-        language.replay.expect("replay").value["response_id"],
-        "resp-1"
-    );
+            .expect("message"),
+        ])
+        .expect("request"),
+    )
+    .await
+    .expect("language output");
+    assert_eq!(language.visible_text(), "hello");
 
-    let image = registry
-        .image(ModelRef::new("openai", "gpt-image-1").expect("model"))
-        .expect("image")
-        .generate(
-            ImageRequest::new("a dot", 1)
+    let adapter = OpenAiImageAdapter::new(config, transport);
+    let prepared = adapter
+        .prepare(
+            context(AiCapability::Image, media, 4),
+            "gpt-image-1".into(),
+            ImageRequest::new("edit", 1)
                 .expect("request")
-                .with_inputs(vec![image_media], None)
-                .expect("image edit"),
+                .with_inputs(vec![descriptor], None)
+                .expect("edit"),
         )
         .await
-        .expect("image output");
-    assert_eq!(image.images[0].bytes, [137, 80, 78, 71]);
-
-    let audio =
-        MediaDescriptor::new(MediaKind::Audio, "audio/wav", 11, audio_digest).expect("audio");
-    let transcript = registry
-        .transcription(ModelRef::new("openai", "gpt-4o-transcribe").expect("model"))
-        .expect("transcription")
-        .transcribe(
-            TranscriptionRequest::new(audio)
-                .expect("request")
-                .with_timestamps(true),
-        )
-        .await
-        .expect("transcript");
-    assert_eq!(transcript.text.len(), 65_537);
-    assert!(transcript.text.ends_with('é'));
-    assert_eq!(transcript.segments[0].end_ms, 1_250);
-
-    let speech = registry
-        .speech(ModelRef::new("openai", "gpt-4o-mini-tts").expect("model"))
-        .expect("speech")
-        .synthesize(SpeechRequest::new("hello", "alloy", SpeechFormat::Mp3).expect("request"))
-        .await
-        .expect("speech output");
-    assert_eq!(speech.audio.bytes, [0, 1, 2, 3]);
+        .expect("prepare");
+    let mut stream = prepared.start(AbortSignal::new()).await.expect("start");
+    let mut assembler = ImageAssembler::new();
+    while let Some(event) = stream.next().await {
+        assembler
+            .push(&event.expect("image event"))
+            .expect("grammar");
+    }
+    assert_eq!(
+        assembler.finish().expect("image output").images[0].bytes,
+        [137, 80, 78, 71, 13, 10, 26, 10]
+    );
 
     let calls = capture.0.lock().expect("capture");
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|(_, headers, _)| {
         headers
             .get("authorization")
             .is_some_and(|value| value == "Bearer openai-secret")
     }));
     assert_eq!(calls[0].1["transfer-encoding"], "chunked");
-    assert!(!calls[0].1.contains_key("content-length"));
-    let response_body: Value = serde_json::from_slice(&calls[0].2).expect("responses request");
-    assert_eq!(response_body["stream"], true);
-    assert_eq!(response_body["max_output_tokens"], 800);
-    assert_eq!(response_body["temperature"], 0.2);
-    assert_eq!(response_body["top_p"], 0.75);
-    assert_eq!(response_body["reasoning"]["effort"], "high");
-    assert_eq!(response_body["input"][0]["type"], "message");
-    assert_eq!(response_body["input"][0]["content"][0]["text"], "before");
-    assert_eq!(response_body["input"][1]["type"], "function_call");
-    assert_eq!(
-        response_body["input"][2]["output"][0],
-        json!({"type":"input_text", "text":"tool text"})
-    );
-    assert_eq!(
-        response_body["input"][2]["output"][1]["image_url"],
-        "data:image/png;base64,iVBORw=="
-    );
-    assert_eq!(
-        response_body["input"][3]["content"][1]["image_url"],
-        "data:image/png;base64,iVBORw=="
-    );
-    assert_eq!(
-        response_body["text"]["format"]["schema"]["const"],
-        "\0rsi-media-0\0"
-    );
     assert_eq!(calls[1].0, "/v1/images/edits");
-    assert_eq!(calls[1].1["transfer-encoding"], "chunked");
-    assert!(!calls[1].1.contains_key("content-length"));
     assert!(
         calls[1]
             .2
             .windows(4)
             .any(|window| window == [137, 80, 78, 71])
-    );
-    assert_eq!(calls[2].1["transfer-encoding"], "chunked");
-    assert!(!calls[2].1.contains_key("content-length"));
-    let transcription_body = &calls[2].2;
-    assert!(
-        transcription_body
-            .windows(11)
-            .any(|window| window == b"hello world")
-    );
-    let speech_body: Value = serde_json::from_slice(&calls[3].2).expect("speech request");
-    assert!(
-        speech_body.get("speed").is_none(),
-        "an unset optional speed must be omitted, not serialized as null"
     );
 }

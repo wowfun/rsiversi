@@ -19,8 +19,8 @@ futures-util.workspace = true
 http.workspace = true
 memchr.workspace = true
 reqwest.workspace = true
-rsi-ai-auth = { path = "../auth" }
 rsi-ai-protocol = { path = "../protocol" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

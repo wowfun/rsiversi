@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use rsi_ai::{ModelRef, Registry};
-use rsi_ai_auth::{CredentialManager, CredentialRequirement};
 use rsi_ai_deepseek::{DeepSeekAdapter, DeepSeekConfig};
 use rsi_ai_protocol::{LanguageModelLimits, LanguageRequest, LanguageSettings, Message};
-use rsi_ai_provider::ProviderRegistration;
+use rsi_ai_provider::MissingMediaResolver;
+use rsi_ai_testkit::{complete_language, language_context};
 use rsi_ai_transport::ReqwestTransport;
+use rsi_credentials_protocol::{CredentialSource, ResolvedCredential, SecretValue};
 
 #[tokio::test]
 #[ignore = "requires an explicit DEEPSEEK_API_KEY and spends live API quota"]
@@ -25,26 +25,6 @@ async fn deepseek_v4_flash_streams_a_real_completion() {
             .expect("live model profile"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("deepseek.live", key)
-            .expect("credential")
-            .build(),
-    )
-    .register(
-        ProviderRegistration::builder("deepseek-live", "deepseek")
-            .expect("registration")
-            .with_credential(
-                CredentialRequirement::new("deepseek.live", std::iter::empty::<String>())
-                    .expect("requirement"),
-            )
-            .with_language(adapter)
-            .build()
-            .expect("provider"),
-    )
-    .expect("register")
-    .build()
-    .expect("registry");
     let request = LanguageRequest::new(vec![
         Message::user_text("Reply with the exact text LIVE_OK and nothing else.").expect("message"),
     ])
@@ -58,10 +38,24 @@ async fn deepseek_v4_flash_streams_a_real_completion() {
 
     let output = tokio::time::timeout(
         Duration::from_mins(2),
-        registry
-            .language(ModelRef::new("deepseek-live", "deepseek-v4-flash").expect("model"))
-            .expect("language")
-            .complete(request),
+        complete_language(
+            &adapter,
+            language_context(
+                "deepseek-live",
+                "deepseek",
+                "deepseek-v4-flash",
+                Some(ResolvedCredential {
+                    secret: SecretValue::new(key).expect("credential"),
+                    source: CredentialSource::Environment {
+                        variable: "DEEPSEEK_API_KEY".into(),
+                    },
+                }),
+                Arc::new(MissingMediaResolver),
+                0,
+            ),
+            "deepseek-v4-flash",
+            request,
+        ),
     )
     .await
     .expect("live DeepSeek request timed out")

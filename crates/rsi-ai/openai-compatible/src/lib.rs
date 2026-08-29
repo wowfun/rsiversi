@@ -19,15 +19,18 @@ use rsi_ai_protocol::{
     ResponseFormat, ToolCallKind, ToolChoice, ToolDialect,
 };
 use rsi_ai_provider::{
-    AdapterFuture, LanguageAdapter, LanguageAdapterStream, PrepareContext, Prepared,
+    AdapterFuture, LanguageAdapter, LanguageAdapterStream, LanguageRegistrarContract,
+    PrepareContext, Prepared, ProviderPublication, ProviderRegistration,
 };
 use rsi_ai_transport::{
     ChatCompletionsChunk, HttpRequest, HttpTransport, JsonBase64Replacement, JsonRequestBody,
-    SseTermination, decode_sse, invalid_request_error, json_base64_body,
-    provider_error as ai_error, provider_http_error, reclassify_context_limit,
+    MAX_PROVIDER_REQUEST_BODY_BYTES, SseTermination, decode_sse, invalid_request_error,
+    json_base64_body, provider_error as ai_error, provider_http_error, reclassify_context_limit,
     transport_connect_error, transport_stream_error,
 };
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 
 /// Fixed endpoint policy for one compatible Chat Completions deployment.
 #[derive(Clone, Debug)]
@@ -156,38 +159,27 @@ impl LanguageAdapter for ChatCompletionsAdapter {
         .expect("static Chat Completions profile is valid"))
     }
 
-    fn prepare(
-        &self,
-        context: PrepareContext,
-        model: String,
-        request: LanguageRequest,
-    ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, AiError>> {
-        if let Err(error) = self.config.model_limits(&model) {
-            return Box::pin(async move { Err(error) });
-        }
-        let unsupported_hosted = request
+    fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
+        self.config.model_limits(model)?;
+        if request
             .hosted_tools()
             .iter()
-            .any(|tool| matches!(tool, HostedTool::WebSearch { .. }));
-        if unsupported_hosted {
-            return Box::pin(async {
-                Err(ai_error(
-                    ErrorKind::Unsupported,
-                    ErrorPhase::Prepare,
-                    DispatchStatus::NotStarted,
-                    "Chat Completions does not support provider-hosted tools",
-                ))
-            });
+            .any(|tool| matches!(tool, HostedTool::WebSearch { .. }))
+        {
+            return Err(ai_error(
+                ErrorKind::Unsupported,
+                ErrorPhase::Prepare,
+                DispatchStatus::NotStarted,
+                "Chat Completions does not support provider-hosted tools",
+            ));
         }
         if request.tools().iter().any(|tool| tool.freeform().is_some()) {
-            return Box::pin(async {
-                Err(ai_error(
-                    ErrorKind::Unsupported,
-                    ErrorPhase::Prepare,
-                    DispatchStatus::NotStarted,
-                    "Chat Completions cannot preserve freeform custom-tool semantics",
-                ))
-            });
+            return Err(ai_error(
+                ErrorKind::Unsupported,
+                ErrorPhase::Prepare,
+                DispatchStatus::NotStarted,
+                "Chat Completions cannot preserve freeform custom-tool semantics",
+            ));
         }
         if request.messages().iter().any(|message| {
             message.content().iter().any(|content| {
@@ -197,16 +189,23 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                 )
             })
         }) {
-            return Box::pin(async {
-                Err(ai_error(
-                    ErrorKind::Unsupported,
-                    ErrorPhase::Prepare,
-                    DispatchStatus::NotStarted,
-                    "Chat Completions cannot preserve freeform custom-tool history",
-                ))
-            });
+            return Err(ai_error(
+                ErrorKind::Unsupported,
+                ErrorPhase::Prepare,
+                DispatchStatus::NotStarted,
+                "Chat Completions cannot preserve freeform custom-tool history",
+            ));
         }
-        if let Err(error) = validate_chat_tool_result_adjacency(&request) {
+        validate_chat_tool_result_adjacency(request)
+    }
+
+    fn prepare(
+        &self,
+        context: PrepareContext,
+        model: String,
+        request: LanguageRequest,
+    ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, AiError>> {
+        if let Err(error) = self.validate_request(&model, &request) {
             return Box::pin(async move { Err(error) });
         }
         let snapshot = context.snapshot().clone();
@@ -243,7 +242,7 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                             HeaderValue::from_static("text/event-stream"),
                         )
                         .map_err(invalid_request_error)?
-                        .bearer_auth(credential.secret())
+                        .bearer_auth(&credential.secret)
                         .map_err(invalid_request_error)?
                         .json_body(body);
                     let response = transport
@@ -256,10 +255,139 @@ impl LanguageAdapter for ChatCompletionsAdapter {
                     Ok(translate_chat_stream(decode_sse(
                         response.body,
                         SseTermination::DoneSentinel,
+                        rsi_ai_transport::DEFAULT_SSE_FRAME_BYTES,
                     )))
                 })
             }))
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatiblePluginConfig {
+    deployment: String,
+    credential: rsi_credentials_protocol::CredentialRef,
+    endpoint: String,
+    path: String,
+    allow_image_input: bool,
+    language_models: BTreeMap<String, LanguageModelLimits>,
+}
+
+#[derive(Debug)]
+struct PreparedCompatiblePlugin {
+    config: CompatiblePluginConfig,
+    adapter: ChatCompletionsConfig,
+}
+
+/// Ordinary plugin factory for one explicit OpenAI-compatible deployment.
+#[derive(Clone, Default)]
+pub struct OpenAiCompatibleFactory {
+    transport: Option<Arc<dyn HttpTransport>>,
+}
+
+impl OpenAiCompatibleFactory {
+    /// Uses an injected no-retry transport for deterministic embedders and tests.
+    #[must_use]
+    pub fn with_transport(transport: Arc<dyn HttpTransport>) -> Self {
+        Self {
+            transport: Some(transport),
+        }
+    }
+}
+
+impl fmt::Debug for OpenAiCompatibleFactory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiCompatibleFactory")
+            .field("injected_transport", &self.transport.is_some())
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl rsi_meta::PluginFactory for OpenAiCompatibleFactory {
+    fn prepare(
+        &self,
+        desired: &rsi_meta::ConfigValue,
+    ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        let config: CompatiblePluginConfig = serde_json::from_value(desired.clone())
+            .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        rsi_ai_protocol::validate_identifier("deployment", &config.deployment)
+            .map_err(rsi_meta::MetaError::InvalidInput)?;
+        config
+            .credential
+            .validate()
+            .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        if config.language_models.is_empty() {
+            return Err(rsi_meta::MetaError::InvalidInput(
+                "OpenAI-compatible deployment requires a nonempty exact model map".into(),
+            ));
+        }
+        let mut adapter = ChatCompletionsConfig::new(&config.endpoint)
+            .and_then(|adapter| adapter.with_path(&config.path))
+            .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?
+            .with_image_input(config.allow_image_input);
+        for (model, limits) in &config.language_models {
+            adapter = adapter
+                .with_model_profile(model, *limits)
+                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        }
+        let retained = serde_json::to_vec(desired)
+            .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?
+            .len();
+        Ok(rsi_meta::PreparedActivation::with_state(
+            desired.clone(),
+            PreparedCompatiblePlugin { config, adapter },
+            retained,
+        )
+        .requiring_local::<LanguageRegistrarContract>())
+    }
+
+    async fn activate(&self, mut plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        let prepared = plan.take_state::<PreparedCompatiblePlugin>()?;
+        let generation = plan
+            .context()
+            .owner()
+            .ok_or_else(|| rsi_meta::MetaError::Activation("provider has no Fiber owner".into()))?
+            .1
+            .0;
+        let transport: Arc<dyn HttpTransport> = match &self.transport {
+            Some(transport) => Arc::clone(transport),
+            None => Arc::new(
+                rsi_ai_transport::ReqwestTransport::new()
+                    .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?,
+            ),
+        };
+        let endpoint_fingerprint = format!(
+            "sha256-{}",
+            hex::encode(Sha256::digest(prepared.config.endpoint.as_bytes()))
+        );
+        let registration =
+            ProviderRegistration::builder(&prepared.config.deployment, "openai-compatible")
+                .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?
+                .with_credential(prepared.config.credential)
+                .with_protocol("chat-completions", "http", endpoint_fingerprint)
+                .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?
+                .with_config_generation(generation)
+                .with_language(ChatCompletionsAdapter::new(prepared.adapter, transport))
+                .build()
+                .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
+        let publication = ProviderPublication::publish(
+            Arc::new(registration),
+            Some(plan.local::<LanguageRegistrarContract>()?),
+            None,
+        )
+        .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
+        plan.defer(
+            "withdraw OpenAI-compatible provider facet",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(publication);
+                    Ok(())
+                })
+            }),
+        )
     }
 }
 
@@ -381,7 +509,8 @@ async fn build_request_body(
             );
         }
     }
-    json_base64_body(Value::Object(body), media).map_err(invalid_request_error)
+    json_base64_body(Value::Object(body), media, MAX_PROVIDER_REQUEST_BODY_BYTES)
+        .map_err(invalid_request_error)
 }
 
 async fn serialize_messages(
@@ -698,6 +827,17 @@ fn translate_chat_stream(mut input: rsi_ai_transport::SseStream) -> LanguageAdap
                                 ErrorPhase::Stream,
                                 DispatchStatus::Dispatched,
                                 "tool call indexes are not contiguous",
+                            )));
+                            return;
+                        }
+                        if usize::try_from(next_output)
+                            .map_or(true, |value| value >= rsi_ai_protocol::MAX_CONTENT_BLOCKS)
+                        {
+                            yield Ok(failed(ai_error(
+                                ErrorKind::OutputValidation,
+                                ErrorPhase::Stream,
+                                DispatchStatus::Dispatched,
+                                "Chat Completions emitted too many content blocks",
                             )));
                             return;
                         }

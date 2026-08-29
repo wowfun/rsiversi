@@ -4,12 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    MAX_AUDIO_BYTES, MAX_BINARY_CHUNK_BYTES, MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, MediaDescriptor,
-    MediaKind, StreamError, TokenUsage, validation,
+    MAX_BINARY_CHUNK_BYTES, MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, MediaDescriptor, MediaKind,
+    StreamError, TokenUsage, validation,
 };
 
 pub const MAX_IMAGE_OUTPUTS: u8 = 10;
-const MAX_TRANSCRIPTION_SEGMENTS: usize = 4_096;
 
 /// One bounded image generation request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -90,6 +89,27 @@ impl ImageRequest {
         self.mask.as_ref()
     }
 
+    /// Returns deterministic canonical JSON bytes for identity and persistence.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, StreamError> {
+        self.encode_canonical()
+    }
+
+    fn encode_canonical(&self) -> Result<Vec<u8>, StreamError> {
+        let value = serde_json::to_value(self)
+            .map_err(|error| StreamError::invalid("request.encoding", error.to_string()))?;
+        let canonical = validation::canonical_json(value)
+            .map_err(|error| StreamError::invalid("request.encoding", error.to_string()))?;
+        let bytes = serde_json::to_vec(&canonical)
+            .map_err(|error| StreamError::invalid("request.encoding", error.to_string()))?;
+        if bytes.len() > MAX_REQUEST_BYTES {
+            return Err(StreamError::invalid(
+                "request.too_large",
+                format!("canonical encoding exceeds {MAX_REQUEST_BYTES} bytes"),
+            ));
+        }
+        Ok(bytes)
+    }
+
     /// Revalidates a deserialized request and all media-kind relationships.
     pub fn validate(&self) -> Result<(), StreamError> {
         validation::safe_text("image.prompt", &self.prompt, MAX_REQUEST_BYTES, false)
@@ -101,6 +121,7 @@ impl ImageRequest {
             ));
         }
         if self.inputs.len() > usize::from(MAX_IMAGE_OUTPUTS)
+            || (self.mask.is_some() && self.inputs.is_empty())
             || self
                 .inputs
                 .iter()
@@ -115,6 +136,7 @@ impl ImageRequest {
                 "image inputs and mask must be bounded image descriptors",
             ));
         }
+        self.encode_canonical()?;
         Ok(())
     }
 }
@@ -172,6 +194,7 @@ pub struct ImageAssembler {
     next_index: u32,
     open: BTreeMap<u32, OpenMedia>,
     outputs: BTreeMap<u32, MediaOutput>,
+    completed_outputs: usize,
     usage: Option<TokenUsage>,
     finished: bool,
 }
@@ -183,6 +206,7 @@ impl ImageAssembler {
             next_index: 0,
             open: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            completed_outputs: 0,
             usage: None,
             finished: false,
         }
@@ -224,10 +248,11 @@ impl ImageAssembler {
                     .ok_or_else(output_not_open)?
                     .finish()?;
                 self.outputs.insert(*index, output);
+                self.completed_outputs = self.completed_outputs.saturating_add(1);
             }
             ImageEvent::Usage { usage } => set_usage(&mut self.usage, *usage)?,
             ImageEvent::Finished => {
-                if !self.open.is_empty() || self.outputs.is_empty() {
+                if !self.open.is_empty() || self.completed_outputs == 0 {
                     return Err(StreamError::invalid(
                         "stream.output_still_open",
                         "image stream finished without at least one closed output",
@@ -237,6 +262,24 @@ impl ImageAssembler {
             }
         }
         Ok(())
+    }
+
+    /// Borrows one already-closed output before the complete stream terminates.
+    ///
+    /// This lets durable callers commit each image independently instead of
+    /// retaining all successful outputs behind a later provider failure.
+    pub fn completed(&self, index: u32) -> Option<&MediaOutput> {
+        self.outputs.get(&index)
+    }
+
+    /// Moves one closed output out so durable consumers can release its body promptly.
+    pub fn take_completed(&mut self, index: u32) -> Option<MediaOutput> {
+        self.outputs.remove(&index)
+    }
+
+    /// Returns the number of outputs closed during this stream, including drained outputs.
+    pub const fn completed_count(&self) -> usize {
+        self.completed_outputs
     }
 
     /// Returns complete output only after a valid terminal event.
@@ -254,502 +297,6 @@ impl ImageAssembler {
     }
 }
 
-/// Transcription of one bounded audio object.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct TranscriptionRequest {
-    audio: MediaDescriptor,
-    language: Option<String>,
-    prompt: Option<String>,
-    timestamps: bool,
-}
-
-impl<'de> Deserialize<'de> for TranscriptionRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireRequest {
-            audio: MediaDescriptor,
-            language: Option<String>,
-            prompt: Option<String>,
-            timestamps: bool,
-        }
-
-        let wire = WireRequest::deserialize(deserializer)?;
-        let request = Self {
-            audio: wire.audio,
-            language: wire.language,
-            prompt: wire.prompt,
-            timestamps: wire.timestamps,
-        };
-        request
-            .validate()
-            .map(|()| request)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl TranscriptionRequest {
-    /// Creates a request for one validated audio descriptor.
-    pub fn new(audio: MediaDescriptor) -> Result<Self, StreamError> {
-        if audio.kind() != MediaKind::Audio {
-            return Err(StreamError::invalid(
-                "request.invalid_media",
-                "transcription input must be audio",
-            ));
-        }
-        Ok(Self {
-            audio,
-            language: None,
-            prompt: None,
-            timestamps: false,
-        })
-    }
-
-    pub fn audio(&self) -> &MediaDescriptor {
-        &self.audio
-    }
-
-    pub fn language(&self) -> Option<&str> {
-        self.language.as_deref()
-    }
-
-    pub fn prompt(&self) -> Option<&str> {
-        self.prompt.as_deref()
-    }
-
-    pub const fn timestamps(&self) -> bool {
-        self.timestamps
-    }
-
-    /// Adds a bounded language identifier hint.
-    pub fn with_language(mut self, language: impl Into<String>) -> Result<Self, StreamError> {
-        let language = language.into();
-        validation::identifier("transcription.language", &language)
-            .map_err(|reason| StreamError::invalid("request.invalid_language", reason))?;
-        self.language = Some(language);
-        Ok(self)
-    }
-
-    /// Adds bounded provider context for transcription.
-    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Result<Self, StreamError> {
-        let prompt = prompt.into();
-        validation::safe_text("transcription.prompt", &prompt, MAX_REQUEST_BYTES, false)
-            .map_err(|reason| StreamError::invalid("request.invalid_prompt", reason))?;
-        self.prompt = Some(prompt);
-        Ok(self)
-    }
-
-    #[must_use]
-    /// Selects whether the provider should return timestamped segments.
-    pub const fn with_timestamps(mut self, timestamps: bool) -> Self {
-        self.timestamps = timestamps;
-        self
-    }
-
-    /// Revalidates a deserialized request and its audio-kind constraint.
-    pub fn validate(&self) -> Result<(), StreamError> {
-        if self.audio.kind() != MediaKind::Audio {
-            return Err(StreamError::invalid(
-                "request.invalid_media",
-                "transcription input must be audio",
-            ));
-        }
-        self.audio
-            .validate()
-            .map_err(|error| StreamError::invalid("request.invalid_media", error.to_string()))?;
-        if let Some(language) = &self.language {
-            validation::identifier("transcription.language", language)
-                .map_err(|reason| StreamError::invalid("request.invalid_language", reason))?;
-        }
-        if let Some(prompt) = &self.prompt {
-            validation::safe_text("transcription.prompt", prompt, MAX_REQUEST_BYTES, false)
-                .map_err(|reason| StreamError::invalid("request.invalid_prompt", reason))?;
-        }
-        Ok(())
-    }
-}
-
-/// One final timestamped transcription segment.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TranscriptionSegment {
-    /// Zero-based contiguous segment identifier.
-    pub id: u32,
-    /// Inclusive segment start offset in milliseconds.
-    pub start_ms: u64,
-    /// Segment end offset in milliseconds, not earlier than `start_ms`.
-    pub end_ms: u64,
-    pub text: String,
-}
-
-/// Normalized streaming transcription events.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TranscriptionEvent {
-    /// Appends text to the complete transcript.
-    TextDelta {
-        /// Bounded UTF-8 transcript fragment.
-        text: String,
-    },
-    /// Adds one final ordered timestamped segment.
-    Segment { segment: TranscriptionSegment },
-    /// Supplies the operation's sole cumulative usage record.
-    Usage { usage: TokenUsage },
-    /// Terminates a nonempty transcript.
-    Finished {
-        /// Provider-detected language, when reported.
-        language: Option<String>,
-    },
-}
-
-/// Complete assembled transcription.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TranscriptionOutput {
-    /// Complete assembled transcript text.
-    pub text: String,
-    /// Ordered final timestamped segments.
-    pub segments: Vec<TranscriptionSegment>,
-    /// Provider-detected language, when reported.
-    pub language: Option<String>,
-    /// Provider-reported usage, when available.
-    pub usage: Option<TokenUsage>,
-}
-
-/// Strict transcription assembler.
-#[derive(Debug, Default)]
-pub struct TranscriptionAssembler {
-    text: String,
-    segments: Vec<TranscriptionSegment>,
-    retained_text_bytes: usize,
-    language: Option<String>,
-    usage: Option<TokenUsage>,
-    finished: bool,
-}
-
-impl TranscriptionAssembler {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            text: String::new(),
-            segments: Vec::new(),
-            retained_text_bytes: 0,
-            language: None,
-            usage: None,
-            finished: false,
-        }
-    }
-
-    /// Applies one event while enforcing text, segment, usage, and terminal invariants.
-    pub fn push(&mut self, event: &TranscriptionEvent) -> Result<(), StreamError> {
-        if self.finished {
-            return Err(StreamError::invalid(
-                "stream.already_finished",
-                "transcription stream emitted an event after terminal",
-            ));
-        }
-        match event {
-            TranscriptionEvent::TextDelta { text } => {
-                validation::safe_text("transcription.delta", text, MAX_REQUEST_BYTES, false)
-                    .map_err(|reason| StreamError::invalid("stream.invalid_text", reason))?;
-                if self.retained_text_bytes.saturating_add(text.len()) > MAX_REQUEST_BYTES {
-                    return Err(StreamError::invalid(
-                        "stream.output_too_large",
-                        "transcription text exceeds its assembled bound",
-                    ));
-                }
-                self.retained_text_bytes = self.retained_text_bytes.saturating_add(text.len());
-                self.text.push_str(text);
-            }
-            TranscriptionEvent::Segment { segment } => {
-                if self.segments.len() >= MAX_TRANSCRIPTION_SEGMENTS
-                    || usize::try_from(segment.id).ok() != Some(self.segments.len())
-                    || segment.start_ms > segment.end_ms
-                {
-                    return Err(StreamError::invalid(
-                        "stream.invalid_segment",
-                        "transcription segments must be contiguous, ordered, and bounded",
-                    ));
-                }
-                validation::safe_text(
-                    "transcription.segment.text",
-                    &segment.text,
-                    MAX_REQUEST_BYTES,
-                    false,
-                )
-                .map_err(|reason| StreamError::invalid("stream.invalid_segment", reason))?;
-                if self.retained_text_bytes.saturating_add(segment.text.len()) > MAX_REQUEST_BYTES {
-                    return Err(StreamError::invalid(
-                        "stream.output_too_large",
-                        "transcription text and segments exceed their assembled bound",
-                    ));
-                }
-                self.retained_text_bytes =
-                    self.retained_text_bytes.saturating_add(segment.text.len());
-                self.segments.push(segment.clone());
-            }
-            TranscriptionEvent::Usage { usage } => set_usage(&mut self.usage, *usage)?,
-            TranscriptionEvent::Finished { language } => {
-                if self.text.is_empty() {
-                    return Err(StreamError::invalid(
-                        "stream.empty_output",
-                        "transcription completed without text",
-                    ));
-                }
-                if let Some(language) = &language {
-                    validation::identifier("transcription.language", language).map_err(
-                        |reason| StreamError::invalid("stream.invalid_language", reason),
-                    )?;
-                }
-                self.language.clone_from(language);
-                self.finished = true;
-            }
-        }
-        Ok(())
-    }
-
-    /// Returns complete output only after a valid terminal event.
-    pub fn finish(self) -> Result<TranscriptionOutput, StreamError> {
-        if !self.finished {
-            return Err(StreamError::invalid(
-                "stream.missing_finish",
-                "transcription stream ended without a terminal event",
-            ));
-        }
-        Ok(TranscriptionOutput {
-            text: self.text,
-            segments: self.segments,
-            language: self.language,
-            usage: self.usage,
-        })
-    }
-}
-
-/// Speech output format requested by a caller.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeechFormat {
-    /// Headerless little-endian signed 16-bit PCM samples.
-    Pcm16,
-    /// RIFF/WAVE audio.
-    Wav,
-    /// MPEG Layer III audio.
-    Mp3,
-}
-
-/// One bounded text-to-speech request.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SpeechRequest {
-    text: String,
-    voice: String,
-    format: SpeechFormat,
-    speed: Option<f32>,
-}
-
-impl<'de> Deserialize<'de> for SpeechRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireRequest {
-            text: String,
-            voice: String,
-            format: SpeechFormat,
-            speed: Option<f32>,
-        }
-
-        let wire = WireRequest::deserialize(deserializer)?;
-        let request = Self {
-            text: wire.text,
-            voice: wire.voice,
-            format: wire.format,
-            speed: wire.speed,
-        };
-        request
-            .validate()
-            .map(|()| request)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl SpeechRequest {
-    /// Creates a bounded speech request using an exact voice and output format.
-    pub fn new(
-        text: impl Into<String>,
-        voice: impl Into<String>,
-        format: SpeechFormat,
-    ) -> Result<Self, StreamError> {
-        let request = Self {
-            text: text.into(),
-            voice: voice.into(),
-            format,
-            speed: None,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Adds a finite provider-neutral speaking-rate multiplier.
-    pub fn with_speed(mut self, speed: f32) -> Result<Self, StreamError> {
-        self.speed = Some(speed);
-        self.validate()?;
-        Ok(self)
-    }
-
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub fn voice(&self) -> &str {
-        &self.voice
-    }
-
-    pub const fn format(&self) -> SpeechFormat {
-        self.format
-    }
-
-    pub const fn speed(&self) -> Option<f32> {
-        self.speed
-    }
-
-    /// Revalidates a deserialized request and its speaking-rate bound.
-    pub fn validate(&self) -> Result<(), StreamError> {
-        validation::safe_text("speech.text", &self.text, MAX_REQUEST_BYTES, false)
-            .map_err(|reason| StreamError::invalid("request.invalid_text", reason))?;
-        validation::identifier("speech.voice", &self.voice)
-            .map_err(|reason| StreamError::invalid("request.invalid_voice", reason))?;
-        if self
-            .speed
-            .is_some_and(|speed| !speed.is_finite() || !(0.25..=4.0).contains(&speed))
-        {
-            return Err(StreamError::invalid(
-                "request.invalid_speed",
-                "speech speed must be finite and within 0.25..=4.0",
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// Normalized streaming speech events.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SpeechEvent {
-    /// Opens the operation's sole audio output.
-    OutputStarted {
-        /// Declared MIME type for the following bytes.
-        mime_type: String,
-    },
-    /// Appends one bounded audio chunk.
-    AudioChunk {
-        /// One-based contiguous chunk sequence.
-        sequence: u32,
-        bytes: Vec<u8>,
-    },
-    /// Closes the audio output and computes its descriptor.
-    OutputFinished,
-    /// Supplies the operation's sole cumulative usage record.
-    Usage { usage: TokenUsage },
-    /// Terminates the stream after the output is closed.
-    Finished,
-}
-
-/// Complete speech output.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpeechOutput {
-    /// Complete validated synthesized audio.
-    pub audio: MediaOutput,
-    /// Provider-reported usage, when available.
-    pub usage: Option<TokenUsage>,
-}
-
-/// Strict speech stream assembler.
-#[derive(Debug, Default)]
-pub struct SpeechAssembler {
-    open: Option<OpenMedia>,
-    output: Option<MediaOutput>,
-    usage: Option<TokenUsage>,
-    finished: bool,
-}
-
-impl SpeechAssembler {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            open: None,
-            output: None,
-            usage: None,
-            finished: false,
-        }
-    }
-
-    /// Applies one event while enforcing the single-output stream grammar.
-    pub fn push(&mut self, event: &SpeechEvent) -> Result<(), StreamError> {
-        if self.finished {
-            return Err(StreamError::invalid(
-                "stream.already_finished",
-                "speech stream emitted an event after terminal",
-            ));
-        }
-        match event {
-            SpeechEvent::OutputStarted { mime_type } => {
-                if self.open.is_some() || self.output.is_some() {
-                    return Err(StreamError::invalid(
-                        "stream.duplicate_output",
-                        "speech stream opened more than one output",
-                    ));
-                }
-                self.open = Some(OpenMedia::new(MediaKind::Audio, mime_type.clone()));
-            }
-            SpeechEvent::AudioChunk { sequence, bytes } => self
-                .open
-                .as_mut()
-                .ok_or_else(output_not_open)?
-                .push(*sequence, bytes)?,
-            SpeechEvent::OutputFinished => {
-                self.output = Some(self.open.take().ok_or_else(output_not_open)?.finish()?);
-            }
-            SpeechEvent::Usage { usage } => set_usage(&mut self.usage, *usage)?,
-            SpeechEvent::Finished => {
-                if self.open.is_some() || self.output.is_none() {
-                    return Err(StreamError::invalid(
-                        "stream.output_still_open",
-                        "speech stream finished without one closed output",
-                    ));
-                }
-                self.finished = true;
-            }
-        }
-        Ok(())
-    }
-
-    /// Returns complete output only after a valid terminal event.
-    pub fn finish(self) -> Result<SpeechOutput, StreamError> {
-        if !self.finished {
-            return Err(StreamError::invalid(
-                "stream.missing_finish",
-                "speech stream ended without a terminal event",
-            ));
-        }
-        let audio = self.output.ok_or_else(|| {
-            StreamError::invalid(
-                "stream.missing_output",
-                "speech stream finished without an output descriptor",
-            )
-        })?;
-        Ok(SpeechOutput {
-            audio,
-            usage: self.usage,
-        })
-    }
-}
-
 #[derive(Debug)]
 struct OpenMedia {
     kind: MediaKind,
@@ -760,6 +307,7 @@ struct OpenMedia {
 
 impl OpenMedia {
     fn new(kind: MediaKind, mime_type: String) -> Self {
+        debug_assert_eq!(kind, MediaKind::Image);
         Self {
             kind,
             mime_type,
@@ -784,10 +332,6 @@ impl OpenMedia {
                 "media chunk is empty or exceeds its bound",
             ));
         }
-        let maximum = match self.kind {
-            MediaKind::Image => MAX_IMAGE_BYTES,
-            MediaKind::Audio => MAX_AUDIO_BYTES,
-        };
         let assembled_length = u64::try_from(self.bytes.len().saturating_add(bytes.len()))
             .map_err(|_| {
                 StreamError::invalid(
@@ -795,7 +339,7 @@ impl OpenMedia {
                     "media output length exceeds the protocol representation",
                 )
             })?;
-        if assembled_length > maximum {
+        if assembled_length > MAX_IMAGE_BYTES {
             return Err(StreamError::invalid(
                 "stream.output_too_large",
                 "media output exceeds its assembled bound",
@@ -813,8 +357,7 @@ impl OpenMedia {
                 "media output is empty",
             ));
         }
-        let digest = Sha256::digest(&self.bytes);
-        let sha256 = hex::encode(digest);
+        let sha256 = hex::encode(Sha256::digest(&self.bytes));
         let descriptor = MediaDescriptor::new(
             self.kind,
             self.mime_type,

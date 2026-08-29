@@ -1,8 +1,9 @@
 use rsi_ai_protocol::{
     FreeformFormat, FreeformToolDefinition, HostedTool, LanguageModelLimits, LanguageModelProfiles,
-    LanguageProfile, LanguageRequest, LanguageSettings, MAX_REQUEST_BYTES, MediaDescriptor,
-    MediaKind, Message, MessageContent, ProviderExtension, ProviderExtensionFormat,
-    ReasoningEffort, ResponseFormat, ToolCall, ToolCallKind, ToolChoice, ToolDefinition,
+    LanguageProfile, LanguageRequest, LanguageSettings, MAX_LANGUAGE_MEDIA_BYTES,
+    MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_REQUEST_BYTES, MediaDescriptor, MediaKind, Message,
+    MessageContent, ProviderExtension, ProviderExtensionFormat, ReasoningEffort, ResponseFormat,
+    ToolCall, ToolCallKind, ToolChoice, ToolDefinition, validate_json_structure,
 };
 
 #[test]
@@ -86,7 +87,7 @@ fn freeform_tool_grammar_is_bounded_at_construction() {
         "x".repeat(rsi_ai_protocol::MAX_FREEFORM_GRAMMAR_BYTES + 1),
     )
     .expect_err("oversized grammar");
-    assert_eq!(error.code(), "tool.invalid_freeform");
+    assert!(error.to_string().contains("freeform grammar"), "{error}");
 }
 
 #[test]
@@ -96,19 +97,19 @@ fn freeform_tool_grammar_counts_multibyte_text_as_utf8_bytes() {
         "é".repeat(rsi_ai_protocol::MAX_FREEFORM_GRAMMAR_BYTES / 2 + 1),
     )
     .expect_err("multibyte grammar exceeds the byte limit");
-    assert_eq!(error.code(), "tool.invalid_freeform");
+    assert!(error.to_string().contains("freeform grammar"), "{error}");
 }
 
 #[test]
 fn aggregate_freeform_grammar_bound_counts_encoded_json_bytes() {
-    let tools = (0..6)
+    let tools = (0..17)
         .map(|index| {
             ToolDefinition::new(format!("tool_{index}"), "", json!(true))
                 .expect("tool")
                 .with_freeform(
                     FreeformToolDefinition::new(
                         FreeformFormat::Lark,
-                        "\u{1}".repeat(rsi_ai_protocol::MAX_FREEFORM_GRAMMAR_BYTES),
+                        "\n".repeat(rsi_ai_protocol::MAX_FREEFORM_GRAMMAR_BYTES),
                     )
                     .expect("individually bounded grammar"),
                 )
@@ -323,6 +324,96 @@ fn rich_language_request_is_bounded_and_contains_only_media_descriptors() {
     assert!(!text.contains("/tmp/"));
 }
 
+fn media(kind: MediaKind, byte_len: u64) -> MediaDescriptor {
+    let mime = match kind {
+        MediaKind::Image => "image/png",
+        MediaKind::Audio => "audio/wav",
+    };
+    MediaDescriptor::new(kind, mime, byte_len, "b".repeat(64)).expect("media descriptor")
+}
+
+#[test]
+fn language_request_bounds_media_occurrences_before_provider_io() {
+    let exact = Message::user(
+        (0..MAX_LANGUAGE_MEDIA_OCCURRENCES)
+            .map(|_| MessageContent::Image(media(MediaKind::Image, 1)))
+            .collect(),
+    )
+    .expect("per-message maximum equals aggregate media maximum");
+    LanguageRequest::new(vec![exact]).expect("exact media occurrence limit");
+
+    let overflow = LanguageRequest::new(vec![
+        Message::user(
+            (0..MAX_LANGUAGE_MEDIA_OCCURRENCES)
+                .map(|_| MessageContent::Image(media(MediaKind::Image, 1)))
+                .collect(),
+        )
+        .expect("full first message"),
+        Message::user(vec![MessageContent::Image(media(MediaKind::Image, 1))])
+            .expect("one extra media occurrence"),
+    ])
+    .expect_err("media occurrence overflow");
+    assert_eq!(overflow.code(), "request.too_many_media");
+}
+
+#[test]
+fn language_request_counts_media_nested_inside_tool_results() {
+    let conversation = |direct_media| {
+        vec![
+            Message::user(
+                (0..direct_media)
+                    .map(|_| MessageContent::Image(media(MediaKind::Image, 1)))
+                    .collect(),
+            )
+            .expect("direct media"),
+            Message::assistant(vec![MessageContent::ToolCall(ToolCall {
+                id: "call-1".to_owned(),
+                name: "inspect".to_owned(),
+                arguments: "{}".to_owned(),
+                kind: ToolCallKind::Function,
+            })])
+            .expect("assistant tool call"),
+            Message::tool_result(
+                "call-1",
+                vec![MessageContent::Image(media(MediaKind::Image, 1))],
+                false,
+            )
+            .expect("image tool result"),
+        ]
+    };
+
+    LanguageRequest::new(conversation(MAX_LANGUAGE_MEDIA_OCCURRENCES - 1))
+        .expect("nested image at exact aggregate limit");
+    let error = LanguageRequest::new(conversation(MAX_LANGUAGE_MEDIA_OCCURRENCES))
+        .expect_err("nested image exceeds aggregate limit");
+    assert_eq!(error.code(), "request.too_many_media");
+}
+
+#[test]
+fn language_request_bounds_declared_media_bytes_with_checked_arithmetic() {
+    let exact = LanguageRequest::new(vec![
+        Message::user(vec![
+            MessageContent::Audio(media(MediaKind::Audio, 128 * 1024 * 1024)),
+            MessageContent::Audio(media(MediaKind::Audio, 128 * 1024 * 1024)),
+        ])
+        .expect("exact aggregate media bytes"),
+    ])
+    .expect("exact aggregate media bytes are admitted");
+    assert_eq!(MAX_LANGUAGE_MEDIA_BYTES, 256 * 1024 * 1024);
+    assert_eq!(exact.messages().len(), 1);
+
+    let overflow = LanguageRequest::new(vec![
+        Message::user(vec![
+            MessageContent::Audio(media(MediaKind::Audio, 128 * 1024 * 1024)),
+            MessageContent::Audio(media(MediaKind::Audio, 128 * 1024 * 1024)),
+            MessageContent::Image(media(MediaKind::Image, 1)),
+        ])
+        .expect("individually valid media descriptors"),
+    ])
+    .expect_err("aggregate media byte overflow");
+    assert_eq!(overflow.code(), "request.media_bytes_exceeded");
+}
+
 #[test]
 fn request_rejects_duplicate_tool_names_before_provider_io() {
     let request =
@@ -332,6 +423,37 @@ fn request_rejects_duplicate_tool_names_before_provider_io() {
         .expect_err("duplicate tool names");
     assert_eq!(error.code(), "request.duplicate_tool");
     assert_eq!(error.field(), "tools");
+}
+
+#[test]
+fn request_revalidates_imported_tool_definitions_at_the_ai_boundary() {
+    let request =
+        LanguageRequest::new(vec![Message::user_text("hello").expect("message")]).expect("request");
+
+    let tools_valid_ai_rejects = ToolDefinition::new(
+        "a".repeat(rsi_tools_protocol::MAXIMUM_TOOL_IDENTIFIER_BYTES),
+        "",
+        serde_json::Value::Bool(true),
+    )
+    .expect("valid Tools definition");
+    let error = request
+        .clone()
+        .with_tools(vec![tools_valid_ai_rejects], ToolChoice::Auto)
+        .expect_err("AI owns the narrower provider-neutral name bound");
+    assert_eq!(error.code(), "tool.invalid_name");
+
+    let tools_valid_ai_rejects = ToolDefinition::new(
+        "wide",
+        "",
+        json!({
+            "nodes": vec![serde_json::Value::Null; rsi_ai_protocol::MAX_JSON_NODES]
+        }),
+    )
+    .expect("within the Tools JSON node bound");
+    let error = request
+        .with_tools(vec![tools_valid_ai_rejects], ToolChoice::Auto)
+        .expect_err("AI owns its lower provider-neutral JSON node bound");
+    assert_eq!(error.code(), "json.too_many_nodes");
 }
 
 #[test]
@@ -363,6 +485,36 @@ fn response_schema_reports_the_typed_json_node_limit() {
     let error = ResponseFormat::json_schema("too_many_nodes", None, schema)
         .expect_err("bounded JSON nodes");
     assert_eq!(error.code(), "json.too_many_nodes");
+}
+
+#[test]
+fn public_json_structure_validator_enforces_exact_depth_and_node_bounds() {
+    fn require_standard_error<T: std::error::Error>() {}
+    require_standard_error::<rsi_ai_protocol::JsonStructureError>();
+
+    let mut exact_depth = serde_json::Value::Null;
+    for _ in 0..rsi_ai_protocol::MAX_JSON_DEPTH {
+        exact_depth = json!([exact_depth]);
+    }
+    validate_json_structure(&exact_depth).expect("exact depth");
+    assert_eq!(
+        validate_json_structure(&json!([exact_depth])).expect_err("depth overflow"),
+        rsi_ai_protocol::JsonStructureError::TooDeep
+    );
+
+    let exact_nodes = json!(vec![
+        serde_json::Value::Null;
+        rsi_ai_protocol::MAX_JSON_NODES - 1
+    ]);
+    validate_json_structure(&exact_nodes).expect("array plus children equals node limit");
+    assert_eq!(
+        validate_json_structure(&json!(vec![
+            serde_json::Value::Null;
+            rsi_ai_protocol::MAX_JSON_NODES
+        ]))
+        .expect_err("node overflow"),
+        rsi_ai_protocol::JsonStructureError::TooManyNodes
+    );
 }
 
 #[test]
@@ -446,7 +598,7 @@ fn media_descriptor_revalidates_during_deserialization() {
         "duration_ms": null
     }))
     .expect_err("empty media must not enter a typed descriptor");
-    assert!(error.to_string().contains("media.byte_len"), "{error}");
+    assert!(error.to_string().contains("media byte length"), "{error}");
 }
 
 #[test]
@@ -457,7 +609,7 @@ fn tool_definition_revalidates_during_deserialization() {
         "input_schema": true
     }))
     .expect_err("invalid tool names must not enter a typed definition");
-    assert!(error.to_string().contains("tool.name"), "{error}");
+    assert!(error.to_string().contains("tool name"), "{error}");
 }
 
 #[test]
@@ -529,4 +681,21 @@ fn aggregate_request_size_is_rechecked_by_builders() {
         }])
         .expect_err("builder must recheck the complete request size");
     assert_eq!(error.code(), "request.too_large");
+}
+
+#[test]
+fn canonical_request_preserves_provider_extension_integers_above_two_to_the_53() {
+    let extension: ProviderExtension = serde_json::from_str(
+        r#"{"namespace":"fixture","version":1,"value":{"exact":9007199254740993}}"#,
+    )
+    .expect("exact extension");
+    let request = LanguageRequest::new(vec![Message::user_text("hello").expect("message")])
+        .expect("request")
+        .with_extensions(vec![extension])
+        .expect("extension");
+    let encoded = request.canonical_bytes().expect("canonical request");
+    let text = std::str::from_utf8(&encoded).expect("UTF-8 JSON");
+    assert!(text.contains("9007199254740993"), "{text}");
+    let restored: LanguageRequest = serde_json::from_slice(&encoded).expect("round trip");
+    assert_eq!(restored.canonical_bytes().unwrap(), encoded);
 }

@@ -1,40 +1,58 @@
 # rsi-ai security boundary
 
-Provider adapters execute with the caller's process authority. The standalone
-SDK does not provide process isolation or a sandbox.
+Provider plugins execute with the Host process authority. This family does not
+provide a sandbox.
 
-Requests, provider bodies, SSE events, WebSocket messages, extension JSON, and
-media are untrusted at their owning boundary. Closed DTOs reject unknown fields;
-semantic constructors enforce role, identifier, count, byte, JSON-depth, and
-media-kind relationships; assemblers enforce temporal grammar and total output
-bounds. Successful HTTP bodies and error bodies are collected with explicit
-limits. Provider errors expose a bounded safe summary, phase, dispatch status,
+Requests, Profile configuration, provider bodies, SSE events, extension JSON,
+and media are untrusted at their owning boundary. Closed DTOs reject unknown
+fields; semantic constructors enforce identifier, count, byte, recursive JSON,
+role, and media relationships. HTTP success and error bodies have independent
+finite bounds. Durable provider-private state additionally validates its exact
+namespace-local format version and internal key grammar before restoration.
+Provider errors retain a bounded safe summary, phase, dispatch status,
 and retry hints rather than raw response bodies.
 
-Semantic `Deserialize` implementations validate each completed typed value,
-but generic Serde deserialization is not a byte-framing boundary: it may
-materialize a string before its semantic byte limit is checked. Transports and
-durable readers must cap the input bytes before invoking Serde. This package's
-HTTP, SSE, WebSocket, and binary ingress paths do so at their owning boundary.
+Serde validation is not a framing boundary: a decoder may allocate a string
+before semantic validation. Transports, Profile parsing, and durable readers
+must cap bytes before invoking it. Typed provider-control projections declare
+per-field decoded string bounds that the transport enforces before serde
+retention. Incremental media extraction uses separate
+body, envelope, item, nesting, and decoded-output limits. Consumers publish an
+operation only after its terminal validation succeeds.
 
-Large media JSON responses are incrementally extracted under independent total
-body, normalized-envelope, item, nesting, and decoded-media limits. OpenAI
-Images retains at most one bounded image item plus its small normalized
-envelope; Xiaomi speech retains one bounded base64 chunk plus its normalized
-envelope. Successfully decoded chunks or items may precede a later terminal
-validation error, so callers must publish only the completed operation result.
-Limits remain per call, and deployments must include configured concurrency in
-their process memory budget.
+Secrets are owned by `rsi-credentials-protocol::SecretValue`, zeroized when the
+last owner drops, and formatted only as redacted. Prepared snapshots retain a
+credential source identity, never a secret. Authorization headers are built
+through temporary zeroizing text, marked sensitive, and consumed by the true
+external HTTP request; copies retained by `http` or `reqwest` do not promise
+zeroization and must not be logged or retained after the attempt. Provider
+configuration cannot override credentials or endpoints per request.
 
-`SecretValue` is zeroized when its last owner is dropped, always formats as
-redacted, and deliberately exposes no equality operation. A prepared snapshot identifies only the selected credential source.
-Standalone resolution precedence is explicit: in-memory, persistent store,
-then the environment captured by the builder. Secrets never enter snapshots or
-Debug output.
+Media requests contain only bounded descriptors. Routers reject more than 256
+MiB of unique declared media during Prepare. The Media resolver reads bytes at
+Start only after atomically acquiring the prepared call's complete byte weight,
+then verifies length and digest while retaining that admission with cached
+bytes. Language requests also enforce total media occurrences and declared raw
+bytes before resolver I/O. Identical complete
+descriptors may be coalesced only inside one prepared call. Provider adapters
+must project buffered and streaming request framing against the transport body
+limit before dispatch; multipart framing bytes count toward the same limit.
+Multipart boundaries are digest-derived 96-bit values and are not synchronously
+searched across hundreds of MiB of already authenticated bodies.
 
-Media requests contain locator-free descriptors. A resolver reads bytes only at
-Start and verifies length and SHA-256 before translation. Provider URL fetching
-is not part of the protocol.
+Dropping or cancelling the final waiter for a queued prepared-call media
+admission removes its semaphore position. A successful complete-weight permit
+is retained only with that prepared call's resolved media and is released when
+the cache or context drops.
 
-Realtime is intentionally non-replayable. A dropped session does not reconnect
-or resend frames.
+Retry safety is an orchestration rule, not a transport convenience. Dispatched
+or dispatch-uncertain effects are not repeated automatically even if their
+error kind is otherwise retryable.
+
+SSE remains bounded per provider wire contract. OpenAI Responses admits a
+larger finite frame because documented terminal events may include the complete
+response; Chat-compatible providers retain the smaller default delta-frame
+bound. A decoder atomically acquires the complete selected frame weight from a
+fixed process-wide budget before reading response bytes, so concurrent large
+frames cannot create unbounded retention or partial-weight deadlock. Semantic
+output and event-count bounds still apply after decoding.

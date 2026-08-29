@@ -1,31 +1,25 @@
-//! Deterministic adapters for exercising the public `rsi-ai` seams.
+//! Deterministic provider adapters for keyless tests.
 
 #![deny(unsafe_code)]
-#![allow(clippy::missing_panics_doc)] // Poisoned fixture locks indicate a test harness panic.
+#![warn(missing_docs)]
+#![allow(clippy::missing_errors_doc)]
 
-use std::{
-    collections::BTreeMap,
-    collections::VecDeque,
-    fmt,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
-
-use async_trait::async_trait;
-use futures_util::stream;
+use futures_util::{StreamExt as _, stream};
 use rsi_ai_protocol::{
-    AiError, DispatchStatus, ErrorKind, ErrorPhase, ImageEvent, ImageRequest, LanguageEvent,
-    LanguageRequest, MediaDescriptor, RealtimeCommand, RealtimeEvent, RealtimeRequest, SpeechEvent,
-    SpeechRequest, TranscriptionEvent, TranscriptionRequest,
+    AiCapability, AiError, DispatchStatus, ErrorKind, ErrorPhase, ImageEvent, ImageRequest,
+    LanguageAssembler, LanguageAssemblyError, LanguageEvent, LanguageOutput, LanguageRequest,
+    PreparedCallSnapshot, RetryPolicy,
 };
 use rsi_ai_provider::{
     AbortSignal, AdapterFuture, ImageAdapter, ImageAdapterStream, LanguageAdapter,
-    LanguageAdapterStream, MediaResolver, PrepareContext, Prepared, RealtimeAdapter,
-    RealtimeAdapterTransport, RealtimeConnection, SpeechAdapter, SpeechAdapterStream,
-    TranscriptionAdapter, TranscriptionAdapterStream,
+    LanguageAdapterStream, MediaResolver, PrepareContext, Prepared,
 };
+use rsi_credentials_protocol::ResolvedCredential;
+use rsi_media_protocol::MediaDescriptor;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// In-memory content-addressed media source for deterministic adapter tests.
 #[derive(Clone, Debug, Default)]
@@ -34,8 +28,8 @@ pub struct InMemoryMediaResolver {
 }
 
 impl InMemoryMediaResolver {
-    #[must_use]
     /// Creates a resolver keyed by each descriptor's lowercase SHA-256 digest.
+    #[must_use]
     pub fn new(bodies: BTreeMap<String, Vec<u8>>) -> Self {
         Self {
             bodies: Arc::new(
@@ -69,254 +63,84 @@ impl MediaResolver for InMemoryMediaResolver {
     }
 }
 
-/// Repeatable language script whose counters change only at public adapter phases.
-#[derive(Clone)]
-pub struct ScriptedLanguageAdapter {
-    inner: Arc<ScriptedLanguageInner>,
+/// Creates bounded provider-author context facts for one deterministic Language adapter call.
+///
+/// # Panics
+///
+/// Panics when a supplied identity cannot form a valid prepared-call snapshot.
+pub fn language_context(
+    deployment: impl Into<String>,
+    provider_family: impl Into<String>,
+    model: impl Into<String>,
+    credential: Option<ResolvedCredential>,
+    media: Arc<dyn MediaResolver>,
+    media_admission_bytes: u64,
+) -> PrepareContext {
+    PrepareContext::new(
+        PreparedCallSnapshot {
+            call_id: "test-call".into(),
+            deployment_id: deployment.into(),
+            provider_family: provider_family.into(),
+            capability: AiCapability::Language,
+            model: model.into(),
+            protocol: "test-protocol".into(),
+            transport: "test-transport".into(),
+            endpoint_fingerprint: "test-endpoint".into(),
+            config_generation: 1,
+            credential_source: credential.as_ref().map(|value| value.source.clone()),
+            retry_policy: RetryPolicy::default(),
+            request_sha256: "0".repeat(64),
+        },
+        credential,
+        media,
+        media_admission_bytes,
+    )
+    .expect("static scripted provider context is valid")
 }
 
-macro_rules! scripted_stream_adapter {
-    (
-        $adapter:ident,
-        $inner:ident,
-        $event:ty,
-        $request:ty,
-        $trait:ident,
-        $stream:ident
-    ) => {
-        #[doc = concat!("Deterministic scripted adapter producing `", stringify!($event), "` events.")]
-        #[derive(Clone)]
-        pub struct $adapter {
-            inner: Arc<$inner>,
-        }
-
-        struct $inner {
-            events: Vec<$event>,
-            prepare_count: AtomicUsize,
-            start_count: AtomicUsize,
-        }
-
-        impl $adapter {
-            #[must_use]
-            /// Creates an adapter that replays the supplied events on every start.
-            pub fn new(events: Vec<$event>) -> Self {
-                Self {
-                    inner: Arc::new($inner {
-                        events,
-                        prepare_count: AtomicUsize::new(0),
-                        start_count: AtomicUsize::new(0),
-                    }),
-                }
-            }
-
-            pub fn prepare_count(&self) -> usize {
-                self.inner.prepare_count.load(Ordering::SeqCst)
-            }
-
-            pub fn start_count(&self) -> usize {
-                self.inner.start_count.load(Ordering::SeqCst)
-            }
-        }
-
-        impl fmt::Debug for $adapter {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter
-                    .debug_struct(stringify!($adapter))
-                    .field("events", &self.inner.events.len())
-                    .field("prepare_count", &self.prepare_count())
-                    .field("start_count", &self.start_count())
-                    .finish()
-            }
-        }
-
-        impl $trait for $adapter {
-            fn prepare(
-                &self,
-                context: PrepareContext,
-                _model: String,
-                _request: $request,
-            ) -> AdapterFuture<Result<Prepared<$stream>, AiError>> {
-                self.inner.prepare_count.fetch_add(1, Ordering::SeqCst);
-                let snapshot = context.snapshot().clone();
-                let inner = Arc::clone(&self.inner);
-                Box::pin(async move {
-                    Ok(Prepared::new(snapshot, move |_abort| {
-                        let events = inner.events.clone();
-                        inner.start_count.fetch_add(1, Ordering::SeqCst);
-                        Box::pin(async move {
-                            let stream: $stream =
-                                Box::pin(stream::iter(events.into_iter().map(Ok)));
-                            Ok(stream)
-                        })
-                    }))
-                })
-            }
-        }
-    };
-}
-
-scripted_stream_adapter!(
-    ScriptedImageAdapter,
-    ScriptedImageInner,
-    ImageEvent,
-    ImageRequest,
-    ImageAdapter,
-    ImageAdapterStream
-);
-scripted_stream_adapter!(
-    ScriptedTranscriptionAdapter,
-    ScriptedTranscriptionInner,
-    TranscriptionEvent,
-    TranscriptionRequest,
-    TranscriptionAdapter,
-    TranscriptionAdapterStream
-);
-scripted_stream_adapter!(
-    ScriptedSpeechAdapter,
-    ScriptedSpeechInner,
-    SpeechEvent,
-    SpeechRequest,
-    SpeechAdapter,
-    SpeechAdapterStream
-);
-
-/// Repeatable live-session script with an observable command sink.
-#[derive(Clone)]
-pub struct ScriptedRealtimeAdapter {
-    inner: Arc<ScriptedRealtimeInner>,
-}
-
+/// Failure observed while driving one adapter through normalized assembly.
 #[derive(Debug)]
-struct ScriptedRealtimeInner {
-    events: Vec<RealtimeEvent>,
-    wait_for_request: bool,
-    commands: Mutex<Vec<RealtimeCommand>>,
-    prepare_count: AtomicUsize,
-    start_count: AtomicUsize,
+pub enum LanguageRunError {
+    /// Provider preparation, start, or transport failure.
+    Provider(AiError),
+    /// Normalized stream grammar or semantic provider failure.
+    Assembly(LanguageAssemblyError),
 }
 
-impl ScriptedRealtimeAdapter {
-    #[must_use]
-    /// Creates a session that emits the supplied events without command gating.
-    pub fn new(events: Vec<RealtimeEvent>) -> Self {
-        Self {
-            inner: Arc::new(ScriptedRealtimeInner {
-                events,
-                wait_for_request: false,
-                commands: Mutex::new(Vec::new()),
-                prepare_count: AtomicUsize::new(0),
-                start_count: AtomicUsize::new(0),
-            }),
+impl LanguageRunError {
+    /// Returns structured provider facts when the failure came from the adapter.
+    pub fn provider_error(&self) -> Option<&AiError> {
+        match self {
+            Self::Provider(error)
+            | Self::Assembly(LanguageAssemblyError::Provider { error, .. }) => Some(error),
+            Self::Assembly(LanguageAssemblyError::Protocol(_)) => None,
         }
-    }
-
-    /// Creates a script whose first event is immediately available and whose
-    /// remaining events wait until the caller sends `RequestResponse`.
-    #[must_use]
-    pub fn new_after_request(events: Vec<RealtimeEvent>) -> Self {
-        Self {
-            inner: Arc::new(ScriptedRealtimeInner {
-                events,
-                wait_for_request: true,
-                commands: Mutex::new(Vec::new()),
-                prepare_count: AtomicUsize::new(0),
-                start_count: AtomicUsize::new(0),
-            }),
-        }
-    }
-
-    /// Returns all commands sent through sessions created by this adapter.
-    pub fn commands(&self) -> Vec<RealtimeCommand> {
-        self.inner
-            .commands
-            .lock()
-            .expect("scripted realtime command lock is not poisoned")
-            .clone()
-    }
-
-    pub fn prepare_count(&self) -> usize {
-        self.inner.prepare_count.load(Ordering::SeqCst)
-    }
-
-    pub fn start_count(&self) -> usize {
-        self.inner.start_count.load(Ordering::SeqCst)
     }
 }
 
-impl fmt::Debug for ScriptedRealtimeAdapter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ScriptedRealtimeAdapter")
-            .field("events", &self.inner.events.len())
-            .field("prepare_count", &self.prepare_count())
-            .field("start_count", &self.start_count())
-            .finish()
+/// Drives one provider adapter through prepare, start, stream, and assembly.
+pub async fn complete_language(
+    adapter: &dyn LanguageAdapter,
+    context: PrepareContext,
+    model: impl Into<String>,
+    request: LanguageRequest,
+) -> Result<LanguageOutput, LanguageRunError> {
+    let prepared = adapter
+        .prepare(context, model.into(), request)
+        .await
+        .map_err(LanguageRunError::Provider)?;
+    let mut stream = prepared
+        .start(AbortSignal::new())
+        .await
+        .map_err(LanguageRunError::Provider)?;
+    let mut assembler = LanguageAssembler::new();
+    while let Some(event) = stream.next().await {
+        let event = event.map_err(LanguageRunError::Provider)?;
+        assembler
+            .push(&event)
+            .map_err(|error| LanguageRunError::Assembly(error.into()))?;
     }
-}
-
-impl RealtimeAdapter for ScriptedRealtimeAdapter {
-    fn prepare(
-        &self,
-        context: PrepareContext,
-        _model: String,
-        _request: RealtimeRequest,
-    ) -> AdapterFuture<Result<Prepared<RealtimeAdapterTransport>, AiError>> {
-        self.inner.prepare_count.fetch_add(1, Ordering::SeqCst);
-        let snapshot = context.snapshot().clone();
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            Ok(Prepared::new(snapshot, move |_abort| {
-                inner.start_count.fetch_add(1, Ordering::SeqCst);
-                let transport: RealtimeAdapterTransport = Box::new(ScriptedRealtimeConnection {
-                    events: inner.events.clone().into(),
-                    wait_for_request: inner.wait_for_request,
-                    first_event_emitted: false,
-                    response_requested: false,
-                    inner,
-                });
-                Box::pin(async move { Ok(transport) })
-            }))
-        })
-    }
-}
-
-#[derive(Debug)]
-struct ScriptedRealtimeConnection {
-    events: VecDeque<RealtimeEvent>,
-    wait_for_request: bool,
-    first_event_emitted: bool,
-    response_requested: bool,
-    inner: Arc<ScriptedRealtimeInner>,
-}
-
-#[async_trait]
-impl RealtimeConnection for ScriptedRealtimeConnection {
-    async fn send(&mut self, command: RealtimeCommand) -> Result<(), AiError> {
-        if matches!(command, RealtimeCommand::RequestResponse) {
-            self.response_requested = true;
-        }
-        self.inner
-            .commands
-            .lock()
-            .expect("scripted realtime command lock is not poisoned")
-            .push(command);
-        Ok(())
-    }
-
-    async fn next_event(&mut self) -> Result<Option<RealtimeEvent>, AiError> {
-        if !self.first_event_emitted {
-            self.first_event_emitted = true;
-            return Ok(self.events.pop_front());
-        }
-        if self.wait_for_request && !self.response_requested {
-            std::future::pending::<()>().await;
-        }
-        Ok(self.events.pop_front())
-    }
-
-    async fn close(&mut self) -> Result<(), AiError> {
-        Ok(())
-    }
+    assembler.finish().map_err(LanguageRunError::Assembly)
 }
 
 struct ScriptedLanguageInner {
@@ -325,24 +149,15 @@ struct ScriptedLanguageInner {
     start_count: AtomicUsize,
 }
 
-fn test_language_profile() -> rsi_ai_protocol::LanguageProfile {
-    rsi_ai_protocol::LanguageProfile::new(
-        128_000,
-        4_096,
-        32_768,
-        rsi_ai_protocol::ToolDialect::Responses,
-        true,
-        rsi_ai_protocol::ImageToolResultCapability::Yes(
-            rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
-        ),
-        Vec::new(),
-    )
-    .expect("static scripted language profile is valid")
+/// Repeatable Language adapter whose counters change only at public phases.
+#[derive(Clone)]
+pub struct ScriptedLanguageAdapter {
+    inner: Arc<ScriptedLanguageInner>,
 }
 
 impl ScriptedLanguageAdapter {
-    #[must_use]
     /// Creates an adapter that replays the supplied events on every start.
+    #[must_use]
     pub fn new(events: Vec<LanguageEvent>) -> Self {
         Self {
             inner: Arc::new(ScriptedLanguageInner {
@@ -353,10 +168,12 @@ impl ScriptedLanguageAdapter {
         }
     }
 
+    /// Returns completed prepare calls.
     pub fn prepare_count(&self) -> usize {
         self.inner.prepare_count.load(Ordering::SeqCst)
     }
 
+    /// Returns started provider attempts.
     pub fn start_count(&self) -> usize {
         self.inner.start_count.load(Ordering::SeqCst)
     }
@@ -378,12 +195,16 @@ impl LanguageAdapter for ScriptedLanguageAdapter {
         Ok(test_language_profile())
     }
 
+    fn validate_request(&self, _model: &str, _request: &LanguageRequest) -> Result<(), AiError> {
+        Ok(())
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,
         _model: String,
         _request: LanguageRequest,
-    ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, rsi_ai_protocol::AiError>> {
+    ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, AiError>> {
         self.inner.prepare_count.fetch_add(1, Ordering::SeqCst);
         let snapshot = context.snapshot().clone();
         let inner = Arc::clone(&self.inner);
@@ -392,9 +213,7 @@ impl LanguageAdapter for ScriptedLanguageAdapter {
                 let events = inner.events.clone();
                 inner.start_count.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
-                    let stream: LanguageAdapterStream =
-                        Box::pin(stream::iter(events.into_iter().map(Ok)));
-                    Ok(stream)
+                    Ok(Box::pin(stream::iter(events.into_iter().map(Ok))) as LanguageAdapterStream)
                 })
             }))
         })
@@ -404,7 +223,7 @@ impl LanguageAdapter for ScriptedLanguageAdapter {
 type LanguageHandler =
     dyn Fn(LanguageRequest) -> Result<Vec<LanguageEvent>, AiError> + Send + Sync + 'static;
 
-/// Request-aware deterministic language adapter for black-box fixtures.
+/// Request-aware deterministic Language adapter.
 #[derive(Clone)]
 pub struct FunctionalLanguageAdapter {
     handler: Arc<LanguageHandler>,
@@ -425,10 +244,12 @@ impl FunctionalLanguageAdapter {
         }
     }
 
+    /// Returns completed prepare calls.
     pub fn prepare_count(&self) -> usize {
         self.prepare_count.load(Ordering::SeqCst)
     }
 
+    /// Returns started provider attempts.
     pub fn start_count(&self) -> usize {
         self.start_count.load(Ordering::SeqCst)
     }
@@ -449,6 +270,10 @@ impl LanguageAdapter for FunctionalLanguageAdapter {
         Ok(test_language_profile())
     }
 
+    fn validate_request(&self, _model: &str, _request: &LanguageRequest) -> Result<(), AiError> {
+        Ok(())
+    }
+
     fn prepare(
         &self,
         context: PrepareContext,
@@ -458,17 +283,91 @@ impl LanguageAdapter for FunctionalLanguageAdapter {
         self.prepare_count.fetch_add(1, Ordering::SeqCst);
         let events = (self.handler)(request);
         let snapshot = context.snapshot().clone();
-        let start_count = Arc::clone(&self.start_count);
+        let starts = Arc::clone(&self.start_count);
         Box::pin(async move {
             let events = events?;
             Ok(Prepared::new(snapshot, move |_abort| {
-                start_count.fetch_add(1, Ordering::SeqCst);
+                starts.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
-                    let stream: LanguageAdapterStream =
-                        Box::pin(stream::iter(events.into_iter().map(Ok)));
-                    Ok(stream)
+                    Ok(Box::pin(stream::iter(events.into_iter().map(Ok))) as LanguageAdapterStream)
                 })
             }))
         })
     }
+}
+
+struct ScriptedImageInner {
+    events: Vec<ImageEvent>,
+    prepare_count: AtomicUsize,
+    start_count: AtomicUsize,
+}
+
+/// Repeatable Image adapter for keyless router tests.
+#[derive(Clone)]
+pub struct ScriptedImageAdapter {
+    inner: Arc<ScriptedImageInner>,
+}
+
+impl ScriptedImageAdapter {
+    /// Creates an adapter that replays the supplied events on every start.
+    #[must_use]
+    pub fn new(events: Vec<ImageEvent>) -> Self {
+        Self {
+            inner: Arc::new(ScriptedImageInner {
+                events,
+                prepare_count: AtomicUsize::new(0),
+                start_count: AtomicUsize::new(0),
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for ScriptedImageAdapter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScriptedImageAdapter")
+            .field("events", &self.inner.events.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ImageAdapter for ScriptedImageAdapter {
+    fn validate_request(&self, _model: &str, _request: &ImageRequest) -> Result<(), AiError> {
+        Ok(())
+    }
+
+    fn prepare(
+        &self,
+        context: PrepareContext,
+        _model: String,
+        _request: ImageRequest,
+    ) -> AdapterFuture<Result<Prepared<ImageAdapterStream>, AiError>> {
+        self.inner.prepare_count.fetch_add(1, Ordering::SeqCst);
+        let snapshot = context.snapshot().clone();
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            Ok(Prepared::new(snapshot, move |_abort| {
+                let events = inner.events.clone();
+                inner.start_count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(Box::pin(stream::iter(events.into_iter().map(Ok))) as ImageAdapterStream)
+                })
+            }))
+        })
+    }
+}
+
+fn test_language_profile() -> rsi_ai_protocol::LanguageProfile {
+    rsi_ai_protocol::LanguageProfile::new(
+        128_000,
+        4_096,
+        32_768,
+        rsi_ai_protocol::ToolDialect::Responses,
+        true,
+        rsi_ai_protocol::ImageToolResultCapability::Yes(
+            rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
+        ),
+        Vec::new(),
+    )
+    .expect("static scripted Language profile is valid")
 }

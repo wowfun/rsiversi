@@ -6,10 +6,9 @@
 mod error;
 mod language;
 mod media;
-mod realtime;
+mod runtime;
 mod semantic;
 mod validation;
-mod wire;
 
 pub use error::{AiError, DispatchStatus, ErrorKind, ErrorPhase, sanitize_error_summary};
 pub use language::{
@@ -19,29 +18,39 @@ pub use language::{
 };
 pub use media::{
     ImageAssembler, ImageEvent, ImageOutput, ImageRequest, MAX_IMAGE_OUTPUTS, MediaOutput,
-    SpeechAssembler, SpeechEvent, SpeechFormat, SpeechOutput, SpeechRequest,
-    TranscriptionAssembler, TranscriptionEvent, TranscriptionOutput, TranscriptionRequest,
-    TranscriptionSegment,
 };
-pub use realtime::{
-    RealtimeAudioFormat, RealtimeCloseReason, RealtimeCommand, RealtimeEvent, RealtimeRequest,
-    RealtimeValidator,
+pub use rsi_media_protocol::{
+    MAXIMUM_IMAGE_DESCRIPTOR_BYTES as MAX_IMAGE_BYTES,
+    MAXIMUM_IMAGE_DIMENSION as MAX_IMAGE_DIMENSION, MediaDescriptor, MediaKind,
+};
+pub use rsi_tools_protocol::{
+    FreeformFormat, FreeformToolDefinition,
+    MAXIMUM_FREEFORM_GRAMMAR_BYTES as MAX_FREEFORM_GRAMMAR_BYTES, ToolDefinition,
+};
+pub use runtime::{
+    AiCapability, AiContractError, DeferredLanguageBatch, DeferredLanguageCall,
+    DeferredLanguageCheckpoint, DeferredLanguageStream, DeferredStatus, ImageCall,
+    ImageCallContract, ImageStream, LanguageCall, LanguageCallContract, LanguageStream, ModelRef,
+    PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedImageCall, PreparedLanguageCall,
+    RetryPolicy, deferred_unsupported,
 };
 pub use semantic::{
-    FreeformFormat, FreeformToolDefinition, HostedTool, ImageToolResultCapability,
-    ImageToolResultMode, LanguageModelLimits, LanguageModelProfiles, LanguageProfile,
-    LanguageRequest, LanguageSettings, MAX_ACCEPTED_PROVIDER_EXTENSIONS, MAX_AUDIO_BYTES,
-    MAX_BLOCKS_PER_MESSAGE, MAX_DESCRIPTION_BYTES, MAX_FREEFORM_GRAMMAR_BYTES, MAX_IMAGE_BYTES,
-    MAX_IMAGE_DIMENSION, MAX_LANGUAGE_MODEL_PROFILES, MAX_MESSAGES, MAX_STOP_SEQUENCE_BYTES,
-    MAX_STOP_SEQUENCES, MediaDescriptor, MediaKind, Message, MessageContent, MessageRole,
-    ProviderExtensionFormat, ReasoningEffort, ResponseFormat, SemanticError, ToolChoice,
-    ToolDefinition, ToolDialect,
+    HostedTool, ImageToolResultCapability, ImageToolResultMode, LanguageModelLimits,
+    LanguageModelProfiles, LanguageProfile, LanguageRequest, LanguageSettings,
+    MAX_ACCEPTED_PROVIDER_EXTENSIONS, MAX_BLOCKS_PER_MESSAGE, MAX_DESCRIPTION_BYTES,
+    MAX_LANGUAGE_MEDIA_BYTES, MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_LANGUAGE_MODEL_PROFILES,
+    MAX_MESSAGES, MAX_STOP_SEQUENCE_BYTES, MAX_STOP_SEQUENCES, Message, MessageContent,
+    MessageRole, ProviderExtensionFormat, ReasoningEffort, ResponseFormat, SemanticError,
+    ToolChoice, ToolDialect,
 };
-pub use validation::identifier as validate_identifier;
-pub use wire::{BlobAssembler, WireError, WireFrame, decode_wire_frame, encode_wire_frame};
+pub use validation::{
+    JsonStructureError, identifier as validate_identifier, validate_json_structure,
+};
 
 /// Maximum UTF-8 bytes retained while assembling one language response.
 pub const MAX_LANGUAGE_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum normalized events in one complete language stream.
+pub const MAX_LANGUAGE_EVENTS: usize = 65_536;
 /// Maximum content blocks retained in one language response.
 pub const MAX_CONTENT_BLOCKS: usize = 256;
 /// Maximum citeable sources retained in one language response.
@@ -64,7 +73,5 @@ pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TOOLS: usize = 128;
 /// Maximum aggregate canonical bytes in tool schemas.
 pub const MAX_TOOL_SCHEMA_BYTES: usize = 2 * 1024 * 1024;
-/// Maximum payload bytes in one normalized JSON control frame.
-pub const MAX_CONTROL_FRAME_BYTES: usize = 256 * 1024;
 /// Maximum raw bytes in one normalized binary chunk.
 pub const MAX_BINARY_CHUNK_BYTES: usize = 256 * 1024;

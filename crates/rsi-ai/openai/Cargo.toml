@@ -17,20 +17,24 @@ base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
+hex.workspace = true
 percent-encoding.workspace = true
-rsi-ai-auth = { path = "../auth" }
 rsi-ai-protocol = { path = "../protocol" }
 rsi-ai-provider = { path = "../provider" }
 rsi-ai-transport = { path = "../transport" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
 rsi-ai = { path = "../core" }
+rsi-ai-image = { path = "../image" }
 rsi-ai-testkit = { path = "../testkit" }
+rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
 
 [lints]
 workspace = true

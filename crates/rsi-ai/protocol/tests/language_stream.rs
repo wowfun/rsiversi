@@ -64,6 +64,18 @@ fn language_stream_bounds_and_validates_sources_and_warnings() {
 }
 
 #[test]
+fn one_oversized_delta_reports_its_per_event_boundary() {
+    let error = LanguageEvent::ContentDelta {
+        index: 0,
+        delta: ContentDelta::Text("x".repeat(rsi_ai_protocol::MAX_LANGUAGE_OUTPUT_BYTES + 1)),
+    }
+    .validate()
+    .expect_err("one delta exceeds its individual bound");
+    assert_eq!(error.code(), "stream.output_too_large");
+    assert!(error.to_string().contains("per-event limit"));
+}
+
+#[test]
 fn language_stream_assembles_interleaved_reasoning_text_and_tool_arguments() {
     let mut assembler = LanguageAssembler::new();
     let events = [

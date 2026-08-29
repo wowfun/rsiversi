@@ -1,42 +1,35 @@
 # rsi-ai testing
 
-Default evidence is deterministic and keyless. Protocol tests cover closed
-request schemas, canonical JSON, constructor and builder aggregate bounds,
-strict language/media stream
-grammars, binary chunk corruption, and Realtime state transitions. Core tests
-exercise exact routing, prepare/start separation, cancellation, all five
-capability handles, and scripted interactive Realtime behavior.
+Default evidence is deterministic, keyless, and isolated from real user state.
+Protocol tests cover closed Language/Image request schemas, constructor and
+aggregate bounds, recursive JSON limits, stream grammars, prepared snapshots,
+and dispatch error facts. Router tests prove exact deployment routing,
+generation withdrawal, provider-I/O-free Prepare, consuming Start, and
+independent Language/Image availability.
 
-Concrete provider tests run local HTTP or WebSocket servers and assert exact
-paths, headers, request bodies, provider-specific unsupported-setting checks,
-stream translation, error classification, reasoning/tool replay, usage, and
-media handling. Transport tests fragment SSE, bound bodies, exercise finite
-request deadlines, and prove cancellation after response headers. Realtime
-tests prove bounded handshakes and cancellation during socket I/O. Auth tests use
-in-memory stores and captured environments, never a real keyring or user state.
-OpenAI deferred tests prove provider-I/O-free Prepare, background submission,
-single-request polling/cancellation, closed checkpoint JSON, monotonic cursor
-validation, clean interrupted-stream EOF, and `starting_after` recovery through
-a local HTTP server.
+Provider tests use local HTTP servers and assert paths, headers, bodies,
+provider-specific setting rejection, stream translation, reasoning and Tool
+replay, usage, media resolution, request-level atomic media admission, multipart
+body projection, last-waiter admission cancellation, and error classification.
+Transport tests fragment SSE, apply
+provider-selected finite frame bounds, exercise deadlines, and prove cancellation after
+headers. Deferred Language tests prove one-request operations, closed
+checkpoints, monotonic cursors, atomic event/checkpoint batches, and interrupted
+stream handling. Protocol and provider suites reject semantically invalid
+checkpoints during deserialization, while router restore tests reject frozen
+route-fact drift including retry policy. OpenAI restore tests reject legacy parser-state versions and
+non-digest open-block keys while accepting checkpoints emitted by the current
+format.
 
-Use these Linux checks for the changed surface:
+Use these Linux checks for the complete family:
 
 ```text
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked -p 'rsi-ai*' --all-targets
+cargo clippy --locked -p 'rsi-ai*' --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked -p 'rsi-ai*' --no-deps
 cargo xtask verify-docs
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --lib --no-deps
-cargo test --locked --workspace --doc
 ```
 
-Live-provider smoke tests require an explicit opt-in and are not release-gate
-evidence. Native keyring behavior requires the corresponding host platform.
-
-The ignored live tests are `deepseek_v4_flash_streams_a_real_completion` and
-`xiaomi_token_plan_synthesizes_then_transcribes_real_audio`. They read secrets
-only from the process environment. Xiaomi defaults to the official China Token
-Plan origin; set `XIAOMI_TOKEN_PLAN_BASE_URL` to the account's displayed
-OpenAI-compatible base URL when it belongs to another cluster. The Xiaomi smoke
-requires a recognizable TTS-to-ASR round trip; because both outputs are
-provider-generated, it permits one complete semantic retry, while transport,
-authentication, protocol, and timeout failures remain immediately terminal.
+Ignored live-provider tests are opt-in smoke tests, not release-gate evidence.
+They require explicit environment credentials and prove only the provider and
+platform actually exercised.

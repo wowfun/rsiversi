@@ -3,7 +3,10 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use futures_util::{StreamExt as _, stream};
 use http::Method;
-use rsi_ai_transport::{ByteStream, HttpRequest, HttpTransport, ReqwestTransport};
+use rsi_ai_transport::{
+    ByteStream, HttpRequest, HttpTransport, ReqwestTransport, bearer_authorization_header,
+};
+use rsi_credentials_protocol::SecretValue;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
@@ -133,4 +136,24 @@ async fn request_body_can_be_pulled_incrementally() {
     assert!(request.windows(5).any(|window| window == b"alpha"));
     assert!(request.windows(4).any(|window| window == b"beta"));
     server.await.expect("server");
+}
+
+#[test]
+fn bearer_authorization_header_is_shared_and_rejects_invalid_header_text() {
+    let valid = SecretValue::new("shared-secret").expect("secret");
+    let header = bearer_authorization_header(&valid).expect("header");
+    assert_eq!(
+        header.to_str().expect("header text"),
+        "Bearer shared-secret"
+    );
+    assert!(header.is_sensitive());
+    assert_eq!(format!("{header:?}"), "Sensitive");
+
+    let invalid = SecretValue::new("line\nbreak").expect("secret storage permits UTF-8 text");
+    assert_eq!(
+        bearer_authorization_header(&invalid)
+            .expect_err("HTTP header rejects newline")
+            .code(),
+        "http.invalid_credential"
+    );
 }

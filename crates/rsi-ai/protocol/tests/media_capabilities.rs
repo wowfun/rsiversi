@@ -1,21 +1,6 @@
 use rsi_ai_protocol::{
-    ImageAssembler, ImageEvent, ImageRequest, MAX_REQUEST_BYTES, MediaDescriptor, MediaKind,
-    SpeechAssembler, SpeechEvent, SpeechFormat, SpeechRequest, TokenUsage, TranscriptionAssembler,
-    TranscriptionEvent, TranscriptionRequest, TranscriptionSegment,
+    ImageAssembler, ImageEvent, ImageRequest, MediaDescriptor, MediaKind, TokenUsage,
 };
-
-#[test]
-fn media_mime_requires_a_nonempty_subtype() {
-    let digest = "a".repeat(64);
-
-    let image = MediaDescriptor::new(MediaKind::Image, "image/", 1, &digest)
-        .expect_err("an image MIME type needs a subtype");
-    assert_eq!(image.code(), "media.invalid_mime");
-
-    let audio = MediaDescriptor::new(MediaKind::Audio, "audio/", 1, digest)
-        .expect_err("an audio MIME type needs a subtype");
-    assert_eq!(audio.code(), "media.invalid_mime");
-}
 use serde_json::json;
 
 fn usage() -> TokenUsage {
@@ -28,50 +13,33 @@ fn usage() -> TokenUsage {
     }
 }
 
-#[test]
-fn transcription_stream_bounds_text_and_segments_together() {
-    let mut assembler = TranscriptionAssembler::new();
-    assembler
-        .push(&TranscriptionEvent::TextDelta {
-            text: "x".to_owned(),
-        })
-        .expect("small transcript delta");
-    let error = assembler
-        .push(&TranscriptionEvent::Segment {
-            segment: TranscriptionSegment {
-                id: 0,
-                start_ms: 0,
-                end_ms: 1,
-                text: "a".repeat(MAX_REQUEST_BYTES),
-            },
-        })
-        .expect_err("aggregate transcription output is bounded");
-    assert_eq!(error.code(), "stream.output_too_large");
-}
-
-fn audio() -> MediaDescriptor {
-    MediaDescriptor::new(
-        MediaKind::Audio,
-        "audio/wav",
-        11,
-        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-    )
-    .expect("audio descriptor")
-}
-
 fn image() -> MediaDescriptor {
     MediaDescriptor::new(MediaKind::Image, "image/png", 4, "a".repeat(64))
         .expect("image descriptor")
 }
 
 #[test]
-fn deserialized_media_metadata_cannot_cross_kind_boundaries() {
-    let mut invalid_audio = serde_json::to_value(audio()).expect("audio JSON");
-    invalid_audio["width"] = json!(10);
-    invalid_audio["height"] = json!(10);
-    serde_json::from_value::<MediaDescriptor>(invalid_audio)
-        .expect_err("audio dimensions must fail at the typed boundary");
+fn image_mask_requires_an_edit_input() {
+    let error = ImageRequest::new("edit the image", 1)
+        .expect("base request")
+        .with_inputs(Vec::new(), Some(image()))
+        .expect_err("a mask without an input must not become generation");
+    assert_eq!(error.code(), "request.invalid_media");
+}
 
+#[test]
+fn media_mime_requires_a_nonempty_subtype() {
+    let image = MediaDescriptor::new(MediaKind::Image, "image/", 1, "a".repeat(64))
+        .expect_err("an image MIME type needs a subtype");
+    assert!(image.to_string().contains("MIME"));
+
+    let nested = MediaDescriptor::new(MediaKind::Image, "image/a/b", 1, "a".repeat(64))
+        .expect_err("a MIME type has exactly one slash");
+    assert!(nested.to_string().contains("MIME"));
+}
+
+#[test]
+fn deserialized_image_metadata_cannot_claim_audio_duration() {
     let mut invalid_image = serde_json::to_value(image()).expect("image JSON");
     invalid_image["duration_ms"] = json!(100);
     serde_json::from_value::<MediaDescriptor>(invalid_image)
@@ -120,90 +88,68 @@ fn image_stream_collects_raw_chunks_into_verified_descriptors() {
 }
 
 #[test]
-fn transcription_stream_preserves_deltas_and_timestamped_segments() {
-    let request = TranscriptionRequest::new(audio()).expect("request");
-    assert_eq!(request.audio().kind(), MediaKind::Audio);
+fn image_stream_rejects_each_terminal_and_ordering_violation() {
+    let mut noncontiguous = ImageAssembler::new();
+    assert_eq!(
+        noncontiguous
+            .push(&ImageEvent::OutputStarted {
+                index: 1,
+                mime_type: "image/png".into(),
+            })
+            .unwrap_err()
+            .code(),
+        "stream.non_contiguous_index"
+    );
 
-    let mut assembler = TranscriptionAssembler::new();
+    let mut sequence = ImageAssembler::new();
+    sequence
+        .push(&ImageEvent::OutputStarted {
+            index: 0,
+            mime_type: "image/png".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        sequence
+            .push(&ImageEvent::OutputChunk {
+                index: 0,
+                sequence: 2,
+                bytes: vec![1],
+            })
+            .unwrap_err()
+            .code(),
+        "stream.chunk_sequence"
+    );
+    assert_eq!(
+        sequence.push(&ImageEvent::Finished).unwrap_err().code(),
+        "stream.output_still_open"
+    );
+
+    let mut terminal = ImageAssembler::new();
     for event in [
-        TranscriptionEvent::TextDelta {
-            text: "hello ".to_owned(),
+        ImageEvent::OutputStarted {
+            index: 0,
+            mime_type: "image/png".into(),
         },
-        TranscriptionEvent::TextDelta {
-            text: "world".to_owned(),
-        },
-        TranscriptionEvent::Segment {
-            segment: TranscriptionSegment {
-                id: 0,
-                start_ms: 0,
-                end_ms: 900,
-                text: "hello world".to_owned(),
-            },
-        },
-        TranscriptionEvent::Usage { usage: usage() },
-        TranscriptionEvent::Finished {
-            language: Some("en".to_owned()),
-        },
-    ] {
-        assembler.push(&event).expect("transcription event");
-    }
-    let output = assembler.finish().expect("transcription output");
-    assert_eq!(output.text, "hello world");
-    assert_eq!(output.segments.len(), 1);
-    assert_eq!(output.language.as_deref(), Some("en"));
-    assert_eq!(output.usage, Some(usage()));
-}
-
-#[test]
-fn unary_speech_is_the_same_stream_with_one_final_chunk() {
-    let request =
-        SpeechRequest::new("hello", "alloy", SpeechFormat::Pcm16).expect("speech request");
-    assert_eq!(request.voice(), "alloy");
-
-    let mut assembler = SpeechAssembler::new();
-    for event in [
-        SpeechEvent::OutputStarted {
-            mime_type: "audio/pcm".to_owned(),
-        },
-        SpeechEvent::AudioChunk {
+        ImageEvent::OutputChunk {
+            index: 0,
             sequence: 1,
-            bytes: vec![0, 1, 2, 3],
+            bytes: vec![1],
         },
-        SpeechEvent::OutputFinished,
-        SpeechEvent::Usage { usage: usage() },
-        SpeechEvent::Finished,
+        ImageEvent::OutputFinished { index: 0 },
+        ImageEvent::Finished,
     ] {
-        assembler.push(&event).expect("speech event");
+        terminal.push(&event).unwrap();
     }
-    let output = assembler.finish().expect("speech output");
-    assert_eq!(output.audio.bytes, vec![0, 1, 2, 3]);
-    assert_eq!(output.audio.descriptor.kind(), MediaKind::Audio);
-    assert_eq!(output.audio.descriptor.mime_type(), "audio/pcm");
-    assert_eq!(output.usage, Some(usage()));
-}
+    assert_eq!(
+        terminal
+            .push(&ImageEvent::Usage { usage: usage() })
+            .unwrap_err()
+            .code(),
+        "stream.already_finished"
+    );
 
-#[test]
-fn media_streams_reject_chunks_after_output_finished() {
-    let mut assembler = SpeechAssembler::new();
-    assembler
-        .push(&SpeechEvent::OutputStarted {
-            mime_type: "audio/pcm".to_owned(),
-        })
-        .expect("start");
-    assembler
-        .push(&SpeechEvent::AudioChunk {
-            sequence: 1,
-            bytes: vec![0, 1],
-        })
-        .expect("chunk");
-    assembler
-        .push(&SpeechEvent::OutputFinished)
-        .expect("output finish");
-    let error = assembler
-        .push(&SpeechEvent::AudioChunk {
-            sequence: 2,
-            bytes: vec![2, 3],
-        })
-        .expect_err("post-finish chunk");
-    assert_eq!(error.code(), "stream.output_not_open");
+    assert_eq!(
+        ImageAssembler::new().finish().unwrap_err().code(),
+        "stream.missing_finish"
+    );
 }

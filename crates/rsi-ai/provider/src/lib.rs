@@ -4,17 +4,29 @@
 #![allow(clippy::missing_errors_doc)] // Provider SDK errors expose stable codes.
 #![allow(clippy::missing_panics_doc)] // Private construction invariants back static-error expects.
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, LazyLock, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use async_trait::async_trait;
-use futures_util::Stream;
-use rsi_ai_auth::{CredentialRequirement, CredentialSourceSnapshot, ResolvedCredential};
+use futures_util::{FutureExt as _, Stream, future::Shared};
 use rsi_ai_protocol::{
-    AiError, DispatchStatus, ErrorKind, ErrorPhase, ImageEvent, ImageRequest, LanguageEvent,
-    LanguageProfile, LanguageRequest, MAX_EXTENSION_BYTES, MediaDescriptor, ProviderExtension,
-    RealtimeCommand, RealtimeEvent, RealtimeRequest, SpeechEvent, SpeechRequest,
-    TranscriptionEvent, TranscriptionRequest,
+    AiError, DeferredLanguageBatch as CallerDeferredLanguageBatch,
+    DeferredLanguageCheckpoint as CallerDeferredLanguageCheckpoint,
+    DeferredStatus as CallerDeferredStatus, DispatchStatus, ErrorKind, ErrorPhase, ImageEvent,
+    ImageRequest, LanguageEvent, LanguageProfile, LanguageRequest, MAX_EXTENSION_BYTES,
+    PreparedCallSnapshot, ProviderExtension, RetryPolicy, sanitize_error_summary,
 };
+use rsi_credentials_protocol::{CredentialRef, ResolvedCredential};
+use rsi_media_protocol::{MediaDescriptor, MediaRead};
+use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -29,10 +41,6 @@ pub type AdapterStream<E> = Pin<Box<dyn Stream<Item = Result<E, AiError>> + Send
 pub type LanguageAdapterStream = AdapterStream<LanguageEvent>;
 /// Normalized image stream returned after a prepared call starts.
 pub type ImageAdapterStream = AdapterStream<ImageEvent>;
-/// Normalized transcription stream returned after a prepared call starts.
-pub type TranscriptionAdapterStream = AdapterStream<TranscriptionEvent>;
-/// Normalized speech stream returned after a prepared call starts.
-pub type SpeechAdapterStream = AdapterStream<SpeechEvent>;
 
 /// Current provider-side state of one explicitly deferred language response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,20 +65,76 @@ impl DeferredStatus {
     }
 }
 
+impl From<DeferredStatus> for CallerDeferredStatus {
+    fn from(status: DeferredStatus) -> Self {
+        match status {
+            DeferredStatus::Queued => Self::Queued,
+            DeferredStatus::InProgress => Self::InProgress,
+            DeferredStatus::Completed => Self::Completed,
+            DeferredStatus::Failed => Self::Failed,
+            DeferredStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<CallerDeferredStatus> for DeferredStatus {
+    fn from(status: CallerDeferredStatus) -> Self {
+        match status {
+            CallerDeferredStatus::Queued => Self::Queued,
+            CallerDeferredStatus::InProgress => Self::InProgress,
+            CallerDeferredStatus::Completed => Self::Completed,
+            CallerDeferredStatus::Failed => Self::Failed,
+            CallerDeferredStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 /// Persistable cursor for a provider-managed background language response.
 ///
 /// `provider_state` is bounded parser state, never response bytes, credentials,
 /// or accumulated model output. A durable caller commits each emitted batch and
 /// this checkpoint atomically before resuming after `sequence_number`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeferredLanguageCheckpoint {
     call: PreparedCallSnapshot,
     operation_id: String,
     status: DeferredStatus,
-    stream_created: bool,
+    event_stream_terminal: bool,
     sequence_number: Option<u64>,
     provider_state: Option<ProviderExtension>,
+}
+
+impl<'de> Deserialize<'de> for DeferredLanguageCheckpoint {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireCheckpoint {
+            call: PreparedCallSnapshot,
+            operation_id: String,
+            status: DeferredStatus,
+            event_stream_terminal: bool,
+            sequence_number: Option<u64>,
+            provider_state: Option<ProviderExtension>,
+        }
+
+        let wire = WireCheckpoint::deserialize(deserializer)?;
+        let checkpoint = Self {
+            call: wire.call,
+            operation_id: wire.operation_id,
+            status: wire.status,
+            event_stream_terminal: wire.event_stream_terminal,
+            sequence_number: wire.sequence_number,
+            provider_state: wire.provider_state,
+        };
+        checkpoint
+            .validate()
+            .map(|()| checkpoint)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl DeferredLanguageCheckpoint {
@@ -85,7 +149,7 @@ impl DeferredLanguageCheckpoint {
             call,
             operation_id: operation_id.into(),
             status,
-            stream_created: false,
+            event_stream_terminal: false,
             sequence_number: None,
             provider_state,
         };
@@ -95,12 +159,16 @@ impl DeferredLanguageCheckpoint {
 
     /// Revalidates a checkpoint decoded from durable state.
     pub fn validate(&self) -> Result<(), ProviderSdkError> {
-        self.call.validate()?;
+        self.call.validate().map_err(|error| {
+            ProviderSdkError::new("provider.invalid_deferred_checkpoint", error.to_string())
+        })?;
         validate_id("operation_id", &self.operation_id)?;
-        if self.stream_created && self.sequence_number.is_none() {
+        if self.event_stream_terminal
+            && (self.sequence_number.is_none() || !self.status.is_terminal())
+        {
             return Err(ProviderSdkError::new(
                 "provider.invalid_deferred_checkpoint",
-                "a created deferred stream must have a sequence number",
+                "a terminal deferred event stream requires a terminal status and sequence number",
             ));
         }
         validate_provider_state(self.provider_state.as_ref())
@@ -121,9 +189,9 @@ impl DeferredLanguageCheckpoint {
         self.status
     }
 
-    /// Returns whether any resumable provider stream has been created.
-    pub const fn stream_created(&self) -> bool {
-        self.stream_created
+    /// Returns whether a terminal output event has been durably consumed.
+    pub const fn event_stream_terminal(&self) -> bool {
+        self.event_stream_terminal
     }
 
     /// Returns the cursor after the last durably paired normalized event batch.
@@ -148,15 +216,21 @@ impl DeferredLanguageCheckpoint {
     pub fn advance(
         &mut self,
         status: DeferredStatus,
-        stream_created: bool,
+        event_stream_terminal: bool,
         sequence_number: u64,
         provider_state: Option<ProviderExtension>,
     ) -> Result<(), ProviderSdkError> {
         validate_status_transition(self.status, status)?;
-        if self.stream_created && !stream_created {
+        if self.event_stream_terminal && !event_stream_terminal {
             return Err(ProviderSdkError::new(
                 "provider.invalid_deferred_checkpoint",
-                "deferred stream-created state cannot regress",
+                "deferred event-stream terminal state cannot regress",
+            ));
+        }
+        if event_stream_terminal && !status.is_terminal() {
+            return Err(ProviderSdkError::new(
+                "provider.invalid_deferred_checkpoint",
+                "a terminal deferred event stream requires a terminal status",
             ));
         }
         if self
@@ -170,10 +244,60 @@ impl DeferredLanguageCheckpoint {
         }
         validate_provider_state(provider_state.as_ref())?;
         self.status = status;
-        self.stream_created = stream_created;
+        self.event_stream_terminal = event_stream_terminal;
         self.sequence_number = Some(sequence_number);
         self.provider_state = provider_state;
         Ok(())
+    }
+
+    /// Converts this provider cursor into the public durable caller contract.
+    pub fn to_caller(&self) -> Result<CallerDeferredLanguageCheckpoint, ProviderSdkError> {
+        let mut checkpoint = CallerDeferredLanguageCheckpoint::new(
+            self.call.clone(),
+            self.operation_id.clone(),
+            self.status.into(),
+            self.provider_state.clone(),
+        )
+        .map_err(|error| {
+            ProviderSdkError::new("provider.invalid_deferred_checkpoint", error.to_string())
+        })?;
+        if let Some(sequence) = self.sequence_number {
+            checkpoint
+                .advance(
+                    self.status.into(),
+                    self.event_stream_terminal,
+                    sequence,
+                    self.provider_state.clone(),
+                )
+                .map_err(|error| {
+                    ProviderSdkError::new("provider.invalid_deferred_checkpoint", error.to_string())
+                })?;
+        }
+        Ok(checkpoint)
+    }
+
+    /// Converts one validated public cursor into the provider-author contract.
+    pub fn from_caller(
+        checkpoint: &CallerDeferredLanguageCheckpoint,
+    ) -> Result<Self, ProviderSdkError> {
+        checkpoint.validate().map_err(|error| {
+            ProviderSdkError::new("provider.invalid_deferred_checkpoint", error.to_string())
+        })?;
+        let mut provider = Self::new(
+            checkpoint.call().clone(),
+            checkpoint.operation_id(),
+            checkpoint.status().into(),
+            checkpoint.provider_state().cloned(),
+        )?;
+        if let Some(sequence) = checkpoint.sequence_number() {
+            provider.advance(
+                checkpoint.status().into(),
+                checkpoint.event_stream_terminal(),
+                sequence,
+                checkpoint.provider_state().cloned(),
+            )?;
+        }
+        Ok(provider)
     }
 }
 
@@ -226,17 +350,28 @@ pub struct DeferredLanguageBatch {
     checkpoint: DeferredLanguageCheckpoint,
 }
 
+/// Atomic event/checkpoint batches returned by one deferred resume request.
+pub type DeferredLanguageAdapterStream = AdapterStream<DeferredLanguageBatch>;
+
 impl DeferredLanguageBatch {
     /// Couples one bounded event batch with the cursor immediately after it.
     pub fn new(
         events: Vec<LanguageEvent>,
         checkpoint: DeferredLanguageCheckpoint,
     ) -> Result<Self, ProviderSdkError> {
-        if events.len() > 64 {
+        const MAX_EVENTS: usize = rsi_ai_protocol::MAX_CONTENT_BLOCKS + 2;
+        if events.len() > MAX_EVENTS {
             return Err(ProviderSdkError::new(
                 "provider.invalid_deferred_batch",
-                "one deferred provider event expanded to more than 64 normalized events",
+                format!(
+                    "one deferred provider event expanded to more than {MAX_EVENTS} normalized events"
+                ),
             ));
+        }
+        for event in &events {
+            event.validate().map_err(|error| {
+                ProviderSdkError::new("provider.invalid_deferred_batch", error.to_string())
+            })?;
         }
         checkpoint.validate()?;
         Ok(Self { events, checkpoint })
@@ -251,188 +386,12 @@ impl DeferredLanguageBatch {
     pub const fn checkpoint(&self) -> &DeferredLanguageCheckpoint {
         &self.checkpoint
     }
-}
 
-/// Atomic event/checkpoint batches returned by one deferred resume request.
-pub type DeferredLanguageAdapterStream = AdapterStream<DeferredLanguageBatch>;
-
-/// AI capability selected before a provider call is prepared.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    /// Text, multimodal understanding, reasoning, and tool calls.
-    Language,
-    /// Image generation or editing.
-    Image,
-    /// Audio-to-text transcription.
-    Transcription,
-    /// Text-to-audio synthesis.
-    Speech,
-    /// Live bidirectional Realtime interaction.
-    Realtime,
-}
-
-/// Finite provider-owned retry policy. Standalone calls remain single-attempt;
-/// an orchestration layer may execute this policy at a durable call boundary.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetryPolicy {
-    max_retries: u8,
-    retryable_kinds: Vec<ErrorKind>,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
-    jitter_per_mille: u16,
-}
-
-impl RetryPolicy {
-    /// Creates bounded retry facts for an orchestration layer to interpret durably.
-    pub fn new(
-        max_retries: u8,
-        retryable_kinds: Vec<ErrorKind>,
-        initial_delay_ms: u64,
-        max_delay_ms: u64,
-        jitter_per_mille: u16,
-    ) -> Result<Self, ProviderSdkError> {
-        if max_retries > 16
-            || retryable_kinds.is_empty()
-            || retryable_kinds.len() > 16
-            || retryable_kinds
-                .iter()
-                .enumerate()
-                .any(|(index, kind)| retryable_kinds[..index].contains(kind))
-            || initial_delay_ms == 0
-            || initial_delay_ms > max_delay_ms
-            || max_delay_ms > 60_000
-            || jitter_per_mille > 1_000
-        {
-            return Err(ProviderSdkError::new(
-                "provider.invalid_retry_policy",
-                "retry policy exceeds its attempt, kind, delay, or jitter bounds",
-            ));
-        }
-        Ok(Self {
-            max_retries,
-            retryable_kinds,
-            initial_delay_ms,
-            max_delay_ms,
-            jitter_per_mille,
-        })
-    }
-
-    /// Returns the maximum retries after the initial attempt.
-    pub const fn max_retries(&self) -> u8 {
-        self.max_retries
-    }
-
-    /// Returns whether the policy admits the provider-neutral failure category.
-    pub fn retries(&self, kind: ErrorKind) -> bool {
-        self.retryable_kinds.contains(&kind)
-    }
-
-    pub const fn initial_delay_ms(&self) -> u64 {
-        self.initial_delay_ms
-    }
-
-    pub const fn max_delay_ms(&self) -> u64 {
-        self.max_delay_ms
-    }
-
-    pub const fn jitter_per_mille(&self) -> u16 {
-        self.jitter_per_mille
-    }
-
-    /// Revalidates retry facts decoded from a prepared snapshot.
-    pub fn validate(&self) -> Result<(), ProviderSdkError> {
-        Self::new(
-            self.max_retries,
-            self.retryable_kinds.clone(),
-            self.initial_delay_ms,
-            self.max_delay_ms,
-            self.jitter_per_mille,
+    /// Converts an adapter batch into the public atomic caller contract.
+    pub fn to_caller(&self) -> Result<CallerDeferredLanguageBatch, ProviderSdkError> {
+        CallerDeferredLanguageBatch::new(self.events.clone(), self.checkpoint.to_caller()?).map_err(
+            |error| ProviderSdkError::new("provider.invalid_deferred_batch", error.to_string()),
         )
-        .map(|_| ())
-    }
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_retries: 2,
-            retryable_kinds: vec![
-                ErrorKind::RateLimited,
-                ErrorKind::Server,
-                ErrorKind::Timeout,
-                ErrorKind::Transport,
-                ErrorKind::OutputValidation,
-            ],
-            initial_delay_ms: 500,
-            max_delay_ms: 10_000,
-            jitter_per_mille: 100,
-        }
-    }
-}
-
-/// Redacted, persistable facts frozen before external provider I/O.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreparedCallSnapshot {
-    /// Caller-visible call identity unique within the owning runtime.
-    pub call_id: String,
-    /// Exact configured provider deployment.
-    pub deployment_id: String,
-    /// Provider family that owns translation semantics.
-    pub provider_family: String,
-    /// Typed capability prepared for the call.
-    pub capability: Capability,
-    /// Exact model identifier supplied by the caller.
-    pub model: String,
-    /// Provider protocol family frozen during preparation.
-    pub protocol: String,
-    /// Transport kind frozen during preparation.
-    pub transport: String,
-    /// Redacted endpoint identity suitable for replay diagnostics.
-    pub endpoint_fingerprint: String,
-    /// Provider configuration generation pinned by the call.
-    pub config_generation: u64,
-    /// Redacted source of the resolved credential, when required.
-    pub credential_source: Option<CredentialSourceSnapshot>,
-    /// Finite retry facts for a durable orchestration layer.
-    pub retry_policy: RetryPolicy,
-    /// Lowercase SHA-256 of canonical provider-neutral request bytes.
-    pub request_sha256: String,
-}
-
-impl PreparedCallSnapshot {
-    /// Revalidates redacted facts decoded from durable or wire state.
-    pub fn validate(&self) -> Result<(), ProviderSdkError> {
-        for (field, value) in [
-            ("call_id", self.call_id.as_str()),
-            ("deployment_id", self.deployment_id.as_str()),
-            ("provider_family", self.provider_family.as_str()),
-            ("model", self.model.as_str()),
-            ("protocol", self.protocol.as_str()),
-            ("transport", self.transport.as_str()),
-            ("endpoint_fingerprint", self.endpoint_fingerprint.as_str()),
-        ] {
-            validate_id(field, value)?;
-        }
-        if self.request_sha256.len() != 64
-            || !self
-                .request_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
-            return Err(ProviderSdkError::new(
-                "provider.invalid_snapshot",
-                "prepared snapshot contains an invalid request digest",
-            ));
-        }
-        if let Some(credential) = &self.credential_source {
-            credential.validate().map_err(|error| {
-                ProviderSdkError::new("provider.invalid_snapshot", error.to_string())
-            })?;
-        }
-        self.retry_policy.validate()
     }
 }
 
@@ -442,21 +401,340 @@ pub struct PrepareContext {
     snapshot: PreparedCallSnapshot,
     credential: Option<ResolvedCredential>,
     media: Arc<dyn MediaResolver>,
+    resolved_media: Arc<MediaResolutions>,
+}
+
+const MEDIA_ADMISSION_UNIT_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_RESIDENT_MEDIA_MIB: usize = 256;
+/// Maximum unique declared media bytes retained by one process across prepared calls.
+pub const MAXIMUM_RESIDENT_MEDIA_BYTES: u64 =
+    MAXIMUM_RESIDENT_MEDIA_MIB as u64 * MEDIA_ADMISSION_UNIT_BYTES;
+static MEDIA_RESIDENT_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAXIMUM_RESIDENT_MEDIA_MIB)));
+
+#[derive(Clone)]
+struct ValidatedMedia {
+    bytes: Arc<[u8]>,
+    admission: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+type MediaResolutionFuture = Shared<AdapterFuture<Result<ValidatedMedia, AiError>>>;
+type MediaAdmissionFuture =
+    Shared<AdapterFuture<Result<Arc<tokio::sync::OwnedSemaphorePermit>, AiError>>>;
+
+struct MediaResolutionFlight {
+    future: MediaResolutionFuture,
+    admission: Arc<MediaAdmissionFlight>,
+}
+
+struct MediaAdmissionFlight {
+    future: MediaAdmissionFuture,
+}
+
+enum MediaAdmission {
+    Empty,
+    Pending(Weak<MediaAdmissionFlight>),
+    Ready(Arc<tokio::sync::OwnedSemaphorePermit>),
+}
+
+enum MediaResolutionEntry {
+    Pending {
+        flight: Arc<MediaResolutionFlight>,
+        waiters: usize,
+    },
+    Ready(ValidatedMedia),
+}
+
+struct MediaResolutionWaiter {
+    resolutions: Arc<MediaResolutions>,
+    descriptor: MediaDescriptor,
+    flight: Arc<MediaResolutionFlight>,
+}
+
+impl Drop for MediaResolutionWaiter {
+    fn drop(&mut self) {
+        self.resolutions
+            .release_waiter(&self.descriptor, &self.flight);
+    }
+}
+
+enum MediaResolution {
+    Pending(MediaResolutionWaiter),
+    Ready(ValidatedMedia),
+}
+
+struct MediaResolutions {
+    entries: Mutex<HashMap<MediaDescriptor, MediaResolutionEntry>>,
+    admission: Mutex<MediaAdmission>,
+    admission_units: u32,
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl MediaResolutions {
+    fn new(media_admission_bytes: u64) -> Result<Self, ProviderSdkError> {
+        Self::new_with_semaphore(media_admission_bytes, Arc::clone(&MEDIA_RESIDENT_ADMISSION))
+    }
+
+    fn new_with_semaphore(
+        media_admission_bytes: u64,
+        semaphore: Arc<tokio::sync::Semaphore>,
+    ) -> Result<Self, ProviderSdkError> {
+        validate_media_admission_bytes(media_admission_bytes)?;
+        let units = media_admission_bytes.saturating_add(MEDIA_ADMISSION_UNIT_BYTES - 1)
+            / MEDIA_ADMISSION_UNIT_BYTES;
+        let admission_units = u32::try_from(units).map_err(|_| {
+            ProviderSdkError::new(
+                "provider.media_admission_exceeded",
+                "media admission weight exceeds its representation",
+            )
+        })?;
+        Ok(Self {
+            entries: Mutex::new(HashMap::new()),
+            admission: Mutex::new(MediaAdmission::Empty),
+            admission_units,
+            semaphore,
+        })
+    }
+
+    fn admission(&self) -> Arc<MediaAdmissionFlight> {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*admission {
+            MediaAdmission::Pending(flight) => {
+                if let Some(flight) = flight.upgrade() {
+                    return flight;
+                }
+            }
+            MediaAdmission::Ready(permit) => {
+                let permit = Arc::clone(permit);
+                let future: AdapterFuture<Result<Arc<tokio::sync::OwnedSemaphorePermit>, AiError>> =
+                    Box::pin(async move { Ok(permit) });
+                return Arc::new(MediaAdmissionFlight {
+                    future: future.shared(),
+                });
+            }
+            MediaAdmission::Empty => {}
+        }
+        let semaphore = Arc::clone(&self.semaphore);
+        let units = self.admission_units;
+        let future: AdapterFuture<Result<Arc<tokio::sync::OwnedSemaphorePermit>, AiError>> =
+            Box::pin(async move {
+                let admission = semaphore
+                    .acquire_many_owned(units)
+                    .await
+                    .expect("static media admission remains open");
+                Ok(Arc::new(admission))
+            });
+        let flight = Arc::new(MediaAdmissionFlight {
+            future: future.shared(),
+        });
+        *admission = MediaAdmission::Pending(Arc::downgrade(&flight));
+        flight
+    }
+
+    fn for_descriptor(
+        self: &Arc<Self>,
+        descriptor: &MediaDescriptor,
+        media: Arc<dyn MediaResolver>,
+    ) -> MediaResolution {
+        let admission = self.admission();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries.entry(descriptor.clone()).or_insert_with(|| {
+            let descriptor = descriptor.clone();
+            let resolver_descriptor = descriptor.clone();
+            let admitted = Arc::clone(&admission);
+            let future: AdapterFuture<Result<ValidatedMedia, AiError>> = Box::pin(async move {
+                let admission = admitted.future.clone().await?;
+                let bytes = media.read(resolver_descriptor, AbortSignal::new()).await?;
+                let bytes = validate_resolved_media_blocking(descriptor, bytes).await?;
+                Ok(ValidatedMedia { bytes, admission })
+            });
+            MediaResolutionEntry::Pending {
+                flight: Arc::new(MediaResolutionFlight {
+                    future: future.shared(),
+                    admission,
+                }),
+                waiters: 0,
+            }
+        });
+        match entry {
+            MediaResolutionEntry::Pending { flight, waiters } => {
+                *waiters = waiters
+                    .checked_add(1)
+                    .expect("one process cannot retain usize::MAX media waiters");
+                MediaResolution::Pending(MediaResolutionWaiter {
+                    resolutions: Arc::clone(self),
+                    descriptor: descriptor.clone(),
+                    flight: Arc::clone(flight),
+                })
+            }
+            MediaResolutionEntry::Ready(media) => MediaResolution::Ready(media.clone()),
+        }
+    }
+
+    fn release_waiter(&self, descriptor: &MediaDescriptor, flight: &Arc<MediaResolutionFlight>) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = match entries.get_mut(descriptor) {
+            Some(MediaResolutionEntry::Pending {
+                flight: current,
+                waiters,
+            }) if Arc::ptr_eq(current, flight) => {
+                *waiters = waiters
+                    .checked_sub(1)
+                    .expect("a media waiter is released exactly once");
+                *waiters == 0
+            }
+            Some(MediaResolutionEntry::Pending { .. } | MediaResolutionEntry::Ready(_)) | None => {
+                false
+            }
+        };
+        if remove {
+            entries.remove(descriptor);
+        }
+    }
+
+    fn retain_admission(
+        &self,
+        flight: &Arc<MediaAdmissionFlight>,
+        permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            &*admission,
+            MediaAdmission::Pending(current)
+                if current.upgrade().is_some_and(|current| Arc::ptr_eq(&current, flight))
+        ) {
+            *admission = MediaAdmission::Ready(Arc::clone(permit));
+        }
+    }
+
+    fn finish(
+        &self,
+        descriptor: &MediaDescriptor,
+        flight: &Arc<MediaResolutionFlight>,
+        result: &Result<ValidatedMedia, AiError>,
+    ) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let is_current = matches!(
+            entries.get(descriptor),
+            Some(MediaResolutionEntry::Pending { flight: current, .. })
+                if Arc::ptr_eq(current, flight)
+        );
+        if !is_current {
+            return;
+        }
+        match result {
+            Ok(media) => {
+                self.retain_admission(&flight.admission, &media.admission);
+                entries.insert(
+                    descriptor.clone(),
+                    MediaResolutionEntry::Ready(media.clone()),
+                );
+            }
+            Err(_) => {
+                entries.remove(descriptor);
+            }
+        }
+    }
+}
+
+/// Validates one prepared call's unique declared media bytes against process admission.
+pub fn validate_media_admission_bytes(media_admission_bytes: u64) -> Result<(), ProviderSdkError> {
+    if media_admission_bytes > MAXIMUM_RESIDENT_MEDIA_BYTES {
+        return Err(ProviderSdkError::new(
+            "provider.media_admission_exceeded",
+            format!(
+                "prepared call declares {media_admission_bytes} unique media bytes, exceeding the {MAXIMUM_RESIDENT_MEDIA_BYTES}-byte process resident bound"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resolved_media(descriptor: &MediaDescriptor, bytes: &[u8]) -> Result<(), AiError> {
+    if u64::try_from(bytes.len()).ok() != Some(descriptor.byte_len()) {
+        return Err(AiError::new(
+            ErrorKind::Artifact,
+            ErrorPhase::Send,
+            DispatchStatus::NotDispatched,
+            "resolved media length does not match its descriptor",
+        )
+        .expect("static media error is valid"));
+    }
+    let digest = hex::encode(Sha256::digest(bytes));
+    if digest != descriptor.sha256() {
+        return Err(AiError::new(
+            ErrorKind::Artifact,
+            ErrorPhase::Send,
+            DispatchStatus::NotDispatched,
+            "resolved media digest does not match its descriptor",
+        )
+        .expect("static media error is valid"));
+    }
+    Ok(())
+}
+
+async fn validate_resolved_media_blocking(
+    descriptor: MediaDescriptor,
+    bytes: Arc<[u8]>,
+) -> Result<Arc<[u8]>, AiError> {
+    tokio::task::spawn_blocking(move || {
+        validate_resolved_media(&descriptor, &bytes)?;
+        Ok(bytes)
+    })
+    .await
+    .map_err(|_| {
+        AiError::new(
+            ErrorKind::Artifact,
+            ErrorPhase::Send,
+            DispatchStatus::NotDispatched,
+            "media validation worker failed",
+        )
+        .expect("static media worker error is valid")
+    })?
+}
+
+fn media_waiter_cancelled() -> AiError {
+    AiError::new(
+        ErrorKind::Cancelled,
+        ErrorPhase::Send,
+        DispatchStatus::NotDispatched,
+        "media resolution waiter was cancelled",
+    )
+    .expect("static media cancellation is valid")
 }
 
 impl PrepareContext {
     /// Couples redacted snapshot facts with nonserializable secret and media access.
-    #[must_use]
     pub fn new(
         snapshot: PreparedCallSnapshot,
         credential: Option<ResolvedCredential>,
         media: Arc<dyn MediaResolver>,
-    ) -> Self {
-        Self {
+        media_admission_bytes: u64,
+    ) -> Result<Self, ProviderSdkError> {
+        snapshot.validate().map_err(|error| {
+            ProviderSdkError::new("provider.invalid_prepare_context", error.to_string())
+        })?;
+        Ok(Self {
             snapshot,
             credential,
             media,
-        }
+            resolved_media: Arc::new(MediaResolutions::new(media_admission_bytes)?),
+        })
     }
 
     /// Returns persistable redacted call facts.
@@ -474,33 +752,42 @@ impl PrepareContext {
         &self.media
     }
 
+    /// Releases successful media bodies after the adapter's final resolution.
+    pub fn release_resolved_media(&self) {
+        self.resolved_media
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        let mut admission = self
+            .resolved_media
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *admission = MediaAdmission::Empty;
+    }
+
     /// Reads and verifies one media body at Start-time.
     pub async fn resolve_media(
         &self,
         descriptor: &MediaDescriptor,
         abort: AbortSignal,
     ) -> Result<Arc<[u8]>, AiError> {
-        let bytes = self.media.read(descriptor.clone(), abort).await?;
-        if u64::try_from(bytes.len()).ok() != Some(descriptor.byte_len()) {
-            return Err(AiError::new(
-                ErrorKind::Artifact,
-                ErrorPhase::Send,
-                DispatchStatus::NotDispatched,
-                "resolved media length does not match its descriptor",
-            )
-            .expect("static media error is valid"));
-        }
-        let digest = hex::encode(Sha256::digest(&bytes));
-        if digest != descriptor.sha256() {
-            return Err(AiError::new(
-                ErrorKind::Artifact,
-                ErrorPhase::Send,
-                DispatchStatus::NotDispatched,
-                "resolved media digest does not match its descriptor",
-            )
-            .expect("static media error is valid"));
-        }
-        Ok(bytes)
+        let resolution = self
+            .resolved_media
+            .for_descriptor(descriptor, Arc::clone(&self.media));
+        let waiter = match resolution {
+            MediaResolution::Pending(waiter) => waiter,
+            MediaResolution::Ready(media) => return Ok(media.bytes),
+        };
+        let result = tokio::select! {
+            biased;
+            () = abort.cancelled() => return Err(media_waiter_cancelled()),
+            result = waiter.flight.future.clone() => result,
+        };
+        self.resolved_media
+            .finish(descriptor, &waiter.flight, &result);
+        result.map(|media| media.bytes)
     }
 }
 
@@ -511,10 +798,13 @@ impl fmt::Debug for PrepareContext {
             .field("snapshot", &self.snapshot)
             .field(
                 "credential",
-                &self.credential.as_ref().map(ResolvedCredential::source),
+                &self
+                    .credential
+                    .as_ref()
+                    .map(|credential| &credential.source),
             )
             .field("media", &self.media)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -528,7 +818,7 @@ pub trait MediaResolver: fmt::Debug + Send + Sync {
     ) -> AdapterFuture<Result<Arc<[u8]>, AiError>>;
 }
 
-/// Default resolver used when a Registry was not connected to an artifact store.
+/// Default resolver used when a router call has no durable Media reader.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MissingMediaResolver;
 
@@ -550,6 +840,48 @@ impl MediaResolver for MissingMediaResolver {
     }
 }
 
+/// Adapter from the durable Base Media read contract to provider-author media resolution.
+#[derive(Clone, Debug)]
+pub struct DurableMediaResolver {
+    reader: Arc<dyn MediaRead>,
+}
+
+impl DurableMediaResolver {
+    /// Pins one exact Media service generation for a prepared operation.
+    #[must_use]
+    pub fn new(reader: Arc<dyn MediaRead>) -> Self {
+        Self { reader }
+    }
+}
+
+impl MediaResolver for DurableMediaResolver {
+    fn read(
+        &self,
+        descriptor: MediaDescriptor,
+        abort: AbortSignal,
+    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
+        let reader = Arc::clone(&self.reader);
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                () = abort.cancelled() => Err(media_waiter_cancelled()),
+                result = reader.read_descriptor(&descriptor) => result
+                    .map(|body| body.bytes)
+                    .map_err(|error| {
+                        let summary = sanitize_error_summary(&error.to_string());
+                        AiError::new(
+                            ErrorKind::Artifact,
+                            ErrorPhase::Send,
+                            DispatchStatus::NotDispatched,
+                            summary,
+                        )
+                        .expect("sanitized Media error is valid")
+                    }),
+            }
+        })
+    }
+}
+
 /// Cooperative cancellation shared by direct calls, plugins, and tests.
 #[derive(Clone, Debug, Default)]
 pub struct AbortSignal(CancellationToken);
@@ -559,6 +891,12 @@ impl AbortSignal {
     #[must_use]
     pub fn new() -> Self {
         Self(CancellationToken::new())
+    }
+
+    /// Wraps an operation-owned cancellation token without a second watcher task.
+    #[must_use]
+    pub fn from_cancellation_token(token: CancellationToken) -> Self {
+        Self(token)
     }
 
     /// Signals cancellation to all clones.
@@ -632,6 +970,9 @@ pub trait LanguageAdapter: fmt::Debug + Send + Sync {
     /// Describes one model without credentials, network, filesystem, or other provider I/O.
     fn describe(&self, model: &str) -> Result<LanguageProfile, AiError>;
 
+    /// Checks model/request compatibility without resolving effect dependencies.
+    fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError>;
+
     /// Validates and freezes one language call without performing provider I/O.
     fn prepare(
         &self,
@@ -694,6 +1035,9 @@ fn deferred_unsupported() -> AiError {
 
 /// Image provider seam.
 pub trait ImageAdapter: fmt::Debug + Send + Sync {
+    /// Checks model/request compatibility without resolving effect dependencies.
+    fn validate_request(&self, model: &str, request: &ImageRequest) -> Result<(), AiError>;
+
     /// Validates and freezes one image call without performing provider I/O.
     fn prepare(
         &self,
@@ -703,69 +1047,20 @@ pub trait ImageAdapter: fmt::Debug + Send + Sync {
     ) -> AdapterFuture<Result<Prepared<ImageAdapterStream>, AiError>>;
 }
 
-/// Transcription provider seam.
-pub trait TranscriptionAdapter: fmt::Debug + Send + Sync {
-    /// Validates and freezes one transcription call without performing provider I/O.
-    fn prepare(
-        &self,
-        context: PrepareContext,
-        model: String,
-        request: TranscriptionRequest,
-    ) -> AdapterFuture<Result<Prepared<TranscriptionAdapterStream>, AiError>>;
-}
-
-/// Speech provider seam.
-pub trait SpeechAdapter: fmt::Debug + Send + Sync {
-    /// Validates and freezes one speech call without performing provider I/O.
-    fn prepare(
-        &self,
-        context: PrepareContext,
-        model: String,
-        request: SpeechRequest,
-    ) -> AdapterFuture<Result<Prepared<SpeechAdapterStream>, AiError>>;
-}
-
-/// Live provider transport hidden by the standalone Realtime façade.
-#[async_trait]
-pub trait RealtimeConnection: fmt::Debug + Send {
-    /// Sends one validated live command.
-    async fn send(&mut self, command: RealtimeCommand) -> Result<(), AiError>;
-    /// Receives the next provider event, or clean EOF after closure.
-    async fn next_event(&mut self) -> Result<Option<RealtimeEvent>, AiError>;
-    /// Performs bounded orderly transport closure.
-    async fn close(&mut self) -> Result<(), AiError>;
-}
-
-/// Owned live transport created by a prepared Realtime call.
-pub type RealtimeAdapterTransport = Box<dyn RealtimeConnection>;
-
-/// Realtime provider seam.
-pub trait RealtimeAdapter: fmt::Debug + Send + Sync {
-    /// Validates and freezes one live session without opening its transport.
-    fn prepare(
-        &self,
-        context: PrepareContext,
-        model: String,
-        request: RealtimeRequest,
-    ) -> AdapterFuture<Result<Prepared<RealtimeAdapterTransport>, AiError>>;
-}
-
-/// Immutable deployment registration consumed by a Registry or rsi-meta wrapper.
+/// Immutable deployment registration consumed by capability routers.
 #[derive(Clone)]
 pub struct ProviderRegistration {
     deployment_id: String,
     provider_family: String,
     protocol: String,
+    image_protocol: Option<String>,
     transport: String,
     endpoint_fingerprint: String,
     config_generation: u64,
-    credential: Option<CredentialRequirement>,
+    credential: Option<CredentialRef>,
     retry_policy: RetryPolicy,
     language: Option<Arc<dyn LanguageAdapter>>,
     image: Option<Arc<dyn ImageAdapter>>,
-    transcription: Option<Arc<dyn TranscriptionAdapter>>,
-    speech: Option<Arc<dyn SpeechAdapter>>,
-    realtime: Option<Arc<dyn RealtimeAdapter>>,
 }
 
 impl ProviderRegistration {
@@ -792,6 +1087,11 @@ impl ProviderRegistration {
         &self.protocol
     }
 
+    /// Returns the frozen Image protocol, falling back only for single-protocol providers.
+    pub fn image_protocol(&self) -> &str {
+        self.image_protocol.as_deref().unwrap_or(&self.protocol)
+    }
+
     /// Returns the frozen transport kind.
     pub fn transport(&self) -> &str {
         &self.transport
@@ -808,7 +1108,7 @@ impl ProviderRegistration {
     }
 
     /// Returns the provider credential requirement, when any.
-    pub const fn credential(&self) -> Option<&CredentialRequirement> {
+    pub const fn credential(&self) -> Option<&CredentialRef> {
         self.credential.as_ref()
     }
 
@@ -824,18 +1124,6 @@ impl ProviderRegistration {
     pub fn image(&self) -> Option<&Arc<dyn ImageAdapter>> {
         self.image.as_ref()
     }
-
-    pub fn transcription(&self) -> Option<&Arc<dyn TranscriptionAdapter>> {
-        self.transcription.as_ref()
-    }
-
-    pub fn speech(&self) -> Option<&Arc<dyn SpeechAdapter>> {
-        self.speech.as_ref()
-    }
-
-    pub fn realtime(&self) -> Option<&Arc<dyn RealtimeAdapter>> {
-        self.realtime.as_ref()
-    }
 }
 
 impl fmt::Debug for ProviderRegistration {
@@ -845,6 +1133,7 @@ impl fmt::Debug for ProviderRegistration {
             .field("deployment_id", &self.deployment_id)
             .field("provider_family", &self.provider_family)
             .field("protocol", &self.protocol)
+            .field("image_protocol", &self.image_protocol)
             .field("transport", &self.transport)
             .field("endpoint_fingerprint", &self.endpoint_fingerprint)
             .field("config_generation", &self.config_generation)
@@ -852,9 +1141,6 @@ impl fmt::Debug for ProviderRegistration {
             .field("retry_policy", &self.retry_policy)
             .field("language", &self.language.is_some())
             .field("image", &self.image.is_some())
-            .field("transcription", &self.transcription.is_some())
-            .field("speech", &self.speech.is_some())
-            .field("realtime", &self.realtime.is_some())
             .finish()
     }
 }
@@ -865,16 +1151,14 @@ pub struct ProviderRegistrationBuilder {
     deployment_id: String,
     provider_family: String,
     protocol: String,
+    image_protocol: Option<String>,
     transport: String,
     endpoint_fingerprint: String,
     config_generation: u64,
-    credential: Option<CredentialRequirement>,
+    credential: Option<CredentialRef>,
     retry_policy: RetryPolicy,
     language: Option<Arc<dyn LanguageAdapter>>,
     image: Option<Arc<dyn ImageAdapter>>,
-    transcription: Option<Arc<dyn TranscriptionAdapter>>,
-    speech: Option<Arc<dyn SpeechAdapter>>,
-    realtime: Option<Arc<dyn RealtimeAdapter>>,
 }
 
 impl ProviderRegistrationBuilder {
@@ -893,7 +1177,7 @@ impl ProviderRegistrationBuilder {
 
     #[must_use]
     /// Sets the credential requirement resolved during preparation.
-    pub fn with_credential(mut self, credential: CredentialRequirement) -> Self {
+    pub fn with_credential(mut self, credential: CredentialRef) -> Self {
         self.credential = Some(credential);
         self
     }
@@ -924,6 +1208,17 @@ impl ProviderRegistrationBuilder {
         Ok(self)
     }
 
+    /// Replaces the protocol identity used only by the Image facet.
+    pub fn with_image_protocol(
+        mut self,
+        protocol: impl Into<String>,
+    ) -> Result<Self, ProviderSdkError> {
+        let protocol = protocol.into();
+        validate_id("image_protocol", &protocol)?;
+        self.image_protocol = Some(protocol);
+        Ok(self)
+    }
+
     #[must_use]
     /// Sets the provider configuration generation frozen by later calls.
     pub const fn with_config_generation(mut self, generation: u64) -> Self {
@@ -949,50 +1244,25 @@ impl ProviderRegistrationBuilder {
         self
     }
 
-    #[must_use]
-    pub fn with_transcription<A>(mut self, adapter: A) -> Self
-    where
-        A: TranscriptionAdapter + 'static,
-    {
-        self.transcription = Some(Arc::new(adapter));
-        self
-    }
-
-    #[must_use]
-    pub fn with_speech<A>(mut self, adapter: A) -> Self
-    where
-        A: SpeechAdapter + 'static,
-    {
-        self.speech = Some(Arc::new(adapter));
-        self
-    }
-
-    #[must_use]
-    pub fn with_realtime<A>(mut self, adapter: A) -> Self
-    where
-        A: RealtimeAdapter + 'static,
-    {
-        self.realtime = Some(Arc::new(adapter));
-        self
-    }
-
     /// Freezes a deployment that exposes at least one capability adapter.
     pub fn build(self) -> Result<ProviderRegistration, ProviderSdkError> {
-        if self.language.is_none()
-            && self.image.is_none()
-            && self.transcription.is_none()
-            && self.speech.is_none()
-            && self.realtime.is_none()
-        {
+        if self.language.is_none() && self.image.is_none() {
             return Err(ProviderSdkError::new(
                 "provider.no_capabilities",
                 "provider registration exposes no capability adapter",
+            ));
+        }
+        if self.config_generation == 0 {
+            return Err(ProviderSdkError::new(
+                "provider.invalid_generation",
+                "provider registration requires a nonzero Fiber generation",
             ));
         }
         Ok(ProviderRegistration {
             deployment_id: self.deployment_id,
             provider_family: self.provider_family,
             protocol: self.protocol,
+            image_protocol: self.image_protocol,
             transport: self.transport,
             endpoint_fingerprint: self.endpoint_fingerprint,
             config_generation: self.config_generation,
@@ -1000,9 +1270,6 @@ impl ProviderRegistrationBuilder {
             retry_policy: self.retry_policy,
             language: self.language,
             image: self.image,
-            transcription: self.transcription,
-            speech: self.speech,
-            realtime: self.realtime,
         })
     }
 }
@@ -1017,6 +1284,147 @@ impl fmt::Debug for ProviderRegistrationBuilder {
     }
 }
 
+/// Shared publication fence for all facets contributed by one provider generation.
+#[derive(Clone, Debug)]
+pub struct RegistrationGate(Arc<AtomicBool>);
+
+impl RegistrationGate {
+    /// Creates a hidden multi-facet registration transaction.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Makes every route carrying this gate visible in one release operation.
+    pub fn commit(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Returns whether the provider completed all facet registrations.
+    pub fn is_committed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for RegistrationGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Generation-owned route lease returned by one router registrar.
+pub struct ProviderLease {
+    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
+}
+
+/// Generation-owned set of provider facet leases published behind one gate.
+#[derive(Debug)]
+pub struct ProviderPublication {
+    leases: Vec<ProviderLease>,
+}
+
+impl ProviderPublication {
+    /// Atomically publishes every facet carried by one immutable registration.
+    ///
+    /// Registrars reserve hidden exact routes first. Any failure drops the
+    /// already acquired leases while they are still invisible; only the final
+    /// gate commit makes all facets observable.
+    pub fn publish(
+        registration: Arc<ProviderRegistration>,
+        language: Option<Arc<dyn LanguageRegistrar>>,
+        image: Option<Arc<dyn ImageRegistrar>>,
+    ) -> Result<Self, ProviderSdkError> {
+        let gate = RegistrationGate::new();
+        let mut leases = Vec::with_capacity(2);
+        if registration.language().is_some() {
+            let registrar = language.ok_or_else(|| {
+                ProviderSdkError::new(
+                    "provider.language_router_missing",
+                    "provider registration has a Language facet but no Language registrar",
+                )
+            })?;
+            leases.push(registrar.register_language(Arc::clone(&registration), gate.clone())?);
+        }
+        if registration.image().is_some() {
+            let registrar = image.ok_or_else(|| {
+                ProviderSdkError::new(
+                    "provider.image_router_missing",
+                    "provider registration has an Image facet but no Image registrar",
+                )
+            })?;
+            leases.push(registrar.register_image(registration, gate.clone())?);
+        }
+        gate.commit();
+        Ok(Self { leases })
+    }
+
+    /// Returns the number of independently leased facets in this publication.
+    pub fn facet_count(&self) -> usize {
+        self.leases.len()
+    }
+}
+
+impl ProviderLease {
+    /// Creates a lease from an exact conditional withdrawal action.
+    pub fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            cleanup: Some(Box::new(cleanup)),
+        }
+    }
+}
+
+impl fmt::Debug for ProviderLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProviderLease(..)")
+    }
+}
+
+impl Drop for ProviderLease {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
+/// Private Language route contribution seam.
+pub trait LanguageRegistrar: fmt::Debug + Send + Sync + 'static {
+    /// Reserves one exact route hidden behind the shared provider gate.
+    fn register_language(
+        &self,
+        registration: Arc<ProviderRegistration>,
+        gate: RegistrationGate,
+    ) -> Result<ProviderLease, ProviderSdkError>;
+}
+
+/// Private Image route contribution seam.
+pub trait ImageRegistrar: fmt::Debug + Send + Sync + 'static {
+    /// Reserves one exact route hidden behind the shared provider gate.
+    fn register_image(
+        &self,
+        registration: Arc<ProviderRegistration>,
+        gate: RegistrationGate,
+    ) -> Result<ProviderLease, ProviderSdkError>;
+}
+
+/// Nominal Local contract for Language provider contributions.
+#[derive(Debug)]
+pub struct LanguageRegistrarContract;
+
+impl LocalContract for LanguageRegistrarContract {
+    const KEY: &'static str = "rsi.ai.language.registrar";
+    type Service = dyn LanguageRegistrar;
+}
+
+/// Nominal Local contract for Image provider contributions.
+#[derive(Debug)]
+pub struct ImageRegistrarContract;
+
+impl LocalContract for ImageRegistrarContract {
+    const KEY: &'static str = "rsi.ai.image.registrar";
+    type Service = dyn ImageRegistrar;
+}
+
 /// Invalid provider-author registration.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("{message}")]
@@ -1026,10 +1434,11 @@ pub struct ProviderSdkError {
 }
 
 impl ProviderSdkError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    /// Creates a bounded provider-registration failure at its owning seam.
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
-            message: message.into(),
+            message: sanitize_error_summary(&message.into()),
         }
     }
 
@@ -1042,4 +1451,99 @@ impl ProviderSdkError {
 fn validate_id(field: &str, value: &str) -> Result<(), ProviderSdkError> {
     rsi_ai_protocol::validate_identifier(field, value)
         .map_err(|message| ProviderSdkError::new("provider.invalid_id", message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn media_admission_waits_for_the_complete_request_weight() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(3));
+        let first = MediaResolutions::new_with_semaphore(
+            2 * MEDIA_ADMISSION_UNIT_BYTES,
+            Arc::clone(&semaphore),
+        )
+        .expect("first admission");
+        let second = MediaResolutions::new_with_semaphore(
+            2 * MEDIA_ADMISSION_UNIT_BYTES,
+            Arc::clone(&semaphore),
+        )
+        .expect("second admission");
+        let first_permit = first
+            .admission()
+            .future
+            .clone()
+            .await
+            .expect("first request acquires");
+        let second_task = tokio::spawn(second.admission().future.clone());
+
+        tokio::task::yield_now().await;
+        assert!(
+            !second_task.is_finished(),
+            "a request must not proceed with only part of its declared weight"
+        );
+
+        drop(first_permit);
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(1), second_task)
+            .await
+            .expect("second request acquires after complete capacity is released")
+            .expect("admission task")
+            .expect("admission remains open");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_admission_waiter_releases_its_semaphore_position() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("test capacity");
+        let body = b"queued media";
+        let descriptor = MediaDescriptor::new(
+            rsi_ai_protocol::MediaKind::Image,
+            "image/png",
+            u64::try_from(body.len()).expect("test body length"),
+            hex::encode(Sha256::digest(body)),
+        )
+        .expect("descriptor");
+        let context = PrepareContext {
+            snapshot: PreparedCallSnapshot {
+                call_id: "1".to_owned(),
+                deployment_id: "deployment".to_owned(),
+                provider_family: "provider".to_owned(),
+                capability: rsi_ai_protocol::AiCapability::Language,
+                model: "model".to_owned(),
+                protocol: "protocol".to_owned(),
+                transport: "transport".to_owned(),
+                endpoint_fingerprint: "endpoint".to_owned(),
+                config_generation: 1,
+                credential_source: None,
+                retry_policy: RetryPolicy::default(),
+                request_sha256: "0".repeat(64),
+            },
+            credential: None,
+            media: Arc::new(MissingMediaResolver),
+            resolved_media: Arc::new(
+                MediaResolutions::new_with_semaphore(
+                    MEDIA_ADMISSION_UNIT_BYTES,
+                    Arc::clone(&semaphore),
+                )
+                .expect("abandoned admission"),
+            ),
+        };
+        let mut waiter = Box::pin(context.resolve_media(&descriptor, AbortSignal::new()));
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        drop(waiter);
+
+        drop(held);
+        let _permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            Arc::clone(&semaphore).acquire_owned(),
+        )
+        .await
+        .expect("an abandoned waiter must not retain released capacity")
+        .expect("semaphore remains open");
+    }
 }

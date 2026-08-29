@@ -1,28 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use rsi_tools_protocol::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    MAX_REQUEST_BYTES, MAX_TOOL_SCHEMA_BYTES, MAX_TOOLS, ProviderExtension, ToolCall, validation,
+    MAX_REQUEST_BYTES, MAX_TOOL_SCHEMA_BYTES, MAX_TOOLS, MediaDescriptor, MediaKind,
+    ProviderExtension, ToolCall, validation,
 };
 
 pub const MAX_MESSAGES: usize = 256;
 pub const MAX_BLOCKS_PER_MESSAGE: usize = 256;
 pub const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
-/// Maximum UTF-8 bytes in one provider-neutral freeform tool grammar.
-pub const MAX_FREEFORM_GRAMMAR_BYTES: usize = 64 * 1024;
 pub const MAX_STOP_SEQUENCES: usize = 8;
 pub const MAX_STOP_SEQUENCE_BYTES: usize = 1_024;
-pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
-pub const MAX_AUDIO_BYTES: u64 = 128 * 1024 * 1024;
-pub const MAX_IMAGE_DIMENSION: u32 = 65_535;
+/// Maximum media descriptor occurrences retained by one language request.
+pub const MAX_LANGUAGE_MEDIA_OCCURRENCES: usize = 256;
+/// Maximum declared raw bytes across all media occurrences in one language request.
+pub const MAX_LANGUAGE_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum provider-extension formats one language profile may accept.
 pub const MAX_ACCEPTED_PROVIDER_EXTENSIONS: usize = 64;
 /// Maximum exact model-capacity profiles retained by one adapter configuration.
 pub const MAX_LANGUAGE_MODEL_PROFILES: usize = 256;
-const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 
 /// Provider wire family used to project caller-owned tools and rich results.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -412,208 +412,6 @@ fn validate_language_model_limits(
     Ok(())
 }
 
-/// Media class whose bytes travel separately from semantic JSON.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaKind {
-    /// Still-image bytes with an `image/` MIME type.
-    Image,
-    /// Audio bytes with an `audio/` MIME type.
-    Audio,
-}
-
-/// Locator-free identity and validated metadata for one media body.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MediaDescriptor {
-    kind: MediaKind,
-    mime_type: String,
-    byte_len: u64,
-    sha256: String,
-    width: Option<u32>,
-    height: Option<u32>,
-    duration_ms: Option<u64>,
-}
-
-impl<'de> Deserialize<'de> for MediaDescriptor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireDescriptor {
-            kind: MediaKind,
-            mime_type: String,
-            byte_len: u64,
-            sha256: String,
-            width: Option<u32>,
-            height: Option<u32>,
-            duration_ms: Option<u64>,
-        }
-
-        let wire = WireDescriptor::deserialize(deserializer)?;
-        let descriptor = Self {
-            kind: wire.kind,
-            mime_type: wire.mime_type,
-            byte_len: wire.byte_len,
-            sha256: wire.sha256,
-            width: wire.width,
-            height: wire.height,
-            duration_ms: wire.duration_ms,
-        };
-        descriptor
-            .validate()
-            .map(|()| descriptor)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl MediaDescriptor {
-    /// Creates locator-free media identity from kind, MIME type, length, and SHA-256.
-    pub fn new(
-        kind: MediaKind,
-        mime_type: impl Into<String>,
-        byte_len: u64,
-        sha256: impl Into<String>,
-    ) -> Result<Self, SemanticError> {
-        let descriptor = Self {
-            kind,
-            mime_type: mime_type.into(),
-            byte_len,
-            sha256: sha256.into(),
-            width: None,
-            height: None,
-            duration_ms: None,
-        };
-        descriptor.validate()?;
-        Ok(descriptor)
-    }
-
-    /// Adds a bounded nonzero width and height to an image descriptor.
-    pub fn with_image_dimensions(mut self, width: u32, height: u32) -> Result<Self, SemanticError> {
-        if self.kind != MediaKind::Image {
-            return Err(SemanticError::new(
-                "media.invalid_metadata",
-                "media.dimensions",
-                "dimensions are valid only for images",
-            ));
-        }
-        self.width = Some(width);
-        self.height = Some(height);
-        self.validate()?;
-        Ok(self)
-    }
-
-    /// Adds a positive duration in milliseconds to an audio descriptor.
-    pub fn with_audio_duration_ms(mut self, duration_ms: u64) -> Result<Self, SemanticError> {
-        if self.kind != MediaKind::Audio {
-            return Err(SemanticError::new(
-                "media.invalid_metadata",
-                "media.duration_ms",
-                "positive duration is valid only for audio",
-            ));
-        }
-        self.duration_ms = Some(duration_ms);
-        self.validate()?;
-        Ok(self)
-    }
-
-    /// Returns the media class that determines validation bounds.
-    pub const fn kind(&self) -> MediaKind {
-        self.kind
-    }
-
-    /// Returns the validated media MIME type.
-    pub fn mime_type(&self) -> &str {
-        &self.mime_type
-    }
-
-    /// Returns the exact byte length of the separately transported body.
-    pub const fn byte_len(&self) -> u64 {
-        self.byte_len
-    }
-
-    /// Returns the lowercase hexadecimal SHA-256 of the body.
-    pub fn sha256(&self) -> &str {
-        &self.sha256
-    }
-
-    /// Revalidates a deserialized descriptor and kind-specific metadata.
-    pub fn validate(&self) -> Result<(), SemanticError> {
-        let maximum = match self.kind {
-            MediaKind::Image => MAX_IMAGE_BYTES,
-            MediaKind::Audio => MAX_AUDIO_BYTES,
-        };
-        if self.byte_len == 0 || self.byte_len > maximum {
-            return Err(SemanticError::new(
-                "media.invalid_length",
-                "media.byte_len",
-                format!("must be 1..={maximum}"),
-            ));
-        }
-        let expected_prefix = match self.kind {
-            MediaKind::Image => "image/",
-            MediaKind::Audio => "audio/",
-        };
-        if self.mime_type.len() <= expected_prefix.len()
-            || self.mime_type.len() > 127
-            || !self.mime_type.starts_with(expected_prefix)
-            || !self.mime_type.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'+' | b'-')
-            })
-        {
-            return Err(SemanticError::new(
-                "media.invalid_mime",
-                "media.mime_type",
-                format!("must be a bounded {expected_prefix} MIME type"),
-            ));
-        }
-        if self.sha256.len() != 64
-            || !self
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
-            return Err(SemanticError::new(
-                "media.invalid_digest",
-                "media.sha256",
-                "must be 64 lowercase hexadecimal characters",
-            ));
-        }
-        match self.kind {
-            MediaKind::Image => {
-                if self.duration_ms.is_some()
-                    || self.width.is_some() != self.height.is_some()
-                    || self.width.zip(self.height).is_some_and(|(width, height)| {
-                        width == 0
-                            || height == 0
-                            || width > MAX_IMAGE_DIMENSION
-                            || height > MAX_IMAGE_DIMENSION
-                            || u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_PIXELS
-                    })
-                {
-                    return Err(SemanticError::new(
-                        "media.invalid_metadata",
-                        "media",
-                        "image metadata must contain either no dimensions or one bounded width/height pair and no duration",
-                    ));
-                }
-            }
-            MediaKind::Audio => {
-                if self.width.is_some() || self.height.is_some() || self.duration_ms == Some(0) {
-                    return Err(SemanticError::new(
-                        "media.invalid_metadata",
-                        "media",
-                        "audio metadata may contain only a positive optional duration",
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Role attached to one provider-neutral message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -783,24 +581,7 @@ fn validate_message_content(
     block: &MessageContent,
     field: &str,
 ) -> Result<(), SemanticError> {
-    let allowed = matches!(
-        (role, block),
-        (
-            MessageRole::System | MessageRole::Developer,
-            MessageContent::Text { .. }
-        ) | (
-            MessageRole::User,
-            MessageContent::Text { .. } | MessageContent::Image(_) | MessageContent::Audio(_),
-        ) | (
-            MessageRole::Assistant,
-            MessageContent::Text { .. }
-                | MessageContent::Image(_)
-                | MessageContent::Audio(_)
-                | MessageContent::Reasoning { .. }
-                | MessageContent::ToolCall(_),
-        ) | (MessageRole::Tool, MessageContent::ToolResult { .. })
-    );
-    if !allowed {
+    if !message_content_allowed(role, block) {
         return Err(SemanticError::new(
             "message.invalid_content",
             field,
@@ -817,24 +598,28 @@ fn validate_message_content(
             validate_reasoning_content(text, evidence.as_ref(), field)?;
         }
         MessageContent::Image(media) => {
-            if media.kind != MediaKind::Image {
+            if media.kind() != MediaKind::Image {
                 return Err(SemanticError::new(
                     "message.invalid_content",
                     field,
                     "image block must contain image media",
                 ));
             }
-            media.validate()?;
+            media.validate().map_err(|error| {
+                SemanticError::new("message.invalid_content", field, error.to_string())
+            })?;
         }
         MessageContent::Audio(media) => {
-            if media.kind != MediaKind::Audio {
+            if media.kind() != MediaKind::Audio {
                 return Err(SemanticError::new(
                     "message.invalid_content",
                     field,
                     "audio block must contain audio media",
                 ));
             }
-            media.validate()?;
+            media.validate().map_err(|error| {
+                SemanticError::new("message.invalid_content", field, error.to_string())
+            })?;
         }
         MessageContent::ToolCall(call) => {
             validation::identifier(&format!("{field}.id"), &call.id)
@@ -884,6 +669,26 @@ fn validate_message_content(
     Ok(())
 }
 
+fn message_content_allowed(role: MessageRole, block: &MessageContent) -> bool {
+    matches!(
+        (role, block),
+        (
+            MessageRole::System | MessageRole::Developer,
+            MessageContent::Text { .. }
+        ) | (
+            MessageRole::User,
+            MessageContent::Text { .. } | MessageContent::Image(_) | MessageContent::Audio(_),
+        ) | (
+            MessageRole::Assistant,
+            MessageContent::Text { .. }
+                | MessageContent::Image(_)
+                | MessageContent::Audio(_)
+                | MessageContent::Reasoning { .. }
+                | MessageContent::ToolCall(_),
+        ) | (MessageRole::Tool, MessageContent::ToolResult { .. })
+    )
+}
+
 fn validate_reasoning_content(
     text: &str,
     evidence: Option<&ProviderExtension>,
@@ -899,184 +704,6 @@ fn validate_reasoning_content(
             })?;
     }
     Ok(())
-}
-
-/// Provider-neutral tool declaration with a JSON function schema and optional
-/// freeform projection for providers that support custom grammar tools.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ToolDefinition {
-    name: String,
-    description: String,
-    input_schema: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    freeform: Option<FreeformToolDefinition>,
-}
-
-impl<'de> Deserialize<'de> for ToolDefinition {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireTool {
-            name: String,
-            description: String,
-            input_schema: Value,
-            #[serde(default)]
-            freeform: Option<FreeformToolDefinition>,
-        }
-
-        let wire = WireTool::deserialize(deserializer)?;
-        let tool = Self {
-            name: wire.name,
-            description: wire.description,
-            input_schema: wire.input_schema,
-            freeform: wire.freeform,
-        };
-        tool.validate()
-            .map(|()| tool)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-/// Bounded provider-neutral freeform grammar attached to one tool.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct FreeformToolDefinition {
-    format: FreeformFormat,
-    grammar: String,
-}
-
-impl<'de> Deserialize<'de> for FreeformToolDefinition {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireFreeform {
-            format: FreeformFormat,
-            grammar: String,
-        }
-
-        let wire = WireFreeform::deserialize(deserializer)?;
-        Self::new(wire.format, wire.grammar).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Closed freeform grammar families supported by semantic adapters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FreeformFormat {
-    /// Lark grammar used by `OpenAI` Responses custom tools.
-    Lark,
-}
-
-impl FreeformToolDefinition {
-    /// Creates a bounded freeform grammar definition.
-    pub fn new(format: FreeformFormat, grammar: impl Into<String>) -> Result<Self, SemanticError> {
-        let definition = Self {
-            format,
-            grammar: grammar.into(),
-        };
-        definition.validate()?;
-        Ok(definition)
-    }
-
-    pub const fn format(&self) -> FreeformFormat {
-        self.format
-    }
-
-    pub fn grammar(&self) -> &str {
-        &self.grammar
-    }
-
-    fn validate(&self) -> Result<(), SemanticError> {
-        validation::safe_text(
-            "tool.freeform.grammar",
-            &self.grammar,
-            MAX_FREEFORM_GRAMMAR_BYTES,
-            false,
-        )
-        .map_err(|reason| {
-            SemanticError::new("tool.invalid_freeform", "tool.freeform.grammar", reason)
-        })
-    }
-}
-
-impl ToolDefinition {
-    /// Creates a named function tool with a bounded JSON Schema input contract.
-    pub fn new(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        input_schema: Value,
-    ) -> Result<Self, SemanticError> {
-        let tool = Self {
-            name: name.into(),
-            description: description.into(),
-            input_schema,
-            freeform: None,
-        };
-        tool.validate()?;
-        Ok(tool)
-    }
-
-    /// Returns the exact tool name exposed to the model.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Returns the model-visible tool description.
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    /// Returns the bounded object or boolean JSON Schema for tool arguments.
-    pub fn input_schema(&self) -> &Value {
-        &self.input_schema
-    }
-
-    /// Selects a provider-neutral freeform projection for capable adapters.
-    pub fn with_freeform(
-        mut self,
-        freeform: FreeformToolDefinition,
-    ) -> Result<Self, SemanticError> {
-        self.freeform = Some(freeform);
-        self.validate()?;
-        Ok(self)
-    }
-
-    pub const fn freeform(&self) -> Option<&FreeformToolDefinition> {
-        self.freeform.as_ref()
-    }
-
-    fn validate(&self) -> Result<(), SemanticError> {
-        validation::tool_name("tool.name", &self.name)
-            .map_err(|reason| SemanticError::new("tool.invalid_name", "tool.name", reason))?;
-        validation::safe_text(
-            "tool.description",
-            &self.description,
-            MAX_DESCRIPTION_BYTES,
-            true,
-        )
-        .map_err(|reason| {
-            SemanticError::new("tool.invalid_description", "tool.description", reason)
-        })?;
-        if !matches!(self.input_schema, Value::Object(_) | Value::Bool(_)) {
-            return Err(SemanticError::new(
-                "tool.invalid_schema",
-                "tool.input_schema",
-                "must be an object or boolean JSON Schema",
-            ));
-        }
-        validate_json("tool.input_schema", &self.input_schema)?;
-        if let Some(freeform) = &self.freeform {
-            freeform.validate()?;
-        }
-        Ok(())
-    }
 }
 
 /// Function-tool selection policy.
@@ -1557,9 +1184,11 @@ impl LanguageRequest {
         &self.extensions
     }
 
-    /// Validates and returns deterministic canonical JSON bytes for identity and persistence.
+    /// Returns deterministic canonical JSON bytes for identity and persistence.
+    ///
+    /// Construction and deserialization establish this closed type's invariant;
+    /// callers may invoke [`Self::validate`] explicitly when they need a separate check.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, SemanticError> {
-        self.validate()?;
         self.canonical_bytes_unchecked()
     }
 
@@ -1575,6 +1204,7 @@ impl LanguageRequest {
         for message in &self.messages {
             message.validate()?;
         }
+        validate_language_media(&self.messages)?;
         let mut calls = BTreeSet::new();
         let mut results = BTreeSet::new();
         for message in &self.messages {
@@ -1655,6 +1285,72 @@ impl LanguageRequest {
     }
 }
 
+fn validate_language_media(messages: &[Message]) -> Result<(), SemanticError> {
+    fn add_block(
+        block: &MessageContent,
+        occurrences: &mut usize,
+        declared_bytes: &mut u64,
+    ) -> Result<(), SemanticError> {
+        match block {
+            MessageContent::Image(media) | MessageContent::Audio(media) => {
+                *occurrences = occurrences.checked_add(1).ok_or_else(|| {
+                    SemanticError::new(
+                        "request.too_many_media",
+                        "messages",
+                        "media occurrence count overflowed",
+                    )
+                })?;
+                if *occurrences > MAX_LANGUAGE_MEDIA_OCCURRENCES {
+                    return Err(SemanticError::new(
+                        "request.too_many_media",
+                        "messages",
+                        format!(
+                            "must contain at most {MAX_LANGUAGE_MEDIA_OCCURRENCES} media occurrences"
+                        ),
+                    ));
+                }
+                *declared_bytes =
+                    declared_bytes
+                        .checked_add(media.byte_len())
+                        .ok_or_else(|| {
+                            SemanticError::new(
+                                "request.media_bytes_exceeded",
+                                "messages",
+                                "declared media byte total overflowed",
+                            )
+                        })?;
+                if *declared_bytes > MAX_LANGUAGE_MEDIA_BYTES {
+                    return Err(SemanticError::new(
+                        "request.media_bytes_exceeded",
+                        "messages",
+                        format!(
+                            "declared media exceeds {MAX_LANGUAGE_MEDIA_BYTES} aggregate bytes"
+                        ),
+                    ));
+                }
+            }
+            MessageContent::ToolResult { content, .. } => {
+                for nested in content {
+                    add_block(nested, occurrences, declared_bytes)?;
+                }
+            }
+            MessageContent::Text { .. }
+            | MessageContent::Reasoning { .. }
+            | MessageContent::ToolCall(_) => {}
+        }
+        Ok(())
+    }
+
+    let mut occurrences = 0usize;
+    let mut declared_bytes = 0u64;
+    for message in messages {
+        for block in &message.content {
+            add_block(block, &mut occurrences, &mut declared_bytes)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_tools(tools: &[ToolDefinition], tool_choice: &ToolChoice) -> Result<(), SemanticError> {
     if tools.len() > MAX_TOOLS {
         return Err(SemanticError::new(
@@ -1666,21 +1362,27 @@ fn validate_tools(tools: &[ToolDefinition], tool_choice: &ToolChoice) -> Result<
     let mut names = BTreeSet::new();
     let mut schema_bytes = 0usize;
     for tool in tools {
-        tool.validate()?;
-        if !names.insert(tool.name.as_str()) {
+        tool.validate().map_err(|error| {
+            SemanticError::new("tool.invalid_definition", "tools", error.to_string())
+        })?;
+        validation::tool_name("tools.name", tool.name())
+            .map_err(|reason| SemanticError::new("tool.invalid_name", "tools", reason))?;
+        validate_json("tools.input_schema", tool.input_schema())?;
+        if !names.insert(tool.name()) {
             return Err(SemanticError::new(
                 "request.duplicate_tool",
                 "tools",
                 "contains duplicate tool names",
             ));
         }
-        schema_bytes = schema_bytes.saturating_add(
-            validation::encoded_len(&tool.input_schema)
-                .map_err(|reason| SemanticError::new("tool.invalid_schema", "tools", reason))?,
-        );
-        if let Some(freeform) = &tool.freeform {
+        schema_bytes =
+            schema_bytes
+                .saturating_add(validation::encoded_len(tool.input_schema()).map_err(
+                    |reason| SemanticError::new("tool.invalid_schema", "tools", reason),
+                )?);
+        if let Some(freeform) = tool.freeform() {
             schema_bytes =
-                schema_bytes.saturating_add(validation::encoded_len(&freeform.grammar).map_err(
+                schema_bytes.saturating_add(validation::encoded_len(freeform.grammar()).map_err(
                     |reason| SemanticError::new("tool.invalid_freeform", "tools", reason),
                 )?);
         }
@@ -1753,13 +1455,13 @@ fn validate_extensions(extensions: &[ProviderExtension]) -> Result<(), SemanticE
 }
 
 fn validate_json(field: &str, value: &Value) -> Result<(), SemanticError> {
-    validation::validate_json(value).map_err(|reason| json_error(field, reason))
+    validation::validate_json_structure(value).map_err(|reason| json_error(field, reason))
 }
 
-fn json_error(field: &str, reason: validation::JsonValidationError) -> SemanticError {
+fn json_error(field: &str, reason: validation::JsonStructureError) -> SemanticError {
     let code = match reason {
-        validation::JsonValidationError::TooDeep => "json.too_deep",
-        validation::JsonValidationError::TooManyNodes => "json.too_many_nodes",
+        validation::JsonStructureError::TooDeep => "json.too_deep",
+        validation::JsonStructureError::TooManyNodes => "json.too_many_nodes",
     };
     SemanticError::new(code, field, reason.to_string())
 }

@@ -12,17 +12,17 @@ use axum::{
     response::Response,
     routing::post,
 };
-use rsi_ai::{ModelRef, Registry};
-use rsi_ai_auth::{CredentialManager, CredentialRequirement};
+use futures_util::StreamExt as _;
 use rsi_ai_openai_compatible::{ChatCompletionsAdapter, ChatCompletionsConfig};
 use rsi_ai_protocol::{
-    ContentBlock, ErrorKind, ErrorPhase, LanguageModelLimits, LanguageRequest, LanguageSettings,
-    MediaDescriptor, MediaKind, Message, MessageContent, ReasoningEffort, ResponseFormat, ToolCall,
-    ToolCallKind,
+    ContentBlock, ErrorKind, ErrorPhase, LanguageEvent, LanguageModelLimits, LanguageRequest,
+    LanguageSettings, MAX_CONTENT_BLOCKS, MediaDescriptor, MediaKind, Message, MessageContent,
+    ReasoningEffort, ResponseFormat, ToolCall, ToolCallKind,
 };
-use rsi_ai_provider::{LanguageAdapter, ProviderRegistration};
-use rsi_ai_testkit::InMemoryMediaResolver;
+use rsi_ai_provider::{AbortSignal, LanguageAdapter, MediaResolver, MissingMediaResolver};
+use rsi_ai_testkit::{InMemoryMediaResolver, complete_language, language_context};
 use rsi_ai_transport::ReqwestTransport;
+use rsi_credentials_protocol::{CredentialSource, ResolvedCredential, SecretValue};
 use serde_json::{Value, json};
 
 #[derive(Clone, Default)]
@@ -30,6 +30,34 @@ struct Capture(Arc<Mutex<Option<(HeaderMap, Value)>>>);
 
 fn model_limits() -> LanguageModelLimits {
     LanguageModelLimits::new(128_000, 4_096, 16_384).expect("model limits")
+}
+
+fn credential() -> ResolvedCredential {
+    ResolvedCredential {
+        secret: SecretValue::new("super-secret").expect("secret"),
+        source: CredentialSource::Keyring,
+    }
+}
+
+async fn complete(
+    adapter: &ChatCompletionsAdapter,
+    request: LanguageRequest,
+    media: Arc<dyn MediaResolver>,
+) -> Result<rsi_ai_protocol::LanguageOutput, rsi_ai_testkit::LanguageRunError> {
+    complete_language(
+        adapter,
+        language_context(
+            "chat",
+            "openai-compatible",
+            "fixture-model",
+            Some(credential()),
+            media,
+            0,
+        ),
+        "fixture-model",
+        request,
+    )
+    .await
 }
 
 #[test]
@@ -84,6 +112,80 @@ async fn chat(State(capture): State<Capture>, headers: HeaderMap, body: String) 
         .expect("response")
 }
 
+async fn too_many_tool_calls() -> Response {
+    let mut body = String::new();
+    for index in 0..=MAX_CONTENT_BLOCKS {
+        writeln!(
+            &mut body,
+            "data: {}\n",
+            json!({
+                "choices":[{
+                    "delta":{"tool_calls":[{
+                        "index":index,
+                        "id":format!("call-{index}"),
+                        "type":"function",
+                        "function":{"name":"lookup","arguments":"{}"}
+                    }]},
+                    "finish_reason":null
+                }]
+            })
+        )
+        .expect("writing to String cannot fail");
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(body))
+        .expect("response")
+}
+
+#[tokio::test]
+async fn chat_stream_rejects_tool_state_before_exceeding_content_bounds() {
+    let app = Router::new().route("/v1/chat/completions", post(too_many_tool_calls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+    let adapter = ChatCompletionsAdapter::new(
+        ChatCompletionsConfig::new(format!("http://{address}"))
+            .and_then(|config| config.with_model_profile("fixture-model", model_limits()))
+            .expect("config"),
+        Arc::new(ReqwestTransport::new().expect("transport")),
+    );
+    let prepared = adapter
+        .prepare(
+            language_context(
+                "chat",
+                "openai-compatible",
+                "fixture-model",
+                Some(credential()),
+                Arc::new(MissingMediaResolver),
+                0,
+            ),
+            "fixture-model".into(),
+            LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap(),
+        )
+        .await
+        .expect("prepare");
+    let mut stream = prepared.start(AbortSignal::new()).await.expect("start");
+    let mut starts = 0;
+    let mut failure = None;
+    while let Some(event) = stream.next().await {
+        match event.expect("adapter event") {
+            LanguageEvent::ContentStarted { .. } => starts += 1,
+            LanguageEvent::Failed { error, .. } => {
+                failure = Some(error);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(starts, MAX_CONTENT_BLOCKS);
+    let failure = failure.expect("translator must terminate with a bounded failure");
+    assert_eq!(failure.kind(), ErrorKind::OutputValidation);
+}
+
 #[tokio::test]
 async fn chat_prepare_rejects_freeform_calls_retained_in_history() {
     let adapter = ChatCompletionsAdapter::new(
@@ -92,24 +194,6 @@ async fn chat_prepare_rejects_freeform_calls_retained_in_history() {
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
-    let credential = CredentialRequirement::new("chat", ["CHAT_API_KEY"]).expect("requirement");
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("chat", "fixture-secret")
-            .expect("credential")
-            .build(),
-    )
-    .register(
-        ProviderRegistration::builder("chat", "openai-compatible")
-            .expect("registration")
-            .with_credential(credential)
-            .with_language(adapter)
-            .build()
-            .expect("provider"),
-    )
-    .expect("register")
-    .build()
-    .expect("registry");
     let request = LanguageRequest::new(vec![
         Message::assistant(vec![MessageContent::ToolCall(ToolCall {
             id: "custom-call".to_owned(),
@@ -128,10 +212,7 @@ async fn chat_prepare_rejects_freeform_calls_retained_in_history() {
         .expect("tool result"),
     ])
     .expect("request");
-    let error = registry
-        .language(ModelRef::new("chat", "fixture-model").expect("model"))
-        .expect("language")
-        .complete(request)
+    let error = complete(&adapter, request, Arc::new(MissingMediaResolver))
         .await
         .expect_err("freeform history must fail before provider I/O");
     let provider = error.provider_error().expect("structured provider error");
@@ -147,25 +228,6 @@ async fn chat_prepare_rejects_nonadjacent_tool_results() {
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("chat", "fixture-secret")
-            .expect("credential")
-            .build(),
-    )
-    .register(
-        ProviderRegistration::builder("chat", "openai-compatible")
-            .expect("registration")
-            .with_credential(
-                CredentialRequirement::new("chat", ["CHAT_API_KEY"]).expect("requirement"),
-            )
-            .with_language(adapter)
-            .build()
-            .expect("provider"),
-    )
-    .expect("register")
-    .build()
-    .expect("registry");
     let request = LanguageRequest::new(vec![
         Message::assistant(vec![MessageContent::ToolCall(ToolCall {
             id: "call-1".to_owned(),
@@ -186,10 +248,7 @@ async fn chat_prepare_rejects_nonadjacent_tool_results() {
     ])
     .expect("provider-neutral history");
 
-    let error = registry
-        .language(ModelRef::new("chat", "fixture-model").expect("model"))
-        .expect("language")
-        .complete(request)
+    let error = complete(&adapter, request, Arc::new(MissingMediaResolver))
         .await
         .expect_err("Chat history must fail before provider I/O");
     let provider = error.provider_error().expect("structured provider error");
@@ -216,31 +275,10 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
             .expect("config"),
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
-    let credential =
-        CredentialRequirement::new("deepseek", ["DEEPSEEK_API_KEY"]).expect("requirement");
     let image = [137, 80, 78, 71];
     let image_digest = "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543";
-    let registry = Registry::builder(
-        CredentialManager::builder()
-            .with_explicit("deepseek", "super-secret")
-            .expect("credential")
-            .build(),
-    )
-    .with_media_resolver(InMemoryMediaResolver::new(BTreeMap::from([(
-        image_digest.to_owned(),
-        image.to_vec(),
-    )])))
-    .register(
-        ProviderRegistration::builder("deepseek", "deepseek")
-            .expect("registration")
-            .with_credential(credential)
-            .with_language(adapter)
-            .build()
-            .expect("provider"),
-    )
-    .expect("register")
-    .build()
-    .expect("registry");
+    let media =
+        InMemoryMediaResolver::new(BTreeMap::from([(image_digest.to_owned(), image.to_vec())]));
 
     let prior = Message::assistant(vec![
         MessageContent::Reasoning {
@@ -261,76 +299,83 @@ async fn chat_adapter_preserves_reasoning_tools_usage_and_redacts_auth() {
         }),
     ])
     .expect("assistant history");
-    let output = registry
-        .language(ModelRef::new("deepseek", "deepseek-reasoner").expect("model"))
-        .expect("language")
-        .complete(
-            LanguageRequest::new(vec![
-                Message::user(vec![
+    let output = complete_language(
+        &adapter,
+        language_context(
+            "deepseek",
+            "openai-compatible",
+            "deepseek-reasoner",
+            Some(credential()),
+            Arc::new(media),
+            4,
+        ),
+        "deepseek-reasoner",
+        LanguageRequest::new(vec![
+            Message::user(vec![
+                MessageContent::Text {
+                    text: "hello".to_owned(),
+                },
+                MessageContent::Image(
+                    MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest)
+                        .expect("image"),
+                ),
+            ])
+            .expect("user"),
+            prior,
+            Message::tool_result(
+                "old-call",
+                vec![
                     MessageContent::Text {
-                        text: "hello".to_owned(),
+                        text: "tool text".to_owned(),
                     },
                     MessageContent::Image(
                         MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest)
-                            .expect("image"),
+                            .expect("tool image"),
                     ),
-                ])
-                .expect("user"),
-                prior,
-                Message::tool_result(
-                    "old-call",
-                    vec![
-                        MessageContent::Text {
-                            text: "tool text".to_owned(),
-                        },
-                        MessageContent::Image(
-                            MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest)
-                                .expect("tool image"),
-                        ),
-                    ],
-                    false,
-                )
-                .expect("rich tool result"),
-                Message::tool_result(
-                    "old-call-2",
-                    vec![
-                        MessageContent::Text {
-                            text: "second tool text".to_owned(),
-                        },
-                        MessageContent::Image(
-                            MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest)
-                                .expect("second tool image"),
-                        ),
-                    ],
-                    false,
-                )
-                .expect("second rich tool result"),
-            ])
-            .expect("request")
-            .with_settings(
-                LanguageSettings::default()
-                    .with_max_output_tokens(321)
-                    .expect("tokens")
-                    .with_sampling(Some(0.4), Some(0.8))
-                    .expect("sampling")
-                    .with_seed(7)
-                    .with_stop(vec!["END".to_owned()])
-                    .expect("stop")
-                    .with_reasoning_effort(ReasoningEffort::Medium),
+                ],
+                false,
             )
-            .expect("settings")
-            .with_response_format(
-                ResponseFormat::json_schema(
-                    "answer",
-                    None,
-                    json!({"type":"string", "const":"\0rsi-media-0\0"}),
-                )
-                .expect("response format"),
+            .expect("rich tool result"),
+            Message::tool_result(
+                "old-call-2",
+                vec![
+                    MessageContent::Text {
+                        text: "second tool text".to_owned(),
+                    },
+                    MessageContent::Image(
+                        MediaDescriptor::new(MediaKind::Image, "image/png", 4, image_digest)
+                            .expect("second tool image"),
+                    ),
+                ],
+                false,
             )
-            .expect("structured output"),
+            .expect("second rich tool result"),
+        ])
+        .expect("request")
+        .with_settings(
+            LanguageSettings::default()
+                .with_max_output_tokens(321)
+                .expect("tokens")
+                .with_sampling(Some(0.4), Some(0.8))
+                .expect("sampling")
+                .with_seed(7)
+                .with_stop(vec!["END".to_owned()])
+                .expect("stop")
+                .with_reasoning_effort(ReasoningEffort::Medium),
         )
-        .await
-        .expect("completion");
+        .expect("settings")
+        .with_response_format(
+            ResponseFormat::json_schema(
+                "answer",
+                None,
+                json!({"type":"string", "const":"\0rsi-media-0\0"}),
+            )
+            .expect("response format"),
+        )
+        .expect("structured output"),
+    )
+    .await
+    .expect("completion");
 
     assert_eq!(
         output.content,

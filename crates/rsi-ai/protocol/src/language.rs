@@ -5,7 +5,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    AiError, MAX_CONTENT_BLOCKS, MAX_LANGUAGE_OUTPUT_BYTES, MAX_SOURCES, MAX_WARNINGS, validation,
+    AiError, MAX_CONTENT_BLOCKS, MAX_LANGUAGE_EVENTS, MAX_LANGUAGE_OUTPUT_BYTES, MAX_SOURCES,
+    MAX_WARNINGS, validation,
 };
 
 const MAX_SOURCE_FIELD_BYTES: usize = 16 * 1024;
@@ -170,7 +171,7 @@ impl ProviderExtension {
     pub(crate) fn validate(&self, field: &str) -> Result<(), StreamError> {
         validation::identifier(&format!("{field}.namespace"), &self.namespace)
             .map_err(|message| StreamError::invalid("stream.invalid_extension", message))?;
-        validation::validate_json(&self.value)
+        validation::validate_json_structure(&self.value)
             .map_err(|error| StreamError::invalid("stream.invalid_extension", error.to_string()))?;
         validation::extension_size(&format!("{field}.value"), &self.value)
             .map_err(|message| StreamError::invalid("stream.extension_too_large", message))
@@ -219,6 +220,111 @@ pub enum LanguageEvent {
         /// Optional bounded provider state observed before failure.
         replay: Option<ProviderExtension>,
     },
+}
+
+impl LanguageEvent {
+    /// Validates the context-free fields and individual bounds of one event.
+    /// Stream ordering and aggregate limits remain owned by
+    /// [`LanguageAssembler`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable stream error when one field could not belong to any
+    /// valid normalized language stream.
+    pub fn validate(&self) -> Result<(), StreamError> {
+        let validate_index = |index: u32| {
+            if usize::try_from(index).map_or(true, |index| index >= MAX_CONTENT_BLOCKS) {
+                Err(StreamError::invalid(
+                    "stream.too_many_blocks",
+                    format!("content index exceeds the {MAX_CONTENT_BLOCKS}-block limit"),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        match self {
+            Self::ContentStarted { index, content } => {
+                validate_index(*index)?;
+                if let ContentStart::ToolCall { id, name, .. } = content {
+                    validation::identifier("tool_call.id", id).map_err(|message| {
+                        StreamError::invalid("stream.invalid_tool_call", message)
+                    })?;
+                    validation::tool_name("tool_call.name", name).map_err(|message| {
+                        StreamError::invalid("stream.invalid_tool_call", message)
+                    })?;
+                }
+                Ok(())
+            }
+            Self::ContentDelta { index, delta } => {
+                validate_index(*index)?;
+                let bytes = match delta {
+                    ContentDelta::Text(value)
+                    | ContentDelta::Reasoning(value)
+                    | ContentDelta::ToolArguments(value) => value.len(),
+                };
+                if bytes == 0 {
+                    return Err(StreamError::invalid(
+                        "stream.empty_delta",
+                        "language content deltas must make nonempty progress",
+                    ));
+                }
+                if bytes > MAX_LANGUAGE_OUTPUT_BYTES {
+                    return Err(StreamError::invalid(
+                        "stream.output_too_large",
+                        format!(
+                            "one language delta exceeds the {MAX_LANGUAGE_OUTPUT_BYTES}-byte per-event limit"
+                        ),
+                    ));
+                }
+                Ok(())
+            }
+            Self::ContentFinished { index } => validate_index(*index),
+            Self::Source { source } => {
+                validation::identifier("source.id", &source.id)
+                    .map_err(|message| StreamError::invalid("stream.invalid_source", message))?;
+                if let Some(title) = &source.title {
+                    validation::safe_text("source.title", title, MAX_SOURCE_FIELD_BYTES, false)
+                        .map_err(|message| {
+                            StreamError::invalid("stream.invalid_source", message)
+                        })?;
+                }
+                if let Some(url) = &source.url {
+                    validation::safe_text("source.url", url, MAX_SOURCE_FIELD_BYTES, false)
+                        .map_err(|message| {
+                            StreamError::invalid("stream.invalid_source", message)
+                        })?;
+                }
+                Ok(())
+            }
+            Self::Warning { warning } => {
+                validation::identifier("warning.code", &warning.code)
+                    .map_err(|message| StreamError::invalid("stream.invalid_warning", message))?;
+                validation::safe_text(
+                    "warning.message",
+                    &warning.message,
+                    MAX_WARNING_MESSAGE_BYTES,
+                    false,
+                )
+                .map_err(|message| StreamError::invalid("stream.invalid_warning", message))
+            }
+            Self::Usage { .. } => Ok(()),
+            Self::Finished { replay, .. } => {
+                if let Some(replay) = replay {
+                    replay.validate("replay")?;
+                }
+                Ok(())
+            }
+            Self::Failed { error, replay } => {
+                error.validate().map_err(|error| {
+                    StreamError::invalid("stream.invalid_provider_error", error.to_string())
+                })?;
+                if let Some(replay) = replay {
+                    replay.validate("replay")?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Complete language output assembled through the same grammar callers stream.
@@ -442,6 +548,7 @@ pub struct LanguageAssembler {
     open: BTreeMap<u32, OpenContent>,
     content: BTreeMap<u32, ContentBlock>,
     assembled_bytes: usize,
+    event_count: usize,
     usage: Option<TokenUsage>,
     replay: Option<ProviderExtension>,
     finish_reason: Option<FinishReason>,
@@ -458,6 +565,7 @@ impl LanguageAssembler {
             open: BTreeMap::new(),
             content: BTreeMap::new(),
             assembled_bytes: 0,
+            event_count: 0,
             usage: None,
             replay: None,
             finish_reason: None,
@@ -476,6 +584,16 @@ impl LanguageAssembler {
                 "language stream emitted an event after its terminal event",
             ));
         }
+        self.event_count = self.event_count.checked_add(1).ok_or_else(|| {
+            StreamError::invalid("stream.too_many_events", "language event count overflowed")
+        })?;
+        if self.event_count > MAX_LANGUAGE_EVENTS {
+            return Err(StreamError::invalid(
+                "stream.too_many_events",
+                format!("language stream exceeds {MAX_LANGUAGE_EVENTS} events"),
+            ));
+        }
+        event.validate()?;
 
         match event {
             LanguageEvent::ContentStarted { index, content } => {
@@ -488,22 +606,10 @@ impl LanguageAssembler {
                         ),
                     ));
                 }
-                if usize::try_from(*index).map_or(true, |index| index >= MAX_CONTENT_BLOCKS) {
-                    return Err(StreamError::invalid(
-                        "stream.too_many_blocks",
-                        format!("language stream exceeds {MAX_CONTENT_BLOCKS} content blocks"),
-                    ));
-                }
                 let open = match content {
                     ContentStart::Text => OpenContent::Text(String::new()),
                     ContentStart::Reasoning => OpenContent::Reasoning(String::new()),
                     ContentStart::ToolCall { id, name, kind } => {
-                        validation::identifier("tool_call.id", id).map_err(|message| {
-                            StreamError::invalid("stream.invalid_tool_call", message)
-                        })?;
-                        validation::tool_name("tool_call.name", name).map_err(|message| {
-                            StreamError::invalid("stream.invalid_tool_call", message)
-                        })?;
                         self.add_bytes(id.len().saturating_add(name.len()))?;
                         OpenContent::ToolCall {
                             id: id.clone(),
@@ -542,20 +648,6 @@ impl LanguageAssembler {
                         format!("language stream exceeds {MAX_SOURCES} sources"),
                     ));
                 }
-                validation::identifier("source.id", &source.id)
-                    .map_err(|message| StreamError::invalid("stream.invalid_source", message))?;
-                if let Some(title) = &source.title {
-                    validation::safe_text("source.title", title, MAX_SOURCE_FIELD_BYTES, false)
-                        .map_err(|message| {
-                            StreamError::invalid("stream.invalid_source", message)
-                        })?;
-                }
-                if let Some(url) = &source.url {
-                    validation::safe_text("source.url", url, MAX_SOURCE_FIELD_BYTES, false)
-                        .map_err(|message| {
-                            StreamError::invalid("stream.invalid_source", message)
-                        })?;
-                }
                 self.add_bytes(
                     source
                         .id
@@ -572,15 +664,6 @@ impl LanguageAssembler {
                         format!("language stream exceeds {MAX_WARNINGS} warnings"),
                     ));
                 }
-                validation::identifier("warning.code", &warning.code)
-                    .map_err(|message| StreamError::invalid("stream.invalid_warning", message))?;
-                validation::safe_text(
-                    "warning.message",
-                    &warning.message,
-                    MAX_WARNING_MESSAGE_BYTES,
-                    false,
-                )
-                .map_err(|message| StreamError::invalid("stream.invalid_warning", message))?;
                 self.add_bytes(warning.code.len().saturating_add(warning.message.len()))?;
                 self.warnings.push(warning.clone());
             }
@@ -599,16 +682,10 @@ impl LanguageAssembler {
                         "language stream finished while a content block remained open",
                     ));
                 }
-                if let Some(replay) = &replay {
-                    replay.validate("replay")?;
-                }
                 self.finish_reason = Some(reason.clone());
                 self.replay.clone_from(replay);
             }
             LanguageEvent::Failed { error, replay } => {
-                if let Some(replay) = &replay {
-                    replay.validate("replay")?;
-                }
                 for (index, open) in std::mem::take(&mut self.open) {
                     self.content.insert(index, open.close());
                 }

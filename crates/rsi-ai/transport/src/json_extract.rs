@@ -49,6 +49,15 @@ pub enum JsonExtractEvent {
     ArrayItem(Vec<u8>),
 }
 
+/// Progress from scanning one response slice up to its next extracted event.
+#[derive(Debug, Eq, PartialEq)]
+pub struct JsonExtractProgress {
+    /// Input bytes consumed from the supplied slice.
+    pub consumed: usize,
+    /// First extracted event encountered, when the slice contained one.
+    pub event: Option<JsonExtractEvent>,
+}
+
 impl fmt::Debug for JsonExtractEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -254,6 +263,22 @@ impl BoundedJsonExtractor {
         };
         self.state = state;
         Ok(event)
+    }
+
+    /// Scans a response slice until its first event or the end of the slice.
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Result<JsonExtractProgress, TransportError> {
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if let Some(event) = self.push(byte)? {
+                return Ok(JsonExtractProgress {
+                    consumed: index + 1,
+                    event: Some(event),
+                });
+            }
+        }
+        Ok(JsonExtractProgress {
+            consumed: bytes.len(),
+            event: None,
+        })
     }
 
     /// Finishes structural validation and returns the bounded normalized envelope.

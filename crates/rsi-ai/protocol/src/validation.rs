@@ -41,7 +41,7 @@ pub(crate) fn extension_size(field: &str, value: &serde_json::Value) -> Result<(
     Ok(())
 }
 
-pub(crate) fn encoded_len(value: &impl serde::Serialize) -> Result<usize, String> {
+pub(crate) fn encoded_len(value: &(impl serde::Serialize + ?Sized)) -> Result<usize, String> {
     struct Counter(usize);
 
     impl std::io::Write for Counter {
@@ -83,13 +83,14 @@ pub(crate) fn safe_text(
     Ok(())
 }
 
+/// Why an arbitrary JSON value exceeds the provider-neutral structure bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum JsonValidationError {
+pub enum JsonStructureError {
     TooDeep,
     TooManyNodes,
 }
 
-impl fmt::Display for JsonValidationError {
+impl fmt::Display for JsonStructureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooDeep => write!(formatter, "JSON nesting exceeds {MAX_JSON_DEPTH}"),
@@ -100,7 +101,10 @@ impl fmt::Display for JsonValidationError {
     }
 }
 
-pub(crate) fn validate_json(value: &Value) -> Result<(), JsonValidationError> {
+impl std::error::Error for JsonStructureError {}
+
+/// Enforces the shared nesting-depth and node-count limits on arbitrary JSON.
+pub fn validate_json_structure(value: &Value) -> Result<(), JsonStructureError> {
     let mut nodes = 0;
     validate_json_at(value, 0, &mut nodes)
 }
@@ -109,13 +113,13 @@ fn validate_json_at(
     value: &Value,
     depth: usize,
     nodes: &mut usize,
-) -> Result<(), JsonValidationError> {
+) -> Result<(), JsonStructureError> {
     if depth > MAX_JSON_DEPTH {
-        return Err(JsonValidationError::TooDeep);
+        return Err(JsonStructureError::TooDeep);
     }
     *nodes = nodes.saturating_add(1);
     if *nodes > MAX_JSON_NODES {
-        return Err(JsonValidationError::TooManyNodes);
+        return Err(JsonStructureError::TooManyNodes);
     }
     match value {
         Value::Array(values) => {
@@ -133,8 +137,8 @@ fn validate_json_at(
     Ok(())
 }
 
-pub(crate) fn canonical_json(mut value: Value) -> Result<Value, JsonValidationError> {
-    validate_json(&value)?;
+pub(crate) fn canonical_json(mut value: Value) -> Result<Value, JsonStructureError> {
+    validate_json_structure(&value)?;
     sort_json_keys(&mut value);
     Ok(value)
 }

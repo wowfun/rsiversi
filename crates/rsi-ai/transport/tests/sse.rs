@@ -1,6 +1,8 @@
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
-use rsi_ai_transport::{ByteStream, SseTermination, decode_sse};
+use rsi_ai_transport::{
+    ByteStream, DEFAULT_SSE_FRAME_BYTES, MAX_PROVIDER_SSE_FRAME_BYTES, SseTermination, decode_sse,
+};
 
 fn chunks(parts: &[&str]) -> ByteStream {
     let chunks = parts
@@ -19,6 +21,7 @@ async fn sse_handles_fragmented_utf8_crlf_comments_and_multiline_data() {
             "NE]\r\n\r\n",
         ]),
         SseTermination::DoneSentinel,
+        DEFAULT_SSE_FRAME_BYTES,
     );
 
     assert_eq!(
@@ -33,6 +36,7 @@ async fn done_terminated_sse_rejects_clean_eof_without_done() {
     let mut values = decode_sse(
         chunks(&["data: {\"ok\":true}\n\n"]),
         SseTermination::DoneSentinel,
+        DEFAULT_SSE_FRAME_BYTES,
     );
     assert!(values.next().await.expect("data").is_ok());
     let error = values
@@ -49,6 +53,7 @@ async fn eof_terminated_sse_accepts_a_final_complete_frame() {
     let mut values = decode_sse(
         chunks(&["event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"]),
         SseTermination::Eof,
+        DEFAULT_SSE_FRAME_BYTES,
     );
     assert_eq!(
         values.next().await.expect("event").expect("valid"),
@@ -59,7 +64,11 @@ async fn eof_terminated_sse_accepts_a_final_complete_frame() {
 
 #[tokio::test]
 async fn eof_terminated_sse_preserves_a_literal_done_event() {
-    let mut values = decode_sse(chunks(&["data: [DONE]\n\n"]), SseTermination::Eof);
+    let mut values = decode_sse(
+        chunks(&["data: [DONE]\n\n"]),
+        SseTermination::Eof,
+        DEFAULT_SSE_FRAME_BYTES,
+    );
 
     assert_eq!(
         values.next().await.expect("event").expect("valid"),
@@ -71,9 +80,27 @@ async fn eof_terminated_sse_preserves_a_literal_done_event() {
 #[tokio::test]
 async fn sse_rejects_a_frame_over_the_bound_before_allocating_unboundedly() {
     let oversized = format!("data: {}\n\n", "x".repeat(256 * 1024 + 1));
-    let mut values = decode_sse(chunks(&[&oversized]), SseTermination::Eof);
+    let mut values = decode_sse(
+        chunks(&[&oversized]),
+        SseTermination::Eof,
+        DEFAULT_SSE_FRAME_BYTES,
+    );
     let error = values.next().await.expect("error").expect_err("oversized");
     assert_eq!(error.code(), "sse.frame_too_large");
+}
+
+#[tokio::test]
+async fn sse_rejects_an_invalid_provider_frame_limit() {
+    for invalid in [0, MAX_PROVIDER_SSE_FRAME_BYTES + 1] {
+        let mut values = decode_sse(chunks(&[]), SseTermination::Eof, invalid);
+        let error = values
+            .next()
+            .await
+            .expect("error")
+            .expect_err("invalid limit");
+        assert_eq!(error.code(), "sse.invalid_frame_limit");
+        assert!(values.next().await.is_none());
+    }
 }
 
 #[tokio::test]
@@ -81,6 +108,7 @@ async fn sse_accepts_lone_cr_line_and_frame_terminators_across_chunks() {
     let mut values = decode_sse(
         chunks(&["data: first\rdata: sec", "ond\r", "\rdata: [DONE]\r\r"]),
         SseTermination::DoneSentinel,
+        DEFAULT_SSE_FRAME_BYTES,
     );
 
     assert_eq!(

@@ -66,6 +66,32 @@ fn object_array_items_are_extracted_without_retaining_them_in_the_envelope() {
 }
 
 #[test]
+fn slice_push_reports_exact_progress_without_buffering_later_items() {
+    let input = br#"{"data":[{"value":1},{"value":2}]}"#;
+    let mut extractor =
+        BoundedJsonExtractor::object_array("/data", limits(256)).expect("extractor");
+    let mut offset = 0;
+    let mut items = Vec::new();
+    while offset < input.len() {
+        let progress = extractor.push_bytes(&input[offset..]).expect("valid slice");
+        assert!(progress.consumed > 0);
+        offset += progress.consumed;
+        if let Some(JsonExtractEvent::ArrayItem(item)) = progress.event {
+            items.push(serde_json::from_slice::<serde_json::Value>(&item).expect("item"));
+        }
+    }
+    extractor.finish().expect("finish");
+
+    assert_eq!(
+        items,
+        [
+            serde_json::json!({"value":1}),
+            serde_json::json!({"value":2})
+        ]
+    );
+}
+
+#[test]
 fn object_array_never_emits_malformed_json_items() {
     for input in [
         br#"{"data":[{"x":[1,]}]}"#.as_slice(),

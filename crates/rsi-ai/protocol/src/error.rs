@@ -135,8 +135,6 @@ pub enum ErrorPhase {
     DeferredPoll,
     /// Cancelling a provider-managed response.
     DeferredCancel,
-    /// Operating a live Realtime session.
-    Realtime,
 }
 
 /// What is known about whether an external request crossed its effect seam.
@@ -205,6 +203,19 @@ impl<'de> Deserialize<'de> for AiError {
 }
 
 impl AiError {
+    pub(crate) fn deferred_unsupported() -> Self {
+        Self {
+            kind: ErrorKind::Unsupported,
+            phase: ErrorPhase::Prepare,
+            dispatch_status: DispatchStatus::NotStarted,
+            status: None,
+            provider_code: None,
+            retry_after_ms: None,
+            request_id: None,
+            safe_summary: "provider does not support deferred language responses".into(),
+        }
+    }
+
     /// Creates bounded error facts without retaining a raw provider body.
     pub fn new(
         kind: ErrorKind,

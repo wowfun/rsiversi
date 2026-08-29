@@ -4,12 +4,21 @@
 #![allow(clippy::missing_errors_doc)] // TransportError owns the bounded failure contract.
 
 mod json_extract;
+mod json_projection;
 
 pub use json_extract::{
-    BoundedJsonExtractor, JsonExtractEvent, JsonExtraction, JsonExtractionLimits,
+    BoundedJsonExtractor, JsonExtractEvent, JsonExtractProgress, JsonExtraction,
+    JsonExtractionLimits,
 };
+pub use json_projection::{JsonProjectionLimits, project_json_body};
 
-use std::{fmt, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    pin::Pin,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -18,23 +27,51 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt as _};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use memchr::memchr2;
-use rsi_ai_auth::SecretValue;
 use rsi_ai_protocol::{
     AiError, DispatchStatus, ErrorKind, ErrorPhase, TokenUsage, sanitize_error_summary,
     validate_identifier,
 };
+use rsi_credentials_protocol::SecretValue;
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-const MAX_SSE_FRAME_BYTES: usize = 256 * 1024;
+/// Default ceiling for delta-oriented SSE provider frames.
+pub const DEFAULT_SSE_FRAME_BYTES: usize = 256 * 1024;
+/// Absolute ceiling a concrete provider may select for one SSE frame.
+pub const MAX_PROVIDER_SSE_FRAME_BYTES: usize = MAX_PROVIDER_REQUEST_BODY_BYTES;
+const SSE_FRAME_ADMISSION_UNIT_BYTES: usize = 1024 * 1024;
+const MAXIMUM_SSE_FRAME_ADMISSION_UNITS: usize =
+    MAX_PROVIDER_SSE_FRAME_BYTES / SSE_FRAME_ADMISSION_UNIT_BYTES;
+static SSE_FRAME_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
+    Arc::new(tokio::sync::Semaphore::new(
+        MAXIMUM_SSE_FRAME_ADMISSION_UNITS,
+    ))
+});
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 const REQUEST_BODY_RAW_CHUNK_BYTES: usize = 48 * 1024;
 const _: () = assert!(REQUEST_BODY_RAW_CHUNK_BYTES.is_multiple_of(3));
+/// Maximum base64 media slots admitted by one streamed JSON request body.
+pub const MAX_JSON_BASE64_REPLACEMENTS: usize = 256;
+/// Default concrete-provider ceiling for one projected JSON request body.
+pub const MAX_PROVIDER_REQUEST_BODY_BYTES: usize = 384 * 1024 * 1024;
+
+/// Formats one bearer credential in temporary zeroizing storage.
+pub fn bearer_authorization_header(secret: &SecretValue) -> Result<HeaderValue, TransportError> {
+    let encoded = Zeroizing::new(format!("Bearer {}", secret.expose_secret()));
+    let mut value = HeaderValue::from_str(&encoded).map_err(|_| {
+        TransportError::new(
+            "http.invalid_credential",
+            "credential cannot be encoded as an Authorization header",
+        )
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
+}
 
 /// Pull-based HTTP body bytes. Each transport failure is terminal.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, TransportError>> + Send + 'static>>;
@@ -82,6 +119,13 @@ impl fmt::Debug for JsonRequestBody {
 pub struct JsonBase64Replacement {
     pointer: String,
     prefix: String,
+    bytes: Arc<[u8]>,
+}
+
+struct LocatedBase64Replacement {
+    start: usize,
+    end: usize,
+    prefix: Bytes,
     bytes: Arc<[u8]>,
 }
 
@@ -137,24 +181,41 @@ fn stream_request_body(parts: Vec<RequestBodyPart>) -> ByteStream {
 pub fn json_base64_body(
     mut template: Value,
     replacements: Vec<JsonBase64Replacement>,
+    maximum_body_bytes: usize,
 ) -> Result<JsonRequestBody, TransportError> {
-    struct Located {
-        start: usize,
-        end: usize,
-        prefix: Bytes,
-        bytes: Arc<[u8]>,
+    if replacements.len() > MAX_JSON_BASE64_REPLACEMENTS {
+        return Err(TransportError::new(
+            "http.too_many_media_replacements",
+            format!(
+                "JSON body contains more than {MAX_JSON_BASE64_REPLACEMENTS} media replacements"
+            ),
+        ));
     }
-
     if replacements.is_empty() {
         let body = serde_json::to_vec(&template).map_err(|error| {
             TransportError::new("http.invalid_body_template", error.to_string())
         })?;
+        ensure_projected_body_size(body.len(), maximum_body_bytes)?;
         return Ok(JsonRequestBody::buffered(body));
     }
 
+    let mut template_strings = HashSet::new();
+    collect_json_strings(&template, &mut template_strings);
     let mut markers = Vec::with_capacity(replacements.len());
+    let mut marker_nonce = 0usize;
     for (index, replacement) in replacements.iter().enumerate() {
-        let marker = unique_media_marker(&template, index);
+        let marker = loop {
+            let marker = format!("\0rsi-media-{index}-{marker_nonce}\0");
+            marker_nonce = marker_nonce.checked_add(1).ok_or_else(|| {
+                TransportError::new(
+                    "http.invalid_body_template",
+                    "JSON media marker identity overflowed",
+                )
+            })?;
+            if template_strings.insert(marker.clone()) {
+                break marker;
+            }
+        };
         let slot = template.pointer_mut(&replacement.pointer).ok_or_else(|| {
             TransportError::new("http.invalid_body_template", "JSON media slot is missing")
         })?;
@@ -171,32 +232,10 @@ pub fn json_base64_body(
         Bytes::from(serde_json::to_vec(&template).map_err(|error| {
             TransportError::new("http.invalid_body_template", error.to_string())
         })?);
-    let mut located = Vec::with_capacity(replacements.len());
-    for (replacement, marker) in replacements.into_iter().zip(markers) {
-        let marker = serde_json::to_vec(&marker).map_err(|error| {
-            TransportError::new("http.invalid_body_template", error.to_string())
-        })?;
-        let offsets = json_string_token_offsets(&template, &marker);
-        let [start] = offsets.as_slice() else {
-            unreachable!("one generated marker occupies exactly one complete JSON string token")
-        };
-        let start = *start;
-        let mut prefix = serde_json::to_vec(&replacement.prefix).map_err(|error| {
-            TransportError::new("http.invalid_body_template", error.to_string())
-        })?;
-        let Some(b'"') = prefix.pop() else {
-            return Err(TransportError::new(
-                "http.invalid_body_template",
-                "JSON media prefix is not a string",
-            ));
-        };
-        located.push(Located {
-            start,
-            end: start + marker.len(),
-            prefix: Bytes::from(prefix),
-            bytes: replacement.bytes,
-        });
-    }
+    let marker_offsets = locate_marker_offsets(&template, &markers)?;
+    let (mut located, projected_body_bytes) =
+        locate_base64_replacements(template.len(), marker_offsets, replacements)?;
+    ensure_projected_body_size(projected_body_bytes, maximum_body_bytes)?;
     located.sort_unstable_by_key(|replacement| replacement.start);
     debug_assert!(
         located.windows(2).all(|pair| pair[0].end <= pair[1].start),
@@ -220,8 +259,105 @@ pub fn json_base64_body(
     })
 }
 
-fn json_string_token_offsets(json: &[u8], token: &[u8]) -> Vec<usize> {
-    let mut matches = Vec::new();
+fn locate_marker_offsets(
+    template: &[u8],
+    markers: &[String],
+) -> Result<Vec<(usize, usize)>, TransportError> {
+    let marker_tokens = markers
+        .iter()
+        .enumerate()
+        .map(|(index, marker)| {
+            serde_json::to_vec(marker)
+                .map(|token| (token, index))
+                .map_err(|error| {
+                    TransportError::new("http.invalid_body_template", error.to_string())
+                })
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let mut offsets = vec![None; markers.len()];
+    visit_json_string_tokens(template, |start, end| {
+        if let Some(index) = marker_tokens.get(&template[start..end]) {
+            debug_assert!(offsets[*index].is_none());
+            offsets[*index] = Some((start, end));
+        }
+    });
+    offsets
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            TransportError::new(
+                "http.invalid_body_template",
+                "generated JSON media marker is missing",
+            )
+        })
+}
+
+fn locate_base64_replacements(
+    template_bytes: usize,
+    marker_offsets: Vec<(usize, usize)>,
+    replacements: Vec<JsonBase64Replacement>,
+) -> Result<(Vec<LocatedBase64Replacement>, usize), TransportError> {
+    let mut located = Vec::with_capacity(replacements.len());
+    let mut projected_body_bytes = template_bytes;
+    for ((start, end), replacement) in marker_offsets.into_iter().zip(replacements) {
+        let mut prefix = serde_json::to_vec(&replacement.prefix).map_err(|error| {
+            TransportError::new("http.invalid_body_template", error.to_string())
+        })?;
+        let Some(b'"') = prefix.pop() else {
+            return Err(TransportError::new(
+                "http.invalid_body_template",
+                "JSON media prefix is not a string",
+            ));
+        };
+        let base64_bytes = projected_base64_bytes(replacement.bytes.len())?;
+        let replacement_bytes = prefix
+            .len()
+            .checked_add(base64_bytes)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(projected_body_overflow)?;
+        projected_body_bytes = projected_body_bytes
+            .checked_sub(end - start)
+            .and_then(|value| value.checked_add(replacement_bytes))
+            .ok_or_else(projected_body_overflow)?;
+        located.push(LocatedBase64Replacement {
+            start,
+            end,
+            prefix: Bytes::from(prefix),
+            bytes: replacement.bytes,
+        });
+    }
+    Ok((located, projected_body_bytes))
+}
+
+fn projected_base64_bytes(raw_bytes: usize) -> Result<usize, TransportError> {
+    raw_bytes
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(projected_body_overflow)
+}
+
+fn projected_body_overflow() -> TransportError {
+    TransportError::new(
+        "http.request_body_too_large",
+        "projected JSON request body length overflowed",
+    )
+}
+
+fn ensure_projected_body_size(
+    projected_body_bytes: usize,
+    maximum_body_bytes: usize,
+) -> Result<(), TransportError> {
+    if projected_body_bytes > maximum_body_bytes {
+        return Err(TransportError::new(
+            "http.request_body_too_large",
+            format!("projected JSON request body exceeds {maximum_body_bytes} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn visit_json_string_tokens(json: &[u8], mut visit: impl FnMut(usize, usize)) {
     let mut offset = 0;
     while offset < json.len() {
         if json[offset] != b'"' {
@@ -239,49 +375,30 @@ fn json_string_token_offsets(json: &[u8], token: &[u8]) -> Vec<usize> {
             } else if byte == b'\\' {
                 escaped = true;
             } else if byte == b'"' {
-                if &json[start..offset] == token {
-                    matches.push(start);
-                }
+                visit(start, offset);
                 break;
             }
         }
     }
-    matches
 }
 
-fn unique_media_marker(template: &Value, replacement_index: usize) -> String {
-    let string_count = json_string_count(template);
-    for candidate in 0..=string_count {
-        let marker = format!("\0rsi-media-{replacement_index}-{candidate}\0");
-        if !json_contains_string(template, &marker) {
-            return marker;
+fn collect_json_strings(value: &Value, strings: &mut HashSet<String>) {
+    match value {
+        Value::String(value) => {
+            strings.insert(value.clone());
         }
-    }
-    unreachable!("one more distinct marker than JSON strings must be absent")
-}
-
-fn json_string_count(value: &Value) -> usize {
-    match value {
-        Value::String(_) => 1,
-        Value::Array(values) => values.iter().map(json_string_count).sum(),
-        Value::Object(values) => values
-            .iter()
-            .map(|(_key, value)| 1_usize.saturating_add(json_string_count(value)))
-            .sum(),
-        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-    }
-}
-
-fn json_contains_string(value: &Value, candidate: &str) -> bool {
-    match value {
-        Value::String(value) => value == candidate,
-        Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_string(value, candidate)),
-        Value::Object(values) => values
-            .iter()
-            .any(|(key, value)| key == candidate || json_contains_string(value, candidate)),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        Value::Array(values) => {
+            for value in values {
+                collect_json_strings(value, strings);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                strings.insert(key.clone());
+                collect_json_strings(value, strings);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -439,15 +556,9 @@ impl HttpRequest {
         Ok(self)
     }
 
-    /// Sets an authorization bearer token without retaining its formatted value.
+    /// Sets a bearer credential as a sensitive authorization header.
     pub fn bearer_auth(mut self, secret: &SecretValue) -> Result<Self, TransportError> {
-        let encoded = Zeroizing::new(format!("Bearer {}", secret.expose()));
-        let value = HeaderValue::from_str(&encoded).map_err(|_| {
-            TransportError::new(
-                "http.invalid_credential",
-                "credential cannot be encoded as an Authorization header",
-            )
-        })?;
+        let value = bearer_authorization_header(secret)?;
         self.headers.insert(http::header::AUTHORIZATION, value);
         Ok(self)
     }
@@ -821,9 +932,31 @@ pub fn reclassify_context_limit(error: AiError) -> AiError {
     }
 }
 
-/// Decodes SSE framing incrementally without buffering an unbounded body.
-pub fn decode_sse(mut body: ByteStream, termination: SseTermination) -> SseStream {
+/// Decodes SSE framing incrementally under one provider-selected finite frame bound.
+#[allow(clippy::too_many_lines)] // One state machine owns cross-chunk CR/LF and frame grammar.
+pub fn decode_sse(
+    mut body: ByteStream,
+    termination: SseTermination,
+    maximum_frame_bytes: usize,
+) -> SseStream {
     Box::pin(stream! {
+        let admission_units = match sse_frame_admission_units(maximum_frame_bytes) {
+            Ok(units) => units,
+            Err(error) => {
+                yield Err(error);
+                return;
+            }
+        };
+        let Ok(_frame_admission) = Arc::clone(&SSE_FRAME_ADMISSION)
+            .acquire_many_owned(admission_units)
+            .await
+        else {
+            yield Err(TransportError::new(
+                "sse.admission_closed",
+                "SSE frame admission is closed",
+            ));
+            return;
+        };
         let mut frame = Vec::new();
         let mut line = Vec::new();
         let mut previous_was_cr = false;
@@ -844,10 +977,10 @@ pub fn decode_sse(mut body: ByteStream, termination: SseTermination) -> SseStrea
             while offset < chunk.len() {
                 let Some(relative) = memchr2(b'\r', b'\n', &chunk[offset..]) else {
                     line.extend_from_slice(&chunk[offset..]);
-                    if frame.len().saturating_add(line.len()) > MAX_SSE_FRAME_BYTES {
+                    if frame.len().saturating_add(line.len()) > maximum_frame_bytes {
                         yield Err(TransportError::new(
                             "sse.frame_too_large",
-                            format!("SSE frame exceeds {MAX_SSE_FRAME_BYTES} bytes"),
+                            format!("SSE frame exceeds {maximum_frame_bytes} bytes"),
                         ));
                         return;
                     }
@@ -855,10 +988,10 @@ pub fn decode_sse(mut body: ByteStream, termination: SseTermination) -> SseStrea
                 };
                 let terminator = offset + relative;
                 line.extend_from_slice(&chunk[offset..terminator]);
-                if frame.len().saturating_add(line.len()) > MAX_SSE_FRAME_BYTES {
+                if frame.len().saturating_add(line.len()) > maximum_frame_bytes {
                     yield Err(TransportError::new(
                         "sse.frame_too_large",
-                        format!("SSE frame exceeds {MAX_SSE_FRAME_BYTES} bytes"),
+                        format!("SSE frame exceeds {maximum_frame_bytes} bytes"),
                     ));
                     return;
                 }
@@ -909,6 +1042,23 @@ pub fn decode_sse(mut body: ByteStream, termination: SseTermination) -> SseStrea
                 "SSE stream ended without [DONE]",
             ));
         }
+    })
+}
+
+fn sse_frame_admission_units(maximum_frame_bytes: usize) -> Result<u32, TransportError> {
+    if maximum_frame_bytes == 0 || maximum_frame_bytes > MAX_PROVIDER_SSE_FRAME_BYTES {
+        return Err(TransportError::new(
+            "sse.invalid_frame_limit",
+            format!("SSE frame limit must be between 1 and {MAX_PROVIDER_SSE_FRAME_BYTES} bytes"),
+        ));
+    }
+    let units = maximum_frame_bytes.saturating_add(SSE_FRAME_ADMISSION_UNIT_BYTES - 1)
+        / SSE_FRAME_ADMISSION_UNIT_BYTES;
+    u32::try_from(units).map_err(|_| {
+        TransportError::new(
+            "sse.invalid_frame_limit",
+            "SSE frame admission weight exceeds its representation",
+        )
     })
 }
 
