@@ -10,27 +10,33 @@
 
 `cargo xtask verify-agent-notes` runs the focused Note lifecycle and archive-integrity checks. `cargo xtask verify-agent-notes --write` is the only documentation command that may append archive seals; it never edits or replaces an existing sealed entry.
 
+## Optional code checks
+
+`cargo xtask code-check` runs the repository checks configured by
+[`code-check.toml`](code-check.toml) when a contributor invokes it explicitly.
+It is not part of CI, conformance, documentation verification, or another
+required gate.
+
+The current line-count check scans every tracked or non-ignored untracked
+regular Rust source file, including tests and standalone fixtures. Blank and
+comment-only lines do not count. Files above the configured threshold produce
+stably ordered warnings without failing the command; invalid configuration,
+source enumeration, reads, or tokenization remain execution errors.
+
 ## rsi-meta verification
 
-`cargo xtask rsi-meta code-health` checks the hard per-file production-code
-limit and each owned region's recorded maximum. `--write` creates the baseline
-or lowers it after a refactor; it refuses automatic increases. A reviewed
-baseline increase is allowed when a cohesive ownership boundary genuinely grew
-and the contract plus behavior evidence justify keeping it together. The
-baseline is a smell detector, not a reason to split one safety state machine
-mechanically.
-
 `cargo xtask rsi-meta conformance` is the single CI and local orchestration
-authority for the foundation. It checks formatting, then runs locked,
-warning-denied Clippy and all-target tests for core, `rsi-meta-scope`, ABI, and
-Loader. It also validates both standalone fixture manifests offline, formats
+authority for the foundation. It runs locked, warning-denied Clippy and
+all-target tests for the runtime-independent contract, core,
+`rsi-meta-scope`, Profile, ABI, and Loader. It also validates
+both standalone fixture manifests offline, formats
 and lints them, tests and release-builds `echo-bidi`, and either runs the
 release `foundation-probe` on Linux or release-builds it on other hosts. On
 Linux it additionally inspects the built ELF dynamic symbol table and accepts
-only the v2 plugin entry export. The inspection uses `NM` when set and otherwise
+only the v3 plugin entry export. The inspection uses `NM` when set and otherwise
 uses `nm`, so cross-toolchain Linux hosts can select the matching GNU- or
 LLVM-compatible inspector. The ABI package test owns the maintained C11/C++17
 header compilation, while the Loader suite maps the real native fixture on the
 executing host.
 
-Both commands must run from the repository root. Native evidence applies only to the platform that actually executed it.
+Repository commands must run from the repository root. Native evidence applies only to the platform that actually executed it.

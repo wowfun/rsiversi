@@ -79,6 +79,7 @@ fn valid_repository() -> TempDir {
         "docs/AGENTS.md",
         "crates/AGENTS.md",
         "crates/tools/AGENTS.md",
+        "crates/rsi-host/AGENTS.md",
         "crates/rsi-meta/AGENTS.md",
         "plugins/AGENTS.md",
         "plugins/rsi-meta/AGENTS.md",
@@ -94,8 +95,14 @@ fn valid_repository() -> TempDir {
     write(root, "README.md", "# Repository\n");
     write(root, "docs/architecture.md", "# Architecture\n");
     write(root, "crates/rsi-meta/README.md", "# Product\n");
+    write(root, "crates/rsi-host/README.md", "# Host\n");
 
     let packages = [
+        (
+            "crates/rsi-host/core",
+            "rsi-host",
+            "A generic static composition host above the Meta lifecycle.",
+        ),
         (
             "crates/rsi-meta/core",
             "product",

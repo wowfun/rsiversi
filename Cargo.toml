@@ -33,14 +33,13 @@ percent-encoding = "2.3"
 pulldown-cmark = "0.10"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+rhai = { version = "1.23", features = ["serde", "sync"] }
 rustix = { version = "1.1", features = ["fs"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 same-file = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-rhai = { version = "1.23", features = ["serde", "sync"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"
-syn = { version = "2.0", features = ["full", "visit"] }
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

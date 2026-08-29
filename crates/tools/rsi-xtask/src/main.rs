@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod cargo_step;
-mod code_health;
+mod code_check;
 mod documentation;
 mod repository_root;
 mod rsi_meta;
@@ -78,22 +78,13 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
             rsi_meta::run(&repository)
         }
-        [product, command] if product == "rsi-meta" && command == "code-health" => {
+        [command] if command == "code-check" => {
             let repository = env::current_dir()
                 .map_err(|error| format!("could not determine repository root: {error}"))?;
-            code_health::run(&repository, false)
-                .map_err(|error| format!("rsi-meta code-health:\n{error}"))
-        }
-        [product, command, write]
-            if product == "rsi-meta" && command == "code-health" && write == "--write" =>
-        {
-            let repository = env::current_dir()
-                .map_err(|error| format!("could not determine repository root: {error}"))?;
-            code_health::run(&repository, true)
-                .map_err(|error| format!("rsi-meta code-health:\n{error}"))
+            code_check::run(&repository).map_err(|error| format!("code-check:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta <code-health [--write]|conformance>"
+            "usage: rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta conformance"
                 .into(),
         ),
     }

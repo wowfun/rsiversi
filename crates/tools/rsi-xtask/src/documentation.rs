@@ -492,16 +492,9 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
     match components.as_slice() {
         [
             Component::Normal(first),
-            Component::Normal(second),
             Component::Normal(_),
-        ] if *first == OsStr::new("crates")
-            && (*second == OsStr::new("rsi-agent")
-                || *second == OsStr::new("rsi-ai")
-                || *second == OsStr::new("rsi-meta")
-                || *second == OsStr::new("tools")) =>
-        {
-            true
-        }
+            Component::Normal(_),
+        ] if *first == OsStr::new("crates") => true,
         [
             Component::Normal(first),
             Component::Normal(second),
@@ -1091,7 +1084,7 @@ mod tests {
         let repository = Path::new("/repo");
         assert!(is_recognized_package_path(
             repository,
-            Path::new("/repo/crates/rsi-agent/protocol")
+            Path::new("/repo/crates/rsi-agent/turn-protocol")
         ));
         assert!(is_recognized_package_path(
             repository,
@@ -1100,6 +1093,10 @@ mod tests {
         assert!(is_recognized_package_path(
             repository,
             Path::new("/repo/crates/rsi-meta/core")
+        ));
+        assert!(is_recognized_package_path(
+            repository,
+            Path::new("/repo/crates/rsi-storage/domain")
         ));
         assert!(is_recognized_package_path(
             repository,

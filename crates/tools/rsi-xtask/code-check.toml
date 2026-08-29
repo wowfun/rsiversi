@@ -1,0 +1,4 @@
+version = 1
+
+[line_count]
+warning_threshold = 1200

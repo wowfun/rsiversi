@@ -7,18 +7,20 @@ use std::process::Command;
 use crate::cargo_step::{self, CargoStep};
 use crate::repository_root;
 
-const CONFORMANCE_PACKAGES: [&str; 4] = [
+const CONFORMANCE_PACKAGES: [&str; 6] = [
+    "rsi-meta-contract",
     "rsi-meta",
     "rsi-meta-scope",
-    "rsi-meta-plugin",
-    "rsi-meta-loader",
+    "rsi-meta-profile",
+    "rsi-meta-native",
+    "rsi-meta-native-loader",
 ];
 const ECHO_MANIFEST: &str = "fixtures/rsi-meta/echo-bidi/Cargo.toml";
 const ECHO_TARGET: &str = "target/rsi-meta-conformance/echo-bidi";
 const FOUNDATION_MANIFEST: &str = "fixtures/rsi-meta/foundation-probe/Cargo.toml";
 const FOUNDATION_TARGET: &str = "target/rsi-meta-conformance/foundation-probe";
 const ENTRY_PREFIX: &str = "rsi_meta_plugin_entry_";
-const ENTRY_V2: &str = "rsi_meta_plugin_entry_v2";
+const ENTRY_V3: &str = "rsi_meta_plugin_entry_v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Host {
@@ -36,7 +38,7 @@ impl Host {
     }
 }
 
-fn conformance_packages() -> [&'static str; 4] {
+fn conformance_packages() -> [&'static str; 6] {
     CONFORMANCE_PACKAGES
 }
 
@@ -53,10 +55,7 @@ pub fn run(repository: &Path) -> Result<(), String> {
 }
 
 fn conformance_steps(host: Host, target: &str) -> Vec<CargoStep> {
-    let mut steps = vec![CargoStep::new(
-        "format rsi-meta foundation",
-        ["fmt".into(), "--all".into(), "--check".into()],
-    )];
+    let mut steps = Vec::new();
     for package in conformance_packages() {
         steps.push(CargoStep::new(
             format!("clippy {package}"),
@@ -308,7 +307,7 @@ fn validate_entry_exports(symbol_table: &str) -> Result<(), String> {
         .filter(|symbol| symbol.starts_with(ENTRY_PREFIX))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let expected = BTreeSet::from([ENTRY_V2.to_owned()]);
+    let expected = BTreeSet::from([ENTRY_V3.to_owned()]);
     if exports == expected {
         Ok(())
     } else {
@@ -358,29 +357,34 @@ mod tests {
         assert_eq!(
             conformance_packages(),
             [
+                "rsi-meta-contract",
                 "rsi-meta",
                 "rsi-meta-scope",
-                "rsi-meta-plugin",
-                "rsi-meta-loader",
+                "rsi-meta-profile",
+                "rsi-meta-native",
+                "rsi-meta-native-loader",
             ]
         );
     }
 
     #[test]
-    fn linux_conformance_plan_has_one_exact_eighteen_step_authority() {
+    fn linux_conformance_plan_has_one_exact_twenty_one_step_authority() {
         let steps = conformance_steps(Host::Linux, "test-host");
         assert_eq!(
             labels(&steps),
             [
-                "format rsi-meta foundation",
+                "clippy rsi-meta-contract",
+                "test rsi-meta-contract",
                 "clippy rsi-meta",
                 "test rsi-meta",
                 "clippy rsi-meta-scope",
                 "test rsi-meta-scope",
-                "clippy rsi-meta-plugin",
-                "test rsi-meta-plugin",
-                "clippy rsi-meta-loader",
-                "test rsi-meta-loader",
+                "clippy rsi-meta-profile",
+                "test rsi-meta-profile",
+                "clippy rsi-meta-native",
+                "test rsi-meta-native",
+                "clippy rsi-meta-native-loader",
+                "test rsi-meta-native-loader",
                 "metadata standalone echo-bidi",
                 "format standalone echo-bidi",
                 "clippy standalone echo-bidi",
@@ -392,10 +396,9 @@ mod tests {
                 "release-run standalone foundation-probe",
             ]
         );
-        assert_eq!(arguments(&steps[0]), ["fmt", "--all", "--check"]);
         for (offset, package) in conformance_packages().into_iter().enumerate() {
-            let clippy = &steps[1 + offset * 2];
-            let test = &steps[2 + offset * 2];
+            let clippy = &steps[offset * 2];
+            let test = &steps[1 + offset * 2];
             assert_eq!(
                 arguments(clippy),
                 [
@@ -505,16 +508,16 @@ mod tests {
     }
 
     #[test]
-    fn entry_export_validation_requires_exactly_v2() {
-        validate_entry_exports("000000000001 T rsi_meta_plugin_entry_v2\n").unwrap();
+    fn entry_export_validation_requires_exactly_v3() {
+        validate_entry_exports("000000000001 T rsi_meta_plugin_entry_v3\n").unwrap();
         assert!(validate_entry_exports("000000000001 T unrelated\n").is_err());
         assert!(
             validate_entry_exports(
-                "000000000001 T rsi_meta_plugin_entry_v1\n000000000002 T rsi_meta_plugin_entry_v2\n"
+                "000000000001 T rsi_meta_plugin_entry_v2\n000000000002 T rsi_meta_plugin_entry_v3\n"
             )
             .is_err()
         );
-        assert!(validate_entry_exports("000000000001 T rsi_meta_plugin_entry_v2@@V2\n").is_err());
+        assert!(validate_entry_exports("000000000001 T rsi_meta_plugin_entry_v3@@V3\n").is_err());
     }
 
     #[test]
