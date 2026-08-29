@@ -1,0 +1,30 @@
+[package]
+name = "rsi-agent-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-agent-store-protocol = { path = "../store-protocol" }
+rsi-agent-turn-protocol = { path = "../turn-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-agent-testkit = { path = "../testkit" }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

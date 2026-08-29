@@ -1,0 +1,29 @@
+[package]
+name = "rsi-agent-store-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-agent-store-protocol = { path = "../store-protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rsi-agent-testkit = { path = "../testkit" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

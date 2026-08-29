@@ -1,5 +1,5 @@
 [package]
-name = "rsi-agent-protocol"
+name = "rsi-agent-presets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,13 +11,13 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
-serde.workspace = true
-serde_json = { workspace = true, features = ["raw_value"] }
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-host = { path = "../../rsi-host/core" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-jsonschema.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

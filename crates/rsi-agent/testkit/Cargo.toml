@@ -1,0 +1,24 @@
+[package]
+name = "rsi-agent-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-agent-store-protocol = { path = "../store-protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tokio.workspace = true
+
+[lints]
+workspace = true

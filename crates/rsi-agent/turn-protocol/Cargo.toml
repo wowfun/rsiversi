@@ -1,0 +1,20 @@
+[package]
+name = "rsi-agent-turn-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+thiserror.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

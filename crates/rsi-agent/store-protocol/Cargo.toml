@@ -1,0 +1,17 @@
+[package]
+name = "rsi-agent-store-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

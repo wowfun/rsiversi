@@ -1,0 +1,21 @@
+[package]
+name = "rsi-agent-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+
+[lints]
+workspace = true
