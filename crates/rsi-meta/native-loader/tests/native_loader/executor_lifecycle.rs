@@ -684,8 +684,20 @@ async fn catalog_destruction_lane_bounds_concurrent_foreign_cleanup() {
     assert!(first_disposal.await.unwrap().is_clean());
     assert!(second_disposal.await.unwrap().is_clean());
 
+    drop(first_service);
+    drop(second_service);
+    assert_clean_shutdown(&first_runtime).await;
+    assert_clean_shutdown(&second_runtime).await;
+
     tokio::time::timeout(Duration::from_secs(1), async {
-        while catalog.snapshot().active_destructions != 0 {
+        loop {
+            let snapshot = catalog.snapshot();
+            if snapshot.active_destructions == 0
+                && snapshot.pending_instance_destructions == 0
+                && snapshot.queued_destructions == 0
+            {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
@@ -694,10 +706,8 @@ async fn catalog_destruction_lane_bounds_concurrent_foreign_cleanup() {
     let snapshot = catalog.snapshot();
     assert_eq!(snapshot.peak_destructions, 1);
     assert_eq!(snapshot.active_destructions, 0);
-    drop(first_service);
-    drop(second_service);
-    assert_clean_shutdown(&first_runtime).await;
-    assert_clean_shutdown(&second_runtime).await;
+    assert_eq!(snapshot.pending_instance_destructions, 0);
+    assert_eq!(snapshot.queued_destructions, 0);
 }
 
 #[test]
