@@ -1,0 +1,21 @@
+[package]
+name = "rsi-permission-presets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

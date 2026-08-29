@@ -22,6 +22,7 @@ bytes = "1.10"
 futures-util = "0.3"
 hex = "0.4"
 http = "1.3"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 jsonschema = { version = "0.33", default-features = false }
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent"] }
 libc = "0.2"
@@ -32,6 +33,8 @@ pulldown-cmark = "0.10"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rustix = { version = "1.1", features = ["fs"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+same-file = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 rhai = { version = "1.23", features = ["serde", "sync"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }

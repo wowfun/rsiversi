@@ -1,0 +1,27 @@
+[package]
+name = "rsi-media-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+libc.workspace = true
+rsi-media-protocol = { path = "../protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde.workspace = true
+serde_json.workspace = true
+same-file.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+rsi-media = { path = "../core" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

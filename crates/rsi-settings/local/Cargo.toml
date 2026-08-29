@@ -1,0 +1,25 @@
+[package]
+name = "rsi-settings-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-settings-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+rsi-settings = { path = "../core" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

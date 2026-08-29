@@ -1,0 +1,21 @@
+[package]
+name = "rsi-media-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-media-protocol = { path = "../protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

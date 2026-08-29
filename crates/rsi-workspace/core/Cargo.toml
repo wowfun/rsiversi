@@ -1,0 +1,26 @@
+[package]
+name = "rsi-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-storage = { path = "../../rsi-storage/core" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rsi-storage-json = { path = "../../rsi-storage/json" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

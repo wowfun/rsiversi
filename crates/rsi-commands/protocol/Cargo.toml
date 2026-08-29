@@ -1,0 +1,21 @@
+[package]
+name = "rsi-commands-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+serde.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

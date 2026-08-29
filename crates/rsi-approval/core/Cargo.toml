@@ -1,0 +1,20 @@
+[package]
+name = "rsi-approval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-approval-protocol = { path = "../protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde_json.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
