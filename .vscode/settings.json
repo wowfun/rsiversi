@@ -1,0 +1,10 @@
+{
+  "rust-analyzer.checkOnSave": true,
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.extraArgs": ["--tests"],
+  "rust-analyzer.cargo.targetDir": "${workspaceFolder}/target/rust-analyzer",
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  }
+}
