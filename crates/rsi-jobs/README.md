@@ -1,18 +1,21 @@
 # rsi-jobs
 
-`rsi-jobs` owns process-local background job contracts. The
-[`rsi-jobs`](core/README.md) package defines bounded task, status, outcome,
-handle, and service seams. [`rsi-jobs-local`](local/README.md) is the ordinary
-Tokio-backed plugin.
+`rsi-jobs` owns the process-local control plane for background work created by
+named producer generations. The [core contract](core/README.md) defines opaque
+scope authority, producer retirement, admission, offset output reads, terminal
+reporting, and finalization. The [local provider](local/README.md) implements
+those contracts on the caller-owned Tokio runtime. The
+[model-facing tools](tools/README.md) project generic list, output, and kill
+operations through one unpublished Tool catalog registrar without depending on
+any concrete work producer.
 
-Jobs are live convenience work, not durable Agent turns or provider-managed
-external jobs. Handles expose latest status, cooperative cancellation, and
-join. The service also exposes bounded `cancel_all`: it temporarily closes
-admission, snapshots and settles every unfinished job, then reopens admission
-unless retirement has begun. Headless uses it in a pre-terminal Agent
-finalizer. Plugin retirement permanently withdraws submission, then performs
-the same bounded drain. No work is recovered after process exit.
+A Jobs provider never executes an arbitrary caller closure. A registered
+producer validates and starts one typed process-local request, then transfers
+the resulting control object to Jobs before an identifier is published. This
+keeps process spawning and confinement with their owning producers while Jobs
+owns discovery, cancellation, reporting, retention, and lifecycle.
 
-The registry retains exact unsettled counts per scope. Releasing a timed-out
-scope is therefore constant work for each completion rather than a scan of all
-other jobs.
+Jobs are intentionally not durable. Identifiers, scopes, output cursors, and
+tombstones are valid only for the current process and provider generation. Agent
+turns use Jobs during pre-terminal finalization; durable scheduling remains an
+Agent concern.

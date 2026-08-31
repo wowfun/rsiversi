@@ -35,8 +35,10 @@ pub const MAXIMUM_FREEFORM_GRAMMAR_BYTES: usize = 64 * 1024;
 pub const MAXIMUM_REGISTERED_TOOLS: usize = 64;
 /// Maximum cooperative timeout for one Tool call in milliseconds.
 pub const MAXIMUM_TOOL_TIMEOUT_MS: u64 = 600_000;
-/// Maximum settled or pending results retained by one Tool Runtime generation.
+/// Maximum settled or pending results retained across one Tool catalog provider.
 pub const MAXIMUM_RETAINED_TOOL_RESULTS: usize = 1_024;
+/// Maximum unpublished and sealed catalogs retained by one provider.
+pub const MAXIMUM_TOOL_CATALOGS: usize = 1_024;
 /// Maximum truthful process-enforcement records in one Tool result.
 pub const MAXIMUM_TOOL_ENFORCEMENT_STAMPS: usize = 256;
 /// Maximum nested containers in model-produced Tool arguments.
@@ -274,6 +276,8 @@ pub struct ToolStart {
     pub policy: ToolExecutionPolicy,
     /// Active sandbox planner generation.
     pub sandbox: Arc<dyn Sandbox>,
+    /// Exact optional Jobs scope authority for this Agent invocation.
+    pub job_scope: Option<rsi_jobs::JobScopeAuthority>,
 }
 
 /// Execution supplied to one trusted tool body.
@@ -285,6 +289,7 @@ pub struct ToolExecution {
     pub cancellation: CancellationToken,
     policy: ToolExecutionPolicy,
     sandbox: Arc<dyn Sandbox>,
+    job_scope: Option<rsi_jobs::JobScopeAuthority>,
     enforcement: Arc<Mutex<Vec<EnforcementStamp>>>,
 }
 
@@ -292,6 +297,11 @@ impl ToolExecution {
     /// Returns the exact orchestrator-pinned process policy.
     pub const fn policy(&self) -> &ToolExecutionPolicy {
         &self.policy
+    }
+
+    /// Returns the exact optional Jobs scope authority pinned at Tool start.
+    pub const fn job_scope(&self) -> Option<&rsi_jobs::JobScopeAuthority> {
+        self.job_scope.as_ref()
     }
 
     /// Confines one process using the pinned mode and workspace authority.
@@ -310,7 +320,7 @@ impl ToolExecution {
                 workspace: self.policy.workspace.clone(),
             })
             .await
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            .map_err(ToolError::Sandbox)?;
         let mut enforcement = self
             .enforcement
             .lock()
@@ -334,6 +344,7 @@ impl ToolExecution {
                 cancellation: start.cancellation,
                 policy: start.policy,
                 sandbox: start.sandbox,
+                job_scope: start.job_scope,
                 enforcement: Arc::clone(&enforcement),
             },
             ToolEnforcement { enforcement },
@@ -463,6 +474,11 @@ impl ToolResult {
             return Err(ToolError::InvalidInput(
                 "tool result contains too many enforcement stamps".into(),
             ));
+        }
+        for stamp in &self.enforcement {
+            stamp
+                .validate()
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
         }
         Ok(())
     }
@@ -683,6 +699,15 @@ pub enum ToolError {
     /// No active exact-name definition.
     #[error("tool `{0}` is not registered")]
     Unknown(String),
+    /// The exact registration generation pinned at prepare was withdrawn before start.
+    #[error("tool `{0}` registration was withdrawn")]
+    Withdrawn(String),
+    /// The unpublished catalog stage was already sealed or abandoned.
+    #[error("Tool catalog stage is sealed")]
+    Sealed,
+    /// Sandbox planning rejected the process before spawn.
+    #[error(transparent)]
+    Sandbox(rsi_sandbox::SandboxError),
     /// Call cancellation won and the body has settled.
     #[error("tool call was cancelled")]
     Cancelled,
@@ -697,11 +722,31 @@ pub enum ToolError {
 /// Tool result.
 pub type Result<T> = std::result::Result<T, ToolError>;
 
-/// Exact-name active tool registry.
+/// Write-only exact-name registration interface for one unpublished catalog.
+pub trait ToolRegistrar: fmt::Debug + Send + Sync + 'static {
+    /// Registers one definition that its lease can withdraw while the stage is open.
+    fn register(&self, registration: ToolRegistration) -> Result<ToolLease>;
+    /// Atomically registers one nonempty batch, withdrawable only before sealing.
+    fn register_batch(&self, registrations: Vec<ToolRegistration>) -> Result<ToolBatchLease>;
+}
+
+/// One unpublished Tool catalog stage.
+pub trait ToolCatalogStage: fmt::Debug + Send + 'static {
+    /// Returns the write-only registrar for this exact stage.
+    fn registrar(&self) -> Arc<dyn ToolRegistrar>;
+    /// Consumes and seals the complete catalog into one immutable runtime.
+    fn seal(self: Box<Self>) -> Result<Arc<dyn ToolRuntime>>;
+}
+
+/// Process-wide owner of bounded Tool catalogs and retained results.
+pub trait ToolCatalogProvider: fmt::Debug + Send + Sync + 'static {
+    /// Begins one unpublished bounded catalog stage.
+    fn begin_stage(&self) -> Result<Box<dyn ToolCatalogStage>>;
+}
+
+/// Immutable exact-name Tool execution authority.
 #[async_trait]
 pub trait ToolRuntime: fmt::Debug + Send + Sync + 'static {
-    /// Registers one definition until the returned lease drops.
-    fn register(&self, registration: ToolRegistration) -> Result<ToolLease>;
     /// Returns ordered model-visible definitions of the active tools.
     fn definitions(&self) -> Vec<ToolDefinition>;
     /// Resolves and pins one call without starting external Tool code.
@@ -718,25 +763,83 @@ pub trait ToolRuntime: fmt::Debug + Send + Sync + 'static {
     fn commit(&self, identity: &ToolResultIdentity) -> Result<()>;
 }
 
-/// Nominal Local contract for [`ToolRuntime`].
+/// Nominal Local contract for [`ToolRegistrar`].
 #[derive(Debug)]
-pub struct ToolRuntimeContract;
+pub struct ToolRegistrarContract;
 
-impl LocalContract for ToolRuntimeContract {
-    const KEY: &'static str = "rsi.tools";
-    type Service = dyn ToolRuntime;
+impl LocalContract for ToolRegistrarContract {
+    const KEY: &'static str = "rsi.tools.registrar";
+    type Service = dyn ToolRegistrar;
+}
+
+/// Nominal Local contract for [`ToolCatalogProvider`].
+#[derive(Debug)]
+pub struct ToolCatalogProviderContract;
+
+impl LocalContract for ToolCatalogProviderContract {
+    const KEY: &'static str = "rsi.tools.catalog";
+    type Service = dyn ToolCatalogProvider;
+}
+
+/// Opaque atomic registration-batch lease.
+///
+/// Dropping or retiring withdraws the exact batch only while its catalog stage
+/// remains open. Once sealed, the immutable catalog owns the registered
+/// executors and calls, so releasing this contributor lease has no effect.
+pub struct ToolBatchLease {
+    withdraw: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
+}
+
+impl ToolBatchLease {
+    /// Creates a lease from one exact open-stage withdrawal action.
+    pub fn new<F>(withdraw: F) -> Self
+    where
+        F: FnOnce() + Send + Sync + 'static,
+    {
+        Self {
+            withdraw: Some(Box::new(withdraw)),
+        }
+    }
+
+    /// Withdraws the complete batch if its catalog stage is still open.
+    pub fn retire(mut self) -> Result<()> {
+        if let Some(withdraw) = self.withdraw.take() {
+            withdraw();
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ToolBatchLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ToolBatchLease(..)")
+    }
+}
+
+impl Drop for ToolBatchLease {
+    fn drop(&mut self) {
+        if let Some(withdraw) = self.withdraw.take() {
+            withdraw();
+        }
+    }
 }
 
 /// Opaque registration lease.
 pub struct ToolLease {
-    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
+    batch: Option<ToolBatchLease>,
 }
 
 impl ToolLease {
-    /// Creates a lease from one unregister action.
-    pub fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self {
-            cleanup: Some(Box::new(cleanup)),
+    /// Creates a single-definition lease with batch-equivalent withdrawal semantics.
+    pub fn new(batch: ToolBatchLease) -> Self {
+        Self { batch: Some(batch) }
+    }
+
+    /// Withdraws the definition if its catalog stage is still open.
+    pub fn retire(mut self) -> Result<()> {
+        match self.batch.take() {
+            Some(batch) => batch.retire(),
+            None => Ok(()),
         }
     }
 }
@@ -749,9 +852,7 @@ impl fmt::Debug for ToolLease {
 
 impl Drop for ToolLease {
     fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
+        drop(self.batch.take());
     }
 }
 
@@ -854,7 +955,12 @@ pub fn parse_tool_arguments(text: &str) -> Result<Value> {
     }
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let mut budget = JsonBudget { nodes: 0 };
-    let _checked = StrictValueSeed {
+    // This first pass preserves duplicate-key evidence that `Value` drops. Its
+    // result is deliberately not authoritative: with `arbitrary_precision`,
+    // serde_json presents non-i64/u64 numbers to custom visitors through a
+    // private tagged map. Reparse through serde_json's own `Value` visitor to
+    // preserve the exact Number, then validate that canonical representation.
+    let _duplicate_checked = StrictValueSeed {
         depth: 0,
         budget: &mut budget,
     }

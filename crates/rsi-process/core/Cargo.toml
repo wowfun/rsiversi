@@ -1,5 +1,5 @@
 [package]
-name = "rsi-tools-protocol"
+name = "rsi-process"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,9 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-rsi-media-protocol = { path = "../../rsi-media/protocol" }
-rsi-jobs = { path = "../../rsi-jobs/core" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
-tokio-util.workspace = true
 
 [lints]
 workspace = true

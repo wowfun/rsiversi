@@ -31,12 +31,17 @@ fn strict_tool_arguments_enforce_depth_and_trailing_data() {
 }
 
 #[test]
-fn strict_tool_arguments_never_rewrite_an_out_of_range_integer_as_an_object() {
+fn strict_tool_arguments_reject_out_of_range_integers_and_preserve_large_u64() {
     for text in ["18446744073709551616", "-9223372036854775809"] {
-        if let Ok(value) = parse_tool_arguments(text) {
-            assert!(value.is_number(), "rewrote {text} as {value}");
-        }
+        assert!(
+            parse_tool_arguments(text).is_err(),
+            "accepted out-of-range integer {text}"
+        );
     }
+    assert_eq!(
+        parse_tool_arguments("18446744073709551615").unwrap(),
+        json!(u64::MAX)
+    );
 }
 
 #[test]
@@ -61,6 +66,33 @@ fn durable_tool_result_deserialization_revalidates_text() {
         "is_error": false
     });
     assert!(serde_json::from_value::<ToolResult>(value).is_err());
+}
+
+#[test]
+fn durable_tool_result_rejects_noncanonical_enforcement_workspaces() {
+    for workspace in [
+        "relative/workspace",
+        "/workspace/../escape",
+        "/workspace/./child",
+    ] {
+        let value = json!({
+            "value": null,
+            "content": [],
+            "is_error": false,
+            "enforcement": [{
+                "requested": "danger-full-access",
+                "backend": {"kind": "unconfined"},
+                "workspace": workspace,
+                "filesystem": "unconfined",
+                "scratch": "host",
+                "network": "host"
+            }]
+        });
+        assert!(
+            serde_json::from_value::<ToolResult>(value).is_err(),
+            "accepted noncanonical durable workspace {workspace:?}"
+        );
+    }
 }
 
 #[test]

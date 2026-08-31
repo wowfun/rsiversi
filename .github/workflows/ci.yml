@@ -99,10 +99,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint Base services
-        run: cargo clippy --locked -p rsi-host -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-workspace --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p rsi-workspace --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
-        run: cargo test --locked -p rsi-host -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-workspace --all-targets
+        run: cargo test --locked -p rsi-host -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p rsi-workspace --all-targets
         timeout-minutes: 30
       - name: Exercise Tool JSON feature-unification boundary
         if: runner.os == 'Linux'

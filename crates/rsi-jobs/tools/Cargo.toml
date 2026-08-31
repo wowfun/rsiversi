@@ -1,0 +1,26 @@
+[package]
+name = "rsi-jobs-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-jobs = { path = "../core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rsi-jobs-local = { path = "../local" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-tools = { path = "../../rsi-tools/core" }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

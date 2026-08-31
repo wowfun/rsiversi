@@ -15,7 +15,7 @@ catalogs plus the Profile environment, then bootstraps exactly one Profile
 without owning product implementations or introducing a second runtime.
 
 Base capability families own Storage, Settings, Credentials, Media, Tools,
-Commands, Approval, Sandbox, Jobs, Workspace, Permission Presets, and derived
+Commands, Approval, Sandbox, Process, Shell, Jobs, Apply-Patch, Workspace, Permission Presets, and derived
 projections. Their protocols and deterministic test support are libraries;
 stateful providers, registries, schedulers, and policy implementations are
 ordinary `rsi-meta` plugins. `rsi-meta` and `rsi-host` do not know those

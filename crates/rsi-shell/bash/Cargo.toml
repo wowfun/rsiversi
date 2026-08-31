@@ -1,0 +1,29 @@
+[package]
+name = "rsi-shell-bash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-jobs = { path = "../../rsi-jobs/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rsi-jobs-local = { path = "../../rsi-jobs/local" }
+rsi-process-local = { path = "../../rsi-process/local" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-tools = { path = "../../rsi-tools/core" }
+tempfile.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true
