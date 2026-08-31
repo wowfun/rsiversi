@@ -20,6 +20,50 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn rhai_defines_accept_exact_i64_and_reject_every_inexact_json_number() {
+    let temp = tempfile::tempdir().unwrap();
+    for value in [
+        json!(i64::MIN),
+        json!(i64::MAX),
+        json!(9_007_199_254_740_993_i64),
+    ] {
+        let environment = ProfileEnvironment::new(
+            temp.path().join("config"),
+            temp.path().join("state"),
+            temp.path().join("cache"),
+            "test",
+            BTreeMap::from([("value".to_owned(), value.clone())]),
+        )
+        .unwrap();
+        environment.validate(&ProfileLimits::default()).unwrap();
+    }
+
+    for value in [
+        json!(0.1),
+        json!(0.5),
+        json!(-0.0),
+        serde_json::from_str::<Value>("1e2").unwrap(),
+        json!(u64::MAX),
+        json!({"nested": [1, 0.25]}),
+    ] {
+        let environment = ProfileEnvironment::new(
+            temp.path().join("config"),
+            temp.path().join("state"),
+            temp.path().join("cache"),
+            "test",
+            BTreeMap::from([("value".to_owned(), value.clone())]),
+        )
+        .unwrap();
+        let diagnostic = environment
+            .validate(&ProfileLimits::default())
+            .unwrap_err()
+            .to_string();
+        assert!(!diagnostic.contains(&value.to_string()));
+        assert!(diagnostic.contains("signed 64-bit integers"));
+    }
+}
+
+#[test]
 fn linked_program_root_and_launch_patches_execute_left_to_right() {
     let temp = tempfile::tempdir().unwrap();
     let linked = ProfileFragment::program(
@@ -459,6 +503,67 @@ fn source_digest_includes_fragment_identity_and_frozen_environment_paths() {
         .compile(&program("first"))
         .unwrap();
     assert_ne!(first.source_digest(), moved.source_digest());
+}
+
+#[test]
+fn source_digest_changes_when_a_frozen_define_value_changes_at_the_same_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = Profile::new([ProfileEntry::new("leaf", "test.leaf", Value::Null)]);
+    let program = ProfileProgram::from_profile(profile);
+    let compile = |value| {
+        let environment = ProfileEnvironment::new(
+            temp.path().join("config"),
+            temp.path().join("state"),
+            temp.path().join("cache"),
+            "linux-x86_64",
+            BTreeMap::from([
+                ("enabled".to_owned(), json!(true)),
+                ("value".to_owned(), json!(value)),
+            ]),
+        )
+        .unwrap();
+        ProfileCompiler::new(environment, ProfileLimits::default())
+            .compile(&program)
+            .unwrap()
+    };
+
+    let first = compile(2);
+    let changed = compile(3);
+
+    assert_ne!(first.source_digest(), changed.source_digest());
+}
+
+#[test]
+fn source_digest_changes_when_included_file_bytes_change_at_the_same_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let child = temp.path().join("child.toml");
+    let root = temp.path().join("root.toml");
+    std::fs::write(
+        &root,
+        "format = 1\n[[steps]]\nkind = \"include\"\npath = \"child.toml\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &child,
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"leaf\"\nplugin = \"test.leaf\"\nconfig = { value = 1 }\n",
+    )
+    .unwrap();
+    let compile = || {
+        ProfileCompiler::new(environment(temp.path()), ProfileLimits::default())
+            .compile(&ProfileProgram::from_file(&root))
+            .unwrap()
+    };
+    let first = compile();
+
+    std::fs::write(
+        &child,
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"leaf\"\nplugin = \"test.leaf\"\nconfig = { value = 2 }\n",
+    )
+    .unwrap();
+    let changed = compile();
+
+    assert_eq!(first.watch_paths(), changed.watch_paths());
+    assert_ne!(first.source_digest(), changed.source_digest());
 }
 
 #[test]

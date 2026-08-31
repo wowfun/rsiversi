@@ -1,4 +1,4 @@
-//! Immutable Agent Profile fragments for explicit product composition.
+//! Bounded Agent-preset catalog, authoring, and legacy Headless composition.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -8,6 +8,26 @@ use rsi_host::{ProfileEntry, ProfileFragment};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+mod authoring;
+mod catalog;
+mod source;
+
+fn clean_metadata_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty() && !value.chars().any(char::is_control)).then(|| value.to_owned())
+    })
+}
+
+pub use catalog::{
+    AgentPresetCatalog, AgentPresetCatalogConfig, AgentPresetDefaultStore, AgentPresetDocument,
+    AgentPresetHealth, AgentPresetRoot, AgentPresetRoster, AgentPresetRow, AgentPresetSource,
+    AgentPresetTrust, COMPOSITION_FILE, MAX_COPY_BYTES, MAX_COPY_DEPTH, MAX_COPY_ENTRIES,
+    MAX_METADATA_BYTES, MAX_ROOTS, MAX_ROSTER_ROWS, METADATA_FILE,
+};
+pub use rsi_agent_session_protocol::AgentPresetId;
+pub use source::{AgentPresetProfileCompiler, MAX_PROFILE_HEALTH_REASON_BYTES};
 
 /// Linked factory key for the `SQLite` Agent Store.
 pub const SQLITE_STORE_FACTORY: &str = "rsi.agent.store.sqlite";
@@ -100,6 +120,87 @@ pub fn headless_fragment(config: &HeadlessAgentConfig) -> ProfileFragment {
 /// Rejected preset input.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PresetError {
+    /// A configured root was relative, duplicated, or not a real directory.
+    #[error("invalid Agent preset root: {0}")]
+    InvalidRoot(String),
+    /// The configured root count exceeded the catalog bound.
+    #[error("Agent preset roots exceed the maximum of {maximum}")]
+    TooManyRoots {
+        /// Exact accepted maximum.
+        maximum: usize,
+    },
+    /// Discovery exceeded the bounded number of filesystem rows.
+    #[error("Agent preset roster exceeds the maximum of {maximum} rows")]
+    RosterCapacity {
+        /// Exact accepted maximum.
+        maximum: usize,
+    },
+    /// No configured root supplied the requested preset id.
+    #[error("Agent preset {id:?} was not found (available: {available:?})")]
+    PresetNotFound {
+        /// Requested id.
+        id: String,
+        /// Currently discoverable ids.
+        available: Vec<String>,
+    },
+    /// A discovered preset cannot supply a bounded composition document.
+    #[error("Agent preset {id:?} is broken: {reason}")]
+    BrokenPreset {
+        /// Broken id.
+        id: String,
+        /// Safe catalog diagnostic.
+        reason: String,
+    },
+    /// Authoring requires an explicit writable user root.
+    #[error("Agent preset authoring requires an explicit user root")]
+    NoUserRoot,
+    /// An entry already occupies this preset id in the catalog or user root.
+    #[error("Agent preset {id:?} already exists")]
+    PresetExists {
+        /// Occupied preset id.
+        id: String,
+    },
+    /// Only the explicit user root grants delete authority.
+    #[error("Agent preset {id:?} is read-only")]
+    ReadOnlyPreset {
+        /// Requested preset id.
+        id: String,
+    },
+    /// The deployment base cannot be removed through a user override operation.
+    #[error("Agent preset {id:?} is the deployment base default and cannot be deleted")]
+    BaseDefaultPreset {
+        /// Requested preset id.
+        id: String,
+    },
+    /// Default mutation requires an injected persistence adapter.
+    #[error("Agent preset default mutation requires a default-store adapter")]
+    DefaultStoreUnavailable,
+    /// Authoring encountered a symlink, special file, or otherwise unsafe row.
+    #[error("unsafe Agent preset entry {}: {reason}", path.display())]
+    UnsafeEntry {
+        /// Exact local entry path.
+        path: PathBuf,
+        /// Safe rejection reason.
+        reason: String,
+    },
+    /// One fixed authoring resource bound was exceeded.
+    #[error("Agent preset copy exceeds the {resource} maximum of {maximum}")]
+    CopyLimit {
+        /// Stable bounded resource name.
+        resource: &'static str,
+        /// Exact accepted maximum.
+        maximum: u64,
+    },
+    /// A filesystem operation failed.
+    #[error("Agent preset {operation} failed for {}: {message}", path.display())]
+    Io {
+        /// Stable operation label.
+        operation: &'static str,
+        /// Exact host-local path.
+        path: PathBuf,
+        /// Underlying safe diagnostic.
+        message: String,
+    },
     /// The durable root was not explicit absolute authority.
     #[error("Agent Store root must be an absolute path")]
     StoreRootNotAbsolute,

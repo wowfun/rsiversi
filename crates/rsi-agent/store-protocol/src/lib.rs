@@ -16,7 +16,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 6;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -27,6 +27,81 @@ pub const MAXIMUM_STORE_FACT_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES;
 pub const MAXIMUM_STORE_CAS_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum durable session identities in one enumeration page.
 pub const MAXIMUM_SESSIONS_PER_READ: usize = 256;
+/// Maximum opaque Context checkpoint bytes retained for one session.
+pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
+    rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
+
+/// Opaque bounded Context-owned checkpoint returned by the mechanical Store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredContextCheckpoint {
+    /// Immutable Session header fingerprint used for fail-soft invalidation.
+    pub header_fingerprint: String,
+    /// Exact durable session sequence folded into the checkpoint.
+    pub through_seq: u64,
+    /// SHA-256 chain of the exact canonical Fact prefix folded by Context.
+    pub fact_prefix_sha256: String,
+    /// Context-owned versioned bytes.
+    pub bytes: Arc<[u8]>,
+}
+
+impl StoredContextCheckpoint {
+    /// Revalidates mechanical fingerprint, cursor, and byte bounds.
+    pub fn validate(&self) -> Result<()> {
+        if self.header_fingerprint.len() != 64
+            || !self
+                .header_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(StoreError::Invalid(
+                "checkpoint header fingerprint must be lowercase SHA-256".into(),
+            ));
+        }
+        if self.fact_prefix_sha256.len() != 64
+            || !self
+                .fact_prefix_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(StoreError::Invalid(
+                "checkpoint Fact-prefix digest must be lowercase SHA-256".into(),
+            ));
+        }
+        if self.through_seq == 0
+            || self.bytes.is_empty()
+            || self.bytes.len() > MAXIMUM_CONTEXT_CHECKPOINT_BYTES
+        {
+            return Err(StoreError::Invalid(
+                "checkpoint cursor and bytes must be nonzero and bounded".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Durable-tail compare-and-set input for one opaque Context checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteContextCheckpoint {
+    /// Exact target session.
+    pub session_id: SessionId,
+    /// Durable tail observed after terminal durability.
+    pub expected_durable_seq: u64,
+    /// Opaque checkpoint to install.
+    pub checkpoint: StoredContextCheckpoint,
+}
+
+impl WriteContextCheckpoint {
+    /// Revalidates mechanical bounds before Store I/O.
+    pub fn validate(&self) -> Result<()> {
+        self.checkpoint.validate()?;
+        if self.checkpoint.through_seq != self.expected_durable_seq {
+            return Err(StoreError::Invalid(
+                "checkpoint cursor must equal its expected durable tail".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Atomic compare-and-append input.
 #[derive(Clone, Debug)]
@@ -349,6 +424,28 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after: Option<&SessionId>,
         limit: usize,
     ) -> Result<StoreSessionPage>;
+    /// Lists at most `limit` sessions containing at least one open turn after
+    /// an exclusive lexical cursor.
+    async fn list_open_sessions(
+        &self,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<StoreSessionPage>;
+    /// Reads one optional opaque Context checkpoint.
+    async fn read_context_checkpoint(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<StoredContextCheckpoint>> {
+        let _ = session_id;
+        Ok(None)
+    }
+    /// Installs a checkpoint only if the durable tail still matches exactly.
+    async fn write_context_checkpoint(&self, write: WriteContextCheckpoint) -> Result<()> {
+        write.validate()?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support Context checkpoints".into(),
+        ))
+    }
     /// Publishes bounded immutable bytes and returns their computed identity.
     async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef>;
     /// Reads and verifies one immutable object.
@@ -429,4 +526,26 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_batch_rejects_an_empty_fact_suffix() {
+        let batch = AppendBatch {
+            session_id: SessionId::new("session-empty-append").unwrap(),
+            expected_seq: 0,
+            header: None,
+            facts: Vec::new(),
+        };
+
+        assert_eq!(
+            batch.validate(),
+            Err(StoreError::Invalid(format!(
+                "Store append must contain 1..={MAXIMUM_STORE_BATCH_FACTS} Facts"
+            )))
+        );
+    }
 }

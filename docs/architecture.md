@@ -28,8 +28,13 @@ Meta adapter owns their lifecycle.
 
 [`rsi-agent`](../crates/rsi-agent/README.md) owns durable session, turn, and
 Store contracts, the session Kernel, context construction, execution, and
-Store adapters. Runtime-composed implementations are independent ordinary
-plugins; protocol and test-support packages are libraries.
+Store adapters. It also owns bounded preset discovery/authoring and immutable
+per-preset composition generations. Global providers create unpublished Tool
+catalog stages; Agent-only contribution plugins register through a write-only
+registrar, and one sealed catalog plus its hidden Scope form the exact
+generation pin retained by drafts, resident sessions, and delayed Tool work.
+Runtime-composed implementations are independent ordinary plugins; protocol
+and test-support packages are libraries.
 
 The standard [`rsi`](../crates/rsi/README.md) product owns Base composition and
 the selection and assembly of Headless composition. The library assembles

@@ -15,7 +15,7 @@ pub use host::{Host, RunningHost};
 pub use paths::HostPaths;
 pub use rsi_meta_profile::{
     Profile, ProfileControl, ProfileControlContract, ProfileEntry, ProfileFragment, ProfileGroup,
-    ProfileHealth, ProfileInstanceStatus, ProfileLimits, ProfileNode, ProfilePatch, ProfileProgram,
-    ProfileSnapshot, ProfileStatus, ProfileStep, ProfileTargetStatus, ReloadOutcome, SnapshotNode,
-    WatcherHealth,
+    ProfileHealth, ProfileInstanceState, ProfileInstanceStatus, ProfileLimits, ProfileNode,
+    ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus, ProfileStep, ProfileTargetStatus,
+    ReloadOutcome, SnapshotNode, WatcherHealth,
 };

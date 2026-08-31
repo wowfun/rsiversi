@@ -4,12 +4,25 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod agent_preset;
 mod composition;
 mod run;
 mod settings;
 
-pub use composition::{StandardComposition, capture_standard_environment};
-pub use run::{OutputMode, RunEvent, RunImageOptions, RunOptions, RunReport, SessionSelection};
+pub use agent_preset::{
+    AGENT_PRESET_SETTINGS_NAMESPACE, AgentPresetManager, DEFAULT_AGENT_PRESET_ID,
+    USER_AGENT_PRESET_DIRECTORY, user_agent_preset_root,
+};
+pub use composition::{
+    StandardCodingTools, StandardComposition, capture_standard_environment,
+    standard_agent_preset_root,
+};
+pub use rsi_agent_presets::{AgentPresetSource, AgentPresetTrust};
+pub use rsi_apply_patch::maybe_run_apply_patch_helper;
+pub use rsi_shell_bash::scrub_child_environment;
+pub use run::{
+    OutputMode, RunCompletion, RunEvent, RunImageOptions, RunOptions, RunReport, SessionSelection,
+};
 pub use settings::{AgentSettings, AgentSettingsContract};
 
 use rsi_host::{HostPaths, RunningHost};
@@ -44,37 +57,6 @@ impl RunningRsi {
     /// Returns the frozen Host paths.
     pub const fn paths(&self) -> &HostPaths {
         self.host.paths()
-    }
-
-    /// Submits trusted unscoped process-local work to the standard Jobs scheduler.
-    ///
-    /// Unscoped work is independent of Agent turn finalization and is cancelled
-    /// only through its handle or Jobs generation retirement.
-    pub fn submit_job(&self, spec: rsi_jobs::JobSpec) -> Result<rsi_jobs::JobHandle> {
-        self.host
-            .lookup_local::<rsi_jobs::JobsContract>()
-            .ok_or_else(|| RsiError::Run("Jobs scheduler is unavailable".into()))?
-            .submit(spec)
-            .map_err(|error| RsiError::Run(error.to_string()))
-    }
-
-    /// Submits trusted process-local work owned by one exact Agent turn.
-    ///
-    /// Headless finalization cancels and boundedly joins only jobs bearing the
-    /// matching session and turn identities before that turn becomes terminal.
-    pub fn submit_turn_job(
-        &self,
-        session_id: &rsi_agent_session_protocol::SessionId,
-        turn_id: &rsi_agent_session_protocol::TurnId,
-        spec: rsi_jobs::JobSpec,
-    ) -> Result<rsi_jobs::JobHandle> {
-        let scope = composition::agent_turn_job_scope(session_id, turn_id)
-            .map_err(|error| RsiError::Run(error.to_string()))?;
-        self.host
-            .lookup_local::<rsi_jobs::JobsContract>()
-            .ok_or_else(|| RsiError::Run("Jobs scheduler is unavailable".into()))?
-            .submit_scoped(scope, spec)
-            .map_err(|error| RsiError::Run(error.to_string()))
     }
 
     /// Shuts down all Profile Fibers and process-local Jobs deterministically.

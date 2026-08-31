@@ -6,8 +6,8 @@ use super::{
 use async_trait::async_trait;
 use rsi_meta::{
     ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberHandle, FiberState, LocalContract,
-    MetaError, PluginFactory, PluginId, PreparedActivation, PreparedPlugin, ResolvedFactory,
-    Runtime, UpdateMode,
+    MetaError, PendingReport, PluginFactory, PluginId, PreparedActivation, PreparedPlugin,
+    ResolvedFactory, Runtime, UpdateMode,
 };
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
+use tokio_util::sync::CancellationToken;
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);
 const FULL_CONTENT_AUDIT_TICKS: usize = 50;
@@ -90,7 +91,24 @@ impl ProfileTargetStatus {
 pub struct ProfileInstanceStatus {
     id: rsi_meta::InstanceId,
     factory: FactoryIdentity,
-    state: FiberState,
+    state: ProfileInstanceState,
+}
+
+/// Redacted lifecycle category for one Profile-owned child Fiber.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProfileInstanceState {
+    /// Dependency convergence has not produced an activatable snapshot.
+    Pending(PendingReport),
+    /// One generation is staging owned resources.
+    Loading,
+    /// The staged generation is published.
+    Active,
+    /// Activation or retirement failed; the plugin diagnostic is not exposed.
+    Failed,
+    /// Publications are withdrawn and owned resources are retiring.
+    Unloading,
+    /// Final teardown completed unexpectedly while Profile still desired the child.
+    Disposed,
 }
 
 impl ProfileInstanceStatus {
@@ -104,8 +122,8 @@ impl ProfileInstanceStatus {
         &self.factory
     }
 
-    /// Current Meta lifecycle observation.
-    pub const fn state(&self) -> &FiberState {
+    /// Current redacted lifecycle observation.
+    pub const fn state(&self) -> &ProfileInstanceState {
         &self.state
     }
 }
@@ -357,6 +375,260 @@ struct ResolvedTarget {
     leaves: Vec<ResolvedLeaf>,
 }
 
+/// Opaque one-shot plan for one static Profile generation.
+///
+/// The plan retains immutable resolved factories without exposing the resolver
+/// or executable leaf details. It installs no source watcher or control plane.
+pub struct ProfileGenerationPlan {
+    target: ResolvedTarget,
+    resolver: Arc<dyn ProfileResolver>,
+}
+
+impl fmt::Debug for ProfileGenerationPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProfileGenerationPlan")
+            .field("source_digest", &self.target.candidate.source_digest())
+            .field("instances", &self.target.leaves.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProfileGenerationPlan {
+    /// Resolves every enabled candidate leaf against one immutable resolver.
+    ///
+    /// This operation does not prepare or apply a plugin and performs no
+    /// Runtime mutation.
+    pub fn resolve(
+        candidate: ProfileCandidate,
+        resolver: Arc<dyn ProfileResolver>,
+    ) -> Result<Self> {
+        let target = resolve_target(resolver.as_ref(), candidate)?;
+        Ok(Self { target, resolver })
+    }
+
+    /// Returns the host-platform-scoped digest of the compiled source snapshot.
+    pub fn source_digest(&self) -> &str {
+        self.target.candidate.source_digest()
+    }
+
+    /// Returns the canonical required file sources captured by compilation.
+    pub fn watch_paths(&self) -> &[PathBuf] {
+        self.target.candidate.watch_paths()
+    }
+
+    /// Activates this plan once below `parent` and returns its owning wrapper.
+    ///
+    /// Every resolved leaf must become Active. Preparation failure leaves no
+    /// Fiber behind; after wrapper creation, failure or cooperative
+    /// cancellation disposes it before this method returns. The returned
+    /// wrapper rejects reconfiguration; replacement requires a new plan.
+    pub async fn activate(
+        self,
+        parent: &Context,
+        cancellation: &CancellationToken,
+    ) -> Result<FiberHandle> {
+        if cancellation.is_cancelled() {
+            return Err(ProfileError::Meta(MetaError::Cancelled));
+        }
+        let Self { target, resolver } = self;
+        let prepared = prepare_generation(target, parent.runtime(), cancellation).await?;
+        let source_digest = prepared.target.candidate.source_digest().to_owned();
+        let first_instance = prepared
+            .target
+            .leaves
+            .first()
+            .map(|leaf| leaf.candidate.id().clone());
+        let wrapper_context = Arc::new(Mutex::new(None));
+        let factory = Arc::new(ProfileGenerationFactory {
+            context: Arc::clone(&wrapper_context),
+            activated: AtomicBool::new(false),
+        });
+        let handle = parent
+            .apply(
+                ResolvedFactory::linked(
+                    "rsi.meta.profile.generation",
+                    source_digest,
+                    UpdateMode::RestartRequired,
+                    factory,
+                ),
+                ConfigValue::Null,
+            )
+            .await?;
+        if !matches!(handle.snapshot().state, FiberState::Active) {
+            let _cleanup = handle.dispose().await;
+            return Err(first_instance.map_or_else(
+                || ProfileError::InvalidProgram("static Profile generation failed".to_owned()),
+                |instance| ProfileError::Application { instance },
+            ));
+        }
+        let wrapper_context = wrapper_context
+            .lock()
+            .ok()
+            .and_then(|mut context| context.take());
+        let Some(wrapper_context) = wrapper_context else {
+            return rollback_generation(
+                handle,
+                ProfileError::InvalidProgram(
+                    "static Profile generation did not capture its Context".to_owned(),
+                ),
+            )
+            .await;
+        };
+        mount_generation(
+            prepared,
+            resolver.as_ref(),
+            &wrapper_context,
+            handle,
+            cancellation,
+        )
+        .await
+    }
+}
+
+async fn prepare_generation(
+    target: ResolvedTarget,
+    runtime: &Runtime,
+    cancellation: &CancellationToken,
+) -> Result<PreparedTarget> {
+    let mut prepared = Vec::with_capacity(target.leaves.len());
+    for leaf in &target.leaves {
+        if cancellation.is_cancelled() {
+            return Err(ProfileError::Meta(MetaError::Cancelled));
+        }
+        let instance = leaf.candidate.id().clone();
+        let runtime = runtime.clone();
+        let factory = leaf.factory.clone();
+        let config = leaf.candidate.config().clone();
+        let mut task = tokio::task::spawn_blocking(move || runtime.prepare(factory, config));
+        let joined = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                let _completion = task.await;
+                return Err(ProfileError::Meta(MetaError::Cancelled));
+            }
+            joined = &mut task => joined,
+        };
+        let proof = joined
+            .map_err(|_| ProfileError::Preparation {
+                instance: instance.clone(),
+            })?
+            .map_err(|_| ProfileError::Preparation { instance })?;
+        prepared.push(Some(proof));
+    }
+    if cancellation.is_cancelled() {
+        return Err(ProfileError::Meta(MetaError::Cancelled));
+    }
+    Ok(PreparedTarget { target, prepared })
+}
+
+async fn mount_generation(
+    prepared: PreparedTarget,
+    resolver: &dyn ProfileResolver,
+    wrapper_context: &Context,
+    handle: FiberHandle,
+    cancellation: &CancellationToken,
+) -> Result<FiberHandle> {
+    if cancellation.is_cancelled() {
+        return rollback_generation(handle, ProfileError::Meta(MetaError::Cancelled)).await;
+    }
+    let candidate = match bind_target(prepared, wrapper_context, resolver) {
+        Ok(candidate) => candidate,
+        Err(error) => return rollback_generation(handle, error).await,
+    };
+    for (index, mut bound) in candidate.leaves.into_iter().enumerate() {
+        let leaf_target = candidate.target.leaves[index].clone();
+        if cancellation.is_cancelled() {
+            return rollback_generation(handle, ProfileError::Meta(MetaError::Cancelled)).await;
+        }
+        let outcome = {
+            let proof = bound
+                .prepared
+                .take()
+                .expect("static Profile generation retains every preparation proof");
+            let application = bound.context.apply_prepared(proof);
+            tokio::pin!(application);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                result = &mut application => Some(result),
+            }
+        };
+        let leaf = match outcome {
+            None => {
+                return rollback_generation(handle, ProfileError::Meta(MetaError::Cancelled)).await;
+            }
+            Some(Ok(leaf)) => leaf,
+            Some(Err(_)) => {
+                return rollback_generation(
+                    handle,
+                    ProfileError::Application {
+                        instance: leaf_target.candidate.id().clone(),
+                    },
+                )
+                .await;
+            }
+        };
+        let error = match leaf.snapshot().state {
+            FiberState::Active => None,
+            FiberState::Pending(_) => Some(ProfileError::GenerationPending {
+                instance: leaf_target.candidate.id().clone(),
+            }),
+            FiberState::Loading
+            | FiberState::Failed(_)
+            | FiberState::Unloading
+            | FiberState::Disposed => Some(ProfileError::Application {
+                instance: leaf_target.candidate.id().clone(),
+            }),
+        };
+        if let Some(error) = error {
+            return rollback_generation(handle, error).await;
+        }
+    }
+    if cancellation.is_cancelled() {
+        return rollback_generation(handle, ProfileError::Meta(MetaError::Cancelled)).await;
+    }
+    Ok(handle)
+}
+
+async fn rollback_generation(handle: FiberHandle, error: ProfileError) -> Result<FiberHandle> {
+    let _cleanup = handle.dispose().await;
+    Err(error)
+}
+
+#[derive(Debug)]
+struct ProfileGenerationFactory {
+    context: Arc<Mutex<Option<Context>>>,
+    activated: AtomicBool,
+}
+
+#[async_trait]
+impl PluginFactory for ProfileGenerationFactory {
+    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        if !desired.is_null() {
+            return Err(MetaError::InvalidConfig(
+                "static Profile generation configuration must be null".to_owned(),
+            ));
+        }
+        Ok(PreparedActivation::new(ConfigValue::Null))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        if self.activated.swap(true, Ordering::AcqRel) {
+            return Err(MetaError::Activation(
+                "static Profile generation is single-use".to_owned(),
+            ));
+        }
+        let Ok(mut context) = self.context.lock() else {
+            return Err(MetaError::Activation(
+                "static Profile generation Context is unavailable".to_owned(),
+            ));
+        };
+        *context = Some(plan.context().clone());
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct PreparedTarget {
     target: ResolvedTarget,
@@ -555,6 +827,7 @@ struct Controller {
     state: Mutex<Option<ControllerState>>,
     reload_lock: AsyncMutex<()>,
     status_tx: watch::Sender<ProfileStatus>,
+    membership_changed: Notify,
     dirty: AtomicBool,
     dirty_notify: Notify,
 }
@@ -598,6 +871,7 @@ impl Controller {
             state: Mutex::new(None),
             reload_lock: AsyncMutex::new(()),
             status_tx,
+            membership_changed: Notify::new(),
             dirty: AtomicBool::new(false),
             dirty_notify: Notify::new(),
         }
@@ -834,7 +1108,7 @@ impl Controller {
         let retained = retained_prefix(active, &candidate.target.leaves);
         while active.len() > retained {
             let removed = active.pop().expect("active suffix exists");
-            self.publish_active(active);
+            self.remove_active_tail(&removed);
             let report = removed.handle.dispose().await;
             if !report.is_clean() {
                 return Err(format!(
@@ -876,12 +1150,11 @@ impl Controller {
                 })?;
             let state = handle.snapshot().state;
             active.push(ActiveLeaf { resolved, handle });
-            self.publish_active(active);
-            if matches!(state, FiberState::Failed(_) | FiberState::Disposed) {
-                return Err(format!(
-                    "Profile instance `{}` settled in a failed state",
-                    candidate.target.leaves[index].candidate.id()
-                ));
+            self.append_active_tail(active.last().expect("active leaf was appended"));
+            if let Some(diagnostic) =
+                settled_failure(candidate.target.leaves[index].candidate.id(), &state)
+            {
+                return Err(diagnostic);
             }
         }
         Ok(candidate.target)
@@ -931,17 +1204,21 @@ impl Controller {
         active: Vec<ActiveLeaf>,
         watch_plan: WatchPlan,
     ) -> ProfileStatus {
-        let mut state = self.state.lock().expect("Profile state poisoned");
-        let state = state.as_mut().expect("checked active state");
-        state.revision = revision;
-        state.health = ProfileHealth::Converged;
-        state.target = target.clone();
-        state.converged_target = target;
-        state.active = active;
-        state.watch_plan = watch_plan;
-        state.watcher = state.watch_plan.health();
-        state.diagnostic = None;
-        self.publish_locked_state(state)
+        let status = {
+            let mut state = self.state.lock().expect("Profile state poisoned");
+            let state = state.as_mut().expect("checked active state");
+            state.revision = revision;
+            state.health = ProfileHealth::Converged;
+            state.target = target.clone();
+            state.converged_target = target;
+            state.active = active;
+            state.watch_plan = watch_plan;
+            state.watcher = state.watch_plan.health();
+            state.diagnostic = None;
+            self.publish_locked_state(state)
+        };
+        self.membership_changed.notify_one();
+        status
     }
 
     fn complete_degraded(
@@ -952,23 +1229,37 @@ impl Controller {
         diagnostic: String,
         watch_plan: WatchPlan,
     ) -> ProfileStatus {
-        let mut state = self.state.lock().expect("Profile state poisoned");
-        let state = state.as_mut().expect("checked active state");
-        state.revision = revision;
-        state.health = ProfileHealth::Degraded;
-        state.target = target;
-        state.active = active;
-        state.diagnostic = Some(diagnostic);
-        state.watch_plan = watch_plan;
-        state.watcher = state.watch_plan.health();
-        self.publish_locked_state(state)
+        let status = {
+            let mut state = self.state.lock().expect("Profile state poisoned");
+            let state = state.as_mut().expect("checked active state");
+            state.revision = revision;
+            state.health = ProfileHealth::Degraded;
+            state.target = target;
+            state.active = active;
+            state.diagnostic = Some(diagnostic);
+            state.watch_plan = watch_plan;
+            state.watcher = state.watch_plan.health();
+            self.publish_locked_state(state)
+        };
+        self.membership_changed.notify_one();
+        status
     }
 
-    fn publish_active(&self, active: &[ActiveLeaf]) {
+    fn remove_active_tail(&self, removed: &ActiveLeaf) {
         let mut state = self.state.lock().expect("Profile state poisoned");
         if let Some(state) = state.as_mut() {
-            state.active = active.to_vec();
-            self.publish_locked_state(state);
+            let mirrored = state.active.pop().expect("active graph suffix exists");
+            debug_assert_eq!(
+                mirrored.resolved.candidate.id(),
+                removed.resolved.candidate.id()
+            );
+        }
+    }
+
+    fn append_active_tail(&self, added: &ActiveLeaf) {
+        let mut state = self.state.lock().expect("Profile state poisoned");
+        if let Some(state) = state.as_mut() {
+            state.active.push(added.clone());
         }
     }
 
@@ -992,18 +1283,23 @@ impl Controller {
 
     fn publish_watcher_error(&self, baseline: &WatchPlan) -> bool {
         const DIAGNOSTIC: &str = "a required watched Profile source is unavailable";
+        let diagnostic = bound_message(
+            DIAGNOSTIC.to_owned(),
+            self.compiler.limits.maximum_diagnostic_bytes,
+        );
         let mut state = self.state.lock().expect("Profile state poisoned");
         if let Some(state) = state.as_mut()
             && state.health != ProfileHealth::Stopped
+            && state.health != ProfileHealth::Converging
             && &state.watch_plan == baseline
         {
             if state.watcher == WatcherHealth::Faulted
-                && state.diagnostic.as_deref() == Some(DIAGNOSTIC)
+                && state.diagnostic.as_deref() == Some(diagnostic.as_str())
             {
                 return false;
             }
             state.watcher = WatcherHealth::Faulted;
-            state.diagnostic = Some(DIAGNOSTIC.to_owned());
+            state.diagnostic = Some(diagnostic);
             self.publish_locked_state(state);
             return true;
         }
@@ -1015,15 +1311,21 @@ impl Controller {
         let Some(state) = state.as_mut() else {
             return;
         };
-        let failed = state.active.iter().any(|entry| {
-            matches!(
-                entry.handle.snapshot().state,
-                FiberState::Failed(_) | FiberState::Disposed
-            )
+        if state.health == ProfileHealth::Converging {
+            return;
+        }
+        let failure = state.active.iter().find_map(|entry| {
+            let snapshot = entry.handle.snapshot();
+            settled_failure(entry.resolved.candidate.id(), &snapshot.state)
         });
-        if failed && state.health == ProfileHealth::Converged {
+        if let Some(diagnostic) = failure
+            && state.health == ProfileHealth::Converged
+        {
             state.health = ProfileHealth::Degraded;
-            state.diagnostic = Some("one desired Profile instance failed after commit".to_owned());
+            state.diagnostic = Some(bound_message(
+                diagnostic,
+                self.compiler.limits.maximum_diagnostic_bytes,
+            ));
         }
         let status = status_from_state(state);
         if *self.status_tx.borrow() != status {
@@ -1149,15 +1451,70 @@ impl Controller {
 
     async fn refresh_loop(self: &Arc<Self>, mut stop: watch::Receiver<bool>) {
         loop {
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        return;
+            let handles = self
+                .state
+                .lock()
+                .expect("Profile state poisoned")
+                .as_ref()
+                .map(|state| {
+                    state
+                        .active
+                        .iter()
+                        .map(|entry| entry.handle.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let receivers = handles
+                .into_iter()
+                .map(|handle| handle.subscribe())
+                .collect::<Vec<_>>();
+            self.refresh_observed();
+            let mut subscriptions = tokio::task::JoinSet::new();
+            let child_changed = Arc::new(Notify::new());
+            for mut receiver in receivers {
+                let child_changed = Arc::clone(&child_changed);
+                subscriptions.spawn(async move {
+                    while receiver.changed().await.is_ok() {
+                        child_changed.notify_one();
+                    }
+                    child_changed.notify_one();
+                });
+            }
+            loop {
+                if subscriptions.is_empty() {
+                    tokio::select! {
+                        stop_change = stop.changed() => {
+                            if stop_change.is_err() || *stop.borrow() {
+                                return;
+                            }
+                        }
+                        () = self.membership_changed.notified() => break,
+                        () = child_changed.notified() => self.refresh_observed(),
+                    }
+                } else {
+                    tokio::select! {
+                        stop_change = stop.changed() => {
+                            if stop_change.is_err() || *stop.borrow() {
+                                subscriptions.abort_all();
+                                return;
+                            }
+                        }
+                        () = self.membership_changed.notified() => break,
+                        () = child_changed.notified() => self.refresh_observed(),
+                        _ = subscriptions.join_next() => self.refresh_observed(),
                     }
                 }
-                () = tokio::time::sleep(WATCH_INTERVAL) => self.refresh_observed(),
             }
+            subscriptions.abort_all();
         }
+    }
+
+    fn has_watched_sources(&self) -> bool {
+        self.state
+            .lock()
+            .expect("Profile state poisoned")
+            .as_ref()
+            .is_some_and(|state| !state.watch_plan.fingerprints.is_empty())
     }
 
     async fn stop(&self) {
@@ -1299,23 +1656,24 @@ impl PluginFactory for ProfileFactory {
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?;
 
-        let stop = tasks.stop.subscribe();
-        let handles = vec![
-            tokio::spawn({
+        let mut handles = Vec::new();
+        if control.has_watched_sources() {
+            handles.push(tokio::spawn({
                 let control = Arc::clone(&control);
-                let stop = stop.clone();
+                let stop = tasks.stop.subscribe();
                 async move { control.poll_sources(stop).await }
-            }),
-            tokio::spawn({
+            }));
+            handles.push(tokio::spawn({
                 let control = Arc::clone(&control);
-                let stop = stop.clone();
+                let stop = tasks.stop.subscribe();
                 async move { control.drive_dirty(stop).await }
-            }),
-            tokio::spawn({
-                let control = Arc::clone(&control);
-                async move { control.refresh_loop(stop).await }
-            }),
-        ];
+            }));
+        }
+        handles.push(tokio::spawn({
+            let control = Arc::clone(&control);
+            let stop = tasks.stop.subscribe();
+            async move { control.refresh_loop(stop).await }
+        }));
         *tasks.handles.lock().expect("Profile task owner poisoned") = Some(handles);
         Ok(())
     }
@@ -1359,11 +1717,10 @@ async fn apply_initial(
             })?;
         let state = handle.snapshot().state;
         active.push(ActiveLeaf { resolved, handle });
-        if matches!(state, FiberState::Failed(_) | FiberState::Disposed) {
-            return Err(format!(
-                "Profile instance `{}` settled in a failed state",
-                candidate.target.leaves[index].candidate.id()
-            ));
+        if let Some(diagnostic) =
+            settled_failure(candidate.target.leaves[index].candidate.id(), &state)
+        {
+            return Err(diagnostic);
         }
     }
     Ok(candidate.target)
@@ -1506,6 +1863,38 @@ fn target_status(target: &ResolvedTarget) -> Vec<ProfileTargetStatus> {
         .collect()
 }
 
+fn settled_failure(instance: &rsi_meta::InstanceId, state: &FiberState) -> Option<String> {
+    match state {
+        FiberState::Failed(_) => Some(
+            ProfileError::Application {
+                instance: instance.clone(),
+            }
+            .to_string(),
+        ),
+        FiberState::Disposed => Some(
+            ProfileError::UnexpectedDisposal {
+                instance: instance.clone(),
+            }
+            .to_string(),
+        ),
+        FiberState::Pending(_)
+        | FiberState::Loading
+        | FiberState::Active
+        | FiberState::Unloading => None,
+    }
+}
+
+fn redacted_instance_state(state: FiberState) -> ProfileInstanceState {
+    match state {
+        FiberState::Pending(report) => ProfileInstanceState::Pending(report),
+        FiberState::Loading => ProfileInstanceState::Loading,
+        FiberState::Active => ProfileInstanceState::Active,
+        FiberState::Failed(_) => ProfileInstanceState::Failed,
+        FiberState::Unloading => ProfileInstanceState::Unloading,
+        FiberState::Disposed => ProfileInstanceState::Disposed,
+    }
+}
+
 fn status_from_state(state: &ControllerState) -> ProfileStatus {
     ProfileStatus {
         revision: state.revision,
@@ -1521,7 +1910,7 @@ fn status_from_state(state: &ControllerState) -> ProfileStatus {
                 ProfileInstanceStatus {
                     id: entry.resolved.candidate.id().clone(),
                     factory: snapshot.factory,
-                    state: snapshot.state,
+                    state: redacted_instance_state(snapshot.state),
                 }
             })
             .collect(),
@@ -1558,5 +1947,25 @@ fn stopped_status() -> ProfileStatus {
         target: Vec::new(),
         observed: Vec::new(),
         diagnostic: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProfileInstanceState, redacted_instance_state, settled_failure};
+    use rsi_meta::{FiberState, InstanceId};
+
+    #[test]
+    fn failed_runtime_state_is_projected_without_its_diagnostic() {
+        let instance = InstanceId::new("child");
+        let runtime_state = FiberState::Failed("secret plugin diagnostic".to_owned());
+
+        let state = redacted_instance_state(runtime_state.clone());
+        let diagnostic = settled_failure(&instance, &runtime_state).unwrap();
+
+        assert_eq!(state, ProfileInstanceState::Failed);
+        assert!(!format!("{state:?}").contains("secret"));
+        assert!(!diagnostic.contains("secret"));
+        assert_eq!(diagnostic, "applying Profile instance `child` failed");
     }
 }

@@ -1,0 +1,18 @@
+format = 1
+
+[[steps]]
+kind = "plugin"
+id = "bash"
+plugin = "rsi.shell.bash.tool"
+enabled_rhai = "defines.standard_linux_coding_tools"
+
+[[steps]]
+kind = "plugin"
+id = "jobs"
+plugin = "rsi.jobs.tools"
+
+[[steps]]
+kind = "plugin"
+id = "apply-patch"
+plugin = "rsi.apply-patch"
+enabled_rhai = "defines.standard_linux_coding_tools"

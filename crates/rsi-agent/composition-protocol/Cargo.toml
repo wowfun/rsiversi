@@ -1,0 +1,24 @@
+[package]
+name = "rsi-agent-composition-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

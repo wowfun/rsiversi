@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod control;
 
 pub use control::{
-    ProfileBootstrap, ProfileControl, ProfileControlContract, ProfileHealth, ProfileInstanceStatus,
-    ProfileResolver, ProfileSnapshot, ProfileStatus, ProfileTargetStatus, ReloadOutcome,
-    SnapshotNode, WatcherHealth,
+    ProfileBootstrap, ProfileControl, ProfileControlContract, ProfileGenerationPlan, ProfileHealth,
+    ProfileInstanceState, ProfileInstanceStatus, ProfileResolver, ProfileSnapshot, ProfileStatus,
+    ProfileTargetStatus, ReloadOutcome, SnapshotNode, WatcherHealth,
 };
 
 const PROFILE_FORMAT: u32 = 1;
@@ -163,6 +163,7 @@ impl ProfileEnvironment {
                 .into_iter()
                 .collect::<serde_json::Map<_, _>>(),
         );
+        validate_define_numbers(&value)?;
         bounded_json_bytes(&value, limits.maximum_config_bytes)?;
         Ok(())
     }
@@ -685,6 +686,18 @@ pub enum ProfileError {
     /// Runtime convergence failed; plugin diagnostics are redacted.
     #[error("applying Profile instance `{instance}` failed")]
     Application {
+        /// Stable instance ID.
+        instance: InstanceId,
+    },
+    /// A static generation could not activate because one leaf remained Pending.
+    #[error("Profile generation instance `{instance}` remained Pending")]
+    GenerationPending {
+        /// Stable instance ID.
+        instance: InstanceId,
+    },
+    /// A desired child retired without a Profile convergence transaction.
+    #[error("Profile instance `{instance}` was disposed unexpectedly")]
+    UnexpectedDisposal {
         /// Stable instance ID.
         instance: InstanceId,
     },
@@ -1483,7 +1496,7 @@ impl<'a> CompileState<'a> {
         scope.push("platform", self.compiler.environment.platform.clone());
         scope.push(
             "defines",
-            json_object_to_map(&self.compiler.environment.defines),
+            json_object_to_map(&self.compiler.environment.defines)?,
         );
         self.expression_engine
             .eval_expression_with_scope::<T>(&mut scope, source)
@@ -1988,34 +2001,53 @@ fn validate_json_depth(value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn json_object_to_map(values: &BTreeMap<String, Value>) -> Map {
+fn validate_define_numbers(value: &Value) -> Result<()> {
+    let mut stack = vec![value];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Number(number) if number.as_i64().is_none() => {
+                return Err(ProfileError::InvalidEnvironment(
+                    "Rhai defines accept only signed 64-bit integers as JSON numbers".to_owned(),
+                ));
+            }
+            Value::Array(values) => stack.extend(values),
+            Value::Object(values) => stack.extend(values.values()),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn json_object_to_map(values: &BTreeMap<String, Value>) -> Result<Map> {
     values
         .iter()
         .map(|(key, value)| (key.as_str().into(), json_to_dynamic(value)))
+        .map(|(key, value)| value.map(|value| (key, value)))
         .collect()
 }
 
-fn json_to_dynamic(value: &Value) -> Dynamic {
-    match value {
+fn json_to_dynamic(value: &Value) -> Result<Dynamic> {
+    Ok(match value {
         Value::Null => Dynamic::UNIT,
         Value::Bool(value) => (*value).into(),
-        Value::Number(value) => value
-            .as_i64()
-            .map(Dynamic::from_int)
-            .or_else(|| value.as_f64().map(Dynamic::from_float))
-            .unwrap_or(Dynamic::UNIT),
+        Value::Number(value) => Dynamic::from_int(value.as_i64().ok_or_else(|| {
+            ProfileError::InvalidEnvironment(
+                "Rhai defines accept only signed 64-bit integers as JSON numbers".to_owned(),
+            )
+        })?),
         Value::String(value) => value.clone().into(),
         Value::Array(values) => values
             .iter()
             .map(json_to_dynamic)
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>>>()?
             .into(),
         Value::Object(values) => values
             .iter()
             .map(|(key, value)| (key.as_str().into(), json_to_dynamic(value)))
-            .collect::<Map>()
+            .map(|(key, value)| value.map(|value| (key, value)))
+            .collect::<Result<Map>>()?
             .into(),
-    }
+    })
 }
 
 fn absolute_path(kind: &'static str, path: PathBuf) -> Result<PathBuf> {

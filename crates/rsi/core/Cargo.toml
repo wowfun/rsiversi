@@ -18,7 +18,10 @@ path = "src/main.rs"
 async-trait.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+hex.workspace = true
 rsi-agent-executor = { path = "../../rsi-agent/executor" }
+rsi-agent-composition = { path = "../../rsi-agent/composition" }
+rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
 rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
 rsi-agent-presets = { path = "../../rsi-agent/presets" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
@@ -34,6 +37,7 @@ rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-ai-provider = { path = "../../rsi-ai/provider" }
 rsi-approval = { path = "../../rsi-approval/core" }
 rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-apply-patch = { path = "../../rsi-apply-patch/core" }
 rsi-commands = { path = "../../rsi-commands/core" }
 rsi-commands-protocol = { path = "../../rsi-commands/protocol" }
 rsi-credentials-local = { path = "../../rsi-credentials/local" }
@@ -41,17 +45,23 @@ rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-host = { path = "../../rsi-host/core" }
 rsi-jobs = { path = "../../rsi-jobs/core" }
 rsi-jobs-local = { path = "../../rsi-jobs/local" }
+rsi-jobs-tools = { path = "../../rsi-jobs/tools" }
 rsi-media = { path = "../../rsi-media/core" }
 rsi-media-local = { path = "../../rsi-media/local" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
+rsi-meta-profile = { path = "../../rsi-meta/profile" }
+rsi-meta-scope = { path = "../../rsi-meta/scope" }
 rsi-permission-presets = { path = "../../rsi-permission-presets/core" }
 rsi-projection = { path = "../../rsi-projection/core" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-settings-local = { path = "../../rsi-settings/local" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
+rsi-shell-bash = { path = "../../rsi-shell/bash" }
 rsi-storage = { path = "../../rsi-storage/core" }
 rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
@@ -60,6 +70,7 @@ rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-workspace = { path = "../../rsi-workspace/core" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -67,6 +78,9 @@ tokio-util.workspace = true
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [lints]
 workspace = true

@@ -59,7 +59,33 @@ publishes the candidate source digest and `RestartRequired` status without
 changing the observed graph. Replayable changes converge in the existing Meta
 graph. Failure retires candidate generations and reconstructs the prior target;
 failed compensation publishes `Degraded` with the observed graph and remains
-retryable. This is bounded convergence, not atomic shadow-Runtime replacement.
+retryable. During convergence the controller mirrors each membership delta
+internally but publishes the complete observed graph only at attempt
+boundaries, avoiding a full graph clone after every leaf. This is bounded
+convergence, not atomic shadow-Runtime replacement.
+
+## Static generations
+
+`ProfileGenerationPlan` is the opaque, one-shot path for mounting one compiled
+Profile candidate below a caller-owned Context without installing Profile
+control or source watching. Construction resolves every enabled plugin against
+the caller's immutable `ProfileResolver` before Runtime mutation. Activation
+prepares every leaf against the supplied Context's Runtime before creating a
+Fiber, then creates one ordinary wrapper Fiber, derives the same group isolation
+as the controlled Profile path, and mounts every prepared leaf below the
+retained wrapper Context. Preparation failure releases every admitted proof
+without wrapper mutation. The method returns the wrapper handle only when every
+leaf is Active; activation failure, a Pending leaf, or cooperative cancellation
+disposes the wrapper and joins child rollback before returning failure.
+Cancellation that intersects an in-flight blocking preparation waits for that
+preparation to exit so its proof is released before the method returns.
+
+A plan exposes only its source digest and required source paths. It does not
+expose resolved factories, bound Contexts, or the resolver and does not turn the
+resolver into a Runtime catalog service. Source changes never mutate a mounted
+static generation: a product compiles and activates a new plan, then decides
+when its own consumers may observe that generation. The wrapper factory rejects
+Meta reconfiguration so it cannot activate again as an empty generation.
 
 ## Watching and control
 
@@ -81,6 +107,19 @@ source changes or manual reload is requested.
 The Fiber supplies typed Local `ProfileControl` with `reload`, `status`,
 redacted tree `snapshot`, and last-value `subscribe`. Status bounds diagnostics
 and source paths; it never contains configuration, Rhai source, or secrets.
+Observed child state is a Profile-owned lifecycle category: `Failed` deliberately
+does not carry the Runtime/plugin failure string, while `Pending` retains only
+Meta's already-bounded dependency report.
+The controller installs child watch receivers synchronously and refreshes the
+current snapshots before awaiting them, so a transition between graph capture
+and task polling cannot be lost. Subscriptions stay installed across child
+state changes and are rebuilt only when graph membership changes. Every diagnostic source, including settled
+child failure and watcher failure, passes through the configured retained-byte
+bound.
+Frozen `defines` visible to Rhai use the exact JSON subset of null, booleans,
+strings, arrays, objects, and signed 64-bit integers. Floating-point numbers,
+negative zero, exponent-form numbers, and integers outside `i64` are rejected
+before expression evaluation; conversion never substitutes Rhai `()`.
 Cross-process sockets, signals, CLI control, and native artifact watching are
 outside this contract.
 

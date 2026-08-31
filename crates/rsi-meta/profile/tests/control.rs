@@ -5,13 +5,15 @@ use rsi_meta::{
 };
 use rsi_meta_profile::{
     IsolationSpec, ProfileBootstrap, ProfileControlContract, ProfileEnvironment, ProfileHealth,
-    ProfileLimits, ProfileProgram, ProfileResolver, ReloadOutcome,
+    ProfileInstanceState, ProfileLimits, ProfileProgram, ProfileResolver, ReloadOutcome,
+    WatcherHealth,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 enum ProbeContract {}
 
@@ -25,6 +27,38 @@ struct ProbeFactory {
     starts: Arc<AtomicUsize>,
     fail_once: Arc<AtomicUsize>,
     prepare_calls: Arc<AtomicUsize>,
+    cleanup_gate: Option<Arc<CleanupGate>>,
+}
+
+#[derive(Debug, Default)]
+struct CleanupGate {
+    started: Notify,
+    release: Notify,
+}
+
+#[derive(Debug)]
+struct SupplyFactory;
+
+#[async_trait]
+impl PluginFactory for SupplyFactory {
+    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let supply = plan
+            .context()
+            .provide_local::<ProbeContract>(Arc::new(AtomicUsize::new(0)))?;
+        plan.defer(
+            "withdraw test Probe service",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
 }
 
 #[async_trait]
@@ -39,7 +73,7 @@ impl PluginFactory for ProbeFactory {
             return Err(MetaError::InvalidConfig("secret rollback".to_owned()));
         }
         let prepared = PreparedActivation::new(desired.clone());
-        if mode == "pending" {
+        if mode == "pending" || mode == "pending-activate-fail" {
             return Ok(prepared.requiring_local::<ProbeContract>());
         }
         Ok(prepared)
@@ -48,11 +82,28 @@ impl PluginFactory for ProbeFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let mode = plan.config().get("mode").and_then(Value::as_str);
         if mode == Some("activate-fail")
+            || mode == Some("pending-activate-fail")
             || (mode == Some("activate-fail-once")
                 && self.fail_once.fetch_add(1, Ordering::SeqCst) == 0)
             || (mode == Some("rollback-fail-after-first") && self.starts.load(Ordering::SeqCst) > 0)
         {
             return Err(MetaError::Activation("secret activation".to_owned()));
+        }
+        if mode == Some("block-cleanup") {
+            let gate = self.cleanup_gate.as_ref().ok_or_else(|| {
+                MetaError::Activation("test cleanup gate is unavailable".to_owned())
+            })?;
+            let gate = Arc::clone(gate);
+            plan.defer(
+                "block test Profile cleanup",
+                Box::new(move || {
+                    Box::pin(async move {
+                        gate.started.notify_one();
+                        gate.release.notified().await;
+                        Ok(())
+                    })
+                }),
+            )?;
         }
         self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -65,6 +116,7 @@ struct Resolver {
     fail_once: Arc<AtomicUsize>,
     prepare_calls: Arc<AtomicUsize>,
     mode: UpdateMode,
+    cleanup_gate: Option<Arc<CleanupGate>>,
 }
 
 impl ProfileResolver for Resolver {
@@ -82,6 +134,7 @@ impl ProfileResolver for Resolver {
                 starts: Arc::clone(&self.starts),
                 fail_once: Arc::clone(&self.fail_once),
                 prepare_calls: Arc::clone(&self.prepare_calls),
+                cleanup_gate: self.cleanup_gate.clone(),
             }),
         ))
     }
@@ -138,6 +191,33 @@ async fn start(
     Arc<dyn rsi_meta_profile::ProfileControl>,
     Arc<AtomicUsize>,
 ) {
+    start_with_limits(root, mode, ProfileLimits::default()).await
+}
+
+async fn start_with_limits(
+    root: &std::path::Path,
+    mode: UpdateMode,
+    limits: ProfileLimits,
+) -> (
+    Runtime,
+    rsi_meta::FiberHandle,
+    Arc<dyn rsi_meta_profile::ProfileControl>,
+    Arc<AtomicUsize>,
+) {
+    start_with_limits_and_cleanup_gate(root, mode, limits, None).await
+}
+
+async fn start_with_limits_and_cleanup_gate(
+    root: &std::path::Path,
+    mode: UpdateMode,
+    limits: ProfileLimits,
+    cleanup_gate: Option<Arc<CleanupGate>>,
+) -> (
+    Runtime,
+    rsi_meta::FiberHandle,
+    Arc<dyn rsi_meta_profile::ProfileControl>,
+    Arc<AtomicUsize>,
+) {
     let runtime = Runtime::default();
     let starts = Arc::new(AtomicUsize::new(0));
     let resolver = Arc::new(Resolver {
@@ -145,13 +225,14 @@ async fn start(
         fail_once: Arc::new(AtomicUsize::new(0)),
         prepare_calls: Arc::new(AtomicUsize::new(0)),
         mode,
+        cleanup_gate,
     });
     let bootstrap = ProfileBootstrap::prepare(
         &runtime,
         resolver,
         ProfileProgram::from_file(root.join("profile.toml")),
         environment(root),
-        ProfileLimits::default(),
+        limits,
     )
     .unwrap();
     let control = bootstrap.control();
@@ -170,6 +251,51 @@ async fn start(
         .unwrap();
     assert!(matches!(handle.snapshot().state, FiberState::Active));
     (runtime, handle, control, starts)
+}
+
+#[tokio::test]
+async fn late_child_failure_is_observed_and_its_diagnostic_is_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    write_profile(&temp.path().join("profile.toml"), "pending-activate-fail");
+    let limits = ProfileLimits {
+        maximum_diagnostic_bytes: 8,
+        ..ProfileLimits::default()
+    };
+    let (runtime, _handle, control, _) =
+        start_with_limits(temp.path(), UpdateMode::Replayable, limits).await;
+    let mut changes = control.subscribe();
+    assert!(matches!(
+        changes.borrow().observed()[0].state(),
+        ProfileInstanceState::Pending(_)
+    ));
+
+    let _supply_handle = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "test.probe-supply",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(SupplyFactory),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            changes.changed().await.unwrap();
+            let status = changes.borrow_and_update().clone();
+            if status.health() == ProfileHealth::Degraded {
+                break status;
+            }
+        }
+    })
+    .await
+    .expect("the Profile observer must not miss a child transition");
+
+    assert!(status.diagnostic().unwrap().len() <= 8);
+    let _ = runtime.shutdown().await;
 }
 
 #[tokio::test]
@@ -238,6 +364,7 @@ async fn rollback_preparation_failure_degrades_and_is_published_in_profile_statu
         "a reload failure returned to the caller must also be observable"
     );
     assert!(!status.diagnostic().unwrap().contains("secret"));
+    assert!(!format!("{status:?}").contains("secret activation"));
     let _ = runtime.shutdown().await;
 }
 
@@ -260,6 +387,7 @@ async fn reloads_at_the_exact_profile_and_leaf_fiber_capacity() {
         fail_once: Arc::new(AtomicUsize::new(0)),
         prepare_calls: Arc::new(AtomicUsize::new(0)),
         mode: UpdateMode::Replayable,
+        cleanup_gate: None,
     });
     let bootstrap = ProfileBootstrap::prepare(
         &runtime,
@@ -323,7 +451,7 @@ async fn restart_required_publishes_digest_without_mutating_and_pending_is_usabl
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert!(matches!(
         control.status().observed()[0].state(),
-        FiberState::Pending(_)
+        ProfileInstanceState::Pending(_)
     ));
     let _ = runtime.shutdown().await;
 }
@@ -347,6 +475,90 @@ async fn watcher_reloads_changed_sources_and_subscription_observes_completion() 
     .await
     .unwrap();
     assert_eq!(starts.load(Ordering::SeqCst), 2);
+    let _ = runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn convergence_publishes_only_complete_observed_graphs() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "block-cleanup");
+    let gate = Arc::new(CleanupGate::default());
+    let (runtime, _handle, control, _) = start_with_limits_and_cleanup_gate(
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        Some(Arc::clone(&gate)),
+    )
+    .await;
+    let changes = control.subscribe();
+
+    write_profile(&path, "changed");
+    let reload = tokio::spawn({
+        let control = Arc::clone(&control);
+        async move { control.reload().await }
+    });
+    gate.started.notified().await;
+
+    let direct = control.status();
+    let published = changes.borrow().clone();
+    gate.release.notify_one();
+    let outcome = reload.await.unwrap().unwrap();
+
+    assert_eq!(direct.health(), ProfileHealth::Converging);
+    assert_eq!(direct.observed().len(), 1);
+    assert_eq!(published.health(), ProfileHealth::Converging);
+    assert_eq!(published.observed().len(), 1);
+    assert!(matches!(outcome, ReloadOutcome::Applied(_)));
+    let _ = runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn watcher_fault_during_convergence_never_publishes_a_partial_graph() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "block-cleanup");
+    let gate = Arc::new(CleanupGate::default());
+    let (runtime, _handle, control, _) = start_with_limits_and_cleanup_gate(
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        Some(Arc::clone(&gate)),
+    )
+    .await;
+    let mut changes = control.subscribe();
+
+    write_profile(&path, "changed");
+    let reload = tokio::spawn({
+        let control = Arc::clone(&control);
+        async move { control.reload().await }
+    });
+    gate.started.notified().await;
+    let converging = changes.borrow_and_update().clone();
+    assert_eq!(converging.health(), ProfileHealth::Converging);
+    assert_eq!(converging.observed().len(), 1);
+
+    std::fs::remove_file(&path).unwrap();
+    let publication = tokio::time::timeout(Duration::from_millis(500), changes.changed())
+        .await
+        .ok()
+        .map(|result| {
+            result.unwrap();
+            changes.borrow_and_update().clone()
+        });
+    write_profile(&path, "changed");
+    gate.release.notify_one();
+    let outcome = reload.await.unwrap().unwrap();
+
+    if let Some(status) = publication {
+        assert_eq!(status.watcher(), WatcherHealth::Faulted);
+        assert_eq!(
+            status.observed().len(),
+            1,
+            "watcher diagnostics must retain the last complete observed graph"
+        );
+    }
+    assert!(matches!(outcome, ReloadOutcome::Applied(_)));
     let _ = runtime.shutdown().await;
 }
 

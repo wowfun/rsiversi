@@ -1,7 +1,7 @@
 use rsi_agent_context::{ContextError, ContextFold, ContextLimits};
 use rsi_agent_session_protocol::{
-    EffectId, FrozenAgentProfile, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
-    TurnOutcome,
+    AgentPresetId, EffectId, FrozenAgentProfile, SessionFact, SessionFactBody, SessionHeader,
+    SessionId, TurnId, TurnOutcome,
 };
 use rsi_ai_protocol::{
     AiCapability, ContentDelta, ContentStart, FinishReason, LanguageEvent, MessageContent,
@@ -16,6 +16,7 @@ fn header(system: &str) -> SessionHeader {
         SessionId::new("session-1").unwrap(),
         1,
         "/secret/workspace-name",
+        AgentPresetId::new("test-agent").unwrap(),
         FrozenAgentProfile::new(
             "default",
             system,
@@ -51,6 +52,17 @@ fn facts(bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
         .enumerate()
         .map(|(index, body)| {
             let seq = u64::try_from(index).unwrap() + 1;
+            SessionFact::new(seq, seq, body).unwrap()
+        })
+        .collect()
+}
+
+fn facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
+    bodies
+        .into_iter()
+        .enumerate()
+        .map(|(index, body)| {
+            let seq = after_seq + u64::try_from(index).unwrap() + 1;
             SessionFact::new(seq, seq, body).unwrap()
         })
         .collect()
@@ -249,4 +261,194 @@ fn incremental_fold_rejects_gaps_and_replays() {
     }]);
     fold.apply(&first).unwrap();
     assert!(fold.apply(&first).is_err());
+}
+
+#[test]
+fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
+    let limits = ContextLimits::default();
+    let old = TurnId::new("turn-old").unwrap();
+    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    fold.apply(&facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: old.clone(),
+            text: "old user message".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: old,
+            outcome: TurnOutcome::Completed,
+        },
+    ]))
+    .unwrap();
+    let expected = fold.project(limits).unwrap();
+    let bytes = fold.checkpoint_bytes().unwrap();
+    let mut restored = ContextFold::from_checkpoint(header("system"), limits, &bytes).unwrap();
+    assert_eq!(restored.project(limits).unwrap(), expected);
+
+    restored
+        .apply(&facts_after(
+            2,
+            vec![SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new("turn-current").unwrap(),
+                text: "suffix only".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            }],
+        ))
+        .unwrap();
+    let projected = restored.project(limits).unwrap();
+    assert_eq!(projected.through_seq, 3);
+    assert!(
+        serde_json::to_string(&projected.messages)
+            .unwrap()
+            .contains("suffix only")
+    );
+}
+
+#[test]
+fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
+    let limits = ContextLimits::default();
+    let mut active = ContextFold::with_limits(header("system"), limits).unwrap();
+    let active_turn = TurnId::new("turn-active").unwrap();
+    active
+        .apply(&facts(vec![
+            SessionFactBody::TurnAccepted {
+                turn_id: active_turn.clone(),
+                text: "active".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+            SessionFactBody::ModelIntent {
+                turn_id: active_turn,
+                effect_id: EffectId::new("effect-active").unwrap(),
+                snapshot: snapshot(),
+            },
+        ]))
+        .unwrap();
+    assert!(active.checkpoint_bytes().is_err());
+
+    let turn = TurnId::new("turn-complete").unwrap();
+    let mut complete = ContextFold::with_limits(header("system"), limits).unwrap();
+    complete
+        .apply(&facts(vec![
+            SessionFactBody::TurnAccepted {
+                turn_id: turn.clone(),
+                text: "complete".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+            SessionFactBody::TurnTerminal {
+                turn_id: turn,
+                outcome: TurnOutcome::Completed,
+            },
+        ]))
+        .unwrap();
+    let bytes = complete.checkpoint_bytes().unwrap();
+    assert!(ContextFold::from_checkpoint(header("different"), limits, &bytes).is_err());
+    assert!(
+        ContextFold::from_checkpoint(
+            header("system"),
+            ContextLimits::new(limits.max_messages - 1, limits.max_bytes).unwrap(),
+            &bytes,
+        )
+        .is_err()
+    );
+    let mut corrupt = bytes.to_vec();
+    corrupt.truncate(corrupt.len() - 1);
+    assert!(ContextFold::from_checkpoint(header("system"), limits, &corrupt).is_err());
+
+    let mut injected = bytes.to_vec();
+    let original = b"complete";
+    let replacement = b"injected";
+    let offset = injected
+        .windows(original.len())
+        .position(|window| window == original)
+        .expect("checkpoint contains the projected user message");
+    injected[offset..offset + replacement.len()].copy_from_slice(replacement);
+    assert!(
+        ContextFold::from_checkpoint(header("system"), limits, &injected).is_err(),
+        "a structurally valid same-length checkpoint mutation must be rejected"
+    );
+}
+
+#[test]
+fn checkpoint_rejects_a_claim_filtered_sequence_hole() {
+    let limits = ContextLimits::default();
+    let turn = TurnId::new("turn-visible").unwrap();
+    let visible = vec![
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                turn_id: turn.clone(),
+                text: "visible".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+        SessionFact::new(
+            3,
+            3,
+            SessionFactBody::TurnTerminal {
+                turn_id: turn,
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .unwrap(),
+    ];
+    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    fold.apply_page(&visible, 3).unwrap();
+    assert!(fold.checkpoint_bytes().is_err());
+}
+
+#[test]
+fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
+    let first = TurnId::new("turn-first").unwrap();
+    let queued = TurnId::new("turn-queued").unwrap();
+    let limits = ContextLimits::default();
+    let mut fold = ContextFold::with_limits(header("system"), limits).unwrap();
+    fold.apply(&facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: first.clone(),
+            text: "first".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: first,
+            outcome: TurnOutcome::Completed,
+        },
+        SessionFactBody::TurnAccepted {
+            turn_id: queued.clone(),
+            text: "queued".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    ]))
+    .unwrap();
+
+    let bytes = fold.checkpoint_bytes().unwrap();
+    let mut restored = ContextFold::from_checkpoint(header("system"), limits, &bytes).unwrap();
+    assert_eq!(
+        restored.project(limits).unwrap(),
+        fold.project(limits).unwrap()
+    );
+    restored
+        .apply(&facts_after(
+            3,
+            vec![SessionFactBody::TurnTerminal {
+                turn_id: queued,
+                outcome: TurnOutcome::Completed,
+            }],
+        ))
+        .unwrap();
 }

@@ -34,14 +34,40 @@ fn snapshot(capability: AiCapability) -> PreparedCallSnapshot {
 }
 
 #[test]
+fn agent_preset_id_round_trips_only_the_safe_directory_grammar() {
+    let preset = AgentPresetId::new("code-agent-2").unwrap();
+    assert_eq!(preset.as_str(), "code-agent-2");
+    assert_eq!(
+        serde_json::from_value::<AgentPresetId>(serde_json::to_value(&preset).unwrap()).unwrap(),
+        preset
+    );
+    assert!(AgentPresetId::new("a".repeat(MAXIMUM_AGENT_PRESET_ID_BYTES)).is_ok());
+
+    for invalid in [
+        "",
+        "-leading",
+        "Upper",
+        "dot.id",
+        "under_score",
+        "path/name",
+    ] {
+        assert!(AgentPresetId::new(invalid).is_err(), "accepted {invalid:?}");
+    }
+    assert!(AgentPresetId::new("a".repeat(MAXIMUM_AGENT_PRESET_ID_BYTES + 1)).is_err());
+    assert!(serde_json::from_str::<AgentPresetId>(r#""../escape""#).is_err());
+}
+
+#[test]
 fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
     let header = SessionHeader::new(
         SessionId::new("session-1").unwrap(),
         1,
         "/workspace",
+        AgentPresetId::new("code-agent").unwrap(),
         profile(),
     )
     .unwrap();
+    assert_eq!(header.agent_preset_id().as_str(), "code-agent");
     let bytes = serde_json::to_vec(&header).unwrap();
     assert_eq!(
         serde_json::from_slice::<SessionHeader>(&bytes).unwrap(),
@@ -50,15 +76,157 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
 
     let mut value = serde_json::to_value(&header).unwrap();
     value["format_version"] = 2.into();
-    assert!(serde_json::from_value::<SessionHeader>(value).is_err());
+    value.as_object_mut().unwrap().remove("agent_preset_id");
+    value["profile"]
+        .as_object_mut()
+        .unwrap()
+        .remove("turn_budget");
+    assert_eq!(
+        serde_json::from_value::<SessionHeader>(value)
+            .unwrap_err()
+            .to_string(),
+        "unsupported session format version 2"
+    );
+
+    let mut missing_preset = serde_json::to_value(&header).unwrap();
+    missing_preset
+        .as_object_mut()
+        .unwrap()
+        .remove("agent_preset_id");
+    assert!(serde_json::from_value::<SessionHeader>(missing_preset).is_err());
+
+    let mut missing_budget = serde_json::to_value(&header).unwrap();
+    missing_budget["profile"]
+        .as_object_mut()
+        .unwrap()
+        .remove("turn_budget");
+    assert!(
+        serde_json::from_value::<SessionHeader>(missing_budget).is_err(),
+        "the current durable format must not widen an omitted frozen budget"
+    );
     assert!(
         SessionHeader::new(
             SessionId::new("session-1").unwrap(),
             1,
             "relative/path",
+            AgentPresetId::new("code-agent").unwrap(),
             profile()
         )
         .is_err()
+    );
+}
+
+#[test]
+fn turn_budget_accepts_each_hard_limit_and_rejects_limit_plus_one() {
+    let maximum = TurnBudget::default();
+    assert_eq!(maximum.maximum_elapsed_ms(), 1_800_000);
+    assert_eq!(maximum.maximum_provider_attempts(), 64);
+    assert_eq!(maximum.maximum_tool_calls(), 256);
+    assert_eq!(maximum.maximum_generated_facts(), 65_536);
+    assert_eq!(maximum.maximum_generated_fact_bytes(), 67_108_864);
+
+    for invalid in [
+        json!({
+            "maximum_elapsed_ms": 1_800_001,
+            "maximum_provider_attempts": 64,
+            "maximum_tool_calls": 256,
+            "maximum_generated_facts": 65_536,
+            "maximum_generated_fact_bytes": 67_108_864
+        }),
+        json!({
+            "maximum_elapsed_ms": 1_800_000,
+            "maximum_provider_attempts": 65,
+            "maximum_tool_calls": 256,
+            "maximum_generated_facts": 65_536,
+            "maximum_generated_fact_bytes": 67_108_864
+        }),
+        json!({
+            "maximum_elapsed_ms": 1_800_000,
+            "maximum_provider_attempts": 64,
+            "maximum_tool_calls": 257,
+            "maximum_generated_facts": 65_536,
+            "maximum_generated_fact_bytes": 67_108_864
+        }),
+        json!({
+            "maximum_elapsed_ms": 1_800_000,
+            "maximum_provider_attempts": 64,
+            "maximum_tool_calls": 256,
+            "maximum_generated_facts": 65_537,
+            "maximum_generated_fact_bytes": 67_108_864
+        }),
+        json!({
+            "maximum_elapsed_ms": 1_800_000,
+            "maximum_provider_attempts": 64,
+            "maximum_tool_calls": 256,
+            "maximum_generated_facts": 65_536,
+            "maximum_generated_fact_bytes": 67_108_865
+        }),
+    ] {
+        assert!(serde_json::from_value::<TurnBudget>(invalid).is_err());
+    }
+}
+
+#[test]
+fn exhaustion_records_cannot_widen_the_named_budget_dimension() {
+    let turn_id = TurnId::new("turn-budget-bound").unwrap();
+    for (dimension, maximum) in [
+        (BudgetDimension::Elapsed, MAXIMUM_TURN_ELAPSED_MS),
+        (
+            BudgetDimension::ProviderAttempts,
+            MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+        ),
+        (BudgetDimension::ToolCalls, MAXIMUM_TURN_TOOL_CALLS),
+        (
+            BudgetDimension::GeneratedFacts,
+            MAXIMUM_TURN_GENERATED_FACTS,
+        ),
+        (
+            BudgetDimension::GeneratedFactBytes,
+            MAXIMUM_TURN_GENERATED_FACT_BYTES,
+        ),
+    ] {
+        let widened = maximum + 1;
+        assert!(
+            TurnOutcome::BudgetExceeded {
+                dimension,
+                consumed: widened,
+                limit: widened,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            SessionFactBody::BudgetExhausted {
+                turn_id: turn_id.clone(),
+                dimension,
+                consumed: widened,
+                limit: widened,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn frozen_profile_serializes_its_creation_time_turn_budget() {
+    let tightened = TurnBudget::new(60_000, 3, 4, 5, 6_000).unwrap();
+    let profile = FrozenAgentProfile::new_with_budget(
+        "bounded",
+        "Be precise.",
+        ModelRef::new("openai", "gpt-test").unwrap(),
+        SandboxMode::WorkspaceWrite,
+        false,
+        tightened.clone(),
+    )
+    .unwrap();
+
+    assert_eq!(profile.turn_budget(), &tightened);
+    assert_eq!(
+        serde_json::from_value::<FrozenAgentProfile>(serde_json::to_value(&profile).unwrap())
+            .unwrap()
+            .turn_budget(),
+        &tightened
     );
 }
 
@@ -80,6 +248,7 @@ fn maximum_escaped_header_stays_inside_its_framing_bound() {
         SessionId::new("s".repeat(MAXIMUM_AGENT_IDENTIFIER_BYTES)).unwrap(),
         1,
         format!("/{}", "\u{1}".repeat(MAXIMUM_WORKSPACE_PATH_BYTES - 1)),
+        AgentPresetId::new("a".repeat(MAXIMUM_AGENT_PRESET_ID_BYTES)).unwrap(),
         profile,
     )
     .unwrap();

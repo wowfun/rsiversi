@@ -5,29 +5,41 @@
 #![allow(clippy::missing_errors_doc)]
 
 use async_trait::async_trait;
-use futures_util::stream::{self, StreamExt as _};
+use futures_util::{
+    FutureExt as _,
+    stream::{self, StreamExt as _},
+};
+use rsi_agent_composition_protocol::{
+    AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
+};
 use rsi_agent_session_protocol::{
-    EffectId, EffectKind, FrozenAgentProfile, MAXIMUM_FACTS_PER_READ, SessionFact, SessionFactBody,
-    SessionHeader, SessionId, TurnId, TurnOutcome, validate_identifier,
+    BudgetDimension, EffectId, EffectKind, FrozenAgentProfile, MAXIMUM_AGENT_DIAGNOSTIC_BYTES,
+    MAXIMUM_FACTS_PER_READ, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_TURN_TEXT_BYTES, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, TurnBudget, TurnId, TurnOutcome,
+    validate_identifier,
 };
 use rsi_agent_store_protocol::{
-    AppendBatch, AppendCommit, MAXIMUM_SESSIONS_PER_READ, MAXIMUM_STORE_BATCH_BYTES,
-    MAXIMUM_STORE_BATCH_FACTS, SessionStore, SessionStoreContract, StoreError,
+    AppendBatch, AppendCommit, MAXIMUM_CONTEXT_CHECKPOINT_BYTES, MAXIMUM_SESSIONS_PER_READ,
+    MAXIMUM_STORE_BATCH_BYTES, MAXIMUM_STORE_BATCH_FACTS, SessionStore, SessionStoreContract,
+    StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
 };
 use rsi_agent_turn_protocol::{
-    CancelResult, ClaimFactPage, ExecutorLease, Result as TurnResult, SubmitImage, SubmitSession,
-    SubmitTurn, SubmittedTurn, TurnClaim, TurnError, TurnExecution, TurnExecutionContract,
-    TurnFinalization, TurnFinalizationContract, TurnFinalizationError, TurnFinalizer,
-    TurnFinalizerLease, TurnObservation, TurnService, TurnServiceContract, TurnUpdate,
+    CancelResult, ClaimFactPage, ContextCheckpoint, ExecutorLease, PreparedResumeSession,
+    Result as TurnResult, ResumeAdmissionIssuer, SubmitImage, SubmitSession, SubmitTurn,
+    SubmittedTurn, TurnClaim, TurnClaimIssuer, TurnError, TurnExecution, TurnExecutionContract,
+    TurnFinalization, TurnFinalizationContext, TurnFinalizationContract, TurnFinalizationError,
+    TurnFinalizationReport, TurnFinalizer, TurnFinalizerLease, TurnObservation, TurnService,
+    TurnServiceContract, TurnUpdate,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::{Notify, broadcast, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -47,8 +59,85 @@ fn rebase_write_behind_tick(scheduled: Instant, now: Instant) -> Instant {
 const MINIMUM_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const MAXIMUM_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 const MAXIMUM_CONSECUTIVE_FLUSH_FAILURES: u32 = 8;
-const OBSERVATION_CAPACITY: usize = 1_024;
 const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default process-wide speculative Fact byte capacity.
+pub const DEFAULT_MAXIMUM_PROCESS_PENDING_FACT_BYTES: usize = 64 * 1024 * 1024;
+/// Default process-wide concurrent Store-read materialization capacity.
+pub const DEFAULT_MAXIMUM_STORE_READ_BYTES: usize = 64 * 1024 * 1024;
+/// Default number of simultaneously attached observers.
+pub const DEFAULT_MAXIMUM_ACTIVE_OBSERVERS: usize = 1_024;
+
+/// Process-wide Kernel resource limits; all defaults may only be tightened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KernelLimits {
+    /// Total speculative Fact bytes across all resident sessions.
+    #[serde(default = "default_process_pending_fact_bytes")]
+    pub maximum_process_pending_fact_bytes: usize,
+    /// Total maximum-page reservations across concurrent Store reads.
+    #[serde(default = "default_store_read_bytes")]
+    pub maximum_store_read_bytes: usize,
+    /// Simultaneously attached live observations.
+    #[serde(default = "default_active_observers")]
+    pub maximum_active_observers: usize,
+}
+
+const fn default_process_pending_fact_bytes() -> usize {
+    DEFAULT_MAXIMUM_PROCESS_PENDING_FACT_BYTES
+}
+
+const fn default_store_read_bytes() -> usize {
+    DEFAULT_MAXIMUM_STORE_READ_BYTES
+}
+
+const fn default_active_observers() -> usize {
+    DEFAULT_MAXIMUM_ACTIVE_OBSERVERS
+}
+
+impl Default for KernelLimits {
+    fn default() -> Self {
+        Self {
+            maximum_process_pending_fact_bytes: default_process_pending_fact_bytes(),
+            maximum_store_read_bytes: default_store_read_bytes(),
+            maximum_active_observers: default_active_observers(),
+        }
+    }
+}
+
+impl KernelLimits {
+    /// Revalidates positive values no wider than the fixed process maxima.
+    pub fn validate(&self) -> Result<()> {
+        for (name, value, maximum) in [
+            (
+                "maximum_process_pending_fact_bytes",
+                self.maximum_process_pending_fact_bytes,
+                DEFAULT_MAXIMUM_PROCESS_PENDING_FACT_BYTES,
+            ),
+            (
+                "maximum_store_read_bytes",
+                self.maximum_store_read_bytes,
+                DEFAULT_MAXIMUM_STORE_READ_BYTES,
+            ),
+            (
+                "maximum_active_observers",
+                self.maximum_active_observers,
+                DEFAULT_MAXIMUM_ACTIVE_OBSERVERS,
+            ),
+        ] {
+            if value == 0 || value > maximum {
+                return Err(KernelError::Capacity(format!(
+                    "{name} must be within 1..={maximum}"
+                )));
+            }
+        }
+        if self.maximum_store_read_bytes < MAXIMUM_SESSION_FACT_BYTES {
+            return Err(KernelError::Capacity(format!(
+                "maximum_store_read_bytes must admit one maximum Fact ({MAXIMUM_SESSION_FACT_BYTES} bytes)"
+            )));
+        }
+        Ok(())
+    }
+}
 
 /// Millisecond source injected into deterministic tests.
 pub trait Clock: fmt::Debug + Send + Sync + 'static {
@@ -114,18 +203,26 @@ impl fmt::Debug for SessionKernel {
 
 struct KernelInner {
     store: Arc<dyn SessionStore>,
+    composition: Arc<dyn AgentComposition>,
+    resume_issuer: ResumeAdmissionIssuer,
+    claim_issuer: TurnClaimIssuer,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
     state: Mutex<KernelState>,
     claim_changed: Notify,
     flush_requested: Notify,
     stop_worker: CancellationToken,
+    limits: KernelLimits,
+    process_pending_bytes: AtomicUsize,
+    active_observers: AtomicUsize,
+    store_read_admission: Arc<Semaphore>,
 }
 
 struct KernelState {
     accepting: bool,
     sessions: BTreeMap<SessionId, SessionRuntime>,
     loading_sessions: BTreeMap<SessionId, Arc<SessionLoad>>,
+    fresh_reservations: BTreeSet<SessionId>,
     executors: BTreeMap<String, u64>,
     next_executor_registration: u64,
     finalizers: BTreeMap<u64, FinalizerEntry>,
@@ -139,6 +236,112 @@ struct KernelState {
 struct SessionLoad {
     result: Mutex<Option<TurnResult<()>>>,
     completed: Notify,
+}
+
+struct FreshReservationGuard {
+    inner: Arc<KernelInner>,
+    session_id: SessionId,
+    armed: bool,
+}
+
+struct ResumeAdmissionGuard {
+    inner: Arc<KernelInner>,
+    session_id: SessionId,
+}
+
+impl Drop for ResumeAdmissionGuard {
+    fn drop(&mut self) {
+        let mut state = lock_state(&self.inner);
+        let remove = state
+            .sessions
+            .get_mut(&self.session_id)
+            .is_some_and(|session| {
+                debug_assert!(session.admission_reservations > 0);
+                session.admission_reservations = session.admission_reservations.saturating_sub(1);
+                session.admission_reservations == 0
+                    && session.turns.is_empty()
+                    && session.pending.is_empty()
+                    && !session.header_pending
+                    && !session.flush_inflight
+            });
+        if remove {
+            state.sessions.remove(&self.session_id);
+        }
+    }
+}
+
+impl FreshReservationGuard {
+    fn new(inner: &Arc<KernelInner>, session_id: SessionId) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            session_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FreshReservationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            lock_state(&self.inner)
+                .fresh_reservations
+                .remove(&self.session_id);
+        }
+    }
+}
+
+struct SessionLoadGuard {
+    inner: Arc<KernelInner>,
+    session_id: SessionId,
+    load: Arc<SessionLoad>,
+    armed: bool,
+}
+
+impl SessionLoadGuard {
+    fn new(inner: &Arc<KernelInner>, session_id: SessionId, load: Arc<SessionLoad>) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            session_id,
+            load,
+            armed: true,
+        }
+    }
+
+    fn complete(mut self, result: TurnResult<()>) {
+        self.load.complete(result);
+        let mut state = lock_state(&self.inner);
+        if state
+            .loading_sessions
+            .get(&self.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.load))
+        {
+            state.loading_sessions.remove(&self.session_id);
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for SessionLoadGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.load.complete(Err(TurnError::Invariant(
+            "session hydration owner was cancelled before completion".into(),
+        )));
+        let mut state = lock_state(&self.inner);
+        if state
+            .loading_sessions
+            .get(&self.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.load))
+        {
+            state.loading_sessions.remove(&self.session_id);
+        }
+    }
 }
 
 impl SessionLoad {
@@ -165,11 +368,14 @@ impl SessionLoad {
     }
 
     fn complete(&self, result: TurnResult<()>) {
-        *self
+        let mut slot = self
             .result
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
-        self.completed.notify_waiters();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = Some(result);
+            self.completed.notify_waiters();
+        }
     }
 }
 
@@ -181,18 +387,20 @@ struct FinalizerEntry {
 
 struct SessionRuntime {
     header: SessionHeader,
+    composition: AgentCompositionPin,
     durable_seq: u64,
-    pending: VecDeque<SessionFact>,
+    pending: VecDeque<Arc<SessionFact>>,
     pending_bytes: usize,
     header_pending: bool,
     turns: BTreeMap<TurnId, TurnControl>,
     turn_order: Vec<TurnId>,
-    updates: broadcast::Sender<TurnUpdate>,
+    updates: watch::Sender<LiveWatermarks>,
     flush_status: watch::Sender<FlushStatus>,
     flush_inflight: bool,
     retry_failures: u32,
     retry_not_before: Option<Instant>,
     permanent_flush_error: Option<String>,
+    admission_reservations: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,13 +409,53 @@ struct FlushStatus {
     permanent_error: Option<String>,
 }
 
+struct PreparedFlushBatch {
+    session_id: SessionId,
+    expected_seq: u64,
+    header: Option<SessionHeader>,
+    facts: Vec<Arc<SessionFact>>,
+}
+
+impl PreparedFlushBatch {
+    fn into_store_batch(self) -> AppendBatch {
+        AppendBatch {
+            session_id: self.session_id,
+            expected_seq: self.expected_seq,
+            header: self.header,
+            facts: self
+                .facts
+                .into_iter()
+                .map(|fact| fact.as_ref().clone())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LiveWatermarks {
+    live_seq: u64,
+    durable_seq: u64,
+}
+
 struct TurnControl {
+    accepted_at_ms: u64,
+    accepted_seq: u64,
     terminal: Option<TurnOutcome>,
     terminal_seq: Option<u64>,
     cancel_requested: bool,
     cancellation: CancellationToken,
     claim: Option<ClaimOwner>,
     effect: Option<ActiveEffect>,
+    budget_usage: BudgetUsage,
+    budget_exhausted: Option<(BudgetDimension, u64, u64)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BudgetUsage {
+    provider_attempts: u64,
+    tool_calls: u64,
+    generated_facts: u64,
+    generated_fact_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -215,6 +463,7 @@ struct ClaimOwner {
     executor: String,
     registration: u64,
     claim: u64,
+    live_seq: u64,
 }
 
 #[derive(Clone)]
@@ -236,27 +485,40 @@ enum ActiveEffect {
 }
 
 impl TurnControl {
-    fn new() -> Self {
+    fn new(accepted_at_ms: u64, accepted_seq: u64) -> Self {
         Self {
+            accepted_at_ms,
+            accepted_seq,
             terminal: None,
             terminal_seq: None,
             cancel_requested: false,
             cancellation: CancellationToken::new(),
             claim: None,
             effect: None,
+            budget_usage: BudgetUsage::default(),
+            budget_exhausted: None,
         }
     }
 }
 
 impl SessionRuntime {
-    fn new(header: SessionHeader, durable_seq: u64, header_pending: bool) -> Self {
-        let (updates, _) = broadcast::channel(OBSERVATION_CAPACITY);
+    fn new(
+        header: SessionHeader,
+        composition: AgentCompositionPin,
+        durable_seq: u64,
+        header_pending: bool,
+    ) -> Self {
+        let (updates, _) = watch::channel(LiveWatermarks {
+            live_seq: durable_seq,
+            durable_seq,
+        });
         let (flush_status, _) = watch::channel(FlushStatus {
             durable_seq,
             permanent_error: None,
         });
         Self {
             header,
+            composition,
             durable_seq,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -269,6 +531,7 @@ impl SessionRuntime {
             retry_failures: 0,
             retry_not_before: None,
             permanent_flush_error: None,
+            admission_reservations: 0,
         }
     }
 
@@ -298,7 +561,11 @@ impl SessionRuntime {
     }
 }
 
-fn apply_committed_flush(session: &mut SessionRuntime, commit: AppendCommit) -> Vec<TurnId> {
+fn apply_committed_flush(
+    session: &mut SessionRuntime,
+    commit: AppendCommit,
+    process_pending_bytes: &AtomicUsize,
+) -> Vec<TurnId> {
     let committed_cancellations = session
         .pending
         .iter()
@@ -311,12 +578,6 @@ fn apply_committed_flush(session: &mut SessionRuntime, commit: AppendCommit) -> 
             _ => None,
         })
         .collect::<Vec<_>>();
-    let committed_terminal = session
-        .pending
-        .iter()
-        .take_while(|fact| fact.seq() <= commit.durable_seq)
-        .find(|fact| is_terminal_fact(fact))
-        .cloned();
     while session
         .pending
         .front()
@@ -324,6 +585,7 @@ fn apply_committed_flush(session: &mut SessionRuntime, commit: AppendCommit) -> 
     {
         let fact = session.pending.pop_front().expect("front existed");
         session.pending_bytes = session.pending_bytes.saturating_sub(fact.encoded_len());
+        process_pending_bytes.fetch_sub(fact.encoded_len(), Ordering::AcqRel);
     }
     session.durable_seq = commit.durable_seq;
     session.header_pending = false;
@@ -333,16 +595,7 @@ fn apply_committed_flush(session: &mut SessionRuntime, commit: AppendCommit) -> 
         durable_seq: commit.durable_seq,
         permanent_error: None,
     });
-    if let Some(fact) = committed_terminal {
-        let _receivers = session.updates.send(TurnUpdate::Fact {
-            fact: Box::new(fact),
-            durable_seq: commit.durable_seq,
-        });
-    } else {
-        let _receivers = session.updates.send(TurnUpdate::Durable {
-            durable_seq: commit.durable_seq,
-        });
-    }
+    publish_live_watermarks(session);
     for cancellation in committed_cancellations {
         cancellation.cancel();
     }
@@ -366,21 +619,49 @@ fn apply_committed_flush(session: &mut SessionRuntime, commit: AppendCommit) -> 
 
 impl SessionKernel {
     /// Recovers every durable session and repairs unfinished tails before return.
-    pub async fn recover(store: Arc<dyn SessionStore>) -> Result<Self> {
-        Self::recover_with_sources(store, Arc::new(SystemClock), Arc::new(SystemIds::default()))
-            .await
+    pub async fn recover(
+        store: Arc<dyn SessionStore>,
+        composition: Arc<dyn AgentComposition>,
+    ) -> Result<Self> {
+        Self::recover_with_sources(
+            store,
+            composition,
+            Arc::new(SystemClock),
+            Arc::new(SystemIds::default()),
+        )
+        .await
     }
 
     /// Recovers with deterministic timestamp and identity sources.
     pub async fn recover_with_sources(
         store: Arc<dyn SessionStore>,
+        composition: Arc<dyn AgentComposition>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
     ) -> Result<Self> {
+        Self::recover_with_sources_and_limits(
+            store,
+            composition,
+            clock,
+            ids,
+            KernelLimits::default(),
+        )
+        .await
+    }
+
+    /// Recovers with deterministic sources and explicit process-wide limits.
+    pub async fn recover_with_sources_and_limits(
+        store: Arc<dyn SessionStore>,
+        composition: Arc<dyn AgentComposition>,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdSource>,
+        limits: KernelLimits,
+    ) -> Result<Self> {
+        limits.validate()?;
         let mut after = None;
         loop {
             let page = store
-                .list_sessions(after.as_ref(), MAXIMUM_SESSIONS_PER_READ)
+                .list_open_sessions(after.as_ref(), MAXIMUM_SESSIONS_PER_READ)
                 .await?;
             let has_more = page.has_more;
             let next_after = page.sessions.last().cloned();
@@ -397,12 +678,16 @@ impl SessionKernel {
         Ok(Self {
             inner: Arc::new(KernelInner {
                 store,
+                composition,
+                resume_issuer: ResumeAdmissionIssuer::new(),
+                claim_issuer: TurnClaimIssuer::new(),
                 clock,
                 ids,
                 state: Mutex::new(KernelState {
                     accepting: true,
                     sessions: BTreeMap::new(),
                     loading_sessions: BTreeMap::new(),
+                    fresh_reservations: BTreeSet::new(),
                     executors: BTreeMap::new(),
                     next_executor_registration: 0,
                     finalizers: BTreeMap::new(),
@@ -415,6 +700,10 @@ impl SessionKernel {
                 claim_changed: Notify::new(),
                 flush_requested: Notify::new(),
                 stop_worker: CancellationToken::new(),
+                limits,
+                process_pending_bytes: AtomicUsize::new(0),
+                active_observers: AtomicUsize::new(0),
+                store_read_admission: Arc::new(Semaphore::new(limits.maximum_store_read_bytes)),
             }),
         })
     }
@@ -426,7 +715,8 @@ impl SessionKernel {
         tokio::spawn(async move { kernel.flush_loop(first_tick).await })
     }
 
-    /// Stops admission, durably drains pending Facts, and ends the worker.
+    /// Stops admission, durably drains pending Facts, ends the worker, and
+    /// releases resident generation pins.
     pub async fn shutdown(&self, mut worker: JoinHandle<()>) -> Result<()> {
         {
             let mut state = lock_state(&self.inner);
@@ -452,7 +742,37 @@ impl SessionKernel {
                 "flush worker did not stop before the shutdown deadline".into(),
             ))
         };
+        self.quiesce();
         flush_result.and(worker_result)
+    }
+
+    fn quiesce(&self) {
+        let (sessions, loads, finalizers) = {
+            let mut state = lock_state(&self.inner);
+            let sessions = std::mem::take(&mut state.sessions);
+            let loads = std::mem::take(&mut state.loading_sessions)
+                .into_values()
+                .collect::<Vec<_>>();
+            let finalizers = std::mem::take(&mut state.finalizers);
+            state.fresh_reservations.clear();
+            state.executors.clear();
+            state.finalizer_names.clear();
+            state.claim_queue.clear();
+            state.queued.clear();
+            (sessions, loads, finalizers)
+        };
+        self.inner.process_pending_bytes.store(0, Ordering::Release);
+        for session in sessions.values() {
+            for turn in session.turns.values() {
+                turn.cancellation.cancel();
+            }
+        }
+        for load in loads {
+            load.complete(Err(TurnError::ShuttingDown));
+        }
+        self.inner.claim_changed.notify_waiters();
+        drop(sessions);
+        drop(finalizers);
     }
 
     async fn flush_loop(self, mut next_tick: Instant) {
@@ -474,15 +794,16 @@ impl SessionKernel {
             state.sessions.keys().cloned().collect::<Vec<_>>()
         };
         for session_id in session_ids {
-            let Some(batch) = self.prepare_flush_batch(&session_id) else {
+            let Some(prepared) = self.prepare_flush_batch(&session_id) else {
                 continue;
             };
+            let batch = prepared.into_store_batch();
             let result = self.inner.store.append(batch).await;
             self.complete_flush(&session_id, result);
         }
     }
 
-    fn prepare_flush_batch(&self, session_id: &SessionId) -> Option<AppendBatch> {
+    fn prepare_flush_batch(&self, session_id: &SessionId) -> Option<PreparedFlushBatch> {
         let mut state = lock_state(&self.inner);
         let session = state.sessions.get_mut(session_id)?;
         if session.flush_inflight
@@ -505,10 +826,10 @@ impl SessionKernel {
                 break;
             }
             bytes = bytes.saturating_add(encoded);
-            facts.push(fact.clone());
+            facts.push(Arc::clone(fact));
         }
         session.flush_inflight = true;
-        Some(AppendBatch {
+        Some(PreparedFlushBatch {
             session_id: session_id.clone(),
             expected_seq: session.durable_seq,
             header: session.header_pending.then(|| session.header.clone()),
@@ -534,10 +855,13 @@ impl SessionKernel {
             session.flush_inflight = false;
             match result {
                 Ok(commit) => {
-                    pruned_turns = apply_committed_flush(session, commit);
+                    pruned_turns =
+                        apply_committed_flush(session, commit, &self.inner.process_pending_bytes);
                     enqueue_after_commit = true;
                     request_more = !session.pending.is_empty();
-                    evict_session = session.turns.is_empty() && session.pending.is_empty();
+                    evict_session = session.admission_reservations == 0
+                        && session.turns.is_empty()
+                        && session.pending.is_empty();
                 }
                 Err(StoreError::Io(_)) => {
                     session.retry_failures = session.retry_failures.saturating_add(1);
@@ -664,9 +988,13 @@ impl SessionKernel {
     }
 
     fn validate_claim<'a>(
+        &self,
         state: &'a KernelState,
         claim: &TurnClaim,
     ) -> TurnResult<&'a TurnControl> {
+        if !self.inner.claim_issuer.validates_identity(claim) {
+            return Err(TurnError::StaleClaim);
+        }
         let registration_id = state
             .executors
             .get(&claim.executor_id)
@@ -684,7 +1012,11 @@ impl SessionKernel {
             Some(owner)
                 if owner.executor == claim.executor_id
                     && owner.registration == registration_id
-                    && owner.claim == claim.claim_id =>
+                    && owner.claim == claim.claim_id
+                    && owner.live_seq == claim.live_seq
+                    && turn.accepted_at_ms == claim.accepted_at_ms
+                    && turn.accepted_seq == claim.accepted_seq
+                    && session.header == claim.header =>
             {
                 Ok(turn)
             }
@@ -692,55 +1024,186 @@ impl SessionKernel {
         }
     }
 
-    async fn prepare_submission_profile(
-        &self,
-        selection: &SubmitSession,
-    ) -> TurnResult<FrozenAgentProfile> {
-        match selection {
-            SubmitSession::Fresh(header) => {
-                if lock_state(&self.inner)
-                    .sessions
-                    .contains_key(header.session_id())
-                {
-                    return Err(TurnError::Invalid(
-                        "fresh submission selected an existing session".into(),
-                    ));
-                }
-                match self.inner.store.header(header.session_id()).await {
-                    Ok(_) => Err(TurnError::Invalid(
-                        "fresh submission selected an existing session".into(),
-                    )),
-                    Err(StoreError::NotFound(_)) => Ok(header.profile().clone()),
-                    Err(error) => Err(turn_store_error(error)),
-                }
+    fn validate_issued_claim(&self, claim: &TurnClaim) -> TurnResult<()> {
+        self.inner
+            .claim_issuer
+            .validates(claim)
+            .then_some(())
+            .ok_or(TurnError::StaleClaim)
+    }
+
+    fn loaded_profile(&self, session_id: &SessionId) -> TurnResult<FrozenAgentProfile> {
+        lock_state(&self.inner)
+            .sessions
+            .get(session_id)
+            .map(|session| session.header.profile().clone())
+            .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))
+    }
+
+    async fn reserve_fresh_session(&self, header: &SessionHeader) -> TurnResult<()> {
+        header
+            .validate()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let session_id = header.session_id();
+        {
+            let mut state = lock_state(&self.inner);
+            if !state.accepting {
+                return Err(TurnError::ShuttingDown);
             }
-            SubmitSession::Resume(session_id) => {
-                if let Some(profile) = lock_state(&self.inner)
-                    .sessions
-                    .get(session_id)
-                    .map(|session| session.header.profile().clone())
-                {
-                    return Ok(profile);
-                }
-                self.inner
-                    .store
-                    .header(session_id)
-                    .await
-                    .map(|header| header.profile().clone())
-                    .map_err(turn_store_error)
+            if state.sessions.contains_key(session_id)
+                || state.loading_sessions.contains_key(session_id)
+                || state.fresh_reservations.contains(session_id)
+            {
+                return Err(TurnError::Invalid(
+                    "fresh submission selected an existing or reserved session".into(),
+                ));
             }
+            if state
+                .sessions
+                .len()
+                .saturating_add(state.loading_sessions.len())
+                .saturating_add(state.fresh_reservations.len())
+                >= MAXIMUM_ACTIVE_SESSIONS
+            {
+                return Err(TurnError::Capacity);
+            }
+            state.fresh_reservations.insert(session_id.clone());
+        }
+        let reservation = FreshReservationGuard::new(&self.inner, session_id.clone());
+        match self.inner.store.header(session_id).await {
+            Err(StoreError::NotFound(_)) => {
+                reservation.disarm();
+                Ok(())
+            }
+            Ok(_) => Err(TurnError::Invalid(
+                "fresh submission selected an existing session".into(),
+            )),
+            Err(error) => Err(turn_store_error(error)),
         }
     }
 
-    async fn ensure_session_loaded(&self, session_id: &SessionId) -> TurnResult<()> {
+    async fn prepare_resume_session(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<PreparedResumeSession> {
+        loop {
+            let concurrent_load = {
+                let state = lock_state(&self.inner);
+                if !state.accepting {
+                    return Err(TurnError::ShuttingDown);
+                }
+                if let Some(session) = state.sessions.get(session_id) {
+                    return self
+                        .inner
+                        .resume_issuer
+                        .issue(session.header.clone(), session.composition.clone());
+                }
+                if state.fresh_reservations.contains(session_id) {
+                    return Err(TurnError::Invalid(
+                        "resume selected a session that is still being created".into(),
+                    ));
+                }
+                state.loading_sessions.get(session_id).cloned()
+            };
+            if let Some(load) = concurrent_load {
+                load.wait().await?;
+                continue;
+            }
+
+            let header = self
+                .inner
+                .store
+                .header(session_id)
+                .await
+                .map_err(turn_store_error)?;
+            let composition = match self.inner.composition.pin(header.agent_preset_id()).await {
+                Ok(composition) => composition,
+                Err(error) => {
+                    let concurrent_load = {
+                        let state = lock_state(&self.inner);
+                        if !state.accepting {
+                            return Err(TurnError::ShuttingDown);
+                        }
+                        if let Some(session) = state.sessions.get(session_id) {
+                            return self
+                                .inner
+                                .resume_issuer
+                                .issue(session.header.clone(), session.composition.clone());
+                        }
+                        if state.fresh_reservations.contains(session_id) {
+                            return Err(TurnError::Invalid(
+                                "resume selected a session that is still being created".into(),
+                            ));
+                        }
+                        state.loading_sessions.get(session_id).cloned()
+                    };
+                    if let Some(load) = concurrent_load {
+                        load.wait().await?;
+                        continue;
+                    }
+                    return Err(turn_composition_error(error));
+                }
+            };
+
+            let concurrent_load = {
+                let state = lock_state(&self.inner);
+                if !state.accepting {
+                    return Err(TurnError::ShuttingDown);
+                }
+                if let Some(session) = state.sessions.get(session_id) {
+                    return self
+                        .inner
+                        .resume_issuer
+                        .issue(session.header.clone(), session.composition.clone());
+                }
+                if state.fresh_reservations.contains(session_id) {
+                    return Err(TurnError::Invalid(
+                        "resume selected a session that is still being created".into(),
+                    ));
+                }
+                state.loading_sessions.get(session_id).cloned()
+            };
+            if let Some(load) = concurrent_load {
+                load.wait().await?;
+                continue;
+            }
+            return self.inner.resume_issuer.issue(header, composition);
+        }
+    }
+
+    async fn ensure_prepared_session_loaded(
+        &self,
+        prepared: &PreparedResumeSession,
+    ) -> TurnResult<()> {
+        let (header, composition) = self.inner.resume_issuer.inspect(prepared)?;
+        let header = header.clone();
+        let composition = composition.clone();
+        let session_id = header.session_id().clone();
         let (load, leader) = {
             let mut state = lock_state(&self.inner);
-            if state.sessions.contains_key(session_id) {
+            if !state.accepting {
+                return Err(TurnError::ShuttingDown);
+            }
+            if state.sessions.contains_key(&session_id) {
                 return Ok(());
             }
-            if let Some(load) = state.loading_sessions.get(session_id) {
+            if state.fresh_reservations.contains(&session_id) {
+                return Err(TurnError::Invalid(
+                    "resume selected a session that is still being created".into(),
+                ));
+            }
+            if let Some(load) = state.loading_sessions.get(&session_id) {
                 (Arc::clone(load), false)
             } else {
+                if state
+                    .sessions
+                    .len()
+                    .saturating_add(state.loading_sessions.len())
+                    .saturating_add(state.fresh_reservations.len())
+                    >= MAXIMUM_ACTIVE_SESSIONS
+                {
+                    return Err(TurnError::Capacity);
+                }
                 let load = Arc::new(SessionLoad::pending());
                 state
                     .loading_sessions
@@ -751,42 +1214,70 @@ impl SessionKernel {
         if !leader {
             return load.wait().await;
         }
-        let header = self
-            .inner
-            .store
-            .header(session_id)
+        let load_guard = SessionLoadGuard::new(&self.inner, session_id.clone(), Arc::clone(&load));
+        let budget = header.profile().turn_budget().clone();
+        let loaded = load_control_state(&self.inner.store, Some(&self.inner), &session_id, &budget)
             .await
-            .map_err(turn_store_error);
-        let result = match header {
-            Ok(header) => load_control_state(&self.inner.store, session_id)
-                .await
-                .map_err(turn_kernel_error)
-                .and_then(|(durable_seq, turns, turn_order)| {
-                    let mut state = lock_state(&self.inner);
-                    if state.sessions.contains_key(session_id) {
-                        return Ok(());
+            .map_err(turn_kernel_error);
+        let result = {
+            let mut state = lock_state(&self.inner);
+            if !state.accepting {
+                Err(TurnError::ShuttingDown)
+            } else if state.sessions.contains_key(&session_id) {
+                Ok(())
+            } else {
+                match loaded {
+                    Err(error) => Err(error),
+                    Ok((durable_seq, turns, turn_order)) => {
+                        let mut session =
+                            SessionRuntime::new(header, composition, durable_seq, false);
+                        session.turns = turns;
+                        session.turn_order = turn_order;
+                        let queued = session.turn_order.clone();
+                        state.sessions.insert(session_id.clone(), session);
+                        for turn_id in queued {
+                            enqueue(&mut state, session_id.clone(), turn_id);
+                        }
+                        Ok(())
                     }
-                    if state.sessions.len() >= MAXIMUM_ACTIVE_SESSIONS {
-                        return Err(TurnError::Capacity);
-                    }
-                    let mut session = SessionRuntime::new(header, durable_seq, false);
-                    session.turns = turns;
-                    session.turn_order = turn_order;
-                    let queued = session.turn_order.clone();
-                    state.sessions.insert(session_id.clone(), session);
-                    for turn_id in queued {
-                        enqueue(&mut state, session_id.clone(), turn_id);
-                    }
-                    Ok(())
-                }),
-            Err(error) => Err(error),
+                }
+            }
         };
-        load.complete(result.clone());
-        lock_state(&self.inner).loading_sessions.remove(session_id);
+        load_guard.complete(result.clone());
         if result.is_ok() {
             self.inner.claim_changed.notify_waiters();
         }
         result
+    }
+
+    async fn ensure_session_loaded(&self, session_id: &SessionId) -> TurnResult<()> {
+        let prepared = self.prepare_resume_session(session_id).await?;
+        self.ensure_prepared_session_loaded(&prepared).await
+    }
+
+    async fn reserve_resume_submission(
+        &self,
+        prepared: &PreparedResumeSession,
+    ) -> TurnResult<ResumeAdmissionGuard> {
+        let (header, _) = self.inner.resume_issuer.inspect(prepared)?;
+        let session_id = header.session_id().clone();
+        loop {
+            self.ensure_prepared_session_loaded(prepared).await?;
+            let mut state = lock_state(&self.inner);
+            let Some(session) = state.sessions.get_mut(&session_id) else {
+                continue;
+            };
+            session.admission_reservations = session
+                .admission_reservations
+                .checked_add(1)
+                .ok_or_else(|| {
+                    TurnError::Invariant("resume admission reservation count overflowed".into())
+                })?;
+            return Ok(ResumeAdmissionGuard {
+                inner: Arc::clone(&self.inner),
+                session_id,
+            });
+        }
     }
 
     fn accept_turn(
@@ -800,27 +1291,32 @@ impl SessionKernel {
         let session_id = session_selection.session_id().clone();
         let mut state = lock_state(&self.inner);
         if !state.accepting {
+            if matches!(&session_selection, SubmitSession::Fresh(_)) {
+                state.fresh_reservations.remove(&session_id);
+            }
             return Err(TurnError::ShuttingDown);
         }
         let inserted_fresh = matches!(&session_selection, SubmitSession::Fresh(_));
         match session_selection {
-            SubmitSession::Fresh(header) => {
+            SubmitSession::Fresh(prepared) => {
+                let (header, composition) = prepared.into_parts();
                 header
                     .validate()
                     .map_err(|error| TurnError::Invalid(error.to_string()))?;
-                if state.sessions.contains_key(&session_id) {
+                if state.sessions.contains_key(&session_id)
+                    || !state.fresh_reservations.remove(&session_id)
+                {
                     return Err(TurnError::Invalid(
-                        "fresh submission selected an existing session".into(),
+                        "fresh submission lacks its exact resident reservation".into(),
                     ));
                 }
-                if state.sessions.len() >= MAXIMUM_ACTIVE_SESSIONS {
-                    return Err(TurnError::Capacity);
-                }
-                state
-                    .sessions
-                    .insert(session_id.clone(), SessionRuntime::new(header, 0, true));
+                state.sessions.insert(
+                    session_id.clone(),
+                    SessionRuntime::new(header, composition, 0, true),
+                );
             }
-            SubmitSession::Resume(_) => {
+            SubmitSession::Resume(prepared) => {
+                let _parts = self.inner.resume_issuer.consume(prepared)?;
                 if !state.sessions.contains_key(&session_id) {
                     return Err(TurnError::SessionNotFound(session_id.to_string()));
                 }
@@ -848,7 +1344,7 @@ impl SessionKernel {
                 ));
             }
             let fact = next_fact(&self.inner, session, body).map_err(turn_kernel_error)?;
-            push_pending(session, fact.clone()).map_err(turn_kernel_error)?;
+            push_pending(&self.inner, session, fact.clone()).map_err(turn_kernel_error)?;
             Ok(fact)
         })();
         let fact = match staged {
@@ -865,12 +1361,12 @@ impl SessionKernel {
             .sessions
             .get_mut(&session_id)
             .expect("accepted session exists");
-        session.turns.insert(turn_id.clone(), TurnControl::new());
+        session.turns.insert(
+            turn_id.clone(),
+            TurnControl::new(fact.timestamp_ms(), accepted_seq),
+        );
         session.turn_order.push(turn_id.clone());
-        let _receivers = session.updates.send(TurnUpdate::Fact {
-            fact: Box::new(fact),
-            durable_seq: session.durable_seq,
-        });
+        publish_live_watermarks(session);
         enqueue(&mut state, session_id.clone(), turn_id.clone());
         drop(state);
         self.inner.claim_changed.notify_waiters();
@@ -884,8 +1380,39 @@ impl SessionKernel {
 
 #[async_trait]
 impl TurnService for SessionKernel {
+    async fn prepare_resume(&self, session_id: &SessionId) -> TurnResult<PreparedResumeSession> {
+        self.prepare_resume_session(session_id).await
+    }
+
     async fn submit(&self, request: SubmitTurn) -> TurnResult<SubmittedTurn> {
-        let profile = self.prepare_submission_profile(&request.session).await?;
+        if request.text.is_empty() || request.text.len() > MAXIMUM_TURN_TEXT_BYTES {
+            return Err(TurnError::Invalid(format!(
+                "turn text must contain 1..={MAXIMUM_TURN_TEXT_BYTES} UTF-8 bytes"
+            )));
+        }
+        if let Some(model) = &request.model {
+            model
+                .validate()
+                .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        }
+        let resume_admission = match &request.session {
+            SubmitSession::Fresh(prepared) => {
+                prepared
+                    .header()
+                    .validate()
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?;
+                None
+            }
+            SubmitSession::Resume(prepared) => {
+                Some(self.reserve_resume_submission(prepared).await?)
+            }
+        };
+        let profile = match &request.session {
+            SubmitSession::Fresh(prepared) => prepared.header().profile().clone(),
+            SubmitSession::Resume(prepared) => {
+                self.loaded_profile(prepared.header().session_id())?
+            }
+        };
         let sandbox = request.sandbox.unwrap_or(profile.sandbox());
         let require_approval =
             profile.require_approval() || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
@@ -900,14 +1427,35 @@ impl TurnService for SessionKernel {
         };
         body.validate()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        if let SubmitSession::Resume(session_id) = &request.session {
-            self.ensure_session_loaded(session_id).await?;
+        if let SubmitSession::Fresh(prepared) = &request.session {
+            self.reserve_fresh_session(prepared.header()).await?;
         }
-        self.accept_turn(request.session, turn_id, body)
+        let result = self.accept_turn(request.session, turn_id, body);
+        drop(resume_admission);
+        result
     }
 
     async fn submit_image(&self, request: SubmitImage) -> TurnResult<SubmittedTurn> {
-        let _profile = self.prepare_submission_profile(&request.session).await?;
+        request
+            .model
+            .validate()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        request
+            .request
+            .validate()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let resume_admission = match &request.session {
+            SubmitSession::Fresh(prepared) => {
+                prepared
+                    .header()
+                    .validate()
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?;
+                None
+            }
+            SubmitSession::Resume(prepared) => {
+                Some(self.reserve_resume_submission(prepared).await?)
+            }
+        };
         let turn_id = TurnId::new(self.inner.ids.next_id("turn").map_err(turn_kernel_error)?)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let body = SessionFactBody::ImageRequested {
@@ -917,10 +1465,12 @@ impl TurnService for SessionKernel {
         };
         body.validate()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        if let SubmitSession::Resume(session_id) = &request.session {
-            self.ensure_session_loaded(session_id).await?;
+        if let SubmitSession::Fresh(prepared) = &request.session {
+            self.reserve_fresh_session(prepared.header()).await?;
         }
-        self.accept_turn(request.session, turn_id, body)
+        let result = self.accept_turn(request.session, turn_id, body);
+        drop(resume_admission);
+        result
     }
 
     async fn cancel(
@@ -936,7 +1486,7 @@ impl TurnService for SessionKernel {
         body.validate()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if !lock_state(&self.inner).sessions.contains_key(session_id) {
-            if read_stored_outcome(&self.inner.store, session_id, turn_id)
+            if read_stored_outcome(&self.inner, session_id, turn_id)
                 .await?
                 .is_some()
             {
@@ -959,7 +1509,7 @@ impl TurnService for SessionKernel {
             {
                 return Err(turn_not_found(session_id, turn_id));
             }
-            return match read_stored_outcome(&self.inner.store, session_id, turn_id).await? {
+            return match read_stored_outcome(&self.inner, session_id, turn_id).await? {
                 Some(_) => Ok(CancelResult {
                     accepted: false,
                     already_terminal: true,
@@ -997,16 +1547,13 @@ impl TurnService for SessionKernel {
             let cancellation = turn.cancellation.clone();
             let fact = next_fact(&self.inner, session, body).map_err(turn_kernel_error)?;
             let cancel_seq = fact.seq();
-            push_pending(session, fact.clone()).map_err(turn_kernel_error)?;
+            push_pending(&self.inner, session, fact.clone()).map_err(turn_kernel_error)?;
             session
                 .turns
                 .get_mut(turn_id)
                 .expect("validated turn exists")
                 .cancel_requested = true;
-            let _receivers = session.updates.send(TurnUpdate::Fact {
-                fact: Box::new(fact),
-                durable_seq: session.durable_seq,
-            });
+            publish_live_watermarks(session);
             (cancel_seq, cancellation)
         };
         self.wait_for_durable(session_id, cancel_seq)
@@ -1020,6 +1567,7 @@ impl TurnService for SessionKernel {
     }
 
     async fn observe(&self, session_id: &SessionId, after_seq: u64) -> TurnResult<TurnObservation> {
+        let observer_lease = ObserverLease::acquire(&self.inner)?;
         let live_snapshot = {
             let state = lock_state(&self.inner);
             state.sessions.get(session_id).map(|session| {
@@ -1028,78 +1576,73 @@ impl TurnService for SessionKernel {
                     Some(session.flush_status.subscribe()),
                     session.durable_seq,
                     session.live_seq(),
-                    session
-                        .pending
-                        .iter()
-                        .filter(|fact| fact.seq() > after_seq && !is_terminal_fact(fact))
-                        .cloned()
-                        .collect::<VecDeque<_>>(),
                 )
             })
         };
-        let (receiver, flush_status, durable_target, live_seq, pending) = if let Some((
-            receiver,
-            flush_status,
-            durable_target,
-            live_seq,
-            pending,
-        )) = live_snapshot
-        {
-            (
-                receiver,
-                flush_status,
-                durable_target,
-                live_seq.map_err(turn_kernel_error)?,
-                pending,
-            )
-        } else {
-            let page = self
-                .inner
-                .store
-                .read_facts(session_id, 0, 1)
-                .await
-                .map_err(turn_store_error)?;
-            let state = lock_state(&self.inner);
-            if let Some(session) = state.sessions.get(session_id) {
-                (
-                    session.updates.subscribe(),
-                    Some(session.flush_status.subscribe()),
-                    session.durable_seq,
-                    session.live_seq().map_err(turn_kernel_error)?,
-                    session
-                        .pending
-                        .iter()
-                        .filter(|fact| fact.seq() > after_seq && !is_terminal_fact(fact))
-                        .cloned()
-                        .collect(),
-                )
-            } else {
-                let (sender, receiver) = broadcast::channel(1);
-                drop(sender);
+        let (receiver, flush_status, durable_target, live_seq, durable_facts) =
+            if let Some((receiver, flush_status, durable_target, live_seq)) = live_snapshot {
                 (
                     receiver,
-                    None,
-                    page.durable_seq,
-                    page.durable_seq,
+                    flush_status,
+                    durable_target,
+                    live_seq.map_err(turn_kernel_error)?,
                     VecDeque::new(),
                 )
-            }
-        };
+            } else {
+                let page =
+                    read_facts_bounded(&self.inner, session_id, after_seq, MAXIMUM_FACTS_PER_READ)
+                        .await
+                        .map_err(|error| match error {
+                            StoreError::Invalid(_) => TurnError::Invalid(
+                                "observation cursor exceeds the durable tail".into(),
+                            ),
+                            other => turn_store_error(other),
+                        })?;
+                let page_durable_seq = page.durable_seq;
+                let durable_facts = page.facts.into_iter().map(Arc::new).collect();
+                let state = lock_state(&self.inner);
+                if let Some(session) = state.sessions.get(session_id) {
+                    (
+                        session.updates.subscribe(),
+                        Some(session.flush_status.subscribe()),
+                        session.durable_seq.max(page_durable_seq),
+                        session
+                            .live_seq()
+                            .map_err(turn_kernel_error)?
+                            .max(page_durable_seq),
+                        durable_facts,
+                    )
+                } else {
+                    let (sender, receiver) = watch::channel(LiveWatermarks {
+                        live_seq: page_durable_seq,
+                        durable_seq: page_durable_seq,
+                    });
+                    drop(sender);
+                    (
+                        receiver,
+                        None,
+                        page_durable_seq,
+                        page_durable_seq,
+                        durable_facts,
+                    )
+                }
+            };
         if after_seq > live_seq {
             return Err(TurnError::Invalid(
                 "observation cursor exceeds the live tail".into(),
             ));
         }
         let state = ObservationState {
-            store: Arc::clone(&self.inner.store),
             session_id: session_id.clone(),
             cursor: after_seq,
             durable_target,
-            durable_buffer: VecDeque::new(),
-            pending,
+            live_target: live_seq,
+            inner: Arc::downgrade(&self.inner),
             receiver,
             flush_status,
+            durable_facts,
             ended: false,
+            _observer_lease: observer_lease,
         };
         Ok(stream::unfold(state, observation_next).boxed())
     }
@@ -1123,7 +1666,7 @@ impl TurnService for SessionKernel {
                 }
             }
         }
-        read_stored_outcome(&self.inner.store, session_id, turn_id).await
+        read_stored_outcome(&self.inner, session_id, turn_id).await
     }
 
     async fn session_header(&self, session_id: &SessionId) -> TurnResult<SessionHeader> {
@@ -1201,18 +1744,43 @@ impl TurnFinalization for SessionKernel {
 
     async fn finalize(
         &self,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-    ) -> rsi_agent_turn_protocol::FinalizationResult<()> {
+        context: &TurnFinalizationContext,
+    ) -> rsi_agent_turn_protocol::FinalizationResult<TurnFinalizationReport> {
         let finalizers = lock_state(&self.inner)
             .finalizers
             .values()
-            .map(|entry| Arc::clone(&entry.finalizer))
+            .map(|entry| (entry.name.clone(), Arc::clone(&entry.finalizer)))
             .collect::<Vec<_>>();
-        for finalizer in finalizers {
-            finalizer.finalize(session_id, turn_id).await?;
+        let results = futures_util::future::join_all(finalizers.into_iter().map(
+            |(name, finalizer)| async move {
+                let result = std::panic::AssertUnwindSafe(finalizer.finalize(context))
+                    .catch_unwind()
+                    .await;
+                (name, result)
+            },
+        ))
+        .await;
+
+        for (name, result) in &results {
+            match result {
+                Ok(Err(error)) => return Err(error.clone()),
+                Err(_) => {
+                    return Err(TurnFinalizationError::Failed {
+                        code: "turn.finalizer_panic".into(),
+                        message: format!("turn finalizer `{name}` panicked"),
+                    });
+                }
+                Ok(Ok(_)) => {}
+            }
         }
-        Ok(())
+        for (_, result) in results {
+            if let Ok(Ok(report)) = result
+                && let Some(blocker) = report.completion_blocker()
+            {
+                return Ok(TurnFinalizationReport::blocked(blocker.clone()));
+            }
+        }
+        Ok(TurnFinalizationReport::complete())
     }
 }
 
@@ -1285,23 +1853,33 @@ impl TurnExecution for SessionKernel {
                         .sessions
                         .get_mut(&session_id)
                         .expect("claimable session was observed");
-                    session
+                    let live_seq = session.live_seq().map_err(turn_kernel_error)?;
+                    let turn = session
                         .turns
                         .get_mut(&turn_id)
-                        .expect("claimable turn was observed")
-                        .claim = Some(ClaimOwner {
+                        .expect("claimable turn was observed");
+                    let accepted_at_ms = turn.accepted_at_ms;
+                    let accepted_seq = turn.accepted_seq;
+                    turn.claim = Some(ClaimOwner {
                         executor: executor_id.into(),
                         registration: registration_id,
                         claim: claim_id,
+                        live_seq,
                     });
-                    return Ok(Some(TurnClaim {
-                        executor_id: executor_id.into(),
-                        claim_id,
-                        session_id,
-                        turn_id,
-                        header: session.header.clone(),
-                        live_seq: session.live_seq().map_err(turn_kernel_error)?,
-                    }));
+                    return self
+                        .inner
+                        .claim_issuer
+                        .issue(
+                            executor_id.into(),
+                            claim_id,
+                            session_id,
+                            turn_id,
+                            session.header.clone(),
+                            accepted_at_ms,
+                            accepted_seq,
+                            live_seq,
+                        )
+                        .map(Some);
                 }
                 if !state.accepting {
                     return Ok(None);
@@ -1313,6 +1891,16 @@ impl TurnExecution for SessionKernel {
                 () = self.inner.stop_worker.cancelled() => return Ok(None),
             }
         }
+    }
+
+    fn composition(&self, claim: &TurnClaim) -> TurnResult<AgentCompositionPin> {
+        let state = lock_state(&self.inner);
+        self.validate_claim(&state, claim)?;
+        state
+            .sessions
+            .get(&claim.session_id)
+            .map(|session| session.composition.clone())
+            .ok_or(TurnError::StaleClaim)
     }
 
     async fn read_facts(
@@ -1328,7 +1916,7 @@ impl TurnExecution for SessionKernel {
         }
         let (durable_seq, live_seq, hidden_turns) = {
             let state = lock_state(&self.inner);
-            Self::validate_claim(&state, claim)?;
+            self.validate_claim(&state, claim)?;
             let session = state
                 .sessions
                 .get(&claim.session_id)
@@ -1354,10 +1942,7 @@ impl TurnExecution for SessionKernel {
         let mut through_seq = after_seq;
         let mut scanned = 0_usize;
         if after_seq < durable_seq {
-            let page = self
-                .inner
-                .store
-                .read_facts(&claim.session_id, after_seq, limit)
+            let page = read_facts_bounded(&self.inner, &claim.session_id, after_seq, limit)
                 .await
                 .map_err(turn_store_error)?;
             scanned = page.facts.len();
@@ -1366,34 +1951,26 @@ impl TurnExecution for SessionKernel {
                 .last()
                 .map_or(after_seq, SessionFact::seq)
                 .min(live_seq);
-            facts.extend(page.facts.into_iter().filter(|fact| {
-                fact.seq() <= live_seq && !hidden_turns.contains(fact.body().turn_id())
+            facts.extend(page.facts.into_iter().filter_map(|fact| {
+                (fact.seq() <= live_seq && !hidden_turns.contains(fact.body().turn_id()))
+                    .then(|| Arc::new(fact))
             }));
-            let current_durable_seq = {
-                let state = lock_state(&self.inner);
-                Self::validate_claim(&state, claim)?;
-                state
-                    .sessions
-                    .get(&claim.session_id)
-                    .expect("validated claim session exists")
-                    .durable_seq
-            };
-            if through_seq < current_durable_seq || through_seq == live_seq || scanned == limit {
-                return Ok(ClaimFactPage { facts, through_seq });
-            }
+        }
+        let state = lock_state(&self.inner);
+        self.validate_claim(&state, claim)?;
+        let session = state
+            .sessions
+            .get(&claim.session_id)
+            .expect("validated claim session exists");
+        if through_seq < session.durable_seq || through_seq == live_seq || scanned == limit {
+            return Ok(ClaimFactPage { facts, through_seq });
         }
         if scanned < limit && through_seq < live_seq {
-            let state = lock_state(&self.inner);
-            Self::validate_claim(&state, claim)?;
-            let session = state
-                .sessions
-                .get(&claim.session_id)
-                .expect("validated claim session exists");
             let pending_after = through_seq;
             for fact in session
                 .pending
                 .iter()
-                .filter(|fact| fact.seq() > pending_after)
+                .filter(|fact| fact.seq() > pending_after && fact.seq() <= live_seq)
                 .take(limit - scanned)
             {
                 through_seq = fact.seq();
@@ -1405,18 +1982,146 @@ impl TurnExecution for SessionKernel {
         Ok(ClaimFactPage { facts, through_seq })
     }
 
+    async fn read_checkpoint_facts(
+        &self,
+        claim: &TurnClaim,
+        after_seq: u64,
+        limit: usize,
+    ) -> TurnResult<Option<ClaimFactPage>> {
+        self.validate_issued_claim(claim)?;
+        if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
+            return Err(TurnError::Invalid(
+                "checkpoint Fact read limit is out of bounds".into(),
+            ));
+        }
+        if !context_checkpoints_enabled(&self.inner) {
+            return Ok(None);
+        }
+        let (session_present, expected_durable) = {
+            let state = lock_state(&self.inner);
+            match state.sessions.get(&claim.session_id) {
+                Some(session) => {
+                    let live_seq = session.live_seq().map_err(turn_kernel_error)?;
+                    (
+                        true,
+                        (live_seq == session.durable_seq).then_some(session.durable_seq),
+                    )
+                }
+                None => (false, None),
+            }
+        };
+        if session_present && expected_durable.is_none() {
+            return Ok(None);
+        }
+        if read_stored_outcome(&self.inner, &claim.session_id, &claim.turn_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let page = read_facts_bounded(&self.inner, &claim.session_id, after_seq, limit)
+            .await
+            .map_err(turn_store_error)?;
+        if expected_durable.is_some_and(|expected| page.durable_seq != expected) {
+            return Ok(None);
+        }
+        let through_seq = page.facts.last().map_or(after_seq, SessionFact::seq);
+        Ok(Some(ClaimFactPage {
+            facts: page.facts.into_iter().map(Arc::new).collect(),
+            through_seq,
+        }))
+    }
+
+    async fn read_context_checkpoint(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<Option<ContextCheckpoint>> {
+        if !context_checkpoints_enabled(&self.inner) {
+            return Ok(None);
+        }
+        let permits = u32::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES)
+            .map_err(|_| TurnError::Invariant("checkpoint bound exceeds semaphore range".into()))?;
+        let permit = Arc::clone(&self.inner.store_read_admission)
+            .acquire_many_owned(permits)
+            .await
+            .map_err(|_| TurnError::Invariant("Store-read admission closed".into()))?;
+        let checkpoint = match self.inner.store.read_context_checkpoint(session_id).await {
+            Ok(checkpoint) => checkpoint,
+            Err(StoreError::NotFound(_)) => None,
+            Err(error) => return Err(turn_store_error(error)),
+        };
+        drop(permit);
+        Ok(checkpoint.map(|checkpoint| ContextCheckpoint {
+            header_fingerprint: checkpoint.header_fingerprint,
+            through_seq: checkpoint.through_seq,
+            fact_prefix_sha256: checkpoint.fact_prefix_sha256,
+            bytes: checkpoint.bytes,
+        }))
+    }
+
+    async fn write_context_checkpoint(
+        &self,
+        claim: &TurnClaim,
+        checkpoint: ContextCheckpoint,
+    ) -> TurnResult<bool> {
+        self.validate_issued_claim(claim)?;
+        let expected_fingerprint = claim
+            .header
+            .fingerprint()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        if checkpoint.header_fingerprint != expected_fingerprint {
+            return Err(TurnError::Invalid(
+                "checkpoint header fingerprint changed session identity".into(),
+            ));
+        }
+        if !context_checkpoints_enabled(&self.inner) {
+            return Ok(false);
+        }
+        {
+            let state = lock_state(&self.inner);
+            if let Some(session) = state.sessions.get(&claim.session_id)
+                && (session.header != claim.header
+                    || session.durable_seq != checkpoint.through_seq
+                    || session.live_seq().map_err(turn_kernel_error)? != checkpoint.through_seq)
+            {
+                return Ok(false);
+            }
+        }
+        if read_stored_outcome(&self.inner, &claim.session_id, &claim.turn_id)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let write = WriteContextCheckpoint {
+            session_id: claim.session_id.clone(),
+            expected_durable_seq: checkpoint.through_seq,
+            checkpoint: StoredContextCheckpoint {
+                header_fingerprint: checkpoint.header_fingerprint,
+                through_seq: checkpoint.through_seq,
+                fact_prefix_sha256: checkpoint.fact_prefix_sha256,
+                bytes: checkpoint.bytes,
+            },
+        };
+        match self.inner.store.write_context_checkpoint(write).await {
+            Ok(()) => Ok(true),
+            Err(StoreError::Conflict { .. }) => Ok(false),
+            Err(error) => Err(turn_store_error(error)),
+        }
+    }
+
     async fn publish(
         &self,
         claim: &TurnClaim,
         bodies: Vec<SessionFactBody>,
-    ) -> TurnResult<Vec<SessionFact>> {
+    ) -> TurnResult<Vec<Arc<SessionFact>>> {
         if bodies.is_empty() || bodies.len() > MAXIMUM_STORE_BATCH_FACTS {
             return Err(TurnError::Invalid(
                 "Fact publication batch is empty or too large".into(),
             ));
         }
         let mut state = lock_state(&self.inner);
-        Self::validate_claim(&state, claim)?;
+        self.validate_claim(&state, claim)?;
         let session = state
             .sessions
             .get_mut(&claim.session_id)
@@ -1450,28 +2155,45 @@ impl TurnExecution for SessionKernel {
             added_bytes = added_bytes
                 .checked_add(fact.encoded_len())
                 .ok_or_else(|| TurnError::Invalid("Fact bytes overflowed".into()))?;
-            facts.push(fact);
+            facts.push(Arc::new(fact));
         }
-        if session.pending_bytes.saturating_add(added_bytes) > MAXIMUM_PENDING_FACT_BYTES {
+        staged.budget_usage = enforce_turn_budget(
+            session.header.profile().turn_budget(),
+            original,
+            &facts,
+            self.inner.clock.now_ms().max(1),
+        )?;
+        let projected_pending_bytes = session
+            .pending_bytes
+            .checked_add(added_bytes)
+            .ok_or_else(|| TurnError::Invariant("pending Fact bytes overflowed".into()))?;
+        if projected_pending_bytes > MAXIMUM_PENDING_FACT_BYTES {
             return Err(TurnError::Flush(
                 "speculative Fact buffer is full; flush before publishing more".into(),
             ));
         }
+        reserve_atomic_capacity(
+            &self.inner.process_pending_bytes,
+            added_bytes,
+            self.inner.limits.maximum_process_pending_fact_bytes,
+        )
+        .map_err(turn_kernel_error)?;
         let terminal = staged.terminal.is_some();
         if terminal {
-            staged.terminal_seq = facts.last().map(SessionFact::seq);
+            staged.terminal_seq = facts.last().map(|fact| fact.seq());
         }
         *session
             .turns
             .get_mut(&claim.turn_id)
             .expect("validated claim turn exists") = staged;
         for fact in &facts {
-            push_pending(session, fact.clone()).map_err(turn_kernel_error)?;
+            session.pending_bytes = session
+                .pending_bytes
+                .checked_add(fact.encoded_len())
+                .expect("the complete batch pending-byte projection was validated");
+            session.pending.push_back(fact.clone());
             if !is_terminal_fact(fact) {
-                let _receivers = session.updates.send(TurnUpdate::Fact {
-                    fact: Box::new(fact.clone()),
-                    durable_seq: session.durable_seq,
-                });
+                publish_live_watermarks(session);
             }
         }
         drop(state);
@@ -1481,7 +2203,7 @@ impl TurnExecution for SessionKernel {
     async fn flush(&self, claim: &TurnClaim, through_seq: u64) -> TurnResult<u64> {
         let status = {
             let state = lock_state(&self.inner);
-            Self::validate_claim(&state, claim)?;
+            self.validate_claim(&state, claim)?;
             let session = state
                 .sessions
                 .get(&claim.session_id)
@@ -1502,13 +2224,13 @@ impl TurnExecution for SessionKernel {
 
     fn cancellation(&self, claim: &TurnClaim) -> TurnResult<CancellationToken> {
         let state = lock_state(&self.inner);
-        let turn = Self::validate_claim(&state, claim)?;
+        let turn = self.validate_claim(&state, claim)?;
         Ok(turn.cancellation.clone())
     }
 
     fn release(&self, claim: &TurnClaim) -> TurnResult<()> {
         let mut state = lock_state(&self.inner);
-        Self::validate_claim(&state, claim)?;
+        self.validate_claim(&state, claim)?;
         let turn = state
             .sessions
             .get_mut(&claim.session_id)
@@ -1527,20 +2249,113 @@ impl TurnExecution for SessionKernel {
 }
 
 struct ObservationState {
-    store: Arc<dyn SessionStore>,
+    inner: Weak<KernelInner>,
     session_id: SessionId,
     cursor: u64,
     durable_target: u64,
-    durable_buffer: VecDeque<SessionFact>,
-    pending: VecDeque<SessionFact>,
-    receiver: broadcast::Receiver<TurnUpdate>,
+    live_target: u64,
+    receiver: watch::Receiver<LiveWatermarks>,
     flush_status: Option<watch::Receiver<FlushStatus>>,
+    durable_facts: VecDeque<Arc<SessionFact>>,
     ended: bool,
+    _observer_lease: ObserverLease,
+}
+
+struct ObserverLease {
+    inner: Weak<KernelInner>,
+}
+
+impl ObserverLease {
+    fn acquire(inner: &Arc<KernelInner>) -> TurnResult<Self> {
+        let mut current = inner.active_observers.load(Ordering::Acquire);
+        loop {
+            if current >= inner.limits.maximum_active_observers {
+                return Err(TurnError::ObserverCapacity);
+            }
+            match inner.active_observers.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(Self {
+                        inner: Arc::downgrade(inner),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for ObserverLease {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.active_observers.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 enum ObservationSignal {
-    Update(std::result::Result<TurnUpdate, broadcast::error::RecvError>),
+    Update(std::result::Result<(), watch::error::RecvError>),
     Flush(std::result::Result<(), watch::error::RecvError>),
+}
+
+async fn read_facts_bounded(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+    after_seq: u64,
+    requested_limit: usize,
+) -> std::result::Result<rsi_agent_store_protocol::StoreFactPage, StoreError> {
+    let (effective_limit, permit) = acquire_store_read(inner, requested_limit).await?;
+    let result = inner
+        .store
+        .read_facts(session_id, after_seq, effective_limit)
+        .await;
+    drop(permit);
+    result
+}
+
+async fn read_turn_facts_bounded(
+    inner: &KernelInner,
+    session_id: &SessionId,
+    turn_id: &TurnId,
+    after_seq: u64,
+    requested_limit: usize,
+) -> std::result::Result<rsi_agent_store_protocol::StoreTurnFactPage, StoreError> {
+    let (effective_limit, permit) = acquire_store_read(inner, requested_limit).await?;
+    let result = inner
+        .store
+        .read_turn_facts(session_id, turn_id, after_seq, effective_limit)
+        .await;
+    drop(permit);
+    result
+}
+
+async fn acquire_store_read(
+    inner: &KernelInner,
+    requested_limit: usize,
+) -> std::result::Result<(usize, tokio::sync::OwnedSemaphorePermit), StoreError> {
+    let (effective_limit, reservation) = if requested_limit == 1 {
+        (1, MAXIMUM_SESSION_FACT_BYTES)
+    } else if inner.limits.maximum_store_read_bytes >= MAXIMUM_STORE_BATCH_BYTES {
+        (requested_limit, MAXIMUM_STORE_BATCH_BYTES)
+    } else {
+        (1, MAXIMUM_SESSION_FACT_BYTES)
+    };
+    let permits = u32::try_from(reservation).map_err(|_| {
+        StoreError::Invalid("Store-read reservation exceeds semaphore representation".into())
+    })?;
+    let permit = Arc::clone(&inner.store_read_admission)
+        .acquire_many_owned(permits)
+        .await
+        .map_err(|_| StoreError::Io("Kernel Store-read admission closed".into()))?;
+    Ok((effective_limit, permit))
+}
+
+const fn context_checkpoints_enabled(inner: &KernelInner) -> bool {
+    inner.limits.maximum_store_read_bytes >= MAXIMUM_CONTEXT_CHECKPOINT_BYTES
 }
 
 async fn observation_next(
@@ -1550,29 +2365,28 @@ async fn observation_next(
         return None;
     }
     loop {
-        if let Some(fact) = state.durable_buffer.pop_front() {
-            state.cursor = fact.seq();
-            return Some((
-                Ok(TurnUpdate::Fact {
-                    fact: Box::new(fact),
-                    durable_seq: state.durable_target,
-                }),
-                state,
-            ));
-        }
+        let previous_durable = state.durable_target;
+        let current = *state.receiver.borrow_and_update();
+        state.live_target = state.live_target.max(current.live_seq);
+        state.durable_target = state.durable_target.max(current.durable_seq);
         if state.cursor < state.durable_target {
-            match state
-                .store
-                .read_facts(&state.session_id, state.cursor, MAXIMUM_FACTS_PER_READ)
-                .await
+            if let Some(update) = take_buffered_durable_fact(&mut state) {
+                return Some((update, state));
+            }
+            let inner = state.inner.upgrade()?;
+            match read_facts_bounded(
+                &inner,
+                &state.session_id,
+                state.cursor,
+                MAXIMUM_FACTS_PER_READ,
+            )
+            .await
             {
                 Ok(page) => {
-                    state.durable_buffer.extend(
-                        page.facts
-                            .into_iter()
-                            .filter(|fact| fact.seq() <= state.durable_target),
-                    );
-                    if state.durable_buffer.is_empty() {
+                    state.durable_target = state.durable_target.max(page.durable_seq);
+                    state.live_target = state.live_target.max(page.durable_seq);
+                    state.durable_facts = page.facts.into_iter().map(Arc::new).collect();
+                    if state.durable_facts.is_empty() {
                         state.ended = true;
                         return Some((
                             Err(TurnError::Invariant(
@@ -1589,11 +2403,21 @@ async fn observation_next(
                 }
             }
         }
-        if let Some(fact) = state.pending.pop_front() {
+        if state.durable_target > previous_durable && state.cursor >= state.durable_target {
+            return Some((
+                Ok(TurnUpdate::Durable {
+                    durable_seq: state.durable_target,
+                }),
+                state,
+            ));
+        }
+        if state.cursor < state.live_target
+            && let Some(fact) = next_speculative_observation_fact(&mut state)
+        {
             state.cursor = fact.seq();
             return Some((
                 Ok(TurnUpdate::Fact {
-                    fact: Box::new(fact),
+                    fact,
                     durable_seq: state.durable_target,
                 }),
                 state,
@@ -1609,46 +2433,57 @@ async fn observation_next(
         }
         let signal = if let Some(status) = state.flush_status.as_mut() {
             tokio::select! {
-                update = state.receiver.recv() => ObservationSignal::Update(update),
+                update = state.receiver.changed() => ObservationSignal::Update(update),
                 changed = status.changed() => ObservationSignal::Flush(changed),
             }
         } else {
-            ObservationSignal::Update(state.receiver.recv().await)
+            ObservationSignal::Update(state.receiver.changed().await)
         };
         match signal {
-            ObservationSignal::Flush(Ok(())) => {}
+            ObservationSignal::Flush(Ok(())) | ObservationSignal::Update(Ok(())) => {
+                // The next loop consumes and compares any exact unseen value.
+            }
             ObservationSignal::Flush(Err(_)) => {
                 state.flush_status = None;
             }
-            ObservationSignal::Update(Ok(update)) => return Some((Ok(update), state)),
-            ObservationSignal::Update(Err(broadcast::error::RecvError::Lagged(_))) => {
-                state.ended = true;
-                return Some((
-                    Err(TurnError::Invariant(
-                        "live observation lagged; caller must reattach from a Fact cursor".into(),
-                    )),
-                    state,
-                ));
-            }
-            ObservationSignal::Update(Err(broadcast::error::RecvError::Closed)) => return None,
+            ObservationSignal::Update(Err(_)) => return None,
         }
     }
 }
 
-fn observation_flush_result(state: &mut ObservationState, error: String) -> TurnResult<TurnUpdate> {
-    match state.receiver.try_recv() {
-        Ok(update) => Ok(update),
-        Err(broadcast::error::TryRecvError::Lagged(_)) => {
-            state.ended = true;
-            Err(TurnError::Invariant(
-                "live observation lagged; caller must reattach from a Fact cursor".into(),
-            ))
-        }
-        Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
-            state.ended = true;
-            Err(TurnError::Flush(error))
-        }
+fn take_buffered_durable_fact(state: &mut ObservationState) -> Option<TurnResult<TurnUpdate>> {
+    let fact = state.durable_facts.pop_front()?;
+    if fact.seq() != state.cursor.saturating_add(1) || fact.seq() > state.durable_target {
+        state.ended = true;
+        return Some(Err(TurnError::Invariant(
+            "buffered durable observation Facts are not contiguous".into(),
+        )));
     }
+    state.cursor = fact.seq();
+    Some(Ok(TurnUpdate::Fact {
+        fact,
+        durable_seq: state.durable_target,
+    }))
+}
+
+fn next_speculative_observation_fact(state: &mut ObservationState) -> Option<Arc<SessionFact>> {
+    let inner = state.inner.upgrade()?;
+    let kernel = lock_state(&inner);
+    let session = kernel.sessions.get(&state.session_id)?;
+    let live_seq = session.live_seq().ok()?;
+    state.live_target = state.live_target.max(live_seq);
+    state.durable_target = state.durable_target.max(session.durable_seq);
+    let next_seq = state.cursor.checked_add(1)?;
+    let pending_start = session.durable_seq.checked_add(1)?;
+    let offset = next_seq.checked_sub(pending_start)?;
+    let fact = session.pending.get(usize::try_from(offset).ok()?)?;
+    (fact.seq() == next_seq && (!is_terminal_fact(fact) || fact.seq() <= session.durable_seq))
+        .then(|| Arc::clone(fact))
+}
+
+fn observation_flush_result(state: &mut ObservationState, error: String) -> TurnResult<TurnUpdate> {
+    state.ended = true;
+    Err(TurnError::Flush(error))
 }
 
 async fn repair_unfinished_session(
@@ -1656,7 +2491,13 @@ async fn repair_unfinished_session(
     clock: &dyn Clock,
     session_id: &SessionId,
 ) -> Result<()> {
-    let (durable_seq, turns, turn_order) = load_control_state(store, session_id).await?;
+    let open = store.list_open_turns(session_id, 0, 1).await?;
+    if open.turns.is_empty() {
+        return Ok(());
+    }
+    let header = store.header(session_id).await?;
+    let (durable_seq, turns, turn_order) =
+        load_control_state(store, None, session_id, header.profile().turn_budget()).await?;
     if turns.len() != turn_order.len()
         || turn_order
             .iter()
@@ -1678,6 +2519,12 @@ async fn repair_unfinished_session(
             .expect("validated recovery turn order references exact state");
         let outcome = if turn.cancel_requested {
             TurnOutcome::Cancelled
+        } else if let Some((dimension, consumed, limit)) = turn.budget_exhausted {
+            TurnOutcome::BudgetExceeded {
+                dimension,
+                consumed,
+                limit,
+            }
         } else {
             let effect = match &turn.effect {
                 Some(ActiveEffect::Model { started: true, .. }) => Some(EffectKind::Model),
@@ -1799,7 +2646,9 @@ fn validate_durable_intent_fence(
 
 async fn load_control_state(
     store: &Arc<dyn SessionStore>,
+    admission: Option<&KernelInner>,
     session_id: &SessionId,
+    budget: &TurnBudget,
 ) -> Result<(u64, BTreeMap<TurnId, TurnControl>, Vec<TurnId>)> {
     let mut open_cursor = 0_u64;
     let mut durable_seq = None;
@@ -1820,21 +2669,35 @@ async fn load_control_state(
         for open_turn in &page.turns {
             let mut turn_cursor = 0_u64;
             loop {
-                let turn_page = store
-                    .read_turn_facts(
-                        session_id,
-                        &open_turn.turn_id,
-                        turn_cursor,
-                        MAXIMUM_FACTS_PER_READ,
-                    )
-                    .await?;
+                let turn_page = match admission {
+                    Some(inner) => {
+                        read_turn_facts_bounded(
+                            inner,
+                            session_id,
+                            &open_turn.turn_id,
+                            turn_cursor,
+                            MAXIMUM_FACTS_PER_READ,
+                        )
+                        .await?
+                    }
+                    None => {
+                        store
+                            .read_turn_facts(
+                                session_id,
+                                &open_turn.turn_id,
+                                turn_cursor,
+                                MAXIMUM_FACTS_PER_READ,
+                            )
+                            .await?
+                    }
+                };
                 if turn_page.durable_seq != page.durable_seq {
                     return Err(KernelError::Invariant(
                         "Store durable watermark changed during per-turn load".into(),
                     ));
                 }
                 for fact in &turn_page.facts {
-                    apply_recovered_fact(&mut turns, &mut order, fact)?;
+                    apply_recovered_fact(&mut turns, &mut order, budget, fact)?;
                     turn_cursor = fact.seq();
                 }
                 if !turn_page.has_more {
@@ -1865,17 +2728,17 @@ async fn load_control_state(
 }
 
 async fn read_stored_outcome(
-    store: &Arc<dyn SessionStore>,
+    inner: &KernelInner,
     session_id: &SessionId,
     turn_id: &TurnId,
 ) -> TurnResult<Option<TurnOutcome>> {
     let mut cursor = 0_u64;
     let mut accepted = false;
     loop {
-        let page = store
-            .read_turn_facts(session_id, turn_id, cursor, MAXIMUM_FACTS_PER_READ)
-            .await
-            .map_err(turn_store_error)?;
+        let page =
+            read_turn_facts_bounded(inner, session_id, turn_id, cursor, MAXIMUM_FACTS_PER_READ)
+                .await
+                .map_err(turn_store_error)?;
         for fact in &page.facts {
             if fact.body().turn_id() != turn_id {
                 cursor = fact.seq();
@@ -1927,6 +2790,7 @@ async fn read_stored_outcome(
 fn apply_recovered_fact(
     turns: &mut BTreeMap<TurnId, TurnControl>,
     order: &mut Vec<TurnId>,
+    budget: &TurnBudget,
     fact: &SessionFact,
 ) -> Result<()> {
     match fact.body() {
@@ -1937,7 +2801,13 @@ fn apply_recovered_fact(
                     "durable session exceeds the live turn bound".into(),
                 ));
             }
-            if turns.insert(turn_id.clone(), TurnControl::new()).is_some() {
+            if turns
+                .insert(
+                    turn_id.clone(),
+                    TurnControl::new(fact.timestamp_ms(), fact.seq()),
+                )
+                .is_some()
+            {
                 return Err(KernelError::Invariant(
                     "durable turn was accepted more than once".into(),
                 ));
@@ -1969,8 +2839,15 @@ fn apply_recovered_fact(
             let turn = turns.get_mut(body.turn_id()).ok_or_else(|| {
                 KernelError::Invariant("durable Fact references unknown turn".into())
             })?;
+            validate_budget_marker(budget, fact)
+                .map_err(|error| KernelError::Invariant(error.to_string()))?;
+            let mut usage = turn.budget_usage;
+            record_budget_usage(&mut usage, fact).map_err(KernelError::Invariant)?;
+            check_budget_usage(budget, usage)
+                .map_err(|error| KernelError::Invariant(error.to_string()))?;
             apply_executor_body(turn, body)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
+            turn.budget_usage = usage;
         }
     }
     Ok(())
@@ -1979,6 +2856,11 @@ fn apply_recovered_fact(
 fn apply_executor_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     if turn.terminal.is_some() {
         return Err(TurnError::Invalid("Fact follows a terminal turn".into()));
+    }
+    if turn.budget_exhausted.is_some() && !matches!(body, SessionFactBody::TurnTerminal { .. }) {
+        return Err(TurnError::Invalid(
+            "only the terminal Fact may follow budget exhaustion".into(),
+        ));
     }
     match body {
         SessionFactBody::ModelIntent { .. }
@@ -1990,10 +2872,42 @@ fn apply_executor_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnRe
         SessionFactBody::ToolIntent { .. }
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
+        SessionFactBody::BudgetExhausted {
+            dimension,
+            consumed,
+            limit,
+            ..
+        } => {
+            turn.budget_exhausted = Some((*dimension, *consumed, *limit));
+        }
         SessionFactBody::TurnTerminal { outcome, .. } => {
             outcome
                 .validate()
                 .map_err(|error| TurnError::Invalid(error.to_string()))?;
+            match (turn.budget_exhausted, outcome) {
+                (
+                    Some((dimension, consumed, limit)),
+                    TurnOutcome::BudgetExceeded {
+                        dimension: outcome_dimension,
+                        consumed: outcome_consumed,
+                        limit: outcome_limit,
+                    },
+                ) if dimension == *outcome_dimension
+                    && consumed == *outcome_consumed
+                    && limit == *outcome_limit => {}
+                (Some(_), TurnOutcome::Cancelled) if turn.cancel_requested => {}
+                (Some(_), _) => {
+                    return Err(TurnError::Invalid(
+                        "budget exhaustion and terminal outcome disagree".into(),
+                    ));
+                }
+                (None, TurnOutcome::BudgetExceeded { .. }) => {
+                    return Err(TurnError::Invalid(
+                        "budget terminal lacks its preceding exhaustion Fact".into(),
+                    ));
+                }
+                (None, _) => {}
+            }
             turn.terminal = Some(outcome.clone());
             turn.effect = None;
         }
@@ -2140,14 +3054,165 @@ fn ensure_no_active_effect(turn: &TurnControl) -> TurnResult<()> {
     Ok(())
 }
 
+fn enforce_turn_budget(
+    budget: &TurnBudget,
+    turn: &TurnControl,
+    facts: &[Arc<SessionFact>],
+    now_ms: u64,
+) -> TurnResult<BudgetUsage> {
+    let admits_work = facts.iter().any(|fact| {
+        !matches!(
+            fact.body(),
+            SessionFactBody::BudgetExhausted { .. } | SessionFactBody::TurnTerminal { .. }
+        )
+    });
+    if admits_work {
+        let elapsed = now_ms.saturating_sub(turn.accepted_at_ms);
+        if elapsed >= budget.maximum_elapsed_ms() {
+            return Err(TurnError::BudgetExceeded {
+                dimension: BudgetDimension::Elapsed,
+                consumed: elapsed,
+                limit: budget.maximum_elapsed_ms(),
+            });
+        }
+    }
+    for fact in facts {
+        validate_budget_marker(budget, fact)?;
+    }
+
+    let mut usage = turn.budget_usage;
+    for fact in facts {
+        record_budget_usage(&mut usage, fact).map_err(TurnError::Invariant)?;
+    }
+    check_budget_usage(budget, usage)?;
+    Ok(usage)
+}
+
+fn validate_budget_marker(budget: &TurnBudget, fact: &SessionFact) -> TurnResult<()> {
+    if let SessionFactBody::BudgetExhausted {
+        dimension,
+        consumed,
+        limit,
+        ..
+    } = fact.body()
+        && (*limit != budget_limit(budget, *dimension) || *consumed < *limit)
+    {
+        return Err(TurnError::Invalid(
+            "budget exhaustion does not match the frozen turn budget".into(),
+        ));
+    }
+    Ok(())
+}
+
+const fn budget_limit(budget: &TurnBudget, dimension: BudgetDimension) -> u64 {
+    match dimension {
+        BudgetDimension::Elapsed => budget.maximum_elapsed_ms(),
+        BudgetDimension::ProviderAttempts => budget.maximum_provider_attempts(),
+        BudgetDimension::ToolCalls => budget.maximum_tool_calls(),
+        BudgetDimension::GeneratedFacts => budget.maximum_generated_facts(),
+        BudgetDimension::GeneratedFactBytes => budget.maximum_generated_fact_bytes(),
+    }
+}
+
+fn check_budget_usage(budget: &TurnBudget, usage: BudgetUsage) -> TurnResult<()> {
+    for (dimension, consumed, limit) in [
+        (
+            BudgetDimension::ProviderAttempts,
+            usage.provider_attempts,
+            budget.maximum_provider_attempts(),
+        ),
+        (
+            BudgetDimension::ToolCalls,
+            usage.tool_calls,
+            budget.maximum_tool_calls(),
+        ),
+        (
+            BudgetDimension::GeneratedFacts,
+            usage.generated_facts,
+            budget.maximum_generated_facts(),
+        ),
+        (
+            BudgetDimension::GeneratedFactBytes,
+            usage.generated_fact_bytes,
+            budget.maximum_generated_fact_bytes(),
+        ),
+    ] {
+        if consumed > limit {
+            return Err(TurnError::BudgetExceeded {
+                dimension,
+                consumed,
+                limit,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn record_budget_usage(
+    usage: &mut BudgetUsage,
+    fact: &SessionFact,
+) -> std::result::Result<(), String> {
+    if matches!(
+        fact.body(),
+        SessionFactBody::TurnAccepted { .. }
+            | SessionFactBody::ImageRequested { .. }
+            | SessionFactBody::CancelRequested { .. }
+            | SessionFactBody::BudgetExhausted { .. }
+            | SessionFactBody::TurnTerminal { .. }
+    ) {
+        return Ok(());
+    }
+    usage.generated_facts = usage
+        .generated_facts
+        .checked_add(1)
+        .ok_or_else(|| "generated Fact count overflowed".to_owned())?;
+    usage.generated_fact_bytes = usage
+        .generated_fact_bytes
+        .checked_add(
+            u64::try_from(fact.encoded_len())
+                .map_err(|_| "generated Fact byte length exceeds u64".to_owned())?,
+        )
+        .ok_or_else(|| "generated Fact bytes overflowed".to_owned())?;
+    match fact.body() {
+        SessionFactBody::ModelIntent { .. } | SessionFactBody::ImageIntent { .. } => {
+            usage.provider_attempts = usage
+                .provider_attempts
+                .checked_add(1)
+                .ok_or_else(|| "provider attempt count overflowed".to_owned())?;
+        }
+        SessionFactBody::ToolIntent { .. } => {
+            usage.tool_calls = usage
+                .tool_calls
+                .checked_add(1)
+                .ok_or_else(|| "Tool-call count overflowed".to_owned())?;
+        }
+        SessionFactBody::TurnAccepted { .. }
+        | SessionFactBody::ImageRequested { .. }
+        | SessionFactBody::CancelRequested { .. }
+        | SessionFactBody::BudgetExhausted { .. }
+        | SessionFactBody::ModelStarted { .. }
+        | SessionFactBody::ImageStarted { .. }
+        | SessionFactBody::ImageOutput { .. }
+        | SessionFactBody::ModelEvent { .. }
+        | SessionFactBody::ToolStarted { .. }
+        | SessionFactBody::ToolResult { .. }
+        | SessionFactBody::TurnTerminal { .. } => {}
+    }
+    Ok(())
+}
+
 fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
+        accepted_at_ms: turn.accepted_at_ms,
+        accepted_seq: turn.accepted_seq,
         terminal: turn.terminal.clone(),
         terminal_seq: turn.terminal_seq,
         cancel_requested: turn.cancel_requested,
         cancellation: turn.cancellation.clone(),
         claim: turn.claim.clone(),
         effect: turn.effect.clone(),
+        budget_usage: turn.budget_usage,
+        budget_exhausted: turn.budget_exhausted,
     }
 }
 
@@ -2178,15 +3243,21 @@ fn next_fact(
     inner: &KernelInner,
     session: &SessionRuntime,
     body: SessionFactBody,
-) -> Result<SessionFact> {
+) -> Result<Arc<SessionFact>> {
     let seq = session
         .live_seq()?
         .checked_add(1)
         .ok_or_else(|| KernelError::Invariant("Fact sequence exhausted".into()))?;
-    SessionFact::new(seq, inner.clock.now_ms().max(1), body).map_err(KernelError::Session)
+    SessionFact::new(seq, inner.clock.now_ms().max(1), body)
+        .map(Arc::new)
+        .map_err(KernelError::Session)
 }
 
-fn push_pending(session: &mut SessionRuntime, fact: SessionFact) -> Result<()> {
+fn push_pending(
+    inner: &KernelInner,
+    session: &mut SessionRuntime,
+    fact: Arc<SessionFact>,
+) -> Result<()> {
     let bytes = fact.encoded_len();
     let projected = session
         .pending_bytes
@@ -2197,9 +3268,43 @@ fn push_pending(session: &mut SessionRuntime, fact: SessionFact) -> Result<()> {
             "speculative Fact buffer capacity is exhausted".into(),
         ));
     }
+    reserve_atomic_capacity(
+        &inner.process_pending_bytes,
+        bytes,
+        inner.limits.maximum_process_pending_fact_bytes,
+    )?;
     session.pending_bytes = projected;
     session.pending.push_back(fact);
     Ok(())
+}
+
+fn publish_live_watermarks(session: &SessionRuntime) {
+    let live_seq = session
+        .live_seq()
+        .expect("validated pending suffix has a representable live sequence");
+    session.updates.send_replace(LiveWatermarks {
+        live_seq,
+        durable_seq: session.durable_seq,
+    });
+}
+
+fn reserve_atomic_capacity(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<()> {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let projected = current
+            .checked_add(amount)
+            .ok_or_else(|| KernelError::Capacity("process capacity counter overflowed".into()))?;
+        if projected > limit {
+            return Err(KernelError::Capacity(
+                "process speculative Fact capacity is exhausted".into(),
+            ));
+        }
+        match counter.compare_exchange_weak(current, projected, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Ok(()),
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 fn enqueue(state: &mut KernelState, session_id: SessionId, turn_id: TurnId) {
@@ -2248,8 +3353,38 @@ fn turn_store_error(error: StoreError) -> TurnError {
     match error {
         StoreError::NotFound(session) => TurnError::SessionNotFound(session),
         StoreError::TurnNotFound { session, turn } => TurnError::TurnNotFound { session, turn },
-        other => TurnError::Flush(other.to_string()),
+        other => TurnError::Flush(bounded_diagnostic(&other.to_string())),
     }
+}
+
+fn turn_composition_error(error: AgentCompositionError) -> TurnError {
+    match error {
+        AgentCompositionError::InvalidInput(message) => {
+            TurnError::Invalid(bounded_diagnostic(&message))
+        }
+        AgentCompositionError::Unavailable { .. }
+        | AgentCompositionError::DefaultUnavailable { .. }
+        | AgentCompositionError::Capacity => {
+            TurnError::Composition(bounded_diagnostic(&error.to_string()))
+        }
+        AgentCompositionError::ShuttingDown => TurnError::ShuttingDown,
+    }
+}
+
+fn bounded_diagnostic(value: &str) -> String {
+    let mut output = String::new();
+    for character in value.chars() {
+        let character = if matches!(character, '\0' | '\u{7f}') {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        if output.len().saturating_add(character.len_utf8()) > MAXIMUM_AGENT_DIAGNOSTIC_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn turn_not_found(session_id: &SessionId, turn_id: &TurnId) -> TurnError {
@@ -2264,6 +3399,8 @@ fn turn_kernel_error(error: KernelError) -> TurnError {
         KernelError::Flush(message) | KernelError::Shutdown(message) => TurnError::Flush(message),
         KernelError::Session(error) => TurnError::Invalid(error.to_string()),
         KernelError::Identity(message) => TurnError::Invalid(message),
+        KernelError::Composition(message) => TurnError::Composition(message),
+        KernelError::Capacity(_) => TurnError::Capacity,
         KernelError::Invariant(message) => TurnError::Invariant(message),
         KernelError::Store(error) => turn_store_error(error),
     }
@@ -2281,6 +3418,12 @@ pub enum KernelError {
     /// Identity generation failed.
     #[error("Agent identity generation failed: {0}")]
     Identity(String),
+    /// A durable session's Agent preset could not produce a healthy generation.
+    #[error("Agent composition failed: {0}")]
+    Composition(String),
+    /// Configured process-wide resource admission was exhausted or invalid.
+    #[error("Agent Kernel capacity failed: {0}")]
+    Capacity(String),
     /// Speculative suffix could not become durable.
     #[error("Agent flush failed: {0}")]
     Flush(String),
@@ -2295,25 +3438,41 @@ pub enum KernelError {
 /// Kernel result.
 pub type Result<T> = std::result::Result<T, KernelError>;
 
-/// Ordinary Kernel factory requiring one exact Agent Store Local supply.
+/// Ordinary Kernel factory requiring exact Agent Store and composition supplies.
 #[derive(Clone, Debug, Default)]
 pub struct KernelFactory;
 
 #[async_trait]
 impl PluginFactory for KernelFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        if !desired.is_null() && !desired.as_object().is_some_and(serde_json::Map::is_empty) {
-            return Err(MetaError::InvalidInput(
-                "Agent Kernel configuration must be null or empty".into(),
-            ));
-        }
-        Ok(PreparedActivation::new(Value::Null).requiring_local::<SessionStoreContract>())
+        let limits = if desired.is_null() {
+            KernelLimits::default()
+        } else {
+            serde_json::from_value::<KernelLimits>(desired.clone())
+                .map_err(|error| MetaError::InvalidInput(error.to_string()))?
+        };
+        limits
+            .validate()
+            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        let config = serde_json::to_value(limits)
+            .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+        Ok(PreparedActivation::new(config)
+            .requiring_local::<SessionStoreContract>()
+            .requiring_local::<AgentCompositionContract>())
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let kernel = SessionKernel::recover(plan.local::<SessionStoreContract>()?)
-            .await
+        let limits: KernelLimits = serde_json::from_value(plan.config().as_ref().clone())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let kernel = SessionKernel::recover_with_sources_and_limits(
+            plan.local::<SessionStoreContract>()?,
+            plan.local::<AgentCompositionContract>()?,
+            Arc::new(SystemClock),
+            Arc::new(SystemIds::default()),
+            limits,
+        )
+        .await
+        .map_err(|error| MetaError::Activation(error.to_string()))?;
         let worker = kernel.start_write_behind();
         let turns: Arc<dyn TurnService> = Arc::new(kernel.clone());
         let execution: Arc<dyn TurnExecution> = Arc::new(kernel.clone());

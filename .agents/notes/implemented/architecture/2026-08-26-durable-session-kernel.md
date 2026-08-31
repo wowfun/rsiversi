@@ -88,11 +88,15 @@ A process crash before the first write-behind flush can lose a newly accepted
 live turn. Live observations and durable watermarks expose that interval
 instead of claiming it is durable.
 
-Executor context reconstruction currently rereads the durable session prefix
-for each claimed turn. Terminal and idle session control is evicted and loaded
-on demand through the turn/open-turn indexes; active state remains bounded by
-the session, per-read, projection, pending-suffix, and Store limits. Context
-projection is still not claimed to be constant with session length.
+Executor context reconstruction first restores an integrity-checked Context
+checkpoint when its immutable header, retention limits, cursor, and durable
+Fact-prefix digest still match, then reads only the remaining suffix. A missing
+or invalid checkpoint falls back to bounded reads of the durable session
+prefix. Terminal and idle session control is evicted and loaded on demand
+through the turn/open-turn indexes; active state remains bounded by the
+session, checkpoint, per-read, projection, pending-suffix, and Store limits.
+Checkpointing is a cache optimization and does not change durable Fact truth or
+make projection constant with session length.
 
 SQLite reopen validates its exact schema, relational integrity, and durable
 watermarks. Kernel recovery revalidates typed headers and Fact sequences, while

@@ -1,44 +1,30 @@
-use async_trait::async_trait;
 use axum::{
     Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
 };
 use rsi::{
     OutputMode, RunEvent, RunImageOptions, RunOptions, RunningRsi, SessionSelection,
-    StandardComposition,
+    StandardCodingTools, StandardComposition,
 };
-use rsi_agent_session_protocol::{SessionFact, SessionFactBody, SessionId, TurnOutcome};
+use rsi_agent_session_protocol::{
+    AgentPresetId, SessionFact, SessionFactBody, SessionId, TurnOutcome,
+};
 use rsi_agent_store_protocol::SessionStore as _;
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_ai_protocol::{ImageRequest, ModelRef};
 use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
-use rsi_jobs::{JobOutcome, JobSpec, JobTask};
 use rsi_sandbox::SandboxMode;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-
-#[derive(Debug)]
-struct IgnoresCancellationUntilReleased {
-    entered: Arc<Notify>,
-    release: Arc<Notify>,
-}
-
-#[async_trait]
-impl JobTask for IgnoresCancellationUntilReleased {
-    async fn run(&self, _cancellation: CancellationToken) -> rsi_jobs::Result<serde_json::Value> {
-        self.entered.notify_one();
-        self.release.notified().await;
-        Ok(serde_json::Value::Null)
-    }
-}
 
 #[derive(Debug)]
 struct EmptySecretStore;
@@ -127,6 +113,7 @@ fn composition(paths: HostPaths) -> StandardComposition {
             "RSI_OPENAI_COMPATIBLE_API_KEY".into(),
             SecretValue::new("fixture-secret").unwrap(),
         )]),
+        test_coding_tools(),
     )
     .with_credential_store(Arc::new(EmptySecretStore))
 }
@@ -138,8 +125,40 @@ fn openai_composition(paths: HostPaths) -> StandardComposition {
             "OPENAI_API_KEY".into(),
             SecretValue::new("fixture-secret").unwrap(),
         )]),
+        test_coding_tools(),
     )
     .with_credential_store(Arc::new(EmptySecretStore))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)] // Matches the non-Linux fixture seam where the standard coding generation is absent.
+fn test_coding_tools() -> Option<StandardCodingTools> {
+    Some(
+        StandardCodingTools::new(
+            std::fs::canonicalize("/bin/bash").unwrap(),
+            std::env::current_exe().unwrap().canonicalize().unwrap(),
+            vec![("PATH".into(), "/usr/bin:/bin".into())],
+        )
+        .unwrap(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn standard_coding_tools_rejects_a_missing_bash_during_construction() {
+    assert!(
+        StandardCodingTools::new(
+            std::path::PathBuf::from("/definitely/missing/rsi-bash"),
+            std::env::current_exe().unwrap().canonicalize().unwrap(),
+            Vec::new(),
+        )
+        .is_err()
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn test_coding_tools() -> Option<StandardCodingTools> {
+    None
 }
 
 fn binary_command(binary: &str, fixture: &Fixture) -> tokio::process::Command {
@@ -180,6 +199,353 @@ async fn server() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+#[derive(Clone, Debug)]
+struct ToolServerState {
+    calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+fn sse_response(events: impl IntoIterator<Item = serde_json::Value>) -> Response {
+    let mut body = String::new();
+    for event in events {
+        writeln!(&mut body, "data: {event}\n").unwrap();
+    }
+    body.push_str("data: [DONE]\n\n");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn tool_call_response(id: &str, name: &str, arguments: &serde_json::Value) -> Response {
+    let arguments = serde_json::to_string(&arguments).unwrap();
+    sse_response([
+        serde_json::json!({
+            "choices":[{
+                "delta":{
+                    "role":"assistant",
+                    "tool_calls":[{
+                        "index":0,
+                        "id":id,
+                        "type":"function",
+                        "function":{"name":name,"arguments":arguments}
+                    }]
+                },
+                "finish_reason":null
+            }]
+        }),
+        serde_json::json!({
+            "choices":[{"delta":{},"finish_reason":"tool_calls"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":5}
+        }),
+    ])
+}
+
+fn completed_chat_response(content: &str) -> Response {
+    sse_response([
+        serde_json::json!({
+            "choices":[{
+                "delta":{"role":"assistant","content":content},
+                "finish_reason":null
+            }]
+        }),
+        serde_json::json!({
+            "choices":[{"delta":{},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":1}
+        }),
+    ])
+}
+
+fn tool_message<'a>(request: &'a serde_json::Value, call_id: &str) -> &'a serde_json::Value {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+        .unwrap()
+}
+
+fn background_job_id(request: &serde_json::Value) -> &str {
+    tool_message(request, "call-background-bash")["content"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("Started background Bash job ")
+        .unwrap()
+        .strip_suffix('.')
+        .unwrap()
+}
+
+fn durable_tool_result<'a>(lines: &'a [serde_json::Value], call_id: &str) -> &'a serde_json::Value {
+    lines
+        .iter()
+        .find(|line| {
+            line["type"] == "fact"
+                && line["fact"]["type"] == "tool_result"
+                && line["fact"]["identity"]["call_id"] == call_id
+        })
+        .unwrap()
+}
+
+fn assert_real_coding_results(lines: &[serde_json::Value], job_id: &str) {
+    let foreground = durable_tool_result(lines, "call-foreground-bash");
+    assert_eq!(foreground["fact"]["result"]["is_error"], false);
+    assert_eq!(foreground["fact"]["result"]["value"]["status"], "exited");
+    assert_eq!(
+        foreground["fact"]["result"]["value"]["stdout"]["text"],
+        "foreground-complete"
+    );
+    let background = durable_tool_result(lines, "call-background-bash");
+    assert_eq!(background["fact"]["result"]["value"]["job_id"], job_id);
+    assert_eq!(background["fact"]["result"]["value"]["status"], "running");
+    let listed = durable_tool_result(lines, "call-job-list");
+    let listed_job = listed["fact"]["result"]["value"]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == job_id)
+        .unwrap();
+    assert_eq!(listed_job["status"], "running");
+    assert_eq!(listed_job["reported"], false);
+    let read = durable_tool_result(lines, "call-job-output");
+    assert_eq!(read["fact"]["result"]["value"]["id"], job_id);
+    assert_eq!(read["fact"]["result"]["value"]["status"], "running");
+    assert_eq!(read["fact"]["result"]["value"]["reported"], false);
+    let killed = durable_tool_result(lines, "call-job-kill");
+    assert_eq!(killed["fact"]["result"]["value"]["id"], job_id);
+    assert_eq!(killed["fact"]["result"]["value"]["status"], "cancelled");
+    assert_eq!(
+        killed["fact"]["result"]["value"]["terminal"]["status"],
+        "cancelled"
+    );
+    assert_eq!(killed["fact"]["result"]["value"]["reported"], true);
+    let patched = durable_tool_result(lines, "call-apply-patch");
+    assert_eq!(patched["fact"]["result"]["is_error"], false);
+    assert_eq!(patched["fact"]["result"]["value"]["status"], "applied");
+}
+
+async fn complete_coding_tools_then_chat(
+    State(state): State<ToolServerState>,
+    body: String,
+) -> Response {
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+    state.requests.lock().unwrap().push(request.clone());
+    match state.calls.fetch_add(1, Ordering::SeqCst) {
+        0 => tool_call_response(
+            "call-foreground-bash",
+            "bash",
+            &serde_json::json!({"command":"printf foreground-complete"}),
+        ),
+        1 => tool_call_response(
+            "call-background-bash",
+            "bash",
+            &serde_json::json!({
+                "command":"printf background-ready; while :; do sleep 60; done",
+                "run_in_background":true
+            }),
+        ),
+        2 => tool_call_response("call-job-list", "job_list", &serde_json::json!({})),
+        3 => tool_call_response(
+            "call-job-output",
+            "job_output",
+            &serde_json::json!({"job_id":background_job_id(&request)}),
+        ),
+        4 => tool_call_response(
+            "call-job-kill",
+            "job_kill",
+            &serde_json::json!({"job_id":background_job_id(&request)}),
+        ),
+        5 => {
+            let patch = concat!(
+                "*** Begin Patch\n",
+                "*** Add File: from-model.txt\n",
+                "+written through the complete tool loop\n",
+                "*** End Patch\n"
+            );
+            tool_call_response(
+                "call-apply-patch",
+                "apply_patch",
+                &serde_json::json!({"patch":patch}),
+            )
+        }
+        _ => completed_chat_response("all coding tools completed"),
+    }
+}
+
+async fn background_then_chat(State(state): State<ToolServerState>, body: String) -> Response {
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .push(serde_json::from_str(&body).unwrap());
+    if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+        let arguments = serde_json::to_string(&serde_json::json!({
+            "command":"printf background-complete",
+            "run_in_background":true
+        }))
+        .unwrap();
+        return sse_response([
+            serde_json::json!({
+                "choices":[{
+                    "delta":{
+                        "role":"assistant",
+                        "tool_calls":[{
+                            "index":0,
+                            "id":"call-background-bash",
+                            "type":"function",
+                            "function":{"name":"bash","arguments":arguments}
+                        }]
+                    },
+                    "finish_reason":null
+                }]
+            }),
+            serde_json::json!({
+                "choices":[{"delta":{},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":10,"completion_tokens":5}
+            }),
+        ]);
+    }
+    sse_response([
+        serde_json::json!({
+            "choices":[{
+                "delta":{"role":"assistant","content":"finished without collecting it"},
+                "finish_reason":null
+            }]
+        }),
+        serde_json::json!({
+            "choices":[{"delta":{},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":4}
+        }),
+    ])
+}
+
+async fn rejected_patch_then_chat(State(state): State<ToolServerState>, body: String) -> Response {
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .push(serde_json::from_str(&body).unwrap());
+    if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: missing.txt\n",
+            "@@\n",
+            "-old\n",
+            "+new\n",
+            "*** End Patch\n"
+        );
+        let arguments = serde_json::to_string(&serde_json::json!({"patch":patch})).unwrap();
+        return sse_response([
+            serde_json::json!({
+                "choices":[{
+                    "delta":{
+                        "role":"assistant",
+                        "tool_calls":[{
+                            "index":0,
+                            "id":"call-rejected-patch",
+                            "type":"function",
+                            "function":{"name":"apply_patch","arguments":arguments}
+                        }]
+                    },
+                    "finish_reason":null
+                }]
+            }),
+            serde_json::json!({
+                "choices":[{"delta":{},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":10,"completion_tokens":5}
+            }),
+        ]);
+    }
+    sse_response([
+        serde_json::json!({
+            "choices":[{
+                "delta":{"role":"assistant","content":"handled rejection"},
+                "finish_reason":null
+            }]
+        }),
+        serde_json::json!({
+            "choices":[{"delta":{},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":2}
+        }),
+    ])
+}
+
+async fn tool_server() -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = ToolServerState {
+        calls: Arc::clone(&calls),
+        requests: Arc::clone(&requests),
+    };
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(complete_coding_tools_then_chat),
+                )
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    (format!("http://{address}"), calls, requests, task)
+}
+
+async fn background_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let state = ToolServerState {
+        calls: Arc::clone(&calls),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/v1/chat/completions", post(background_then_chat))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    (format!("http://{address}"), calls, task)
+}
+
+async fn rejected_patch_server() -> (
+    String,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = ToolServerState {
+        calls: Arc::new(AtomicUsize::new(0)),
+        requests: Arc::clone(&requests),
+    };
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/v1/chat/completions", post(rejected_patch_then_chat))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    (format!("http://{address}"), requests, task)
+}
+
 async fn image() -> Response {
     Response::builder()
         .status(StatusCode::OK)
@@ -197,27 +563,6 @@ async fn image_server() -> (String, tokio::task::JoinHandle<()>) {
         axum::serve(
             listener,
             Router::new().route("/v1/images/generations", post(image)),
-        )
-        .await
-        .unwrap();
-    });
-    (format!("http://{address}"), task)
-}
-
-async fn job_gated_chat(State(entered): State<Arc<Notify>>) -> Response {
-    entered.notified().await;
-    chat().await
-}
-
-async fn job_gated_server(entered: Arc<Notify>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new()
-                .route("/v1/chat/completions", post(job_gated_chat))
-                .with_state(entered),
         )
         .await
         .unwrap();
@@ -295,6 +640,22 @@ async fn failed_server() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+fn assert_versioned_run_events(events: &[RunEvent], observed_fact_count: usize) {
+    let decoded = events
+        .iter()
+        .map(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.json_line().unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(decoded.iter().all(|line| line["version"] == 2));
+    assert_eq!(decoded.first().unwrap()["type"], "session");
+    assert_eq!(decoded.last().unwrap()["type"], "outcome");
+    assert_eq!(
+        decoded.iter().filter(|line| line["type"] == "fact").count(),
+        observed_fact_count
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let (endpoint, server) = server().await;
@@ -310,6 +671,7 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
                 session: SessionSelection::Fresh {
                     cwd: fixture.workspace.clone(),
                     session_id: None,
+                    agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
                 },
                 model: None,
                 sandbox: None,
@@ -325,10 +687,16 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         .unwrap();
     assert_eq!(first.outcome(), &TurnOutcome::Completed);
     assert_eq!(first.exit_code(), 0);
-    assert_eq!(first.text_output(), "hello");
-    assert!(first.durable_seq() >= first.facts().last().unwrap().seq());
+    let observed_facts = events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::Fact { fact, .. } => Some(fact),
+            RunEvent::Session { .. } | RunEvent::Outcome { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(first.durable_seq() >= observed_facts.last().unwrap().seq());
     assert!(matches!(
-        first.facts().first().unwrap().body(),
+        observed_facts.first().unwrap().body(),
         SessionFactBody::TurnAccepted { text, .. } if text == "/status"
     ));
     assert!(events.iter().any(|event| matches!(
@@ -339,23 +707,17 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
             ..
         } if *durable_seq < fact.seq()
     )));
-    let lines = first.jsonl_output().unwrap();
-    let decoded = lines
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(decoded.first().unwrap()["type"], "session");
-    assert_eq!(decoded.last().unwrap()["type"], "outcome");
-    assert_eq!(
-        decoded.iter().filter(|line| line["type"] == "fact").count(),
-        first.facts().len()
-    );
-    assert!(
-        decoded
-            .iter()
-            .filter(|line| line["type"] == "fact")
-            .all(|line| line["durable_seq"].as_u64() == Some(first.durable_seq()))
-    );
+    assert!(observed_facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::ModelEvent {
+            event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                delta: rsi_ai_protocol::ContentDelta::Text(text),
+                ..
+            },
+            ..
+        } if text == "hello"
+    )));
+    assert_versioned_run_events(&events, observed_facts.len());
 
     let second = running
         .run_turn(
@@ -418,6 +780,7 @@ async fn resume_rejects_a_different_canonical_workspace() {
                 session: SessionSelection::Fresh {
                     cwd: fixture.workspace.clone(),
                     session_id: None,
+                    agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
                 },
                 model: None,
                 sandbox: None,
@@ -538,6 +901,255 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
     assert!(third.status.success());
     assert_eq!(third.stdout, b"hello\n");
     assert!(third.stderr.is_empty());
+    server.abort();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_protocol() {
+    let binary = env!("CARGO_BIN_EXE_rsi");
+    let workspace = tempfile::tempdir().unwrap();
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Add File: direct.txt\n",
+        "+direct helper\n",
+        "*** End Patch\n"
+    );
+    let mut child = tokio::process::Command::new(binary)
+        .arg("--rsi-run-as-apply-patch")
+        .current_dir(workspace.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .await
+        .unwrap();
+    let output = child.wait_with_output().await.unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(output.stdout.ends_with(b"\n"));
+    assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout[..output.stdout.len() - 1]).unwrap();
+    assert_eq!(response["status"], "applied");
+    assert_eq!(
+        std::fs::read(workspace.path().join("direct.txt")).unwrap(),
+        b"direct helper\n"
+    );
+
+    let rejected = tokio::process::Command::new(binary)
+        .arg("--rsi-run-as-apply-patch")
+        .current_dir(workspace.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut rejected = rejected;
+    rejected
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"not a patch")
+        .await
+        .unwrap();
+    let rejected = rejected.wait_with_output().await.unwrap();
+    assert!(rejected.status.success());
+    assert!(rejected.stderr.is_empty());
+    assert!(rejected.stdout.ends_with(b"\n"));
+    assert!(!rejected.stdout[..rejected.stdout.len() - 1].contains(&b'\n'));
+    let response: serde_json::Value =
+        serde_json::from_slice(&rejected.stdout[..rejected.stdout.len() - 1]).unwrap();
+    assert_eq!(response["status"], "rejected");
+
+    let extra = tokio::process::Command::new(binary)
+        .args(["--rsi-run-as-apply-patch", "extra"])
+        .current_dir(workspace.path())
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(extra.status.code(), Some(2));
+    assert!(extra.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&extra.stderr).contains("only the `run` command"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn built_binary_runs_the_complete_real_coding_tool_flow() {
+    let (endpoint, calls, requests, server) = tool_server().await;
+    let fixture = fixture(&endpoint);
+    let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+        .args([
+            "run",
+            "exercise all coding tools",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--sandbox",
+            "workspace-write",
+            "--output",
+            "jsonl",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 7);
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("from-model.txt")).unwrap(),
+        b"written through the complete tool loop\n"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    let mut tool_names = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    tool_names.sort_unstable();
+    assert_eq!(
+        tool_names,
+        ["apply_patch", "bash", "job_kill", "job_list", "job_output"]
+    );
+    assert_eq!(
+        tool_message(&requests[1], "call-foreground-bash")["content"],
+        "foreground-complete"
+    );
+    let job_id = background_job_id(&requests[2]).to_owned();
+    assert!(
+        tool_message(&requests[3], "call-job-list")["content"]
+            .as_str()
+            .unwrap()
+            .contains(&job_id)
+    );
+    assert!(tool_message(&requests[4], "call-job-output")["content"].is_string());
+    assert!(tool_message(&requests[5], "call-job-kill")["content"].is_string());
+    assert!(
+        tool_message(&requests[6], "call-apply-patch")["content"]
+            .as_str()
+            .unwrap()
+            .contains("applied")
+    );
+    drop(requests);
+
+    let lines = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_real_coding_results(&lines, &job_id);
+    assert_eq!(lines.last().unwrap()["outcome"]["status"], "completed");
+    server.abort();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn built_binary_blocks_success_when_background_work_was_not_collected() {
+    let (endpoint, calls, server) = background_server().await;
+    let fixture = fixture(&endpoint);
+    let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+        .args([
+            "run",
+            "start work but forget to collect it",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--sandbox",
+            "workspace-write",
+            "--output",
+            "jsonl",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("jobs.unreported_background_work"));
+    let lines = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let outcome = lines.last().unwrap();
+    assert_eq!(outcome["type"], "outcome");
+    assert_eq!(outcome["outcome"]["status"], "failed");
+    assert_eq!(
+        outcome["outcome"]["code"],
+        "jobs.unreported_background_work"
+    );
+    assert!(lines.iter().any(|line| {
+        line["type"] == "fact"
+            && line["fact"]["type"] == "tool_result"
+            && line["fact"]["result"]["value"]["status"] == "running"
+    }));
+    server.abort();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
+    let (endpoint, requests, server) = rejected_patch_server().await;
+    let fixture = fixture(&endpoint);
+    let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+        .args([
+            "run",
+            "attempt a patch and handle rejection",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--sandbox",
+            "workspace-write",
+            "--output",
+            "jsonl",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fixture.workspace.join("missing.txt").exists());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let tool_message = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap();
+    let evidence: serde_json::Value =
+        serde_json::from_str(tool_message["content"].as_str().unwrap()).unwrap();
+    assert_eq!(evidence["status"], "rejected");
+    assert_eq!(evidence["failure"]["operation"], 0);
+    assert_eq!(evidence["failure"]["code"], "not_found");
+    assert_eq!(evidence["failure"]["path"], "missing.txt");
+    assert!(evidence["effects"].as_array().unwrap().is_empty());
+    drop(requests);
+
+    let lines = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let result = lines
+        .iter()
+        .find(|line| line["type"] == "fact" && line["fact"]["type"] == "tool_result")
+        .unwrap();
+    assert_eq!(result["fact"]["result"]["is_error"], true);
+    assert_eq!(result["fact"]["result"]["value"], evidence);
+    assert_eq!(lines.last().unwrap()["outcome"]["status"], "completed");
     server.abort();
 }
 
@@ -786,84 +1398,6 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn unfinished_jobs_are_cancelled_before_terminal_and_timeout_fails_the_turn() {
-    let job_entered = Arc::new(Notify::new());
-    let job_release = Arc::new(Notify::new());
-    let (endpoint, server) = job_gated_server(Arc::clone(&job_entered)).await;
-    let fixture = fixture(&endpoint);
-    let mut profile = std::fs::read_to_string(&fixture.profile).unwrap();
-    profile.push_str(
-        r#"
-
-[[steps]]
-kind = "patch"
-target = "rsi-jobs"
-
-[steps.config]
-maximum_active_jobs = 2
-shutdown_timeout_ms = 5
-"#,
-    );
-    std::fs::write(&fixture.profile, profile).unwrap();
-    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
-        .await
-        .unwrap();
-    let mut job = None;
-    let report = running
-        .run_turn_observed(
-            RunOptions {
-                task: "finish with a pending job".into(),
-                session: SessionSelection::Fresh {
-                    cwd: fixture.workspace.clone(),
-                    session_id: None,
-                },
-                model: None,
-                sandbox: None,
-                output: OutputMode::Jsonl,
-            },
-            CancellationToken::new(),
-            |event| {
-                if let RunEvent::Session {
-                    session_id,
-                    turn_id,
-                    ..
-                } = event
-                {
-                    job = Some(running.submit_turn_job(
-                        session_id,
-                        turn_id,
-                        JobSpec {
-                            name: "ignore-cancel-briefly".into(),
-                            task: Arc::new(IgnoresCancellationUntilReleased {
-                                entered: Arc::clone(&job_entered),
-                                release: Arc::clone(&job_release),
-                            }),
-                        },
-                    )?);
-                }
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        report.outcome(),
-        TurnOutcome::Failed { code, .. } if code == "jobs.cancellation_timeout"
-    ));
-    assert!(matches!(
-        report.facts().last().unwrap().body(),
-        SessionFactBody::TurnTerminal {
-            outcome: TurnOutcome::Failed { code, .. },
-            ..
-        } if code == "jobs.cancellation_timeout"
-    ));
-    job_release.notify_one();
-    assert_eq!(job.unwrap().join().await, JobOutcome::Cancelled);
-    assert!(running.shutdown().await.is_clean());
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_image_turn_renders_only_the_durable_media_reference() {
     let (endpoint, server) = image_server().await;
     let fixture = fixture(&endpoint);
@@ -898,6 +1432,7 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
                 session: SessionSelection::Fresh {
                     cwd: fixture.workspace.clone(),
                     session_id: None,
+                    agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
                 },
                 model: ModelRef::new("fixture", "gpt-image-1").unwrap(),
                 request: ImageRequest::new("one pixel", 1).unwrap(),
@@ -915,7 +1450,7 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
         .iter()
         .find(|fact| matches!(fact.body(), SessionFactBody::ImageOutput { .. }))
         .unwrap();
-    let encoded = serde_json::to_string(image_fact).unwrap();
+    let encoded = serde_json::to_string(image_fact.as_ref()).unwrap();
     assert!(!encoded.contains("b64_json"));
     assert!(!encoded.contains("iVBOR"));
     assert!(running.shutdown().await.is_clean());

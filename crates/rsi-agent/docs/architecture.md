@@ -18,9 +18,11 @@ Kernel. Model prompt projection and compaction belong to
 SQLite Store --Local--> Kernel --Local Turn service--> callers
                             ^
                             |
-                    executor registration
+                    executor registration and claims
                             |
-            Language, Image, Media, and Tool Local services
+            Agent composition pin -> immutable Tool catalog
+                            |
+          Preset Profile contributions over global providers
 ```
 
 The Store root has one cross-process exclusive writer lease held from open
@@ -56,8 +58,39 @@ Creating an empty session is lazy and process-local. The immutable header and
 first `TurnAccepted` Fact are created atomically when its first turn is
 submitted. Therefore an empty session that never receives a turn does not
 survive process loss; no durable receipt promises otherwise. Once the header
-exists, its canonical workspace path, frozen agent settings, default model,
-and creation-time permission facts never follow later configuration drift.
+exists, its validated Agent preset identity, canonical workspace path, frozen
+agent settings, default model, and creation-time permission facts never follow
+later configuration drift. The header records the durable preset identity, not
+an in-process composition-generation capability.
+
+Before first submission, an `AgentSessionDraft` owns the candidate header and
+one exact composition pin without creating Store state or reserving Kernel
+capacity. Changing its preset fully constructs and validates the replacement
+generation before atomically exchanging the draft's identity and pin. Consuming
+the draft yields one move-only fresh-session value; after that ownership
+transfer no switching interface exists. Failure or dropping an unsubmitted
+draft leaves no durable session.
+
+Agent composition resolves one preset source digest into a standing child Scope
+inside the existing Runtime. It starts an unpublished Tool catalog stage,
+activates the preset's allowlisted contribution Profile, requires every child
+Fiber to become Active, seals the exact catalog, and only then publishes the
+generation. Candidate failure disposes the complete stage and never replaces a
+healthy current generation. Construction is single-flight per preset identity
+and source digest. A superseded generation remains alive while a draft,
+resident session, or admitted Tool result holds its pin, then tears down after
+the final pin releases.
+
+The preset catalog and generation builder share one application-supplied frozen
+Profile compiler. Fresh roster discovery compiles each winning source, including
+required includes and pure expressions, checks enabled contribution identities
+against the frozen Agent-only allowlist, and keeps failed rows visible with a
+bounded categorical diagnostic. The roster receives neither concrete factories
+nor the Host catalog. That health is observational only: generation selection
+probes the exact preset id in root-precedence order without compiling unrelated
+roster rows, compiles that selected source once, and then resolves it against
+the Agent-only factory allowlist before any Runtime mutation. The catalog
+neither receives nor exposes the Host factory catalog.
 
 Startup recovery enumerates sessions and the Store's mechanically indexed open
 turns through bounded cursor pages, reads only those per-turn Fact streams into
@@ -81,6 +114,17 @@ idle historical session is admitted to resident Kernel state. Invalid requests
 therefore cannot consume the active-session bound. Claim reads return a Store
 page before consulting the speculative suffix whenever the durable watermark
 advances during Store I/O, preserving one contiguous prefix across races.
+Resume preparation is a move-only admission step at the Turn-service boundary.
+It returns the authoritative Header together with either the resident session's
+exact pin or the current healthy generation for a cold session. Applications
+must complete this preparation before creating any durable workspace
+registration or other run-local side effect, and submission consumes the token.
+A missing or broken cold preset therefore fails before workspace mutation,
+resident capacity, Fact materialization, or external effects. A resident
+session continues using its existing pin across source changes; after idle
+eviction or process restart, preparation deliberately acquires the latest
+generation for the same durable preset identity. Dropping an unsubmitted token
+releases its pin and has no Store or workspace semantics.
 
 The executor follows one ordering rule for every external effect. The Kernel
 rejects a start marker unless its matching intent is already durable, so an
@@ -91,8 +135,10 @@ prepare immutable input -> publish intent -> flush durable intent
 -> publish start -> flush durable start -> invoke -> publish outcome
 ```
 
-Language calls, Image calls, and Tool invocations are pinned process-local objects obtained
-from exact active Local generations. Tool execution uses retained identities:
+Language calls and Image calls are pinned process-local objects obtained from
+exact active Local generations. Tool definitions and dispatch come from the
+same immutable Agent composition pin for the complete claim. Tool execution
+uses retained identities:
 recovery may query the exact owner/call/request identity, but absence never
 authorizes implicit replay. Durable Tool results contain only bounded text,
 canonical JSON, and immutable Media references; Agent does not copy media
@@ -144,6 +190,14 @@ its bounded tail. It never splits a tool call from its result. Workspace
 contents are not implicit input: a model sees them only through an explicit
 context source or Tool contract.
 
-Detach ends observation without changing durable state. Fork is not a v1
-operation. Presets are linked Profile fragments that compose the ordinary
-plugins; they do not provide a second runtime or hidden service locator.
+A claim carries the exact sequence of its own acceptance. The executor may
+restore a session checkpoint only when that checkpoint ends before this
+sequence; checkpoints that already folded the claimed or any later accepted
+turn fall back to the canonical claim-filtered replay. Checkpoint maintenance
+may still encode the complete durable tail for reuse by later claims.
+
+Detach ends observation without changing durable state. Fork is not a current
+operation. Presets are bounded Profile sources for allowlisted Agent-plane
+contributions; provider factories remain in the global Profile. Composition
+uses ordinary child Fibers in the same Runtime and does not provide a second
+runtime, privileged Host catalog, or hidden service locator.

@@ -6,8 +6,10 @@
 
 use async_trait::async_trait;
 use futures_util::Stream;
+use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
-    SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId, TurnOutcome,
+    BudgetDimension, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId, TurnOutcome,
+    validate_identifier, validate_safe_diagnostic,
 };
 use rsi_meta_contract::LocalContract;
 use std::fmt;
@@ -16,27 +18,135 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+/// Kernel-owned issuer for exact resume admissions.
+///
+/// This public type is an integration seam between the Turn protocol and its
+/// Kernel implementation. Application callers obtain tokens through
+/// [`TurnService::prepare_resume`] and never need an issuer.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ResumeAdmissionIssuer {
+    seal: Arc<()>,
+}
+
+impl ResumeAdmissionIssuer {
+    /// Creates one issuer identity for one Turn-service instance.
+    pub fn new() -> Self {
+        Self { seal: Arc::new(()) }
+    }
+
+    /// Issues one move-only admission after validating Header/pin identity.
+    pub fn issue(
+        &self,
+        header: SessionHeader,
+        composition: AgentCompositionPin,
+    ) -> Result<PreparedResumeSession> {
+        header
+            .validate()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        if header.agent_preset_id() != composition.preset_id() {
+            return Err(TurnError::Invariant(
+                "resume Header and composition preset identities differ".into(),
+            ));
+        }
+        Ok(PreparedResumeSession {
+            inner: Box::new(PreparedResumeSessionInner {
+                header,
+                composition,
+                issuer_seal: Arc::clone(&self.seal),
+            }),
+        })
+    }
+
+    /// Borrows parts only when this issuer created the token.
+    pub fn inspect<'a>(
+        &self,
+        prepared: &'a PreparedResumeSession,
+    ) -> Result<(&'a SessionHeader, &'a AgentCompositionPin)> {
+        if !Arc::ptr_eq(&self.seal, &prepared.inner.issuer_seal) {
+            return Err(TurnError::Invalid(
+                "resume admission belongs to a different Turn service".into(),
+            ));
+        }
+        Ok((&prepared.inner.header, &prepared.inner.composition))
+    }
+
+    /// Consumes parts only when this issuer created the token.
+    pub fn consume(
+        &self,
+        prepared: PreparedResumeSession,
+    ) -> Result<(SessionHeader, AgentCompositionPin)> {
+        if !Arc::ptr_eq(&self.seal, &prepared.inner.issuer_seal) {
+            return Err(TurnError::Invalid(
+                "resume admission belongs to a different Turn service".into(),
+            ));
+        }
+        let inner = *prepared.inner;
+        Ok((inner.header, inner.composition))
+    }
+}
+
+impl Default for ResumeAdmissionIssuer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for ResumeAdmissionIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResumeAdmissionIssuer(..)")
+    }
+}
+
+/// Move-only authoritative Header and Agent-generation pin for one resume.
+pub struct PreparedResumeSession {
+    inner: Box<PreparedResumeSessionInner>,
+}
+
+struct PreparedResumeSessionInner {
+    header: SessionHeader,
+    composition: AgentCompositionPin,
+    issuer_seal: Arc<()>,
+}
+
+impl PreparedResumeSession {
+    /// Returns the authoritative durable Header selected by preparation.
+    pub const fn header(&self) -> &SessionHeader {
+        &self.inner.header
+    }
+}
+
+impl fmt::Debug for PreparedResumeSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedResumeSession")
+            .field("header", &self.inner.header)
+            .field("composition", &self.inner.composition)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Fresh or durable session selected by one submission.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum SubmitSession {
-    /// First turn creates this immutable header atomically on flush.
-    Fresh(SessionHeader),
-    /// Existing durable session whose creation-time header is authoritative.
-    Resume(SessionId),
+    /// First turn creates this prepared immutable header atomically on flush.
+    Fresh(PreparedFreshSession),
+    /// Existing durable session prepared by the same Turn-service instance.
+    Resume(PreparedResumeSession),
 }
 
 impl SubmitSession {
     /// Returns the selected session identity.
     pub const fn session_id(&self) -> &SessionId {
         match self {
-            Self::Fresh(header) => header.session_id(),
-            Self::Resume(session_id) => session_id,
+            Self::Fresh(prepared) => prepared.header().session_id(),
+            Self::Resume(prepared) => prepared.header().session_id(),
         }
     }
 }
 
 /// One user turn submission without a durability receipt promise.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct SubmitTurn {
     /// Fresh header or existing durable identity.
     pub session: SubmitSession,
@@ -49,7 +159,7 @@ pub struct SubmitTurn {
 }
 
 /// One direct Image request submitted as its own durable turn.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct SubmitImage {
     /// Fresh header or existing durable identity.
     pub session: SubmitSession,
@@ -86,7 +196,7 @@ pub enum TurnUpdate {
     /// `durable_seq` may lag only a nonterminal Fact.
     Fact {
         /// Exact Fact.
-        fact: Box<SessionFact>,
+        fact: Arc<SessionFact>,
         /// Durable watermark at publication time.
         durable_seq: u64,
     },
@@ -103,6 +213,11 @@ pub type TurnObservation = Pin<Box<dyn Stream<Item = Result<TurnUpdate>> + Send 
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Pins the authoritative resident or current-cold generation for resume.
+    ///
+    /// Preparation does not reserve resident capacity or materialize Facts.
+    /// Dropping the returned token has no Store semantics.
+    async fn prepare_resume(&self, session_id: &SessionId) -> Result<PreparedResumeSession>;
     /// Accepts one turn into a fresh or existing session's live interval.
     async fn submit(&self, request: SubmitTurn) -> Result<SubmittedTurn>;
     /// Accepts one direct Image operation into a fresh or existing session.
@@ -148,17 +263,155 @@ pub struct TurnClaim {
     pub turn_id: TurnId,
     /// Immutable session header.
     pub header: SessionHeader,
+    /// Durable acceptance timestamp from which elapsed budget is measured.
+    pub accepted_at_ms: u64,
+    /// Exact Fact sequence of this turn's acceptance boundary.
+    pub accepted_seq: u64,
     /// Highest Fact sequence in the live interval when claimed.
     pub live_seq: u64,
+    authority: TurnClaimAuthority,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TurnClaimBinding {
+    executor_id: String,
+    claim_id: u64,
+    session_id: SessionId,
+    turn_id: TurnId,
+    header_fingerprint: String,
+    accepted_at_ms: u64,
+    accepted_seq: u64,
+    live_seq: u64,
+}
+
+#[derive(Clone)]
+struct TurnClaimAuthority {
+    issuer_seal: Arc<()>,
+    binding: Arc<TurnClaimBinding>,
+}
+
+impl fmt::Debug for TurnClaimAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TurnClaimAuthority(..)")
+    }
+}
+
+impl PartialEq for TurnClaimAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.issuer_seal, &other.issuer_seal) && self.binding == other.binding
+    }
+}
+
+impl Eq for TurnClaimAuthority {}
+
+/// Kernel-only issuer for field-bound process-local claims.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TurnClaimIssuer {
+    seal: Arc<()>,
+}
+
+impl TurnClaimIssuer {
+    /// Creates one issuer identity for one Turn service instance.
+    pub fn new() -> Self {
+        Self { seal: Arc::new(()) }
+    }
+
+    /// Issues one claim whose complete public representation is privately bound.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        &self,
+        executor_id: String,
+        claim_id: u64,
+        session_id: SessionId,
+        turn_id: TurnId,
+        header: SessionHeader,
+        accepted_at_ms: u64,
+        accepted_seq: u64,
+        live_seq: u64,
+    ) -> Result<TurnClaim> {
+        let binding = Arc::new(TurnClaimBinding {
+            executor_id: executor_id.clone(),
+            claim_id,
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            header_fingerprint: header
+                .fingerprint()
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+            accepted_at_ms,
+            accepted_seq,
+            live_seq,
+        });
+        Ok(TurnClaim {
+            executor_id,
+            claim_id,
+            session_id,
+            turn_id,
+            header,
+            accepted_at_ms,
+            accepted_seq,
+            live_seq,
+            authority: TurnClaimAuthority {
+                issuer_seal: Arc::clone(&self.seal),
+                binding,
+            },
+        })
+    }
+
+    /// Revalidates issuer identity and every public field without live claim state.
+    pub fn validates(&self, claim: &TurnClaim) -> bool {
+        self.validates_identity(claim)
+            && claim
+                .header
+                .fingerprint()
+                .is_ok_and(|fingerprint| claim.authority.binding.header_fingerprint == fingerprint)
+    }
+
+    /// Revalidates issuer identity and public fields other than the Header body.
+    pub fn validates_identity(&self, claim: &TurnClaim) -> bool {
+        Arc::ptr_eq(&self.seal, &claim.authority.issuer_seal)
+            && claim.authority.binding.executor_id == claim.executor_id
+            && claim.authority.binding.claim_id == claim.claim_id
+            && claim.authority.binding.session_id == claim.session_id
+            && claim.authority.binding.turn_id == claim.turn_id
+            && claim.authority.binding.accepted_at_ms == claim.accepted_at_ms
+            && claim.authority.binding.accepted_seq == claim.accepted_seq
+            && claim.authority.binding.live_seq == claim.live_seq
+    }
+}
+
+impl Default for TurnClaimIssuer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for TurnClaimIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TurnClaimIssuer(..)")
+    }
 }
 
 /// One claim-filtered page plus the exact live sequence scanned through.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClaimFactPage {
     /// Facts visible to the claimed turn in increasing sequence order.
-    pub facts: Vec<SessionFact>,
+    pub facts: Vec<Arc<SessionFact>>,
     /// Highest live sequence examined, including Facts hidden by claim isolation.
     pub through_seq: u64,
+}
+
+/// Opaque Context-owned checkpoint crossing only the process-local Kernel seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextCheckpoint {
+    /// Immutable Session header fingerprint.
+    pub header_fingerprint: String,
+    /// Exact durable sequence folded into the checkpoint.
+    pub through_seq: u64,
+    /// SHA-256 chain of the exact canonical Fact prefix folded by Context.
+    pub fact_prefix_sha256: String,
+    /// Versioned Context-owned bytes.
+    pub bytes: Arc<[u8]>,
 }
 
 /// Executor-facing Kernel port.
@@ -172,6 +425,8 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         executor_id: &str,
         cancellation: CancellationToken,
     ) -> Result<Option<TurnClaim>>;
+    /// Returns the exact immutable Agent composition pinned by this claim.
+    fn composition(&self, claim: &TurnClaim) -> Result<AgentCompositionPin>;
     /// Reads bounded live Facts after a cursor, including a speculative suffix.
     async fn read_facts(
         &self,
@@ -179,12 +434,46 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         after_seq: u64,
         limit: usize,
     ) -> Result<ClaimFactPage>;
+    /// Reads an unfiltered durable session page for checkpoint maintenance
+    /// only after the claimed turn is terminal and no speculative suffix exists.
+    /// Returns `Ok(None)` when checkpoint maintenance is unavailable or stale.
+    async fn read_checkpoint_facts(
+        &self,
+        claim: &TurnClaim,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Option<ClaimFactPage>> {
+        let _ = (claim, after_seq, limit);
+        Ok(None)
+    }
+    /// Reads one optional Context checkpoint cache.
+    async fn read_context_checkpoint(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ContextCheckpoint>> {
+        let _ = session_id;
+        Ok(None)
+    }
+    /// Installs a checkpoint only at an unchanged durable and live tail.
+    ///
+    /// `Ok(false)` means checkpoint maintenance is disabled, the tail changed,
+    /// or the claim is not durably terminal;
+    /// Store failures remain typed errors so callers can choose an explicit
+    /// fail-soft cache policy without losing diagnostics at this seam.
+    async fn write_context_checkpoint(
+        &self,
+        claim: &TurnClaim,
+        checkpoint: ContextCheckpoint,
+    ) -> Result<bool> {
+        let _ = (claim, checkpoint);
+        Ok(false)
+    }
     /// Publishes validated bodies as the next live Facts without claiming durability.
     async fn publish(
         &self,
         claim: &TurnClaim,
         bodies: Vec<SessionFactBody>,
-    ) -> Result<Vec<SessionFact>>;
+    ) -> Result<Vec<Arc<SessionFact>>>;
     /// Waits until the exact live prefix is durable or returns its flush failure.
     async fn flush(&self, claim: &TurnClaim, through_seq: u64) -> Result<u64>;
     /// Returns a cancellation token that fires after a durable cancel request.
@@ -203,10 +492,83 @@ impl LocalContract for TurnExecutionContract {
 }
 
 /// One effect-owned pre-terminal hook.
+#[derive(Clone, Debug)]
+pub struct TurnFinalizationContext {
+    /// Exact session identity.
+    pub session_id: SessionId,
+    /// Exact turn identity.
+    pub turn_id: TurnId,
+    /// Exact optional Jobs authority shared with Tool execution.
+    pub job_scope: Option<rsi_jobs::JobScopeAuthority>,
+}
+
+/// Bounded reason why otherwise completed work must not publish success.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnCompletionBlocker {
+    code: String,
+    message: String,
+}
+
+impl TurnCompletionBlocker {
+    /// Creates one validated stable completion blocker.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> FinalizationResult<Self> {
+        let blocker = Self {
+            code: code.into(),
+            message: message.into(),
+        };
+        validate_identifier("turn completion blocker", &blocker.code)
+            .map_err(|error| TurnFinalizationError::Invalid(error.to_string()))?;
+        validate_safe_diagnostic("turn completion blocker message", &blocker.message)
+            .map_err(|error| TurnFinalizationError::Invalid(error.to_string()))?;
+        Ok(blocker)
+    }
+
+    /// Returns the stable blocker code.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Returns the bounded safe blocker summary.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Successful result from one hook or a complete finalizer snapshot.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TurnFinalizationReport {
+    completion_blocker: Option<TurnCompletionBlocker>,
+}
+
+impl TurnFinalizationReport {
+    /// Returns an unblocked finalization report.
+    pub const fn complete() -> Self {
+        Self {
+            completion_blocker: None,
+        }
+    }
+
+    /// Returns a report containing one validated completion blocker.
+    pub const fn blocked(blocker: TurnCompletionBlocker) -> Self {
+        Self {
+            completion_blocker: Some(blocker),
+        }
+    }
+
+    /// Returns the optional blocker selected by registration order.
+    pub const fn completion_blocker(&self) -> Option<&TurnCompletionBlocker> {
+        self.completion_blocker.as_ref()
+    }
+}
+
+/// One effect-owned pre-terminal hook.
 #[async_trait]
 pub trait TurnFinalizer: fmt::Debug + Send + Sync + 'static {
     /// Settles invocation-scoped resources before the sole terminal Fact is published.
-    async fn finalize(&self, session_id: &SessionId, turn_id: &TurnId) -> FinalizationResult<()>;
+    async fn finalize(
+        &self,
+        context: &TurnFinalizationContext,
+    ) -> FinalizationResult<TurnFinalizationReport>;
 }
 
 /// Ordered process-local finalizer registry invoked by the Agent executor.
@@ -219,10 +581,13 @@ pub trait TurnFinalization: fmt::Debug + Send + Sync + 'static {
         finalizer: Arc<dyn TurnFinalizer>,
     ) -> FinalizationResult<TurnFinalizerLease>;
 
-    /// Runs an immutable snapshot in registration order until one finalizer fails.
+    /// Starts an immutable snapshot concurrently and resolves errors and blockers by registration order.
     ///
     /// The caller owns the deadline for the complete snapshot.
-    async fn finalize(&self, session_id: &SessionId, turn_id: &TurnId) -> FinalizationResult<()>;
+    async fn finalize(
+        &self,
+        context: &TurnFinalizationContext,
+    ) -> FinalizationResult<TurnFinalizationReport>;
 }
 
 /// Nominal Local contract for [`TurnFinalization`].
@@ -329,6 +694,22 @@ pub enum TurnError {
     /// The session already has its bounded number of live turns.
     #[error("Agent session live-turn capacity is exhausted")]
     Capacity,
+    /// Process-wide live-observer admission is exhausted.
+    #[error("Agent active-observer capacity is exhausted")]
+    ObserverCapacity,
+    /// The session's durable Agent preset cannot produce a healthy generation.
+    #[error("Agent composition is unavailable: {0}")]
+    Composition(String),
+    /// One frozen turn budget prevented further work admission.
+    #[error("Agent turn budget exceeded for {dimension:?}: consumed {consumed}, limit {limit}")]
+    BudgetExceeded {
+        /// Exhausted dimension.
+        dimension: BudgetDimension,
+        /// Proposed or elapsed consumption at rejection.
+        consumed: u64,
+        /// Immutable turn limit.
+        limit: u64,
+    },
     /// Exact executor or claim lease is stale.
     #[error("Agent executor claim is stale")]
     StaleClaim,
@@ -345,3 +726,18 @@ pub enum TurnError {
 
 /// Turn runtime result.
 pub type Result<T> = std::result::Result<T, TurnError>;
+
+#[cfg(test)]
+mod tests {
+    use super::TurnCompletionBlocker;
+
+    #[test]
+    fn completion_blocker_rejects_unsafe_diagnostic_characters() {
+        for message in ["contains\0nul", "contains\u{7f}delete"] {
+            assert!(
+                TurnCompletionBlocker::new("jobs_active", message).is_err(),
+                "accepted unsafe blocker message {message:?}"
+            );
+        }
+    }
+}

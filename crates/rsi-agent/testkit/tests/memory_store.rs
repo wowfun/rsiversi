@@ -1,6 +1,6 @@
 use rsi_agent_session_protocol::{
-    EffectId, FrozenAgentProfile, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
-    TurnOutcome,
+    AgentPresetId, EffectId, FrozenAgentProfile, SessionFact, SessionFactBody, SessionHeader,
+    SessionId, TurnId, TurnOutcome,
 };
 use rsi_agent_store_protocol::{
     AppendBatch, MAXIMUM_STORE_FACT_PAGE_BYTES, SessionStore, StoreError,
@@ -14,6 +14,7 @@ fn header() -> SessionHeader {
         SessionId::new("memory-session").unwrap(),
         1,
         "/workspace",
+        AgentPresetId::new("test-agent").unwrap(),
         FrozenAgentProfile::new(
             "default",
             "system",
@@ -86,6 +87,15 @@ async fn memory_store_is_compare_and_append_and_failure_injection_is_precommit()
         })
         .await
         .unwrap();
+    assert_eq!(
+        store
+            .header(&session)
+            .await
+            .unwrap()
+            .agent_preset_id()
+            .as_str(),
+        "test-agent"
+    );
     assert_eq!(
         store.read_facts(&session, 0, 8).await.unwrap().facts,
         vec![fact(1)]

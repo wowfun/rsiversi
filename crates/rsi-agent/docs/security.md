@@ -6,6 +6,15 @@ model routes, JSON values, Facts, Tool results, Media references, batch sizes,
 and CAS bytes all have explicit finite bounds. Custom deserialization must not
 bypass constructor invariants.
 
+The durable Agent preset identity uses the same lowercase alphanumeric-and-dash
+grammar as its eventual directory segment. It cannot contain separators,
+dot-segments, absolute-path syntax, or an unbounded name; resolving that
+identity to filesystem authority remains the preset provider's responsibility.
+Preset Profile resolution uses a construction-time frozen Agent-only factory
+allowlist. A source cannot name Store, Process, Jobs, Kernel, provider, Host, or
+other global factories. Unknown or unsupported contribution identities fail
+before a Tool stage is sealed or any session capacity is reserved.
+
 The session header records redacted configuration facts only. It may contain a
 credential reference but never a resolved secret. Provider error summaries and
 Tool failures are bounded before persistence. Media content remains owned by
@@ -39,10 +48,24 @@ or Fact body before allocating its Rust String. Typed Fact readers then enforce
 both item and aggregate encoded-byte pages before materializing a page. Claim projection excludes later accepted turns, and
 incremental context compaction keeps resident history proportional to the
 configured model context rather than session lifetime.
+Checkpoint restore is additionally fenced by the claimed turn's acceptance
+sequence, so an unfiltered maintenance checkpoint cannot swallow that
+acceptance or project a later queued turn.
 Resume input is validated from the durable header before an idle session is
 loaded, so rejected requests cannot reserve resident-session capacity. A claim
 reader never merges the speculative suffix behind a durable watermark that
 advanced during Store I/O.
+Every claim carries a process-local issuer seal plus an immutable binding over
+its executor, claim, session, turn, Header fingerprint, acceptance, and live
+horizon fields. Mutating a public projection cannot manufacture either live
+claim authority or the post-terminal maintenance authority used for checkpoint
+rebuilds.
+The Kernel issues a move-only resume token only after pinning the resident or
+current cold composition. The standard application obtains that token before
+durably registering the Header's workspace, and the Kernel rejects tokens
+issued by another service instance. The executor receives only the resulting
+opaque resident pin. Neither module receives preset paths, Profile resolver
+authority, or a mutable Tool registrar.
 
 Local contracts are safe-Rust, process-local authority. Session identities are
 correlation values, not authorization tokens. Cross-process API, auth, RPC, and

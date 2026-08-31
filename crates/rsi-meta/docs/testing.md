@@ -208,6 +208,10 @@ Control tests cross real Runtime Fibers for all-before-mutation preparation,
 Pending acceptance, healthy equality, restart-required publication,
 apply/rollback/degraded recovery, same-source degraded retry, exact required
 source watching, watcher fault/recovery, subscriptions, and bounded shutdown.
+One disposal gate holds a replayable attempt between membership mutations and
+proves status reads, subscriptions, and a concurrent watched-source fault retain
+the last complete observed graph until that attempt reaches a publication
+boundary.
 Host tests additionally prove frozen catalog/marker ownership, launch-patch
 order, group isolation mapping, direct single Profile bootstrap, and startup
 rollback.

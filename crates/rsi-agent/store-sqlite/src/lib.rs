@@ -6,13 +6,15 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES, SessionFact, SessionFactBody,
-    SessionHeader, SessionId, TurnId,
+    EMPTY_FACT_PREFIX_DIGEST, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
+    SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId, advance_fact_prefix_digest,
 };
 use rsi_agent_store_protocol::{
-    AGENT_STORE_SCHEMA_VERSION, AppendBatch, AppendCommit, CasObjectRef, MAXIMUM_STORE_CAS_BYTES,
-    MAXIMUM_STORE_FACT_PAGE_BYTES, Result, SessionStore, SessionStoreContract, StoreError,
-    StoreFactPage, StoreOpenTurn, StoreOpenTurnPage, StoreTurnFactPage, validate_read_limit,
+    AGENT_STORE_SCHEMA_VERSION, AppendBatch, AppendCommit, CasObjectRef,
+    MAXIMUM_CONTEXT_CHECKPOINT_BYTES, MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
+    Result, SessionStore, SessionStoreContract, StoreError, StoreFactPage, StoreOpenTurn,
+    StoreOpenTurnPage, StoreTurnFactPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    validate_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -30,13 +32,14 @@ use tokio::sync::Semaphore;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
-const EXPECTED_TABLES: [(&str, &str); 4] = [
+const EXPECTED_TABLES: [(&str, &str); 5] = [
     (
         "sessions",
         "CREATE TABLE sessions (
             session_id TEXT PRIMARY KEY NOT NULL,
             header_json TEXT NOT NULL,
-            durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0)
+            durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
+            fact_prefix_sha256 TEXT NOT NULL
          ) STRICT",
     ),
     (
@@ -65,6 +68,17 @@ const EXPECTED_TABLES: [(&str, &str); 4] = [
                 REFERENCES facts(session_id, seq) ON DELETE RESTRICT,
             FOREIGN KEY (session_id, terminal_seq)
                 REFERENCES facts(session_id, seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
+    (
+        "context_checkpoints",
+        "CREATE TABLE context_checkpoints (
+            session_id TEXT PRIMARY KEY NOT NULL
+                REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            header_fingerprint TEXT NOT NULL,
+            through_seq INTEGER NOT NULL CHECK (through_seq > 0),
+            fact_prefix_sha256 TEXT NOT NULL,
+            checkpoint_bytes BLOB NOT NULL
          ) STRICT",
     ),
     (
@@ -544,6 +558,197 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn list_open_sessions(
+        &self,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreSessionPage> {
+        rsi_agent_store_protocol::validate_session_read_limit(limit)?;
+        let after = after.cloned();
+        self.with_connection(move |connection| {
+            let sqlite_limit = i64::try_from(limit + 1)
+                .map_err(|_| StoreError::Invalid("session read limit exceeds SQLite".into()))?;
+            let mut sessions = Vec::with_capacity(limit + 1);
+            if let Some(after) = &after {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT DISTINCT session_id FROM turns
+                         WHERE terminal_seq IS NULL AND session_id > ?1
+                         ORDER BY session_id LIMIT ?2",
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map(params![after.as_str(), sqlite_limit], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(sql_error)?;
+                for row in rows {
+                    sessions.push(
+                        SessionId::new(row.map_err(sql_error)?)
+                            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                    );
+                }
+            } else {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT DISTINCT session_id FROM turns
+                         WHERE terminal_seq IS NULL
+                         ORDER BY session_id LIMIT ?1",
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map([sqlite_limit], |row| row.get::<_, String>(0))
+                    .map_err(sql_error)?;
+                for row in rows {
+                    sessions.push(
+                        SessionId::new(row.map_err(sql_error)?)
+                            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                    );
+                }
+            }
+            let has_more = sessions.len() > limit;
+            sessions.truncate(limit);
+            let page = rsi_agent_store_protocol::StoreSessionPage {
+                after,
+                sessions,
+                has_more,
+            };
+            page.validate()?;
+            Ok(page)
+        })
+        .await
+    }
+
+    async fn read_context_checkpoint(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<StoredContextCheckpoint>> {
+        let session_id = session_id.clone();
+        self.with_connection(move |connection| {
+            let exists = connection
+                .query_row(
+                    "SELECT 1 FROM sessions WHERE session_id = ?1",
+                    [session_id.as_str()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .is_some();
+            if !exists {
+                return Err(StoreError::NotFound(session_id.to_string()));
+            }
+            let projection = connection
+                .query_row(
+                    "SELECT c.header_fingerprint, c.through_seq, c.fact_prefix_sha256,
+                            length(c.checkpoint_bytes),
+                            CASE WHEN length(c.checkpoint_bytes) <= ?2
+                                 THEN c.checkpoint_bytes END,
+                            length(CAST(s.header_json AS BLOB)),
+                            CASE WHEN length(CAST(s.header_json AS BLOB)) <= ?3
+                                 THEN s.header_json END,
+                            s.durable_seq
+                     FROM context_checkpoints c
+                     JOIN sessions s ON s.session_id = c.session_id
+                     WHERE c.session_id = ?1",
+                    params![
+                        session_id.as_str(),
+                        i64::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES)
+                            .expect("checkpoint bound fits SQLite INTEGER"),
+                        i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
+                            .expect("session header bound fits SQLite INTEGER"),
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<Vec<u8>>>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(sql_error)?;
+            projection.map(decode_context_checkpoint).transpose()
+        })
+        .await
+    }
+
+    async fn write_context_checkpoint(&self, write: WriteContextCheckpoint) -> Result<()> {
+        write.validate()?;
+        self.with_connection(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let (actual, header_json, fact_prefix_sha256) = transaction
+                .query_row(
+                    "SELECT durable_seq, header_json, fact_prefix_sha256
+                     FROM sessions WHERE session_id = ?1",
+                    [write.session_id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(|| StoreError::NotFound(write.session_id.to_string()))
+                .and_then(|(value, header, digest)| {
+                    Ok((decode_u64("durable sequence", value)?, header, digest))
+                })?;
+            if actual != write.expected_durable_seq {
+                return Err(StoreError::Conflict {
+                    expected: write.expected_durable_seq,
+                    actual,
+                });
+            }
+            let header: SessionHeader = decode_json("session header", &header_json)?;
+            if write.checkpoint.header_fingerprint
+                != header.fingerprint().map_err(|error| {
+                    StoreError::Corrupt(format!("stored session header is invalid: {error}"))
+                })?
+            {
+                return Err(StoreError::Invalid(
+                    "checkpoint header fingerprint differs from the durable session".into(),
+                ));
+            }
+            validate_sha256("Fact-prefix digest", &fact_prefix_sha256)?;
+            if write.checkpoint.fact_prefix_sha256 != fact_prefix_sha256 {
+                return Err(StoreError::Invalid(
+                    "checkpoint Fact-prefix digest differs from the durable session".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO context_checkpoints
+                         (session_id, header_fingerprint, through_seq,
+                          fact_prefix_sha256, checkpoint_bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(session_id) DO UPDATE SET
+                         header_fingerprint = excluded.header_fingerprint,
+                         through_seq = excluded.through_seq,
+                         fact_prefix_sha256 = excluded.fact_prefix_sha256,
+                         checkpoint_bytes = excluded.checkpoint_bytes",
+                    params![
+                        write.session_id.as_str(),
+                        write.checkpoint.header_fingerprint,
+                        sqlite_u64("checkpoint sequence", write.checkpoint.through_seq)?,
+                        write.checkpoint.fact_prefix_sha256,
+                        write.checkpoint.bytes.as_ref(),
+                    ],
+                )
+                .map_err(sql_error)?;
+            transaction.commit().map_err(sql_error)
+        })
+        .await
+    }
+
     async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef> {
         if bytes.is_empty() || bytes.len() > MAXIMUM_STORE_CAS_BYTES {
             return Err(StoreError::Invalid(
@@ -653,11 +858,13 @@ fn admit_append(transaction: &Transaction<'_>, batch: &AppendBatch) -> Result<()
     match (existing, batch.header.as_ref()) {
         (None, Some(header)) => transaction
             .execute(
-                "INSERT INTO sessions (session_id, header_json, durable_seq)
-                 VALUES (?1, ?2, 0)",
+                "INSERT INTO sessions
+                    (session_id, header_json, durable_seq, fact_prefix_sha256)
+                 VALUES (?1, ?2, 0, ?3)",
                 params![
                     batch.session_id.as_str(),
                     encode_json("session header", header)?,
+                    hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                 ],
             )
             .map(|_| ())
@@ -755,12 +962,25 @@ fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBatch) -> Resu
         .last()
         .expect("validated append is nonempty")
         .seq();
+    let previous = transaction
+        .query_row(
+            "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
+            [batch.session_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sql_error)?;
+    let mut fact_prefix_digest = decode_sha256("Fact-prefix digest", &previous)?;
+    for fact in &batch.facts {
+        fact_prefix_digest = advance_fact_prefix_digest(fact_prefix_digest, fact)
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    }
     let changed = transaction
         .execute(
-            "UPDATE sessions SET durable_seq = ?1
-             WHERE session_id = ?2 AND durable_seq = ?3",
+            "UPDATE sessions SET durable_seq = ?1, fact_prefix_sha256 = ?2
+             WHERE session_id = ?3 AND durable_seq = ?4",
             params![
                 sqlite_u64("durable sequence", durable_seq)?,
+                hex::encode(fact_prefix_digest),
                 batch.session_id.as_str(),
                 sqlite_u64("expected sequence", batch.expected_seq)?,
             ],
@@ -949,6 +1169,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<()> {
 fn validate_schema_shape(connection: &Connection) -> Result<()> {
     let expected = BTreeSet::from([
         "cas_objects".to_owned(),
+        "context_checkpoints".to_owned(),
         "facts".to_owned(),
         "sessions".to_owned(),
         "turns".to_owned(),
@@ -1094,6 +1315,23 @@ fn validate_database(connection: &Connection) -> Result<()> {
             "session durable watermark differs from its contiguous Fact stream".into(),
         ));
     }
+    let invalid_fact_prefix_digest = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sessions
+               WHERE typeof(fact_prefix_sha256) != 'text'
+                  OR length(fact_prefix_sha256) != 64
+                  OR fact_prefix_sha256 GLOB '*[^0-9a-f]*'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(sql_error)?;
+    if invalid_fact_prefix_digest {
+        return Err(StoreError::Corrupt(
+            "Fact-prefix digest is not lowercase SHA-256".into(),
+        ));
+    }
     let invalid_turn_index = connection
         .query_row(
             "SELECT EXISTS(
@@ -1213,7 +1451,7 @@ fn sync_directory_io(_path: &Path) -> std::io::Result<()> {
 }
 
 fn read_cas_file(cas_dir: &Path, sha256: &str) -> Result<Vec<u8>> {
-    validate_sha256(sha256)?;
+    validate_sha256("CAS identity", sha256)?;
     let path = cas_dir.join(sha256);
     let metadata = fs::symlink_metadata(&path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -1265,21 +1503,98 @@ fn read_regular_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Resu
     Ok(bytes)
 }
 
-fn validate_sha256(value: &str) -> Result<()> {
+type ContextCheckpointProjection = (
+    String,
+    i64,
+    String,
+    i64,
+    Option<Vec<u8>>,
+    i64,
+    Option<String>,
+    i64,
+);
+
+fn decode_context_checkpoint(
+    projection: ContextCheckpointProjection,
+) -> Result<StoredContextCheckpoint> {
+    let (
+        header_fingerprint,
+        through_seq,
+        fact_prefix_sha256,
+        encoded_len,
+        bytes,
+        header_encoded_len,
+        header_json,
+        durable_seq,
+    ) = projection;
+    let encoded_len = usize::try_from(encoded_len)
+        .map_err(|_| StoreError::Corrupt("checkpoint length is invalid".into()))?;
+    if encoded_len == 0 || encoded_len > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
+        return Err(StoreError::Corrupt(
+            "checkpoint bytes exceed their durable bound".into(),
+        ));
+    }
+    let bytes = bytes.ok_or_else(|| {
+        StoreError::Corrupt("bounded checkpoint projection returned no bytes".into())
+    })?;
+    if bytes.len() != encoded_len {
+        return Err(StoreError::Corrupt(
+            "checkpoint byte length changed during read".into(),
+        ));
+    }
+    let checkpoint = StoredContextCheckpoint {
+        header_fingerprint,
+        through_seq: decode_u64("checkpoint sequence", through_seq)?,
+        fact_prefix_sha256,
+        bytes: Arc::from(bytes),
+    };
+    checkpoint
+        .validate()
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    let header: SessionHeader = decode_projected_json(
+        "session header",
+        (header_encoded_len, header_json),
+        MAXIMUM_SESSION_HEADER_BYTES,
+    )?;
+    let expected_fingerprint = header.fingerprint().map_err(|error| {
+        StoreError::Corrupt(format!("stored session header is invalid: {error}"))
+    })?;
+    if checkpoint.header_fingerprint != expected_fingerprint {
+        return Err(StoreError::Corrupt(
+            "checkpoint header fingerprint differs from the durable session".into(),
+        ));
+    }
+    if checkpoint.through_seq > decode_u64("durable sequence", durable_seq)? {
+        return Err(StoreError::Corrupt(
+            "checkpoint cursor exceeds the durable tail".into(),
+        ));
+    }
+    Ok(checkpoint)
+}
+
+fn validate_sha256(label: &str, value: &str) -> Result<()> {
     if value.len() != 64
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     {
-        return Err(StoreError::Corrupt(
-            "CAS identity is not lowercase SHA-256".into(),
-        ));
+        return Err(StoreError::Corrupt(format!(
+            "{label} is not lowercase SHA-256"
+        )));
     }
     Ok(())
 }
 
+fn decode_sha256(label: &str, value: &str) -> Result<[u8; 32]> {
+    validate_sha256(label, value)?;
+    let mut digest = [0_u8; 32];
+    hex::decode_to_slice(value, &mut digest)
+        .map_err(|error| StoreError::Corrupt(format!("cannot decode {label}: {error}")))?;
+    Ok(digest)
+}
+
 fn validate_digest(sha256: &str, bytes: &[u8]) -> Result<()> {
-    validate_sha256(sha256)?;
+    validate_sha256("CAS identity", sha256)?;
     if hex::encode(Sha256::digest(bytes)) != sha256 {
         return Err(StoreError::Corrupt(
             "CAS body does not match its digest".into(),

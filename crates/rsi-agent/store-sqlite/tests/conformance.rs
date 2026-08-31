@@ -1,8 +1,11 @@
 use rsi_agent_session_protocol::{
-    FrozenAgentProfile, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES, SessionFact,
-    SessionFactBody, SessionHeader, SessionId, TurnId,
+    AgentPresetId, FrozenAgentProfile, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
+    SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
 };
-use rsi_agent_store_protocol::{AppendBatch, SessionStore, StoreError};
+use rsi_agent_store_protocol::{
+    AGENT_STORE_SCHEMA_VERSION, AppendBatch, SessionStore, StoreError, StoredContextCheckpoint,
+    WriteContextCheckpoint,
+};
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_testkit::assert_mechanical_store_contract;
 use rsi_ai_protocol::ModelRef;
@@ -15,6 +18,7 @@ fn header(session: &str) -> SessionHeader {
         SessionId::new(session).unwrap(),
         1,
         "/workspace",
+        AgentPresetId::new("test-agent").unwrap(),
         FrozenAgentProfile::new(
             "default",
             "system",
@@ -188,6 +192,105 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
 }
 
 #[tokio::test]
+async fn open_session_cursor_pagination_is_lexical_and_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    for name in ["session-1", "session-2", "session-3"] {
+        store
+            .append(AppendBatch {
+                session_id: SessionId::new(name).unwrap(),
+                expected_seq: 0,
+                header: Some(header(name)),
+                facts: vec![fact(1)],
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = store.list_open_sessions(None, 2).await.unwrap();
+    assert_eq!(
+        first.sessions,
+        vec![
+            SessionId::new("session-1").unwrap(),
+            SessionId::new("session-2").unwrap()
+        ]
+    );
+    assert!(first.has_more);
+    let second = store
+        .list_open_sessions(first.sessions.last(), 2)
+        .await
+        .unwrap();
+    assert_eq!(second.sessions, vec![SessionId::new("session-3").unwrap()]);
+    assert!(!second.has_more);
+}
+
+#[tokio::test]
+async fn checkpoint_reads_reassert_immutable_session_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = SessionId::new("session-checkpoint-metadata").unwrap();
+    let session_header = header(session.as_str());
+    store
+        .append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(session_header.clone()),
+            facts: vec![fact(1)],
+        })
+        .await
+        .unwrap();
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let fact_prefix_sha256 = connection
+        .query_row(
+            "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
+            [session.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    drop(connection);
+    store
+        .write_context_checkpoint(WriteContextCheckpoint {
+            session_id: session.clone(),
+            expected_durable_seq: 1,
+            checkpoint: StoredContextCheckpoint {
+                header_fingerprint: session_header.fingerprint().unwrap(),
+                through_seq: 1,
+                fact_prefix_sha256,
+                bytes: Arc::from(&b"opaque"[..]),
+            },
+        })
+        .await
+        .unwrap();
+
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE context_checkpoints SET header_fingerprint = ?1 WHERE session_id = ?2",
+            rusqlite::params!["b".repeat(64), session.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.read_context_checkpoint(&session).await,
+        Err(StoreError::Corrupt(message)) if message.contains("header fingerprint")
+    ));
+
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE context_checkpoints SET header_fingerprint = ?1, through_seq = 2
+             WHERE session_id = ?2",
+            rusqlite::params![session_header.fingerprint().unwrap(), session.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.read_context_checkpoint(&session).await,
+        Err(StoreError::Corrupt(message)) if message.contains("durable tail")
+    ));
+}
+
+#[tokio::test]
 async fn turn_indexes_support_exact_outcome_and_open_turn_queries() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -305,6 +408,36 @@ fn reopen_rejects_a_turn_index_that_disagrees_with_canonical_facts() {
     ));
 }
 
+#[test]
+fn reopen_rejects_a_malformed_fact_prefix_digest() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(store.append(AppendBatch {
+            session_id: SessionId::new("session-prefix-corrupt").unwrap(),
+            expected_seq: 0,
+            header: Some(header("session-prefix-corrupt")),
+            facts: vec![fact(1)],
+        }))
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET fact_prefix_sha256 = 'not-a-digest' WHERE session_id = ?1",
+            ["session-prefix-corrupt"],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteStore::open(root.path()),
+        Err(StoreError::Corrupt(message)) if message.contains("Fact-prefix digest")
+    ));
+}
+
 #[tokio::test]
 async fn cas_is_immutable_verified_and_does_not_delete_unowned_files() {
     let root = tempfile::tempdir().unwrap();
@@ -361,7 +494,8 @@ fn writer_lease_is_held_from_open_until_last_clone_drops() {
 
 #[test]
 fn old_or_partial_schema_is_rejected_without_migration() {
-    for (version, partial) in [(2, false), (0, true)] {
+    assert_eq!(AGENT_STORE_SCHEMA_VERSION, 6);
+    for (version, partial) in [(5, false), (2, false), (0, true)] {
         let root = tempfile::tempdir().unwrap();
         let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         if partial {

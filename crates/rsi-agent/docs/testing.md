@@ -1,13 +1,18 @@
 # rsi-agent testing
 
 Protocol suites exercise constructor and deserialization rejection, exact
-round trips, sequence invariants, byte limits, and dependency direction. The
+round trips, Agent preset identity grammar and required Header membership,
+sequence invariants, byte limits, and dependency direction. The
 Memory testkit proves append/read behavior, Store-level turn-lifecycle
-admission, aggregate-byte pagination, and pre-commit failure injection.
+admission, open-session presence and closure, checkpoint replacement,
+aggregate-byte pagination, and pre-commit failure injection.
 SQLite integration tests separately cover session and per-turn pagination,
-open-turn indexing, optimistic conflicts, schema rejection, index integrity,
+open-turn indexing and cursor pagination, optimistic conflicts, rejection of
+representative old schemas, index integrity,
 CAS integrity, reopen recovery, exclusive writer leases, and direct database
-tampering with header or Fact rows above their framing bounds.
+tampering with header or Fact rows above their framing bounds. Checkpoint-row
+tampering also proves reads reject a mismatched immutable-header fingerprint
+or a cursor beyond the durable session tail before returning opaque bytes.
 
 Kernel tests use deterministic clocks and a controllable Store. They cover lazy
 empty sessions, live-before-durable observation, the 200 ms batching boundary,
@@ -22,11 +27,29 @@ tests prove a start cannot share its undurable intent publication. Shutdown
 waits on every captured session even when one fails, and a
 claim-horizon test submits a later private prompt before the first claim and
 proves that prompt is absent from the earlier model request.
+An executor integration test installs an unfiltered checkpoint covering two
+queued acceptances before the first queued turn is claimed, then proves that
+the claim replays its own acceptance and excludes the later prompt.
 Race tests also prove a claim read cannot skip a prefix committed while Store
-I/O is in flight, and repeated invalid resumes of historical idle sessions do
-not consume the resident-session bound. Cold outcome lookup and recovery prove
-they do not read unrelated session Fact pages, while concurrent resumes prove
-that one session has at most one in-flight control-state load.
+I/O is in flight, and that a later turn accepted during that I/O cannot cross
+the claim's already captured live horizon. Repeated invalid resumes of
+historical idle sessions do not consume the resident-session bound. Capacity rejection leaves turn control
+unchanged and succeeds after the admitted prefix is flushed; checkpoint Store
+I/O failures remain typed at the executor-facing seam, and mutated terminal
+claims cannot invoke checkpoint maintenance. A tightened Store-read
+budget proves checkpoint maintenance declines both unfiltered rebuild reads and
+writes instead of producing an unreadable cache. Cold outcome lookup and
+recovery prove they do not read unrelated session Fact pages, while concurrent
+resumes prove that one session has at most one in-flight control-state load.
+Draft and composition tests cover default and explicit selection, failed
+replacement preserving the prior pin, drop without Store state, single-flight
+generation construction, source-digest replacement, resident old-generation
+stability, cold-resume rebinding, broken-source failure before admission, and
+last-pin reclamation. Kernel tests prove the fresh pin moves exactly once into
+resident state, resume tokens preserve resident pins, token failure/drop
+releases cold pins, and every claim returns the exact admitted pin. Standard
+application tests also prove generation preparation precedes durable Workspace
+registration for both fresh and resumed sessions.
 
 Context tests fold real Facts and prove deterministic compaction, complete-turn
 removal, tool call/result adjacency, Media references, and hard byte/message
@@ -39,6 +62,12 @@ worker has joined. Direct Image
 tests commit multiple Media refs one at a time and force a tail failure to prove
 `partial_failed` preserves the durable prefix without media bytes. Kernel tests,
 not the executor suite, own durable interruption repair and cancellation races.
+Executor Tool tests use two different immutable catalogs and prove schema
+projection, prepare, retained query/wait/commit, delayed retirement, and
+elapsed-budget cleanup never cross their claim generation.
+The deadline selector has a deterministic simultaneous-readiness regression:
+an already-terminal drive result wins over elapsed cancellation in the same
+scheduler poll.
 
 Plugin lifecycle tests use `rsi-meta` Contexts. They verify every ordinary
 factory's exact hard dependencies, publication and withdrawal behavior, and

@@ -1,0 +1,3 @@
+name = "Standard"
+description = "Standard coding tools for this platform."
+order = 0

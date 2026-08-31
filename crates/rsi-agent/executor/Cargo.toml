@@ -11,10 +11,12 @@ async-trait.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 rsi-agent-context = { path = "../context" }
+rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-agent-turn-protocol = { path = "../turn-protocol" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-jobs = { path = "../../rsi-jobs/core" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
@@ -30,6 +32,7 @@ rsi-agent-kernel = { path = "../kernel" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-agent-testkit = { path = "../testkit" }
 rsi-ai-testkit = { path = "../../rsi-ai/testkit" }
+rsi-jobs-local = { path = "../../rsi-jobs/local" }
 rsi-tools = { path = "../../rsi-tools/core" }
 
 [lints]

@@ -5,12 +5,16 @@
 #![allow(clippy::missing_errors_doc)]
 
 use async_trait::async_trait;
-use rsi_agent_session_protocol::{SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId};
+use rsi_agent_session_protocol::{
+    EMPTY_FACT_PREFIX_DIGEST, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    advance_fact_prefix_digest, fact_prefix_sha256,
+};
 use rsi_agent_store_protocol::{
     AppendBatch, AppendCommit, CasObjectRef, MAXIMUM_STORE_CAS_BYTES,
     MAXIMUM_STORE_FACT_PAGE_BYTES, Result, SessionStore, SessionStoreContract, StoreError,
     StoreFactPage, StoreOpenTurn, StoreOpenTurnPage, StoreSessionPage, StoreTurnFactPage,
-    validate_read_limit, validate_session_read_limit,
+    StoredContextCheckpoint, WriteContextCheckpoint, validate_read_limit,
+    validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde_json::Value;
@@ -30,12 +34,15 @@ pub struct MemoryStore {
 struct MemoryState {
     sessions: BTreeMap<SessionId, MemorySession>,
     cas: BTreeMap<String, Arc<[u8]>>,
+    fact_read_cursors: Vec<u64>,
 }
 
 #[derive(Debug)]
 struct MemorySession {
     header: SessionHeader,
     facts: Vec<SessionFact>,
+    fact_prefix_digest: [u8; 32],
+    checkpoint: Option<StoredContextCheckpoint>,
 }
 
 impl MemoryStore {
@@ -47,6 +54,17 @@ impl MemoryStore {
     /// Makes exactly the next `count` append attempts fail before mutation.
     pub fn fail_next_appends(&self, count: usize) {
         self.fail_appends.store(count, Ordering::Release);
+    }
+
+    /// Drains the exact cursors supplied to durable whole-session Fact reads.
+    pub fn take_fact_read_cursors(&self) -> Vec<u64> {
+        std::mem::take(
+            &mut self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .fact_read_cursors,
+        )
     }
 
     fn should_fail_append(&self) -> bool {
@@ -65,6 +83,7 @@ impl MemoryStore {
 ///
 /// Panics when the supplied fixture is internally inconsistent or the backend
 /// violates any observable part of the mechanical Store contract.
+#[allow(clippy::too_many_lines)]
 pub async fn assert_mechanical_store_contract(
     store: &dyn SessionStore,
     header: SessionHeader,
@@ -125,18 +144,21 @@ pub async fn assert_mechanical_store_contract(
         .read_turn_facts(&session_id, &turn_id, 0, 8)
         .await
         .unwrap();
-    assert_eq!(turn.facts, vec![accepted, event]);
+    assert_eq!(turn.facts, vec![accepted.clone(), event.clone()]);
     assert!(!turn.has_more);
     let open = store.list_open_turns(&session_id, 0, 8).await.unwrap();
     assert_eq!(open.turns.len(), 1);
     assert_eq!(open.turns[0].turn_id, turn_id);
+    let open_sessions = store.list_open_sessions(None, 8).await.unwrap();
+    assert_eq!(open_sessions.sessions, vec![session_id.clone()]);
+    assert!(!open_sessions.has_more);
 
     store
         .append(AppendBatch {
             session_id: session_id.clone(),
             expected_seq: 2,
             header: None,
-            facts: vec![terminal],
+            facts: vec![terminal.clone()],
         })
         .await
         .expect("close turn");
@@ -148,9 +170,81 @@ pub async fn assert_mechanical_store_contract(
             .turns
             .is_empty()
     );
+    assert!(matches!(
+        store
+            .write_context_checkpoint(WriteContextCheckpoint {
+                session_id: session_id.clone(),
+                expected_durable_seq: 3,
+                checkpoint: StoredContextCheckpoint {
+                    header_fingerprint: header.fingerprint().unwrap(),
+                    through_seq: 3,
+                    fact_prefix_sha256: "b".repeat(64),
+                    bytes: Arc::from(b"self-consistent-forged-checkpoint".as_slice()),
+                },
+            })
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    let checkpoint = StoredContextCheckpoint {
+        header_fingerprint: header.fingerprint().unwrap(),
+        through_seq: 3,
+        fact_prefix_sha256: fact_prefix_sha256([&accepted, &event, &terminal]).unwrap(),
+        bytes: Arc::from(b"context-checkpoint-v2".as_slice()),
+    };
+    store
+        .write_context_checkpoint(WriteContextCheckpoint {
+            session_id: session_id.clone(),
+            expected_durable_seq: 3,
+            checkpoint: checkpoint.clone(),
+        })
+        .await
+        .expect("write terminal-tail checkpoint");
+    assert_eq!(
+        store.read_context_checkpoint(&session_id).await.unwrap(),
+        Some(checkpoint)
+    );
+    let replacement = StoredContextCheckpoint {
+        header_fingerprint: header.fingerprint().unwrap(),
+        through_seq: 3,
+        fact_prefix_sha256: fact_prefix_sha256([&accepted, &event, &terminal]).unwrap(),
+        bytes: Arc::from(b"context-checkpoint-v2-replacement".as_slice()),
+    };
+    store
+        .write_context_checkpoint(WriteContextCheckpoint {
+            session_id: session_id.clone(),
+            expected_durable_seq: 3,
+            checkpoint: replacement.clone(),
+        })
+        .await
+        .expect("replace terminal-tail checkpoint");
+    assert_eq!(
+        store.read_context_checkpoint(&session_id).await.unwrap(),
+        Some(replacement)
+    );
+    assert!(matches!(
+        store
+            .write_context_checkpoint(WriteContextCheckpoint {
+                session_id: session_id.clone(),
+                expected_durable_seq: 2,
+                checkpoint: StoredContextCheckpoint {
+                    header_fingerprint: header.fingerprint().unwrap(),
+                    through_seq: 2,
+                    fact_prefix_sha256: "c".repeat(64),
+                    bytes: Arc::from(b"stale-checkpoint-v2".as_slice()),
+                },
+            })
+            .await,
+        Err(StoreError::Conflict {
+            expected: 2,
+            actual: 3
+        })
+    ));
     let sessions = store.list_sessions(None, 8).await.unwrap();
     assert_eq!(sessions.sessions, vec![session_id]);
     assert!(!sessions.has_more);
+    let closed_sessions = store.list_open_sessions(None, 8).await.unwrap();
+    assert!(closed_sessions.sessions.is_empty());
+    assert!(!closed_sessions.has_more);
 
     let bytes: Arc<[u8]> = Arc::from(b"shared Store contract".as_slice());
     let object = store.put_cas(Arc::clone(&bytes)).await.unwrap();
@@ -183,7 +277,16 @@ impl SessionStore for MemoryStore {
                 ));
             }
             index_turn_lifecycle(session.facts.iter().chain(batch.facts.iter()))?;
+            let fact_prefix_digest =
+                batch
+                    .facts
+                    .iter()
+                    .try_fold(session.fact_prefix_digest, |digest, fact| {
+                        advance_fact_prefix_digest(digest, fact)
+                            .map_err(|error| StoreError::Invalid(error.to_string()))
+                    })?;
             session.facts.extend(batch.facts);
+            session.fact_prefix_digest = fact_prefix_digest;
             Ok(AppendCommit {
                 durable_seq: session
                     .facts
@@ -207,11 +310,21 @@ impl SessionStore for MemoryStore {
                 .expect("a validated append is nonempty")
                 .seq();
             index_turn_lifecycle(&batch.facts)?;
+            let fact_prefix_digest =
+                batch
+                    .facts
+                    .iter()
+                    .try_fold(EMPTY_FACT_PREFIX_DIGEST, |digest, fact| {
+                        advance_fact_prefix_digest(digest, fact)
+                            .map_err(|error| StoreError::Invalid(error.to_string()))
+                    })?;
             state.sessions.insert(
                 batch.session_id,
                 MemorySession {
                     header,
                     facts: batch.facts,
+                    fact_prefix_digest,
+                    checkpoint: None,
                 },
             );
             Ok(AppendCommit { durable_seq })
@@ -235,10 +348,11 @@ impl SessionStore for MemoryStore {
         limit: usize,
     ) -> Result<StoreFactPage> {
         validate_read_limit(limit)?;
-        let state = self
+        let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.fact_read_cursors.push(after_seq);
         let session = state
             .sessions
             .get(session_id)
@@ -406,6 +520,86 @@ impl SessionStore for MemoryStore {
         };
         page.validate()?;
         Ok(page)
+    }
+
+    async fn list_open_sessions(
+        &self,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<StoreSessionPage> {
+        validate_session_read_limit(limit)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = state
+            .sessions
+            .iter()
+            .filter(|(session_id, session)| {
+                after.is_none_or(|after| *session_id > after)
+                    && index_turn_lifecycle(&session.facts)
+                        .is_ok_and(|turns| turns.values().any(|(_, open)| *open))
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = sessions.len() > limit;
+        sessions.truncate(limit);
+        let page = StoreSessionPage {
+            after: after.cloned(),
+            sessions,
+            has_more,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
+    async fn read_context_checkpoint(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<StoredContextCheckpoint>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .get(session_id)
+            .map(|session| session.checkpoint.clone())
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))
+    }
+
+    async fn write_context_checkpoint(&self, write: WriteContextCheckpoint) -> Result<()> {
+        write.validate()?;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get_mut(&write.session_id)
+            .ok_or_else(|| StoreError::NotFound(write.session_id.to_string()))?;
+        let actual = session.facts.last().map_or(0, SessionFact::seq);
+        if actual != write.expected_durable_seq {
+            return Err(StoreError::Conflict {
+                expected: write.expected_durable_seq,
+                actual,
+            });
+        }
+        if write.checkpoint.header_fingerprint
+            != session.header.fingerprint().map_err(|error| {
+                StoreError::Corrupt(format!("stored session header is invalid: {error}"))
+            })?
+        {
+            return Err(StoreError::Invalid(
+                "checkpoint header fingerprint differs from the durable session".into(),
+            ));
+        }
+        if write.checkpoint.fact_prefix_sha256 != hex::encode(session.fact_prefix_digest) {
+            return Err(StoreError::Invalid(
+                "checkpoint Fact-prefix digest differs from the durable session".into(),
+            ));
+        }
+        session.checkpoint = Some(write.checkpoint);
+        Ok(())
     }
 
     async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef> {

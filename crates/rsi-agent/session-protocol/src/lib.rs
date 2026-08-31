@@ -18,9 +18,11 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 1;
+pub const SESSION_FORMAT_VERSION: u32 = 3;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
+/// Maximum bytes in one Agent preset directory-segment identity.
+pub const MAXIMUM_AGENT_PRESET_ID_BYTES: usize = 255;
 /// Maximum UTF-8 bytes in one user turn.
 pub const MAXIMUM_TURN_TEXT_BYTES: usize = 1024 * 1024;
 /// Maximum UTF-8 bytes in one frozen system instruction.
@@ -33,8 +35,23 @@ pub const MAXIMUM_SESSION_HEADER_BYTES: usize = 1024 * 1024;
 pub const MAXIMUM_AGENT_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// Maximum encoded bytes in one Fact, including one maximum Language event.
 pub const MAXIMUM_SESSION_FACT_BYTES: usize = 36 * 1024 * 1024;
+/// Maximum bytes in one opaque Context checkpoint cache entry.
+pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum Facts returned by one Store read.
 pub const MAXIMUM_FACTS_PER_READ: usize = 512;
+/// Hard maximum elapsed milliseconds for one accepted turn.
+pub const MAXIMUM_TURN_ELAPSED_MS: u64 = 30 * 60 * 1_000;
+/// Hard maximum provider attempts for one accepted turn.
+pub const MAXIMUM_TURN_PROVIDER_ATTEMPTS: u64 = 64;
+/// Hard maximum Tool calls for one accepted turn.
+pub const MAXIMUM_TURN_TOOL_CALLS: u64 = 256;
+/// Hard maximum executor-generated Facts for one accepted turn.
+pub const MAXIMUM_TURN_GENERATED_FACTS: u64 = 65_536;
+/// Hard maximum compact encoded bytes across executor-generated Facts.
+pub const MAXIMUM_TURN_GENERATED_FACT_BYTES: u64 = 64 * 1024 * 1024;
+/// Empty predecessor for the canonical durable Fact-prefix digest chain.
+pub const EMPTY_FACT_PREFIX_DIGEST: [u8; 32] = [0; 32];
+const FACT_PREFIX_DOMAIN: &[u8] = b"rsi-agent-context-fact-prefix-v2\0";
 
 macro_rules! string_identity {
     ($name:ident, $kind:literal) => {
@@ -85,6 +102,228 @@ string_identity!(SessionId, "session");
 string_identity!(TurnId, "turn");
 string_identity!(EffectId, "effect");
 
+/// Validated durable Agent preset identity.
+///
+/// The lowercase alphanumeric-and-dash grammar is safe to use as one preset
+/// directory segment. Filesystem resolution must still remain beneath the
+/// preset provider's separately validated root.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct AgentPresetId(String);
+
+impl<'de> Deserialize<'de> for AgentPresetId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl AgentPresetId {
+    /// Creates one bounded preset identity matching `[a-z0-9][a-z0-9-]*`.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        let mut bytes = value.bytes();
+        let valid_first = bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        if value.len() > MAXIMUM_AGENT_PRESET_ID_BYTES
+            || !valid_first
+            || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(SessionError::Invalid(
+                "Agent preset identity must match [a-z0-9][a-z0-9-]* within the identifier bound"
+                    .into(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the exact durable preset identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AgentPresetId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for AgentPresetId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Immutable hard-stop budget for one accepted turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)]
+pub struct TurnBudget {
+    maximum_elapsed_ms: u64,
+    maximum_provider_attempts: u64,
+    maximum_tool_calls: u64,
+    maximum_generated_facts: u64,
+    maximum_generated_fact_bytes: u64,
+}
+
+impl<'de> Deserialize<'de> for TurnBudget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(clippy::struct_field_names)]
+        struct WireBudget {
+            maximum_elapsed_ms: u64,
+            maximum_provider_attempts: u64,
+            maximum_tool_calls: u64,
+            maximum_generated_facts: u64,
+            maximum_generated_fact_bytes: u64,
+        }
+
+        let wire = WireBudget::deserialize(deserializer)?;
+        Self::new(
+            wire.maximum_elapsed_ms,
+            wire.maximum_provider_attempts,
+            wire.maximum_tool_calls,
+            wire.maximum_generated_facts,
+            wire.maximum_generated_fact_bytes,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Default for TurnBudget {
+    fn default() -> Self {
+        Self {
+            maximum_elapsed_ms: MAXIMUM_TURN_ELAPSED_MS,
+            maximum_provider_attempts: MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+            maximum_tool_calls: MAXIMUM_TURN_TOOL_CALLS,
+            maximum_generated_facts: MAXIMUM_TURN_GENERATED_FACTS,
+            maximum_generated_fact_bytes: MAXIMUM_TURN_GENERATED_FACT_BYTES,
+        }
+    }
+}
+
+impl TurnBudget {
+    /// Creates a positive budget no wider than the repository hard maxima.
+    pub fn new(
+        maximum_elapsed_ms: u64,
+        maximum_provider_attempts: u64,
+        maximum_tool_calls: u64,
+        maximum_generated_facts: u64,
+        maximum_generated_fact_bytes: u64,
+    ) -> Result<Self> {
+        let budget = Self {
+            maximum_elapsed_ms,
+            maximum_provider_attempts,
+            maximum_tool_calls,
+            maximum_generated_facts,
+            maximum_generated_fact_bytes,
+        };
+        budget.validate()?;
+        Ok(budget)
+    }
+
+    /// Revalidates positivity and every fixed hard maximum.
+    pub fn validate(&self) -> Result<()> {
+        validate_budget_dimension(
+            "maximum_elapsed_ms",
+            self.maximum_elapsed_ms,
+            MAXIMUM_TURN_ELAPSED_MS,
+        )?;
+        validate_budget_dimension(
+            "maximum_provider_attempts",
+            self.maximum_provider_attempts,
+            MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+        )?;
+        validate_budget_dimension(
+            "maximum_tool_calls",
+            self.maximum_tool_calls,
+            MAXIMUM_TURN_TOOL_CALLS,
+        )?;
+        validate_budget_dimension(
+            "maximum_generated_facts",
+            self.maximum_generated_facts,
+            MAXIMUM_TURN_GENERATED_FACTS,
+        )?;
+        validate_budget_dimension(
+            "maximum_generated_fact_bytes",
+            self.maximum_generated_fact_bytes,
+            MAXIMUM_TURN_GENERATED_FACT_BYTES,
+        )
+    }
+
+    /// Returns the elapsed-time limit measured from durable acceptance time.
+    pub const fn maximum_elapsed_ms(&self) -> u64 {
+        self.maximum_elapsed_ms
+    }
+
+    /// Returns the provider-attempt limit.
+    pub const fn maximum_provider_attempts(&self) -> u64 {
+        self.maximum_provider_attempts
+    }
+
+    /// Returns the Tool-call limit.
+    pub const fn maximum_tool_calls(&self) -> u64 {
+        self.maximum_tool_calls
+    }
+
+    /// Returns the executor-generated Fact-count limit.
+    pub const fn maximum_generated_facts(&self) -> u64 {
+        self.maximum_generated_facts
+    }
+
+    /// Returns the executor-generated compact-byte limit.
+    pub const fn maximum_generated_fact_bytes(&self) -> u64 {
+        self.maximum_generated_fact_bytes
+    }
+}
+
+fn validate_budget_dimension(name: &'static str, value: u64, maximum: u64) -> Result<()> {
+    if value == 0 || value > maximum {
+        return Err(SessionError::Invalid(format!(
+            "{name} must be within 1..={maximum}"
+        )));
+    }
+    Ok(())
+}
+
+/// Turn-budget dimension that prevented further work admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetDimension {
+    /// Wall time since `TurnAccepted`.
+    Elapsed,
+    /// Language or Image provider attempts.
+    ProviderAttempts,
+    /// Tool invocations.
+    ToolCalls,
+    /// Executor-generated Fact count.
+    GeneratedFacts,
+    /// Compact encoded bytes across executor-generated Facts.
+    GeneratedFactBytes,
+}
+
+impl BudgetDimension {
+    /// Returns the repository hard maximum for this durable dimension.
+    pub const fn hard_maximum(self) -> u64 {
+        match self {
+            Self::Elapsed => MAXIMUM_TURN_ELAPSED_MS,
+            Self::ProviderAttempts => MAXIMUM_TURN_PROVIDER_ATTEMPTS,
+            Self::ToolCalls => MAXIMUM_TURN_TOOL_CALLS,
+            Self::GeneratedFacts => MAXIMUM_TURN_GENERATED_FACTS,
+            Self::GeneratedFactBytes => MAXIMUM_TURN_GENERATED_FACT_BYTES,
+        }
+    }
+}
+
 /// Immutable redacted settings captured when one session becomes durable.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +333,7 @@ pub struct FrozenAgentProfile {
     default_model: ModelRef,
     sandbox: SandboxMode,
     require_approval: bool,
+    turn_budget: TurnBudget,
 }
 
 impl<'de> Deserialize<'de> for FrozenAgentProfile {
@@ -109,15 +349,17 @@ impl<'de> Deserialize<'de> for FrozenAgentProfile {
             default_model: ModelRef,
             sandbox: SandboxMode,
             require_approval: bool,
+            turn_budget: TurnBudget,
         }
 
         let wire = WireProfile::deserialize(deserializer)?;
-        Self::new(
+        Self::new_with_budget(
             wire.profile_id,
             wire.system_prompt,
             wire.default_model,
             wire.sandbox,
             wire.require_approval,
+            wire.turn_budget,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -132,12 +374,32 @@ impl FrozenAgentProfile {
         sandbox: SandboxMode,
         require_approval: bool,
     ) -> Result<Self> {
+        Self::new_with_budget(
+            profile_id,
+            system_prompt,
+            default_model,
+            sandbox,
+            require_approval,
+            TurnBudget::default(),
+        )
+    }
+
+    /// Creates a bounded immutable profile with an explicit tightened turn budget.
+    pub fn new_with_budget(
+        profile_id: impl Into<String>,
+        system_prompt: impl Into<String>,
+        default_model: ModelRef,
+        sandbox: SandboxMode,
+        require_approval: bool,
+        turn_budget: TurnBudget,
+    ) -> Result<Self> {
         let profile = Self {
             profile_id: profile_id.into(),
             system_prompt: system_prompt.into(),
             default_model,
             sandbox,
             require_approval,
+            turn_budget,
         };
         profile.validate()?;
         Ok(profile)
@@ -155,6 +417,7 @@ impl FrozenAgentProfile {
         self.default_model
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        self.turn_budget.validate()?;
         if self.sandbox == SandboxMode::DangerFullAccess && !self.require_approval {
             return Err(SessionError::Invalid(
                 "danger-full-access requires live approval".into(),
@@ -188,6 +451,11 @@ impl FrozenAgentProfile {
         self.require_approval
     }
 
+    /// Returns the immutable turn budget captured at session creation.
+    pub const fn turn_budget(&self) -> &TurnBudget {
+        &self.turn_budget
+    }
+
     /// Returns the lowercase SHA-256 of the canonical redacted profile.
     pub fn fingerprint(&self) -> Result<String> {
         let bytes =
@@ -204,6 +472,7 @@ pub struct SessionHeader {
     session_id: SessionId,
     created_at_ms: u64,
     canonical_cwd: String,
+    agent_preset_id: AgentPresetId,
     profile: FrozenAgentProfile,
 }
 
@@ -216,19 +485,26 @@ impl<'de> Deserialize<'de> for SessionHeader {
         #[serde(deny_unknown_fields)]
         struct WireHeader {
             format_version: u32,
-            session_id: SessionId,
-            created_at_ms: u64,
-            canonical_cwd: String,
-            profile: FrozenAgentProfile,
+            session_id: Option<serde_json::Value>,
+            created_at_ms: Option<serde_json::Value>,
+            canonical_cwd: Option<serde_json::Value>,
+            agent_preset_id: Option<serde_json::Value>,
+            profile: Option<serde_json::Value>,
         }
 
         let wire = WireHeader::deserialize(deserializer)?;
+        if wire.format_version != SESSION_FORMAT_VERSION {
+            return Err(serde::de::Error::custom(SessionError::UnsupportedFormat(
+                wire.format_version,
+            )));
+        }
         let header = Self {
             format_version: wire.format_version,
-            session_id: wire.session_id,
-            created_at_ms: wire.created_at_ms,
-            canonical_cwd: wire.canonical_cwd,
-            profile: wire.profile,
+            session_id: decode_header_field(wire.session_id, "session_id")?,
+            created_at_ms: decode_header_field(wire.created_at_ms, "created_at_ms")?,
+            canonical_cwd: decode_header_field(wire.canonical_cwd, "canonical_cwd")?,
+            agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
+            profile: decode_header_field(wire.profile, "profile")?,
         };
         header
             .validate()
@@ -237,12 +513,25 @@ impl<'de> Deserialize<'de> for SessionHeader {
     }
 }
 
+fn decode_header_field<T, E>(
+    value: Option<serde_json::Value>,
+    name: &'static str,
+) -> std::result::Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    let value = value.ok_or_else(|| E::missing_field(name))?;
+    serde_json::from_value(value).map_err(E::custom)
+}
+
 impl SessionHeader {
-    /// Creates the exact v1 durable header.
+    /// Creates the exact current durable header.
     pub fn new(
         session_id: SessionId,
         created_at_ms: u64,
         canonical_cwd: impl Into<String>,
+        agent_preset_id: AgentPresetId,
         profile: FrozenAgentProfile,
     ) -> Result<Self> {
         let header = Self {
@@ -250,6 +539,7 @@ impl SessionHeader {
             session_id,
             created_at_ms,
             canonical_cwd: canonical_cwd.into(),
+            agent_preset_id,
             profile,
         };
         header.validate()?;
@@ -299,9 +589,31 @@ impl SessionHeader {
         &self.canonical_cwd
     }
 
+    /// Returns the durable Agent preset identity selected for this session.
+    pub const fn agent_preset_id(&self) -> &AgentPresetId {
+        &self.agent_preset_id
+    }
+
+    /// Rebinds a process-local draft to a different validated preset identity.
+    ///
+    /// This does not persist a header. The caller must still submit the final
+    /// header atomically with its first accepted turn.
+    pub fn with_agent_preset_id(mut self, agent_preset_id: AgentPresetId) -> Result<Self> {
+        self.agent_preset_id = agent_preset_id;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Returns the frozen creation-time profile.
     pub const fn profile(&self) -> &FrozenAgentProfile {
         &self.profile
+    }
+
+    /// Returns lowercase SHA-256 of the exact canonical immutable header.
+    pub fn fingerprint(&self) -> Result<String> {
+        let bytes =
+            serde_json::to_vec(self).map_err(|error| SessionError::Encoding(error.to_string()))?;
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
 }
 
@@ -348,6 +660,15 @@ pub enum TurnOutcome {
         /// Safe bounded reason.
         reason: String,
     },
+    /// One immutable turn-budget dimension prevented further work.
+    BudgetExceeded {
+        /// Exhausted dimension.
+        dimension: BudgetDimension,
+        /// Amount already consumed when admission stopped.
+        consumed: u64,
+        /// Frozen limit for this turn.
+        limit: u64,
+    },
 }
 
 impl TurnOutcome {
@@ -393,6 +714,11 @@ impl TurnOutcome {
                 MAXIMUM_AGENT_DIAGNOSTIC_BYTES,
                 false,
             ),
+            Self::BudgetExceeded {
+                dimension,
+                consumed,
+                limit,
+            } => validate_budget_exhaustion(*dimension, *consumed, *limit),
         }
     }
 }
@@ -429,6 +755,17 @@ pub enum SessionFactBody {
         turn_id: TurnId,
         /// Optional safe caller reason.
         reason: Option<String>,
+    },
+    /// Further work stopped at one immutable turn-budget dimension.
+    BudgetExhausted {
+        /// Exact target turn.
+        turn_id: TurnId,
+        /// Exhausted dimension.
+        dimension: BudgetDimension,
+        /// Amount already consumed when admission stopped.
+        consumed: u64,
+        /// Frozen limit for this turn.
+        limit: u64,
     },
     /// Immutable Language provider input was prepared before I/O.
     ModelIntent {
@@ -569,6 +906,12 @@ impl SessionFactBody {
                 }
                 Ok(())
             }
+            Self::BudgetExhausted {
+                dimension,
+                consumed,
+                limit,
+                ..
+            } => validate_budget_exhaustion(*dimension, *consumed, *limit),
             Self::ModelIntent { snapshot, .. } => validate_snapshot_capability(
                 snapshot,
                 AiCapability::Language,
@@ -615,6 +958,7 @@ impl SessionFactBody {
             Self::TurnAccepted { turn_id, .. }
             | Self::ImageRequested { turn_id, .. }
             | Self::CancelRequested { turn_id, .. }
+            | Self::BudgetExhausted { turn_id, .. }
             | Self::ModelIntent { turn_id, .. }
             | Self::ModelStarted { turn_id, .. }
             | Self::ImageIntent { turn_id, .. }
@@ -627,6 +971,15 @@ impl SessionFactBody {
             | Self::TurnTerminal { turn_id, .. } => turn_id,
         }
     }
+}
+
+fn validate_budget_exhaustion(dimension: BudgetDimension, consumed: u64, limit: u64) -> Result<()> {
+    if limit == 0 || limit > dimension.hard_maximum() || consumed < limit {
+        return Err(SessionError::Invalid(
+            "budget exhaustion requires a positive reached dimension limit".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_snapshot_capability(
@@ -764,6 +1117,39 @@ impl SessionFact {
     }
 }
 
+/// Advances the canonical digest chain by one validated Fact.
+pub fn advance_fact_prefix_digest(previous: [u8; 32], fact: &SessionFact) -> Result<[u8; 32]> {
+    struct DigestWriter<'a>(&'a mut Sha256);
+
+    impl std::io::Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fact.validate()?;
+    let mut digest = Sha256::new();
+    digest.update(FACT_PREFIX_DOMAIN);
+    digest.update(previous);
+    serde_json::to_writer(DigestWriter(&mut digest), fact)
+        .map_err(|error| SessionError::Encoding(error.to_string()))?;
+    Ok(digest.finalize().into())
+}
+
+/// Computes lowercase SHA-256 for one exact canonical Fact prefix.
+pub fn fact_prefix_sha256<'a>(facts: impl IntoIterator<Item = &'a SessionFact>) -> Result<String> {
+    let mut digest = EMPTY_FACT_PREFIX_DIGEST;
+    for fact in facts {
+        digest = advance_fact_prefix_digest(digest, fact)?;
+    }
+    Ok(hex::encode(digest))
+}
+
 fn compact_json_len(value: &(impl Serialize + ?Sized)) -> Result<usize> {
     struct Counter(usize);
 
@@ -854,6 +1240,11 @@ pub fn validate_identifier(kind: &str, value: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Validates one nonempty bounded diagnostic using the durable safety rules.
+pub fn validate_safe_diagnostic(kind: &str, value: &str) -> Result<()> {
+    validate_safe_text(kind, value, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, false)
 }
 
 fn validate_safe_text(kind: &str, value: &str, maximum: usize, allow_empty: bool) -> Result<()> {

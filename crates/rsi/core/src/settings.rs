@@ -59,7 +59,14 @@ impl PluginFactory for AgentSettingsFactory {
                     "profile_id": "headless",
                     "system_prompt": "You are a careful coding agent.",
                     "sandbox": "workspace-write",
-                    "require_approval": false
+                    "require_approval": false,
+                    "turn_budget": {
+                        "maximum_elapsed_ms": 1_800_000,
+                        "maximum_provider_attempts": 64,
+                        "maximum_tool_calls": 256,
+                        "maximum_generated_facts": 65_536,
+                        "maximum_generated_fact_bytes": 67_108_864
+                    }
                 }),
                 base: json!({}),
                 validator: Arc::new(ValidateWith(validate_profile)),

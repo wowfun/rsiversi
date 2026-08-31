@@ -6,13 +6,15 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
+use rsi_agent_composition_protocol::AgentCompositionPin;
 use rsi_agent_context::{ContextFold, ContextLimits};
 use rsi_agent_session_protocol::{
-    EffectId, EffectKind, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, SessionFact, SessionFactBody, TurnOutcome,
+    BudgetDimension, EffectId, EffectKind, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, SessionFact,
+    SessionFactBody, TurnOutcome,
 };
 use rsi_agent_turn_protocol::{
-    TurnClaim, TurnError, TurnExecution, TurnExecutionContract, TurnFinalization,
-    TurnFinalizationContract, TurnFinalizationError,
+    ContextCheckpoint, TurnClaim, TurnError, TurnExecution, TurnExecutionContract,
+    TurnFinalization, TurnFinalizationContext, TurnFinalizationContract, TurnFinalizationError,
 };
 use rsi_ai_protocol::{
     DispatchStatus, ErrorKind, FinishReason, ImageAssembler, ImageCall, ImageCallContract,
@@ -23,20 +25,24 @@ use rsi_ai_protocol::{
 use rsi_approval_protocol::{
     Approval, ApprovalContract, ApprovalDecision, ApprovalError, ApprovalRequest,
 };
+use rsi_jobs::{JobScopeAuthority, JobScopeId, Jobs, JobsContract};
 use rsi_media_protocol::{Media, MediaContract, MediaRef};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_sandbox::{Sandbox, SandboxContract, SandboxMode};
 use rsi_tools_protocol::{
     PreparedToolCall, RetainedToolFailureKind, RetainedToolResult, ToolCall, ToolError,
-    ToolExecutionPolicy, ToolResult, ToolResultIdentity, ToolRuntime, ToolRuntimeContract,
-    ToolStart, parse_tool_arguments,
+    ToolExecutionPolicy, ToolResult, ToolResultIdentity, ToolStart, parse_tool_arguments,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +50,7 @@ const EXECUTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 const MAXIMUM_DURABILITY_WAIT_MS: u64 = 5 * 60 * 1_000;
 const MAXIMUM_FINALIZATION_WAIT_MS: u64 = 5 * 60 * 1_000;
+const MAXIMUM_RETAINED_TOOL_WAIT_MS: u64 = 5 * 60 * 1_000;
 
 /// Explicit executor instance configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -63,6 +70,9 @@ pub struct ExecutorConfig {
     /// Maximum wait for the complete pre-terminal finalizer snapshot.
     #[serde(default = "default_finalization_wait_ms")]
     pub finalization_wait_ms: u64,
+    /// Maximum background wait for a retained Tool to settle after terminal durability.
+    #[serde(default = "default_retained_tool_wait_ms")]
+    pub retained_tool_wait_ms: u64,
 }
 
 const fn default_context_messages() -> usize {
@@ -78,6 +88,10 @@ const fn default_durability_wait_ms() -> u64 {
 }
 
 const fn default_finalization_wait_ms() -> u64 {
+    30_000
+}
+
+const fn default_retained_tool_wait_ms() -> u64 {
     30_000
 }
 
@@ -99,6 +113,13 @@ impl ExecutorConfig {
                 "finalization_wait_ms must be within 1..={MAXIMUM_FINALIZATION_WAIT_MS}"
             )));
         }
+        if self.retained_tool_wait_ms == 0
+            || self.retained_tool_wait_ms > MAXIMUM_RETAINED_TOOL_WAIT_MS
+        {
+            return Err(ExecutorError::Invalid(format!(
+                "retained_tool_wait_ms must be within 1..={MAXIMUM_RETAINED_TOOL_WAIT_MS}"
+            )));
+        }
         Ok(())
     }
 
@@ -116,6 +137,10 @@ impl ExecutorConfig {
     const fn finalization_wait(&self) -> Duration {
         Duration::from_millis(self.finalization_wait_ms)
     }
+
+    const fn retained_tool_wait(&self) -> Duration {
+        Duration::from_millis(self.retained_tool_wait_ms)
+    }
 }
 
 #[derive(Debug)]
@@ -125,52 +150,264 @@ struct Driver {
     language: Arc<dyn LanguageCall>,
     image: Arc<dyn ImageCall>,
     media: Arc<dyn Media>,
-    tools: Arc<dyn ToolRuntime>,
     approval: Arc<dyn Approval>,
     sandbox: Arc<dyn Sandbox>,
+    jobs: Arc<dyn Jobs>,
+    active_tools: Mutex<BTreeMap<(String, String), TrackedTool>>,
+    retirement_tasks: Mutex<Vec<JoinHandle<()>>>,
+    checkpoint_tx: watch::Sender<Option<CheckpointRequest>>,
     config: ExecutorConfig,
+}
+
+#[derive(Clone, Debug)]
+struct TrackedTool {
+    composition: AgentCompositionPin,
+    identity: ToolResultIdentity,
+}
+
+#[derive(Clone, Debug)]
+struct CheckpointRequest {
+    claim: TurnClaim,
+    limits: ContextLimits,
+}
+
+async fn select_drive_or_stop(
+    stop: &CancellationToken,
+    drive: impl Future<Output = std::result::Result<(), DriveFailure>>,
+) -> std::result::Result<(), DriveFailure> {
+    tokio::select! {
+        biased;
+        result = drive => result,
+        () = stop.cancelled() => Err(DriveFailure::Stopped),
+    }
+}
+
+const fn elapsed_deadline_wins(
+    deadline_fired: bool,
+    drive: &std::result::Result<(), DriveFailure>,
+) -> bool {
+    deadline_fired && matches!(drive, Err(DriveFailure::Stopped))
 }
 
 impl Driver {
     async fn run(self: Arc<Self>, stop: CancellationToken) {
         loop {
-            let Ok(Some(claim)) = self
-                .turns
-                .claim(&self.config.executor_id, stop.clone())
-                .await
-            else {
-                return;
+            let Some(claim) = self.claim_next(&stop).await else {
+                break;
             };
-            match self.drive(&claim, &stop).await {
-                Ok(()) => {
-                    let _ignored = self.turns.release(&claim);
-                }
-                Err(DriveFailure::Stopped) => {
-                    let _ignored = self.turns.release(&claim);
-                    return;
-                }
-                Err(DriveFailure::Turn(outcome)) => {
-                    let _ignored = self.finish(&claim, outcome).await;
-                    let _ignored = self.turns.release(&claim);
-                }
-                Err(DriveFailure::SettledTool { outcome, identity }) => {
-                    if self.finish(&claim, outcome).await.is_ok() {
-                        let _ignored = self.tools.commit(&identity);
-                    }
-                    let _ignored = self.turns.release(&claim);
-                }
-                Err(DriveFailure::Fatal(message)) => {
+            let job_scope = match self.acquire_job_scope(&claim) {
+                Ok(scope) => Some(scope),
+                Err(message) => {
                     let _ignored = self
                         .finish(
                             &claim,
-                            TurnOutcome::Failed {
-                                code: "executor.internal".into(),
-                                message,
-                            },
+                            None,
+                            failure_outcome("jobs.scope", bounded(&message)),
                         )
                         .await;
                     let _ignored = self.turns.release(&claim);
+                    continue;
                 }
+            };
+            let composition = match self.turns.composition(&claim) {
+                Ok(composition) => composition,
+                Err(error) => {
+                    self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
+                        .await;
+                    let _ignored = self.turns.release(&claim);
+                    continue;
+                }
+            };
+            let claim_stop = stop.child_token();
+            let deadline_fired = Arc::new(AtomicBool::new(false));
+            let elapsed = unix_now_ms().saturating_sub(claim.accepted_at_ms);
+            let limit = claim.header.profile().turn_budget().maximum_elapsed_ms();
+            let remaining = limit.saturating_sub(elapsed);
+            let deadline_task = tokio::spawn({
+                let deadline_fired = Arc::clone(&deadline_fired);
+                let claim_stop = claim_stop.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(remaining)).await;
+                    deadline_fired.store(true, Ordering::Release);
+                    claim_stop.cancel();
+                }
+            });
+            let limits = self.context_limits();
+            let mut fold = match ContextFold::with_limits(claim.header.clone(), limits) {
+                Ok(fold) => fold,
+                Err(error) => {
+                    deadline_task.abort();
+                    self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
+                        .await;
+                    let _ignored = self.turns.release(&claim);
+                    continue;
+                }
+            };
+            let drive = select_drive_or_stop(
+                &claim_stop,
+                self.drive(
+                    &claim,
+                    &composition,
+                    job_scope.as_ref(),
+                    &claim_stop,
+                    &mut fold,
+                ),
+            )
+            .await;
+            deadline_task.abort();
+            if elapsed_deadline_wins(deadline_fired.load(Ordering::Acquire), &drive) {
+                let consumed = unix_now_ms()
+                    .saturating_sub(claim.accepted_at_ms)
+                    .max(limit);
+                if self
+                    .finish_budget(
+                        &claim,
+                        job_scope.as_ref(),
+                        BudgetDimension::Elapsed,
+                        consumed,
+                        limit,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    self.request_checkpoint(&claim);
+                    self.retire_tracked_tool(&claim, &stop);
+                }
+                let _ignored = self.turns.release(&claim);
+                continue;
+            }
+            let stopped = self
+                .settle_drive(&claim, &composition, job_scope.as_ref(), drive, &stop)
+                .await;
+            let _ignored = self.turns.release(&claim);
+            if stopped {
+                break;
+            }
+        }
+        self.abort_retirement_tasks().await;
+    }
+
+    async fn claim_next(&self, stop: &CancellationToken) -> Option<TurnClaim> {
+        self.reap_retirement_tasks();
+        self.turns
+            .claim(&self.config.executor_id, stop.clone())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    fn acquire_job_scope(
+        &self,
+        claim: &TurnClaim,
+    ) -> std::result::Result<JobScopeAuthority, String> {
+        let id = JobScopeId::new(
+            "rsi.agent.turn",
+            [claim.session_id.as_str(), claim.turn_id.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+        self.jobs
+            .acquire_scope(id)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn settle_drive(
+        &self,
+        claim: &TurnClaim,
+        composition: &AgentCompositionPin,
+        job_scope: Option<&JobScopeAuthority>,
+        drive: std::result::Result<(), DriveFailure>,
+        stop: &CancellationToken,
+    ) -> bool {
+        match drive {
+            Ok(()) => false,
+            Err(DriveFailure::Stopped) => true,
+            Err(DriveFailure::Turn(outcome)) => {
+                if self.finish(claim, job_scope, outcome).await.is_ok() {
+                    self.request_checkpoint(claim);
+                    self.retire_tracked_tool(claim, stop);
+                }
+                false
+            }
+            Err(DriveFailure::SettledTool { outcome, identity }) => {
+                if self.finish(claim, job_scope, outcome).await.is_ok() {
+                    self.request_checkpoint(claim);
+                    let _ignored = composition.tools().commit(&identity);
+                    self.clear_tracked_tool(claim, &identity);
+                }
+                false
+            }
+            Err(DriveFailure::Budget {
+                dimension,
+                consumed,
+                limit,
+            }) => {
+                if self
+                    .finish_budget(claim, job_scope, dimension, consumed, limit)
+                    .await
+                    .is_ok()
+                {
+                    self.request_checkpoint(claim);
+                    self.retire_tracked_tool(claim, stop);
+                }
+                false
+            }
+            Err(DriveFailure::DurableBudget {
+                dimension,
+                consumed,
+                limit,
+            }) => {
+                if publish_terminal(
+                    self.turns.as_ref(),
+                    &self.config,
+                    claim,
+                    TurnOutcome::BudgetExceeded {
+                        dimension,
+                        consumed,
+                        limit,
+                    },
+                )
+                .await
+                .is_ok()
+                {
+                    self.request_checkpoint(claim);
+                    self.retire_tracked_tool(claim, stop);
+                }
+                false
+            }
+            Err(DriveFailure::SettledToolBudget {
+                dimension,
+                consumed,
+                limit,
+                identity,
+            }) => {
+                if self
+                    .finish_budget(claim, job_scope, dimension, consumed, limit)
+                    .await
+                    .is_ok()
+                {
+                    self.request_checkpoint(claim);
+                    let _ignored = composition.tools().commit(&identity);
+                    self.clear_tracked_tool(claim, &identity);
+                }
+                false
+            }
+            Err(DriveFailure::Fatal(message)) => {
+                if self
+                    .finish(
+                        claim,
+                        job_scope,
+                        TurnOutcome::Failed {
+                            code: "executor.internal".into(),
+                            message,
+                        },
+                    )
+                    .await
+                    .is_ok()
+                {
+                    self.request_checkpoint(claim);
+                    self.retire_tracked_tool(claim, stop);
+                }
+                false
             }
         }
     }
@@ -178,20 +415,21 @@ impl Driver {
     async fn drive(
         &self,
         claim: &TurnClaim,
+        composition: &AgentCompositionPin,
+        job_scope: Option<&JobScopeAuthority>,
         stop: &CancellationToken,
+        fold: &mut ContextFold,
     ) -> std::result::Result<(), DriveFailure> {
-        let mut fold = ContextFold::with_limits(
-            claim.header.clone(),
-            ContextLimits::new(
-                self.config.max_context_messages,
-                self.config.max_context_bytes,
-            )
-            .map_err(|error| failed("context.invalid", error.to_string()))?,
-        )
-        .map_err(|error| failed("context.invalid", error.to_string()))?;
-        let state = self.load_claim(claim, &mut fold).await?;
+        let state = self.load_claim(claim, fold).await?;
         if state.terminal {
             return Ok(());
+        }
+        if let Some((dimension, consumed, limit)) = state.budget_exhausted {
+            return Err(DriveFailure::DurableBudget {
+                dimension,
+                consumed,
+                limit,
+            });
         }
         if state.completed_model_without_successor {
             return Err(DriveFailure::Turn(TurnOutcome::Interrupted {
@@ -200,11 +438,11 @@ impl Driver {
                     .into(),
             }));
         }
-        self.resume_effect(claim, &mut fold, state.effect, stop)
+        self.resume_effect(claim, composition, fold, state.effect, stop)
             .await?;
 
         if let Some((model, request)) = state.image {
-            return self.run_image(claim, &mut fold, model, request, stop).await;
+            return self.run_image(claim, fold, model, request, stop).await;
         }
 
         let turn_policy = state.turn_policy.ok_or_else(|| {
@@ -216,13 +454,24 @@ impl Driver {
         let model = state
             .model
             .unwrap_or_else(|| claim.header.profile().default_model().clone());
-        self.run_language(claim, &mut fold, model, turn_policy, stop)
-            .await
+        self.run_language(
+            claim,
+            composition,
+            job_scope,
+            fold,
+            model,
+            turn_policy,
+            stop,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)] // Keep the exact claim generation, durable fold, policy, Jobs authority, and cancellation owner explicit.
     async fn run_language(
         &self,
         claim: &TurnClaim,
+        composition: &AgentCompositionPin,
+        job_scope: Option<&JobScopeAuthority>,
         fold: &mut ContextFold,
         model: ModelRef,
         turn_policy: ResolvedTurnPolicy,
@@ -238,7 +487,15 @@ impl Driver {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
             let output = match self
-                .run_model_attempt(claim, fold, &model, retry_attempt, &cancellation, stop)
+                .run_model_attempt(
+                    claim,
+                    composition,
+                    fold,
+                    &model,
+                    retry_attempt,
+                    &cancellation,
+                    stop,
+                )
                 .await?
             {
                 ModelAttempt::Retry => {
@@ -272,8 +529,17 @@ impl Driver {
                 ));
             }
             for call in calls {
-                self.run_tool(claim, fold, call, turn_policy, &cancellation, stop)
-                    .await?;
+                self.run_tool(
+                    claim,
+                    composition,
+                    job_scope,
+                    fold,
+                    call,
+                    turn_policy,
+                    &cancellation,
+                    stop,
+                )
+                .await?;
             }
         }
     }
@@ -281,6 +547,7 @@ impl Driver {
     async fn resume_effect(
         &self,
         claim: &TurnClaim,
+        composition: &AgentCompositionPin,
         fold: &mut ContextFold,
         effect: Option<ResumeEffect>,
         stop: &CancellationToken,
@@ -310,7 +577,7 @@ impl Driver {
                 identity,
                 started: true,
             }) => {
-                self.recover_tool(claim, fold, effect_id, identity, stop)
+                self.recover_tool(claim, composition, fold, effect_id, identity, stop)
                     .await
             }
         }
@@ -480,9 +747,11 @@ impl Driver {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // One attempt binds the resident generation to its durable fold, model, retry ordinal, and cancellation fences.
     async fn run_model_attempt(
         &self,
         claim: &TurnClaim,
+        composition: &AgentCompositionPin,
         fold: &mut ContextFold,
         model: &ModelRef,
         retry_attempt: u8,
@@ -491,7 +760,7 @@ impl Driver {
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
         self.sync_fold(claim, fold).await?;
         let request = fold
-            .request(self.config.limits(), self.tools.definitions())
+            .request(self.config.limits(), composition.tools().definitions())
             .map_err(|error| failed("context.projection", error.to_string()))?;
         let prepared = self
             .language
@@ -648,15 +917,19 @@ impl Driver {
         Ok(ModelAttempt::Retry)
     }
 
+    #[allow(clippy::too_many_arguments)] // Keep durable claim/fold, live Jobs authority, policy, and both cancellation owners explicit.
     async fn run_tool(
         &self,
         claim: &TurnClaim,
+        composition: &AgentCompositionPin,
+        job_scope: Option<&JobScopeAuthority>,
         fold: &mut ContextFold,
         call: ModelToolCall,
         turn_policy: ResolvedTurnPolicy,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
+        let tools = composition.tools();
         let (effect_id, arguments) = prepare_tool_effect(&call).map_err(|failure| *failure)?;
         let approval = self
             .request_tool_approval(
@@ -668,8 +941,7 @@ impl Driver {
                 stop,
             )
             .await?;
-        let prepared = self
-            .tools
+        let prepared = tools
             .prepare(
                 effect_id.as_str(),
                 ToolCall {
@@ -707,16 +979,28 @@ impl Driver {
             )
             .await?;
         self.flush_last(claim, &started).await?;
-        let result = self
+        self.track_tool(claim, composition.clone(), identity.clone());
+        let result = match self
             .start_tool(
                 prepared,
                 &identity,
+                composition,
                 claim,
+                job_scope,
                 turn_policy.sandbox,
                 cancellation,
                 stop,
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(failure) => {
+                if matches!(tools.query(&identity), Ok(RetainedToolResult::Absent)) {
+                    self.clear_tracked_tool(claim, &identity);
+                }
+                return Err(failure);
+            }
+        };
         let returned = self
             .publish_apply(
                 claim,
@@ -728,18 +1012,127 @@ impl Driver {
                     result,
                 }],
             )
-            .await?;
+            .await
+            .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
         self.flush_last(claim, &returned).await?;
-        self.tools
+        tools
             .commit(&identity)
-            .map_err(|error| tool_failure(&error))
+            .map_err(|error| tool_failure(&error))?;
+        self.clear_tracked_tool(claim, &identity);
+        Ok(())
     }
 
+    fn track_tool(
+        &self,
+        claim: &TurnClaim,
+        composition: AgentCompositionPin,
+        identity: ToolResultIdentity,
+    ) {
+        self.active_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                (
+                    claim.session_id.as_str().to_owned(),
+                    claim.turn_id.as_str().to_owned(),
+                ),
+                TrackedTool {
+                    composition,
+                    identity,
+                },
+            );
+    }
+
+    fn clear_tracked_tool(&self, claim: &TurnClaim, identity: &ToolResultIdentity) {
+        let key = (
+            claim.session_id.as_str().to_owned(),
+            claim.turn_id.as_str().to_owned(),
+        );
+        let mut active = self
+            .active_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active
+            .get(&key)
+            .is_some_and(|tracked| &tracked.identity == identity)
+        {
+            active.remove(&key);
+        }
+    }
+
+    fn retire_tracked_tool(&self, claim: &TurnClaim, stop: &CancellationToken) {
+        let key = (
+            claim.session_id.as_str().to_owned(),
+            claim.turn_id.as_str().to_owned(),
+        );
+        let tracked = self
+            .active_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        let Some(tracked) = tracked else {
+            return;
+        };
+        let composition = tracked.composition;
+        let tools = composition.tools();
+        let identity = tracked.identity;
+        let stop = stop.clone();
+        let wait = self.config.retained_tool_wait();
+        let task = tokio::spawn(async move {
+            let _composition = composition;
+            let settlement = tools.wait(&identity, stop.clone());
+            tokio::pin!(settlement);
+            let retained = tokio::select! {
+                biased;
+                () = stop.cancelled() => None,
+                () = tokio::time::sleep(wait) => None,
+                retained = &mut settlement => Some(retained),
+            };
+            if matches!(
+                retained,
+                Some(Ok(
+                    RetainedToolResult::Returned(_) | RetainedToolResult::Failed(_)
+                ))
+            ) {
+                let _ignored = tools.commit(&identity);
+            }
+        });
+        self.retirement_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(task);
+    }
+
+    fn reap_retirement_tasks(&self) {
+        self.retirement_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|task| !task.is_finished());
+    }
+
+    async fn abort_retirement_tasks(&self) {
+        let tasks = std::mem::take(
+            &mut *self
+                .retirement_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ignored = task.await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // Start binds one prepared effect to its durable identity and exact turn-scoped authorities.
     async fn start_tool(
         &self,
         prepared: Box<dyn PreparedToolCall>,
         identity: &ToolResultIdentity,
+        composition: &AgentCompositionPin,
         claim: &TurnClaim,
+        job_scope: Option<&JobScopeAuthority>,
         sandbox_mode: SandboxMode,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
@@ -755,6 +1148,7 @@ impl Driver {
                     workspace: cwd,
                 },
                 sandbox: Arc::clone(&self.sandbox),
+                job_scope: job_scope.cloned(),
             })
             .await;
         combined.cancel();
@@ -766,7 +1160,7 @@ impl Driver {
             Err(error) => {
                 let failure = tool_failure(&error);
                 if matches!(
-                    self.tools.query(identity),
+                    composition.tools().query(identity),
                     Ok(RetainedToolResult::Failed(_))
                 ) {
                     let DriveFailure::Turn(outcome) = failure else {
@@ -822,12 +1216,15 @@ impl Driver {
     async fn recover_tool(
         &self,
         claim: &TurnClaim,
+        composition: &AgentCompositionPin,
         fold: &mut ContextFold,
         effect_id: EffectId,
         identity: ToolResultIdentity,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
-        let retained = self.tools.wait(&identity, stop.clone()).await;
+        let tools = composition.tools();
+        self.track_tool(claim, composition.clone(), identity.clone());
+        let retained = tools.wait(&identity, stop.clone()).await;
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);
         }
@@ -844,11 +1241,13 @@ impl Driver {
                             result,
                         }],
                     )
-                    .await?;
+                    .await
+                    .map_err(|failure| settled_tool_budget(failure, identity.clone()))?;
                 self.flush_last(claim, &facts).await?;
-                self.tools
+                tools
                     .commit(&identity)
                     .map_err(|error| tool_failure(&error))?;
+                self.clear_tracked_tool(claim, &identity);
                 Ok(())
             }
             RetainedToolResult::Failed(failure) => {
@@ -930,33 +1329,127 @@ impl Driver {
     async fn finish(
         &self,
         claim: &TurnClaim,
+        job_scope: Option<&JobScopeAuthority>,
         outcome: TurnOutcome,
-    ) -> std::result::Result<(), DriveFailure> {
-        let outcome = match tokio::time::timeout(
+    ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
+        let outcome = self.resolve_outcome(claim, job_scope, outcome).await;
+        publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await
+    }
+
+    async fn resolve_outcome(
+        &self,
+        claim: &TurnClaim,
+        job_scope: Option<&JobScopeAuthority>,
+        outcome: TurnOutcome,
+    ) -> TurnOutcome {
+        let context = TurnFinalizationContext {
+            session_id: claim.session_id.clone(),
+            turn_id: claim.turn_id.clone(),
+            job_scope: job_scope.cloned(),
+        };
+        match tokio::time::timeout(
             self.config.finalization_wait(),
-            self.finalization
-                .finalize(&claim.session_id, &claim.turn_id),
+            self.finalization.finalize(&context),
         )
         .await
         {
-            Ok(Ok(())) => outcome,
-            Ok(Err(TurnFinalizationError::Failed { code, message })) => TurnOutcome::Failed {
-                code: bounded(&code),
-                message: bounded(&message),
+            Ok(Ok(report)) => match report.completion_blocker() {
+                Some(blocker) => {
+                    apply_finalization_failure(outcome, blocker.code(), blocker.message(), false)
+                }
+                None => outcome,
             },
-            Ok(Err(TurnFinalizationError::Invalid(message))) => TurnOutcome::Failed {
-                code: "turn.finalization".into(),
-                message: bounded(&message),
-            },
-            Err(_) => TurnOutcome::Failed {
-                code: "turn.finalization_timeout".into(),
-                message: format!(
+            Ok(Err(TurnFinalizationError::Failed { code, message })) => {
+                apply_finalization_failure(outcome, &bounded(&code), &bounded(&message), true)
+            }
+            Ok(Err(TurnFinalizationError::Invalid(message))) => {
+                apply_finalization_failure(outcome, "turn.finalization", &bounded(&message), true)
+            }
+            Err(_) => apply_finalization_failure(
+                outcome,
+                "turn.finalization_timeout",
+                &format!(
                     "turn finalization exceeded {} ms",
                     self.config.finalization_wait_ms
                 ),
-            },
-        };
-        publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await
+                true,
+            ),
+        }
+    }
+
+    async fn finish_budget(
+        &self,
+        claim: &TurnClaim,
+        job_scope: Option<&JobScopeAuthority>,
+        dimension: BudgetDimension,
+        consumed: u64,
+        limit: u64,
+    ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
+        let outcome = self
+            .resolve_outcome(
+                claim,
+                job_scope,
+                TurnOutcome::BudgetExceeded {
+                    dimension,
+                    consumed,
+                    limit,
+                },
+            )
+            .await;
+        if !matches!(
+            outcome,
+            TurnOutcome::BudgetExceeded {
+                dimension: outcome_dimension,
+                consumed: outcome_consumed,
+                limit: outcome_limit,
+            } if outcome_dimension == dimension
+                && outcome_consumed == consumed
+                && outcome_limit == limit
+        ) {
+            let terminal =
+                publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await?;
+            return Ok(vec![terminal]);
+        }
+        let exhausted = publish_budget_exhaustion(
+            self.turns.as_ref(),
+            &self.config,
+            claim,
+            dimension,
+            consumed,
+            limit,
+        )
+        .await?;
+        let terminal = publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await?;
+        Ok(vec![exhausted, terminal])
+    }
+
+    const fn context_limits(&self) -> ContextLimits {
+        ContextLimits {
+            max_messages: self.config.max_context_messages,
+            max_bytes: self.config.max_context_bytes,
+        }
+    }
+
+    async fn finish_context_error(
+        &self,
+        claim: &TurnClaim,
+        job_scope: Option<&JobScopeAuthority>,
+        message: String,
+    ) {
+        let _ignored = self
+            .finish(
+                claim,
+                job_scope,
+                failure_outcome("context.invalid", message),
+            )
+            .await;
+    }
+
+    fn request_checkpoint(&self, claim: &TurnClaim) {
+        self.checkpoint_tx.send_replace(Some(CheckpointRequest {
+            claim: claim.clone(),
+            limits: self.context_limits(),
+        }));
     }
 
     async fn publish_apply(
@@ -964,14 +1457,17 @@ impl Driver {
         claim: &TurnClaim,
         fold: &mut ContextFold,
         bodies: Vec<SessionFactBody>,
-    ) -> std::result::Result<Vec<SessionFact>, DriveFailure> {
+    ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
         let facts = match self.turns.publish(claim, bodies.clone()).await {
             Ok(facts) => facts,
             Err(TurnError::Flush(_)) if fold.through_seq() > 0 => {
                 self.flush_durable(claim, fold.through_seq()).await?;
-                self.turns.publish(claim, bodies).await.map_err(fatal)?
+                self.turns
+                    .publish(claim, bodies)
+                    .await
+                    .map_err(turn_failure)?
             }
-            Err(error) => return Err(fatal(error)),
+            Err(error) => return Err(turn_failure(error)),
         };
         if facts
             .first()
@@ -992,7 +1488,7 @@ impl Driver {
     async fn flush_last(
         &self,
         claim: &TurnClaim,
-        facts: &[SessionFact],
+        facts: &[Arc<SessionFact>],
     ) -> std::result::Result<(), DriveFailure> {
         let seq = facts
             .last()
@@ -1052,6 +1548,24 @@ impl Driver {
     ) -> std::result::Result<ScannedTurn, DriveFailure> {
         let mut state = ScannedTurn::default();
         let mut cursor = 0;
+        if let Ok(Some(checkpoint)) = self.turns.read_context_checkpoint(&claim.session_id).await
+            && checkpoint.through_seq < claim.accepted_seq
+            && checkpoint.through_seq <= claim.live_seq
+            && let Ok(restored) = ContextFold::from_checkpoint(
+                claim.header.clone(),
+                self.context_limits(),
+                &checkpoint.bytes,
+            )
+            && restored.through_seq() == checkpoint.through_seq
+            && restored.fact_prefix_sha256() == checkpoint.fact_prefix_sha256
+            && claim
+                .header
+                .fingerprint()
+                .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
+        {
+            *fold = restored;
+            cursor = checkpoint.through_seq;
+        }
         loop {
             let page = self
                 .turns
@@ -1079,7 +1593,7 @@ async fn publish_terminal(
     config: &ExecutorConfig,
     claim: &TurnClaim,
     outcome: TurnOutcome,
-) -> std::result::Result<(), DriveFailure> {
+) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
     let mut last_capacity_flush = None;
     let facts = loop {
         match turns
@@ -1106,12 +1620,51 @@ async fn publish_terminal(
             Err(error) => return Err(fatal(error)),
         }
     };
-    let seq = facts
+    let fact = facts
         .last()
         .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
-        .seq();
-    flush_execution_prefix(turns, config, claim, seq).await?;
-    Ok(())
+        .clone();
+    flush_execution_prefix(turns, config, claim, fact.seq()).await?;
+    Ok(fact)
+}
+
+async fn publish_budget_exhaustion(
+    turns: &dyn TurnExecution,
+    config: &ExecutorConfig,
+    claim: &TurnClaim,
+    dimension: BudgetDimension,
+    consumed: u64,
+    limit: u64,
+) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
+    let body = SessionFactBody::BudgetExhausted {
+        turn_id: claim.turn_id.clone(),
+        dimension,
+        consumed,
+        limit,
+    };
+    let mut last_capacity_flush = None;
+    let facts = loop {
+        match turns.publish(claim, vec![body.clone()]).await {
+            Ok(facts) => break facts,
+            Err(TurnError::Flush(_)) => {
+                let tail = live_tail(turns, claim).await?;
+                if tail == 0 || last_capacity_flush.is_some_and(|flushed| flushed >= tail) {
+                    return Err(fatal(
+                        "budget publication remained full without new flushable Facts",
+                    ));
+                }
+                flush_execution_prefix(turns, config, claim, tail).await?;
+                last_capacity_flush = Some(tail);
+            }
+            Err(error) => return Err(turn_failure(error)),
+        }
+    };
+    let fact = facts
+        .last()
+        .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
+        .clone();
+    flush_execution_prefix(turns, config, claim, fact.seq()).await?;
+    Ok(fact)
 }
 
 async fn live_tail(
@@ -1190,6 +1743,7 @@ struct ScannedTurn {
     completed_model_without_successor: bool,
     effect: Option<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
+    budget_exhausted: Option<(BudgetDimension, u64, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1213,10 +1767,11 @@ enum ResumeEffect {
     },
 }
 
+#[allow(clippy::too_many_lines)]
 fn scan_turn(
     claim: &TurnClaim,
     state: &mut ScannedTurn,
-    facts: &[SessionFact],
+    facts: &[Arc<SessionFact>],
 ) -> std::result::Result<(), &'static str> {
     for fact in facts {
         match fact.body() {
@@ -1302,9 +1857,18 @@ fn scan_turn(
                 state.completed_model_without_successor = false;
                 state.effect = None;
             }
+            SessionFactBody::BudgetExhausted {
+                turn_id,
+                dimension,
+                consumed,
+                limit,
+            } if turn_id == &claim.turn_id => {
+                state.budget_exhausted = Some((*dimension, *consumed, *limit));
+            }
             SessionFactBody::TurnAccepted { .. }
             | SessionFactBody::ImageRequested { .. }
             | SessionFactBody::CancelRequested { .. }
+            | SessionFactBody::BudgetExhausted { .. }
             | SessionFactBody::ModelIntent { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
@@ -1483,21 +2047,63 @@ fn tool_failure(error: &ToolError) -> DriveFailure {
         ToolError::InvalidInput(_)
         | ToolError::Duplicate(_)
         | ToolError::Unknown(_)
+        | ToolError::Withdrawn(_)
+        | ToolError::Sealed
+        | ToolError::Sandbox(_)
         | ToolError::Execution(_) => failed("tool.execution", error.to_string()),
     }
 }
 
 fn failed(code: impl Into<String>, message: impl Into<String>) -> DriveFailure {
+    DriveFailure::Turn(failure_outcome(code, message))
+}
+
+fn failure_outcome(code: impl Into<String>, message: impl Into<String>) -> TurnOutcome {
     let code = code.into();
     let message = message.into();
-    DriveFailure::Turn(TurnOutcome::Failed {
+    TurnOutcome::Failed {
         code: bounded(&code),
         message: bounded(&message),
-    })
+    }
 }
 
 fn fatal(error: impl fmt::Display) -> DriveFailure {
     DriveFailure::Fatal(bounded(&error.to_string()))
+}
+
+fn turn_failure(error: TurnError) -> DriveFailure {
+    match error {
+        TurnError::BudgetExceeded {
+            dimension,
+            consumed,
+            limit,
+        } => DriveFailure::Budget {
+            dimension,
+            consumed,
+            limit,
+        },
+        other => fatal(other),
+    }
+}
+
+fn apply_finalization_failure(
+    outcome: TurnOutcome,
+    code: &str,
+    message: &str,
+    cleanup_failed: bool,
+) -> TurnOutcome {
+    let code = bounded(code);
+    let message = bounded(message);
+    match outcome {
+        TurnOutcome::PartialFailed { media, .. } => TurnOutcome::PartialFailed {
+            media,
+            code,
+            message,
+        },
+        TurnOutcome::Completed => TurnOutcome::Failed { code, message },
+        _ if cleanup_failed => TurnOutcome::Failed { code, message },
+        original => original,
+    }
 }
 
 fn bounded(value: &str) -> String {
@@ -1519,6 +2125,14 @@ fn bounded(value: &str) -> String {
     output
 }
 
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 #[derive(Debug)]
 enum DriveFailure {
     Stopped,
@@ -1528,6 +2142,103 @@ enum DriveFailure {
         identity: ToolResultIdentity,
     },
     Fatal(String),
+    Budget {
+        dimension: BudgetDimension,
+        consumed: u64,
+        limit: u64,
+    },
+    DurableBudget {
+        dimension: BudgetDimension,
+        consumed: u64,
+        limit: u64,
+    },
+    SettledToolBudget {
+        dimension: BudgetDimension,
+        consumed: u64,
+        limit: u64,
+        identity: ToolResultIdentity,
+    },
+}
+
+fn settled_tool_budget(failure: DriveFailure, identity: ToolResultIdentity) -> DriveFailure {
+    match failure {
+        DriveFailure::Budget {
+            dimension,
+            consumed,
+            limit,
+        } => DriveFailure::SettledToolBudget {
+            dimension,
+            consumed,
+            limit,
+            identity,
+        },
+        failure => failure,
+    }
+}
+
+async fn run_checkpoint_writer(
+    turns: Arc<dyn TurnExecution>,
+    mut requests: watch::Receiver<Option<CheckpointRequest>>,
+) {
+    while requests.changed().await.is_ok() {
+        let Some(request) = requests.borrow_and_update().clone() else {
+            continue;
+        };
+        let Some(checkpoint) = rebuild_context_checkpoint(&turns, &request).await else {
+            continue;
+        };
+        let _ignored = turns
+            .write_context_checkpoint(&request.claim, checkpoint)
+            .await;
+    }
+}
+
+async fn rebuild_context_checkpoint(
+    turns: &Arc<dyn TurnExecution>,
+    request: &CheckpointRequest,
+) -> Option<ContextCheckpoint> {
+    let mut fold = ContextFold::with_limits(request.claim.header.clone(), request.limits).ok()?;
+    let mut cursor = 0;
+    if let Ok(Some(checkpoint)) = turns
+        .read_context_checkpoint(&request.claim.session_id)
+        .await
+        && let Ok(restored) = ContextFold::from_checkpoint(
+            request.claim.header.clone(),
+            request.limits,
+            &checkpoint.bytes,
+        )
+        && restored.through_seq() == checkpoint.through_seq
+        && restored.fact_prefix_sha256() == checkpoint.fact_prefix_sha256
+        && request
+            .claim
+            .header
+            .fingerprint()
+            .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
+    {
+        fold = restored;
+        cursor = checkpoint.through_seq;
+    }
+    loop {
+        let page = turns
+            .read_checkpoint_facts(
+                &request.claim,
+                cursor,
+                rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
+            )
+            .await
+            .ok()??;
+        if page.through_seq == cursor {
+            break;
+        }
+        fold.apply(&page.facts).ok()?;
+        cursor = page.through_seq;
+    }
+    Some(ContextCheckpoint {
+        header_fingerprint: request.claim.header.fingerprint().ok()?,
+        through_seq: fold.through_seq(),
+        fact_prefix_sha256: fold.fact_prefix_sha256(),
+        bytes: fold.checkpoint_bytes().ok()?,
+    })
 }
 
 /// Closed executor preparation failure taxonomy.
@@ -1541,7 +2252,7 @@ pub enum ExecutorError {
 /// Executor result.
 pub type Result<T> = std::result::Result<T, ExecutorError>;
 
-/// Ordinary executor factory over Turn, Language, Image, Media, and Tool Local contracts.
+/// Ordinary executor factory over Turn, AI, Media, and effect-owner Local contracts.
 #[derive(Clone, Debug, Default)]
 pub struct ExecutorFactory;
 
@@ -1567,9 +2278,9 @@ impl PluginFactory for ExecutorFactory {
                 .requiring_local::<LanguageCallContract>()
                 .requiring_local::<ImageCallContract>()
                 .requiring_local::<MediaContract>()
-                .requiring_local::<ToolRuntimeContract>()
                 .requiring_local::<ApprovalContract>()
-                .requiring_local::<SandboxContract>(),
+                .requiring_local::<SandboxContract>()
+                .requiring_local::<JobsContract>(),
         )
     }
 
@@ -1580,26 +2291,34 @@ impl PluginFactory for ExecutorFactory {
         let language = plan.local::<LanguageCallContract>()?;
         let image = plan.local::<ImageCallContract>()?;
         let media = plan.local::<MediaContract>()?;
-        let tools = plan.local::<ToolRuntimeContract>()?;
         let approval = plan.local::<ApprovalContract>()?;
         let sandbox = plan.local::<SandboxContract>()?;
+        let jobs = plan.local::<JobsContract>()?;
         let lease = turns
             .register(config.executor_id.clone())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let checkpoint_turns = Arc::clone(&turns);
+        let (checkpoint_tx, checkpoint_rx) = watch::channel(None);
         let driver = Arc::new(Driver {
             turns,
             finalization,
             language,
             image,
             media,
-            tools,
             approval,
             sandbox,
+            jobs,
+            active_tools: Mutex::new(BTreeMap::new()),
+            retirement_tasks: Mutex::new(Vec::new()),
+            checkpoint_tx,
             config,
         });
         let stop = CancellationToken::new();
         let task_stop = stop.clone();
         let mut worker = tokio::spawn(async move { driver.run(task_stop).await });
+        let mut checkpoint_worker = tokio::spawn(async move {
+            run_checkpoint_writer(checkpoint_turns, checkpoint_rx).await;
+        });
         plan.defer(
             "shutdown Agent executor",
             Box::new(move || {
@@ -1608,14 +2327,29 @@ impl PluginFactory for ExecutorFactory {
                     if let Ok(joined) =
                         tokio::time::timeout(EXECUTOR_SHUTDOWN_TIMEOUT, &mut worker).await
                     {
+                        let checkpoint_joined =
+                            tokio::time::timeout(EXECUTOR_SHUTDOWN_TIMEOUT, &mut checkpoint_worker)
+                                .await;
                         drop(lease);
-                        match joined {
-                            Ok(()) => Ok(()),
-                            Err(error) => Err(format!("Agent executor worker failed: {error}")),
+                        match (joined, checkpoint_joined) {
+                            (Ok(()), Ok(Ok(()))) => Ok(()),
+                            (Err(error), _) => {
+                                Err(format!("Agent executor worker failed: {error}"))
+                            }
+                            (Ok(()), Ok(Err(error))) => {
+                                Err(format!("Agent checkpoint worker failed: {error}"))
+                            }
+                            (Ok(()), Err(_)) => {
+                                checkpoint_worker.abort();
+                                let _ = checkpoint_worker.await;
+                                Err("Agent checkpoint worker shutdown timed out".into())
+                            }
                         }
                     } else {
                         worker.abort();
                         let _ = worker.await;
+                        checkpoint_worker.abort();
+                        let _ = checkpoint_worker.await;
                         drop(lease);
                         Err("Agent executor worker shutdown timed out".into())
                     }
@@ -1628,8 +2362,11 @@ impl PluginFactory for ExecutorFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsi_agent_session_protocol::{FrozenAgentProfile, SessionHeader, SessionId, TurnId};
+    use rsi_agent_session_protocol::{
+        AgentPresetId, FrozenAgentProfile, SessionHeader, SessionId, TurnId,
+    };
     use rsi_agent_turn_protocol::ExecutorLease;
+    use rsi_media_protocol::MediaId;
     use rsi_sandbox::SandboxMode;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1642,6 +2379,7 @@ mod tests {
             max_context_bytes: default_context_bytes(),
             durability_wait_ms: default_durability_wait_ms(),
             finalization_wait_ms: default_finalization_wait_ms(),
+            retained_tool_wait_ms: default_retained_tool_wait_ms(),
         };
 
         assert_eq!(
@@ -1650,11 +2388,186 @@ mod tests {
         );
     }
 
+    #[test]
+    fn context_failure_diagnostic_is_utf8_safe_and_protocol_bounded() {
+        let outcome = failure_outcome(
+            "context.invalid",
+            "界".repeat(MAXIMUM_AGENT_DIAGNOSTIC_BYTES),
+        );
+        outcome.validate().unwrap();
+        let TurnOutcome::Failed { message, .. } = outcome else {
+            panic!("context failure must preserve its typed terminal class");
+        };
+        assert!(message.len() <= MAXIMUM_AGENT_DIAGNOSTIC_BYTES);
+        assert!(std::str::from_utf8(message.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn finalization_priority_matrix_preserves_partial_media_and_ignores_blockers_for_failures() {
+        let media = MediaRef {
+            id: MediaId::new("a".repeat(64)).unwrap(),
+            mime: "image/png".into(),
+            bytes: 1,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(
+            apply_finalization_failure(
+                TurnOutcome::PartialFailed {
+                    media: vec![media.clone()],
+                    code: "image.failure".into(),
+                    message: "image failed".into(),
+                },
+                "jobs.cleanup",
+                "cleanup failed",
+                true,
+            ),
+            TurnOutcome::PartialFailed {
+                media: vec![media],
+                code: "jobs.cleanup".into(),
+                message: "cleanup failed".into(),
+            }
+        );
+        assert_eq!(
+            apply_finalization_failure(
+                TurnOutcome::Cancelled,
+                "jobs.unreported",
+                "output was not collected",
+                false,
+            ),
+            TurnOutcome::Cancelled
+        );
+        assert!(matches!(
+            apply_finalization_failure(
+                TurnOutcome::BudgetExceeded {
+                    dimension: BudgetDimension::Elapsed,
+                    consumed: 10,
+                    limit: 10,
+                },
+                "jobs.cleanup",
+                "cleanup failed",
+                true,
+            ),
+            TurnOutcome::Failed { code, .. } if code == "jobs.cleanup"
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_drive_wins_when_the_elapsed_deadline_is_also_ready() {
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        let drive = select_drive_or_stop(
+            &stop,
+            std::future::ready(Err(DriveFailure::Turn(TurnOutcome::Completed))),
+        )
+        .await;
+
+        assert!(matches!(
+            drive,
+            Err(DriveFailure::Turn(TurnOutcome::Completed))
+        ));
+        assert!(!elapsed_deadline_wins(true, &drive));
+    }
+
     #[derive(Debug)]
     struct FullBeforeTerminal {
         accepted: SessionFact,
         publish_calls: AtomicUsize,
         flushes: Mutex<Vec<u64>>,
+    }
+
+    #[derive(Debug)]
+    struct CheckpointFixture {
+        facts: Vec<Arc<SessionFact>>,
+        writes: Mutex<Vec<ContextCheckpoint>>,
+    }
+
+    #[async_trait]
+    impl TurnExecution for CheckpointFixture {
+        fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
+            unreachable!("checkpoint writer test does not register")
+        }
+
+        async fn claim(
+            &self,
+            _executor_id: &str,
+            _cancellation: CancellationToken,
+        ) -> rsi_agent_turn_protocol::Result<Option<TurnClaim>> {
+            unreachable!("checkpoint writer test does not claim")
+        }
+
+        fn composition(
+            &self,
+            _claim: &TurnClaim,
+        ) -> rsi_agent_turn_protocol::Result<AgentCompositionPin> {
+            unreachable!("checkpoint writer test does not resolve composition")
+        }
+
+        async fn read_facts(
+            &self,
+            _claim: &TurnClaim,
+            _after_seq: u64,
+            _limit: usize,
+        ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::ClaimFactPage> {
+            unreachable!("checkpoint writer uses only maintenance reads")
+        }
+
+        async fn read_checkpoint_facts(
+            &self,
+            _claim: &TurnClaim,
+            after_seq: u64,
+            limit: usize,
+        ) -> rsi_agent_turn_protocol::Result<Option<rsi_agent_turn_protocol::ClaimFactPage>>
+        {
+            let facts = self
+                .facts
+                .iter()
+                .filter(|fact| fact.seq() > after_seq)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(Some(rsi_agent_turn_protocol::ClaimFactPage {
+                through_seq: facts.last().map_or(after_seq, |fact| fact.seq()),
+                facts,
+            }))
+        }
+
+        async fn write_context_checkpoint(
+            &self,
+            _claim: &TurnClaim,
+            checkpoint: ContextCheckpoint,
+        ) -> rsi_agent_turn_protocol::Result<bool> {
+            self.writes.lock().unwrap().push(checkpoint);
+            Ok(true)
+        }
+
+        async fn publish(
+            &self,
+            _claim: &TurnClaim,
+            _bodies: Vec<SessionFactBody>,
+        ) -> rsi_agent_turn_protocol::Result<Vec<Arc<SessionFact>>> {
+            unreachable!("checkpoint writer test does not publish")
+        }
+
+        async fn flush(
+            &self,
+            _claim: &TurnClaim,
+            _through_seq: u64,
+        ) -> rsi_agent_turn_protocol::Result<u64> {
+            unreachable!("checkpoint writer test does not flush")
+        }
+
+        fn cancellation(
+            &self,
+            _claim: &TurnClaim,
+        ) -> rsi_agent_turn_protocol::Result<CancellationToken> {
+            unreachable!("checkpoint writer test does not cancel")
+        }
+
+        fn release(&self, _claim: &TurnClaim) -> rsi_agent_turn_protocol::Result<()> {
+            unreachable!("checkpoint writer test does not release")
+        }
     }
 
     #[async_trait]
@@ -1671,6 +2584,13 @@ mod tests {
             unreachable!("terminal publication test does not claim")
         }
 
+        fn composition(
+            &self,
+            _claim: &TurnClaim,
+        ) -> rsi_agent_turn_protocol::Result<AgentCompositionPin> {
+            unreachable!("terminal publication test does not resolve composition")
+        }
+
         async fn read_facts(
             &self,
             _claim: &TurnClaim,
@@ -1678,11 +2598,11 @@ mod tests {
             _limit: usize,
         ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::ClaimFactPage> {
             let facts = (after_seq == 0)
-                .then(|| self.accepted.clone())
+                .then(|| Arc::new(self.accepted.clone()))
                 .into_iter()
                 .collect::<Vec<_>>();
             Ok(rsi_agent_turn_protocol::ClaimFactPage {
-                through_seq: facts.last().map_or(after_seq, SessionFact::seq),
+                through_seq: facts.last().map_or(after_seq, |fact| fact.seq()),
                 facts,
             })
         }
@@ -1691,7 +2611,7 @@ mod tests {
             &self,
             claim: &TurnClaim,
             bodies: Vec<SessionFactBody>,
-        ) -> rsi_agent_turn_protocol::Result<Vec<SessionFact>> {
+        ) -> rsi_agent_turn_protocol::Result<Vec<Arc<SessionFact>>> {
             if self.publish_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(TurnError::Flush("speculative buffer is full".into()));
             }
@@ -1699,9 +2619,9 @@ mod tests {
                 bodies.as_slice(),
                 [SessionFactBody::TurnTerminal { turn_id, .. }] if turn_id == &claim.turn_id
             ));
-            Ok(vec![
+            Ok(vec![Arc::new(
                 SessionFact::new(2, 2, bodies.into_iter().next().unwrap()).unwrap(),
-            ])
+            )])
         }
 
         async fn flush(
@@ -1732,6 +2652,7 @@ mod tests {
             session_id.clone(),
             1,
             "/tmp",
+            AgentPresetId::new("test-agent").unwrap(),
             FrozenAgentProfile::new(
                 "test",
                 "system",
@@ -1755,14 +2676,9 @@ mod tests {
         )
         .unwrap();
         (
-            TurnClaim {
-                executor_id: "executor".into(),
-                claim_id: 1,
-                session_id,
-                turn_id,
-                header,
-                live_seq: 1,
-            },
+            rsi_agent_turn_protocol::TurnClaimIssuer::new()
+                .issue("executor".into(), 1, session_id, turn_id, header, 1, 1, 1)
+                .unwrap(),
             accepted,
         )
     }
@@ -1781,6 +2697,7 @@ mod tests {
             max_context_bytes: default_context_bytes(),
             durability_wait_ms: 1_000,
             finalization_wait_ms: 1_000,
+            retained_tool_wait_ms: 1_000,
         };
 
         publish_terminal(&turns, &config, &claim, TurnOutcome::Completed)
@@ -1788,6 +2705,67 @@ mod tests {
             .unwrap();
         assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 2);
         assert_eq!(turns.flushes.lock().unwrap().as_slice(), [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writer_coalesces_and_preserves_a_queued_turn() {
+        let (claim, accepted) = claim();
+        let queued_turn = TurnId::new("turn-queued").unwrap();
+        let fixture = Arc::new(CheckpointFixture {
+            facts: vec![
+                Arc::new(accepted),
+                Arc::new(
+                    SessionFact::new(
+                        2,
+                        2,
+                        SessionFactBody::TurnTerminal {
+                            turn_id: claim.turn_id.clone(),
+                            outcome: TurnOutcome::Completed,
+                        },
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(
+                    SessionFact::new(
+                        3,
+                        3,
+                        SessionFactBody::TurnAccepted {
+                            turn_id: queued_turn,
+                            text: "queued task".into(),
+                            model: None,
+                            sandbox: SandboxMode::WorkspaceWrite,
+                            require_approval: false,
+                        },
+                    )
+                    .unwrap(),
+                ),
+            ],
+            writes: Mutex::new(Vec::new()),
+        });
+        let turns: Arc<dyn TurnExecution> = fixture.clone();
+        let (sender, receiver) = watch::channel(None);
+        let request = CheckpointRequest {
+            claim: claim.clone(),
+            limits: ContextLimits::default(),
+        };
+        sender.send_replace(Some(request.clone()));
+        sender.send_replace(Some(request));
+        drop(sender);
+
+        run_checkpoint_writer(turns, receiver).await;
+
+        let writes = fixture.writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].through_seq, 3);
+        let restored =
+            ContextFold::from_checkpoint(claim.header, ContextLimits::default(), &writes[0].bytes)
+                .unwrap();
+        assert_eq!(restored.through_seq(), 3);
+        assert!(
+            serde_json::to_string(&restored.project(ContextLimits::default()).unwrap().messages)
+                .unwrap()
+                .contains("queued task")
+        );
     }
 
     #[test]
@@ -1843,6 +2821,7 @@ mod tests {
             .unwrap(),
         ];
         let mut state = ScannedTurn::default();
+        let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
         scan_turn(&claim, &mut state, &facts).unwrap();
         assert!(state.completed_model_without_successor);
         assert!(state.effect.is_none());
@@ -1859,6 +2838,20 @@ mod tests {
                 }))
                 .expect_err("unbounded finalization deadline");
             assert!(error.to_string().contains("finalization_wait_ms"));
+        }
+    }
+
+    #[test]
+    fn retained_tool_deadline_is_bounded_during_factory_preparation() {
+        let factory = ExecutorFactory;
+        for wait in [0, MAXIMUM_RETAINED_TOOL_WAIT_MS + 1] {
+            let error = factory
+                .prepare(&serde_json::json!({
+                    "executor_id": "executor",
+                    "retained_tool_wait_ms": wait
+                }))
+                .expect_err("unbounded retained Tool deadline");
+            assert!(error.to_string().contains("retained_tool_wait_ms"));
         }
     }
 }
