@@ -9,7 +9,9 @@ only after their own enforcement probe succeeds. Probes are bounded by a
 two-second timeout and do not consult `PATH`.
 
 The selected wrapper is frozen for the generation. Restricted requests produce
-wrapper argv and a matching stamp; absence fails closed. The Landlock backend
+wrapper argv and a matching stamp; absence fails closed. The durable stamp
+identifies the staged wrapper bytes by SHA-256 rather than its temporary path.
+The Landlock backend
 is an external safe runner because applying Landlock between fork and exec
 inside this `unsafe_code = deny` library would require an unsafe pre-exec hook.
 
@@ -21,6 +23,16 @@ program, cwd, and workspace paths are preserved rather than rewritten.
 Staged wrappers are deliberately non-privileged. A bubblewrap installation
 that requires a setuid executable is rejected rather than copying elevated
 mode bits into application-owned storage.
+
+Bubblewrap restricted plans create a private tmpfs `/tmp` before rebinding the
+canonical workspace read-only or writable according to the requested mode. A
+workspace exactly equal to `/tmp` or `/` is invalid for every restricted
+backend; root authority is outside a workspace-scoped sandbox contract, and a
+Bubblewrap root rebind would additionally hide its private scratch and device
+mounts. A canonical descendant
+such as `/tmp/work` is rebound after tmpfs creation in either restricted mode.
+Landlock plans retain host scratch and therefore do not claim Bubblewrap's
+private-scratch evidence.
 
 Default tests inject the probe and inspect plans without changing host policy.
 On a Linux host with `/usr/bin/bwrap` and user-namespace support, the ignored

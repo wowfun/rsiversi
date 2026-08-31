@@ -543,6 +543,7 @@ mod tests {
         reopened.read_to_end(&mut contents).unwrap();
         assert_eq!(contents, b"sealed");
 
+        drop(reopened);
         drop(temporary);
         assert!(!path.exists());
     }

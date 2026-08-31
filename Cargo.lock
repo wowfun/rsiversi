@@ -1576,6 +1576,9 @@ dependencies = [
  "axum",
  "futures-util",
  "getrandom 0.3.4",
+ "hex",
+ "rsi-agent-composition",
+ "rsi-agent-composition-protocol",
  "rsi-agent-executor",
  "rsi-agent-kernel",
  "rsi-agent-presets",
@@ -1590,6 +1593,7 @@ dependencies = [
  "rsi-ai-openai-compatible",
  "rsi-ai-protocol",
  "rsi-ai-provider",
+ "rsi-apply-patch",
  "rsi-approval",
  "rsi-approval-protocol",
  "rsi-commands",
@@ -1599,26 +1603,68 @@ dependencies = [
  "rsi-host",
  "rsi-jobs",
  "rsi-jobs-local",
+ "rsi-jobs-tools",
  "rsi-media",
  "rsi-media-local",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-meta-profile",
+ "rsi-meta-scope",
  "rsi-permission-presets",
+ "rsi-process",
+ "rsi-process-local",
  "rsi-projection",
  "rsi-sandbox",
  "rsi-sandbox-local",
  "rsi-settings",
  "rsi-settings-local",
  "rsi-settings-protocol",
+ "rsi-shell-bash",
  "rsi-storage",
  "rsi-storage-domain",
  "rsi-storage-sqlite",
  "rsi-tools",
  "rsi-tools-protocol",
  "rsi-workspace",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-composition"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-presets",
+ "rsi-meta",
+ "rsi-meta-profile",
+ "rsi-meta-scope",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-composition-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta-contract",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -1628,12 +1674,15 @@ dependencies = [
 name = "rsi-agent-context"
 version = "0.0.1"
 dependencies = [
+ "hex",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
  "rsi-sandbox",
  "rsi-tools-protocol",
+ "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
@@ -1644,6 +1693,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "getrandom 0.3.4",
+ "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-kernel",
  "rsi-agent-session-protocol",
@@ -1653,6 +1703,8 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-ai-testkit",
  "rsi-approval-protocol",
+ "rsi-jobs",
+ "rsi-jobs-local",
  "rsi-media-protocol",
  "rsi-meta",
  "rsi-sandbox",
@@ -1672,6 +1724,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "getrandom 0.3.4",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",
@@ -1680,6 +1733,7 @@ dependencies = [
  "rsi-meta",
  "rsi-sandbox",
  "rsi-tools-protocol",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -1690,11 +1744,17 @@ dependencies = [
 name = "rsi-agent-presets"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "rsi-agent-session-protocol",
  "rsi-host",
+ "rsi-meta-profile",
+ "rustix",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -1766,8 +1826,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-jobs",
  "rsi-meta-contract",
  "rsi-sandbox",
  "thiserror",
@@ -1954,6 +2016,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-apply-patch"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-approval"
 version = "0.0.1"
 dependencies = [
@@ -2071,6 +2153,23 @@ dependencies = [
  "futures-util",
  "rsi-jobs",
  "rsi-meta",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-jobs-tools"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-jobs",
+ "rsi-jobs-local",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-tools",
+ "rsi-tools-protocol",
  "serde",
  "serde_json",
  "tokio",
@@ -2200,6 +2299,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml",
 ]
 
@@ -2230,6 +2330,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-process"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
+ "rsi-sandbox",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-process-local"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-projection"
 version = "0.0.1"
 dependencies = [
@@ -2255,11 +2380,13 @@ name = "rsi-sandbox-local"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "hex",
  "libc",
  "rsi-meta",
  "rsi-sandbox",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
@@ -2310,6 +2437,27 @@ dependencies = [
  "rsi-meta",
  "rsi-settings-protocol",
  "serde_json",
+]
+
+[[package]]
+name = "rsi-shell-bash"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-jobs",
+ "rsi-jobs-local",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2390,6 +2538,7 @@ name = "rsi-tools-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-sandbox",

@@ -9,9 +9,10 @@ use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedAc
 use rsi_sandbox::{
     ConfinedProcess, EnforcementStamp, MAXIMUM_SANDBOX_ARGUMENTS, MAXIMUM_SANDBOX_PLAN_BYTES,
     MAXIMUM_SANDBOX_WRAPPER_BYTES, ProcessRequest, Result, Sandbox, SandboxBackend,
-    SandboxContract, SandboxError, SandboxMode,
+    SandboxContract, SandboxError, SandboxFileSystem, SandboxMode, SandboxNetwork, SandboxScratch,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -110,8 +111,21 @@ impl SandboxLocalConfig {
 
 #[derive(Debug)]
 struct Service {
-    backend: Option<SandboxBackend>,
+    backend: Option<SelectedBackend>,
     _staged: Option<tempfile::TempDir>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackendKind {
+    Bubblewrap,
+    Landlock,
+}
+
+#[derive(Clone, Debug)]
+struct SelectedBackend {
+    kind: BackendKind,
+    path: PathBuf,
+    sha256: String,
 }
 
 #[async_trait]
@@ -123,7 +137,7 @@ impl Sandbox for Service {
                 program,
                 arguments: request.arguments.into_iter().map(OsString::from).collect(),
                 cwd,
-                stamp: stamp(request.mode, SandboxBackend::Unconfined, workspace),
+                stamp: stamp(request.mode, None, workspace),
             });
         }
         let backend = self
@@ -133,8 +147,8 @@ impl Sandbox for Service {
         let target_program = program.into_os_string();
         let target_cwd = cwd.clone().into_os_string();
         let target_workspace = workspace.clone().into_os_string();
-        let (wrapper, arguments) = match &backend {
-            SandboxBackend::Bubblewrap { path } => {
+        let (wrapper, arguments) = match backend.kind {
+            BackendKind::Bubblewrap => {
                 let mut arguments: Vec<OsString> = vec![
                     "--die-with-parent".into(),
                     "--new-session".into(),
@@ -143,23 +157,27 @@ impl Sandbox for Service {
                     "--ro-bind".into(),
                     "/".into(),
                     "/".into(),
+                    "--tmpfs".into(),
+                    "/tmp".into(),
                     "--proc".into(),
                     "/proc".into(),
                     "--dev".into(),
                     "/dev".into(),
                 ];
-                if request.mode == SandboxMode::WorkspaceWrite {
-                    arguments.extend([
-                        "--bind".into(),
-                        target_workspace.clone(),
-                        target_workspace.clone(),
-                    ]);
-                }
+                arguments.extend([
+                    if request.mode == SandboxMode::WorkspaceWrite {
+                        "--bind".into()
+                    } else {
+                        "--ro-bind".into()
+                    },
+                    target_workspace.clone(),
+                    target_workspace.clone(),
+                ]);
                 arguments.extend(["--chdir".into(), target_cwd, "--".into(), target_program]);
                 arguments.extend(request.arguments.into_iter().map(OsString::from));
-                (path.clone(), arguments)
+                (backend.path.clone(), arguments)
             }
-            SandboxBackend::Landlock { path } => {
+            BackendKind::Landlock => {
                 let mut arguments: Vec<OsString> = vec![
                     "--mode".into(),
                     mode_name(request.mode).into(),
@@ -171,16 +189,15 @@ impl Sandbox for Service {
                     target_program,
                 ];
                 arguments.extend(request.arguments.into_iter().map(OsString::from));
-                (path.clone(), arguments)
+                (backend.path.clone(), arguments)
             }
-            SandboxBackend::Unconfined => unreachable!("restricted path never selects bypass"),
         };
         validate_plan(&wrapper, &arguments, &cwd, &workspace)?;
         Ok(ConfinedProcess {
             program: wrapper,
             arguments,
             cwd,
-            stamp: stamp(request.mode, backend, workspace),
+            stamp: stamp(request.mode, Some(&backend), workspace),
         })
     }
 }
@@ -207,20 +224,20 @@ impl SandboxLocalFactory {
 
     async fn stage_available(
         &self,
-        backend: SandboxBackend,
+        kind: BackendKind,
+        path: PathBuf,
         arguments: &'static [&'static str],
-    ) -> rsi_meta::Result<Option<(SandboxBackend, tempfile::TempDir)>> {
-        let staged = tokio::task::spawn_blocking(move || stage_backend(&backend))
+    ) -> rsi_meta::Result<Option<(SelectedBackend, tempfile::TempDir)>> {
+        let staged = tokio::task::spawn_blocking(move || stage_backend(kind, &path))
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let Ok((backend, directory)) = staged else {
             return Ok(None);
         };
-        let path = match &backend {
-            SandboxBackend::Bubblewrap { path } | SandboxBackend::Landlock { path } => path,
-            SandboxBackend::Unconfined => unreachable!("staging rejects an unconfined backend"),
-        };
-        if matches!(self.probe.available(path, arguments).await, Ok(true)) {
+        if matches!(
+            self.probe.available(&backend.path, arguments).await,
+            Ok(true)
+        ) {
             Ok(Some((backend, directory)))
         } else {
             Ok(None)
@@ -254,10 +271,7 @@ impl PluginFactory for SandboxLocalFactory {
         let mut selected = None;
         for path in config.bubblewrap {
             if let Some(staged) = self
-                .stage_available(
-                    SandboxBackend::Bubblewrap { path },
-                    BUBBLEWRAP_PROBE_ARGUMENTS,
-                )
+                .stage_available(BackendKind::Bubblewrap, path, BUBBLEWRAP_PROBE_ARGUMENTS)
                 .await?
             {
                 selected = Some(staged);
@@ -267,7 +281,7 @@ impl PluginFactory for SandboxLocalFactory {
         if selected.is_none() {
             for path in config.landlock {
                 if let Some(staged) = self
-                    .stage_available(SandboxBackend::Landlock { path }, LANDLOCK_PROBE_ARGUMENTS)
+                    .stage_available(BackendKind::Landlock, path, LANDLOCK_PROBE_ARGUMENTS)
                     .await?
                 {
                     selected = Some(staged);
@@ -318,6 +332,18 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
     }
     let cwd = canonical_directory(&request.cwd, "cwd")?;
     let workspace = canonical_directory(&request.workspace, "workspace")?;
+    if request.mode != SandboxMode::DangerFullAccess {
+        if workspace == Path::new("/") {
+            return Err(SandboxError::InvalidInput(
+                "restricted workspace cannot be the filesystem root".into(),
+            ));
+        }
+        if workspace == Path::new("/tmp") {
+            return Err(SandboxError::InvalidInput(
+                "restricted workspace cannot be exactly /tmp".into(),
+            ));
+        }
+    }
     validate_plan(&program, &request.arguments, &cwd, &workspace)?;
     Ok((program, cwd, workspace))
 }
@@ -359,15 +385,7 @@ fn validate_plan<T: AsRef<OsStr>>(
     Ok(())
 }
 
-fn stage_backend(backend: &SandboxBackend) -> Result<(SandboxBackend, tempfile::TempDir)> {
-    let source = match backend {
-        SandboxBackend::Bubblewrap { path } | SandboxBackend::Landlock { path } => path,
-        SandboxBackend::Unconfined => {
-            return Err(SandboxError::InvalidInput(
-                "cannot stage an unconfined backend".into(),
-            ));
-        }
-    };
+fn stage_backend(kind: BackendKind, source: &Path) -> Result<(SelectedBackend, tempfile::TempDir)> {
     let directory = tempfile::Builder::new()
         .prefix("rsi-sandbox-wrapper-")
         .tempdir()
@@ -397,10 +415,11 @@ fn stage_backend(backend: &SandboxBackend) -> Result<(SandboxBackend, tempfile::
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o500))
             .map_err(|error| SandboxError::Probe(error.to_string()))?;
     }
-    let backend = match backend {
-        SandboxBackend::Bubblewrap { .. } => SandboxBackend::Bubblewrap { path: staged },
-        SandboxBackend::Landlock { .. } => SandboxBackend::Landlock { path: staged },
-        SandboxBackend::Unconfined => unreachable!("checked above"),
+    let bytes = std::fs::read(&staged).map_err(|error| SandboxError::Probe(error.to_string()))?;
+    let backend = SelectedBackend {
+        kind,
+        path: staged,
+        sha256: hex::encode(Sha256::digest(bytes)),
     };
     Ok((backend, directory))
 }
@@ -470,14 +489,48 @@ fn create_staged_wrapper(path: &Path) -> Result<std::fs::File> {
         .map_err(|error| SandboxError::Probe(error.to_string()))
 }
 
-fn stamp(mode: SandboxMode, backend: SandboxBackend, workspace: PathBuf) -> EnforcementStamp {
-    EnforcementStamp {
+fn stamp(
+    mode: SandboxMode,
+    backend: Option<&SelectedBackend>,
+    workspace: PathBuf,
+) -> EnforcementStamp {
+    let filesystem = match mode {
+        SandboxMode::ReadOnly => SandboxFileSystem::ReadOnly,
+        SandboxMode::WorkspaceWrite => SandboxFileSystem::WorkspaceWrite,
+        SandboxMode::DangerFullAccess => SandboxFileSystem::Unconfined,
+    };
+    let durable_backend = match backend {
+        Some(SelectedBackend {
+            kind: BackendKind::Bubblewrap,
+            sha256,
+            ..
+        }) => SandboxBackend::Bubblewrap {
+            sha256: sha256.clone(),
+        },
+        Some(SelectedBackend {
+            kind: BackendKind::Landlock,
+            sha256,
+            ..
+        }) => SandboxBackend::Landlock {
+            sha256: sha256.clone(),
+        },
+        None => SandboxBackend::Unconfined,
+    };
+    let scratch = if backend.is_some_and(|backend| backend.kind == BackendKind::Bubblewrap) {
+        SandboxScratch::PrivateTmp
+    } else {
+        SandboxScratch::Host
+    };
+    let stamp = EnforcementStamp {
         requested: mode,
-        backend,
+        backend: durable_backend,
         workspace,
-        workspace_writable: mode != SandboxMode::ReadOnly,
-        network_restricted: false,
-    }
+        filesystem,
+        scratch,
+        network: SandboxNetwork::Host,
+    };
+    debug_assert!(stamp.validate().is_ok());
+    stamp
 }
 
 const fn mode_name(mode: SandboxMode) -> &'static str {

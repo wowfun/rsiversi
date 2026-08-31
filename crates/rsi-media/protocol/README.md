@@ -12,3 +12,7 @@ Descriptors describe validated external/provider inputs and may name supported
 source formats. A durable `MediaRef` instead names canonical PNG bytes produced
 by the Media service and enforces both the pixel and per-dimension bounds;
 callers must not treat the two roles as interchangeable.
+
+The closed error taxonomy distinguishes permanent malformed or out-of-bounds
+input from transient generation admission pressure. Callers may retry
+`AdmissionFull`; they must not reinterpret `InvalidInput` as backpressure.

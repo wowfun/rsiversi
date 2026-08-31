@@ -380,6 +380,9 @@ pub enum MediaError {
     /// Malformed or out-of-bounds caller input.
     #[error("invalid media input: {0}")]
     InvalidInput(String),
+    /// Transient generation-local admission pressure; the same input may be retried.
+    #[error("media admission is full: {0}")]
+    AdmissionFull(String),
     /// Source raster decoding or canonical encoding failed.
     #[error("media codec failed: {0}")]
     Codec(String),

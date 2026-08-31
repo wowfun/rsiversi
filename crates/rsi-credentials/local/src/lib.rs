@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Semaphore, watch};
 
-const DEFAULT_MAXIMUM_CONCURRENT_RESOLUTIONS: usize = 8;
-const MAXIMUM_CONCURRENT_RESOLUTIONS: usize = 64;
+const DEFAULT_MAXIMUM_CONCURRENT_STORE_OPERATIONS: usize = 8;
+const MAXIMUM_CONCURRENT_STORE_OPERATIONS: usize = 64;
 const DEFAULT_RESOLUTION_TIMEOUT_MS: u64 = 30_000;
 const MAXIMUM_RESOLUTION_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 
@@ -84,16 +84,16 @@ pub struct CredentialsLocalConfig {
     /// Explicit environment fallback mapping.
     #[serde(default)]
     pub environment: Vec<EnvironmentBinding>,
-    /// Maximum synchronous secret-store lookups admitted concurrently.
-    #[serde(default = "default_maximum_concurrent_resolutions")]
-    pub maximum_concurrent_resolutions: usize,
+    /// Maximum synchronous secret-store operations admitted concurrently.
+    #[serde(default = "default_maximum_concurrent_store_operations")]
+    pub maximum_concurrent_store_operations: usize,
     /// Per-waiter credential resolution deadline in milliseconds.
     #[serde(default = "default_resolution_timeout_ms")]
     pub resolution_timeout_ms: u64,
 }
 
-const fn default_maximum_concurrent_resolutions() -> usize {
-    DEFAULT_MAXIMUM_CONCURRENT_RESOLUTIONS
+const fn default_maximum_concurrent_store_operations() -> usize {
+    DEFAULT_MAXIMUM_CONCURRENT_STORE_OPERATIONS
 }
 
 const fn default_resolution_timeout_ms() -> u64 {
@@ -103,11 +103,11 @@ const fn default_resolution_timeout_ms() -> u64 {
 impl CredentialsLocalConfig {
     fn validate(&self) -> Result<()> {
         validate_segment("keyring service", &self.service)?;
-        if self.maximum_concurrent_resolutions == 0
-            || self.maximum_concurrent_resolutions > MAXIMUM_CONCURRENT_RESOLUTIONS
+        if self.maximum_concurrent_store_operations == 0
+            || self.maximum_concurrent_store_operations > MAXIMUM_CONCURRENT_STORE_OPERATIONS
         {
             return Err(CredentialsError::InvalidInput(format!(
-                "maximum_concurrent_resolutions must be within 1..={MAXIMUM_CONCURRENT_RESOLUTIONS}"
+                "maximum_concurrent_store_operations must be within 1..={MAXIMUM_CONCURRENT_STORE_OPERATIONS}"
             )));
         }
         if self.resolution_timeout_ms == 0
@@ -272,9 +272,20 @@ impl CredentialsAdmin for Service {
         let store = Arc::clone(&self.store);
         let name = self.name.clone();
         let account = reference.account();
-        tokio::task::spawn_blocking(move || store.set(&name, &account, &secret))
+        let permit = Arc::clone(&self.admission)
+            .acquire_owned()
             .await
-            .map_err(|error| CredentialsError::Store(format!("keyring task failed: {error}")))?
+            .map_err(|error| {
+                CredentialsError::Store(format!(
+                    "credential admission unexpectedly closed: {error}"
+                ))
+            })?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.set(&name, &account, &secret)
+        })
+        .await
+        .map_err(|error| CredentialsError::Store(format!("keyring task failed: {error}")))?
     }
 
     async fn unset(&self, reference: &CredentialRef) -> Result<bool> {
@@ -285,9 +296,20 @@ impl CredentialsAdmin for Service {
         let store = Arc::clone(&self.store);
         let name = self.name.clone();
         let account = reference.account();
-        tokio::task::spawn_blocking(move || store.unset(&name, &account))
+        let permit = Arc::clone(&self.admission)
+            .acquire_owned()
             .await
-            .map_err(|error| CredentialsError::Store(format!("keyring task failed: {error}")))?
+            .map_err(|error| {
+                CredentialsError::Store(format!(
+                    "credential admission unexpectedly closed: {error}"
+                ))
+            })?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.unset(&name, &account)
+        })
+        .await
+        .map_err(|error| CredentialsError::Store(format!("keyring task failed: {error}")))?
     }
 }
 
@@ -360,7 +382,7 @@ impl PluginFactory for CredentialsLocalFactory {
             store: Arc::clone(&self.store),
             environment,
             flights: Arc::new(Mutex::new(HashMap::new())),
-            admission: Arc::new(Semaphore::new(config.maximum_concurrent_resolutions)),
+            admission: Arc::new(Semaphore::new(config.maximum_concurrent_store_operations)),
             resolution_timeout: Duration::from_millis(config.resolution_timeout_ms),
         });
         let resolve: Arc<dyn CredentialsResolve> = service.clone();

@@ -21,6 +21,13 @@ use tokio::sync::Semaphore;
 
 /// Absolute number of codec imports admitted concurrently by one Media generation.
 pub const MAXIMUM_CONCURRENT_MEDIA_IMPORTS: usize = 32;
+/// Absolute encoded-source bytes retained by one Media generation.
+pub const MAXIMUM_INFLIGHT_SOURCE_BYTES: usize = MAXIMUM_IMAGE_INPUT_BYTES;
+/// Absolute source-visible codec working bytes retained by one Media generation.
+pub const MAXIMUM_INFLIGHT_DECODE_BYTES: usize = 1_600_000_000;
+/// Conservative encoded-source plus normalization working-set ceiling.
+pub const MAXIMUM_VISIBLE_MEDIA_IMPORT_BYTES: usize =
+    MAXIMUM_INFLIGHT_SOURCE_BYTES + MAXIMUM_INFLIGHT_DECODE_BYTES;
 
 /// Configuration accepted by [`MediaFactory`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -35,6 +42,12 @@ pub struct MediaConfig {
     /// Maximum codec imports executing concurrently in this generation.
     #[serde(default = "default_maximum_concurrent_imports")]
     pub maximum_concurrent_imports: usize,
+    /// Maximum encoded source bytes retained across admitted and waiting imports.
+    #[serde(default = "default_maximum_inflight_source_bytes")]
+    pub maximum_inflight_source_bytes: usize,
+    /// Maximum probed source-visible decode bytes executing concurrently.
+    #[serde(default = "default_maximum_inflight_decode_bytes")]
+    pub maximum_inflight_decode_bytes: usize,
 }
 
 const fn default_maximum_input_bytes() -> usize {
@@ -49,12 +62,22 @@ const fn default_maximum_concurrent_imports() -> usize {
     2
 }
 
+const fn default_maximum_inflight_source_bytes() -> usize {
+    MAXIMUM_INFLIGHT_SOURCE_BYTES
+}
+
+const fn default_maximum_inflight_decode_bytes() -> usize {
+    MAXIMUM_INFLIGHT_DECODE_BYTES
+}
+
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
             maximum_input_bytes: default_maximum_input_bytes(),
             maximum_pixels: default_maximum_pixels(),
             maximum_concurrent_imports: default_maximum_concurrent_imports(),
+            maximum_inflight_source_bytes: default_maximum_inflight_source_bytes(),
+            maximum_inflight_decode_bytes: default_maximum_inflight_decode_bytes(),
         }
     }
 }
@@ -78,6 +101,25 @@ impl MediaConfig {
                 "maximum_concurrent_imports must be within 1..={MAXIMUM_CONCURRENT_MEDIA_IMPORTS}"
             )));
         }
+        if self.maximum_inflight_source_bytes == 0
+            || self.maximum_inflight_source_bytes > MAXIMUM_INFLIGHT_SOURCE_BYTES
+        {
+            return Err(MediaError::InvalidInput(format!(
+                "maximum_inflight_source_bytes must be within 1..={MAXIMUM_INFLIGHT_SOURCE_BYTES}"
+            )));
+        }
+        if self.maximum_input_bytes > self.maximum_inflight_source_bytes {
+            return Err(MediaError::InvalidInput(
+                "maximum_input_bytes must not exceed maximum_inflight_source_bytes".into(),
+            ));
+        }
+        if self.maximum_inflight_decode_bytes == 0
+            || self.maximum_inflight_decode_bytes > MAXIMUM_INFLIGHT_DECODE_BYTES
+        {
+            return Err(MediaError::InvalidInput(format!(
+                "maximum_inflight_decode_bytes must be within 1..={MAXIMUM_INFLIGHT_DECODE_BYTES}"
+            )));
+        }
         Ok(())
     }
 }
@@ -87,6 +129,8 @@ struct Service {
     config: MediaConfig,
     backend: Arc<dyn MediaBackend>,
     import_admission: Arc<Semaphore>,
+    source_admission: Arc<Semaphore>,
+    decode_admission: Arc<Semaphore>,
 }
 
 #[async_trait]
@@ -99,12 +143,39 @@ impl Media for Service {
             )));
         }
         let maximum_pixels = self.config.maximum_pixels;
+        let source_permits = u32::try_from(source.len())
+            .map_err(|_| MediaError::InvalidInput("source image length is unsupported".into()))?;
+        let source_permit = Arc::clone(&self.source_admission)
+            .try_acquire_many_owned(source_permits)
+            .map_err(|_| MediaError::AdmissionFull("source-byte gate is saturated".into()))?;
         let permit = Arc::clone(&self.import_admission)
             .acquire_owned()
             .await
             .map_err(|_| MediaError::Codec("Media import admission is closed".into()))?;
+        let (source, working_bytes, permit, source_permit) =
+            tokio::task::spawn_blocking(move || {
+                let working_bytes = probe_image(&source, maximum_pixels)?;
+                Ok::<_, MediaError>((source, working_bytes, permit, source_permit))
+            })
+            .await
+            .map_err(|error| MediaError::Codec(format!("codec probe task failed: {error}")))??;
+        if working_bytes > self.config.maximum_inflight_decode_bytes {
+            return Err(MediaError::InvalidInput(format!(
+                "decode working set exceeds the configured {}-byte admission ceiling",
+                self.config.maximum_inflight_decode_bytes
+            )));
+        }
+        let decode_permits = u32::try_from(working_bytes).map_err(|_| {
+            MediaError::InvalidInput("decode admission weight is unsupported".into())
+        })?;
+        let decode_permit = Arc::clone(&self.decode_admission)
+            .acquire_many_owned(decode_permits)
+            .await
+            .map_err(|_| MediaError::Codec("Media decode-byte admission is closed".into()))?;
         let stored = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _count_permit = permit;
+            let _source_permit = source_permit;
+            let _decode_permit = decode_permit;
             normalize(source, maximum_pixels)
         })
         .await
@@ -183,10 +254,14 @@ impl PluginFactory for MediaFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<MediaConfig>()?;
         let maximum_concurrent_imports = config.maximum_concurrent_imports;
+        let maximum_inflight_source_bytes = config.maximum_inflight_source_bytes;
+        let maximum_inflight_decode_bytes = config.maximum_inflight_decode_bytes;
         let service = Arc::new(Service {
             config,
             backend: plan.local::<MediaBackendContract>()?,
             import_admission: Arc::new(Semaphore::new(maximum_concurrent_imports)),
+            source_admission: Arc::new(Semaphore::new(maximum_inflight_source_bytes)),
+            decode_admission: Arc::new(Semaphore::new(maximum_inflight_decode_bytes)),
         });
         let media: Arc<dyn Media> = service.clone();
         let read: Arc<dyn MediaRead> = service;
@@ -233,7 +308,7 @@ fn normalize(source: Arc<[u8]>, maximum_pixels: u64) -> Result<StoredMedia> {
     let mut image = image::DynamicImage::from_decoder(decoder)
         .map_err(|error| MediaError::Codec(error.to_string()))?;
     image.apply_orientation(orientation);
-    let image = image.to_rgba8();
+    let image = image.into_rgba8();
     let (width, height) = image.dimensions();
     let maximum_bytes = usize::try_from(MAXIMUM_IMAGE_DESCRIPTOR_BYTES).map_err(|_| {
         MediaError::InvalidInput("canonical image byte bound is unsupported".into())
@@ -272,6 +347,47 @@ fn normalize(source: Arc<[u8]>, maximum_pixels: u64) -> Result<StoredMedia> {
         reference,
         bytes: Arc::from(bytes),
     })
+}
+
+fn probe_image(source: &[u8], maximum_pixels: u64) -> Result<usize> {
+    let reader = ImageReader::new(Cursor::new(source))
+        .with_guessed_format()
+        .map_err(|error| MediaError::Codec(error.to_string()))?;
+    let decoder = reader
+        .into_decoder()
+        .map_err(|error| MediaError::Codec(error.to_string()))?;
+    let (width, height) = decoder.dimensions();
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| MediaError::InvalidInput("image dimensions overflow".into()))?;
+    if width == 0 || height == 0 || pixels > maximum_pixels {
+        return Err(MediaError::InvalidInput(format!(
+            "decoded image exceeds the {maximum_pixels}-pixel limit"
+        )));
+    }
+    visible_decode_bytes(decoder.total_bytes(), pixels)
+}
+
+fn visible_decode_bytes(decoded_bytes: u64, pixels: u64) -> Result<usize> {
+    let rgba_bytes = pixels
+        .checked_mul(4)
+        .ok_or_else(|| MediaError::InvalidInput("RGBA image length overflow".into()))?;
+    let working = decoded_bytes
+        .checked_mul(2)
+        .and_then(|twice| {
+            decoded_bytes
+                .checked_add(rgba_bytes)
+                .map(|sum| twice.max(sum))
+        })
+        .ok_or_else(|| MediaError::InvalidInput("decode working-set weight overflow".into()))?;
+    let working = usize::try_from(working)
+        .map_err(|_| MediaError::InvalidInput("decode working-set weight is unsupported".into()))?;
+    if working == 0 || working > MAXIMUM_INFLIGHT_DECODE_BYTES {
+        return Err(MediaError::InvalidInput(format!(
+            "decode working set exceeds {MAXIMUM_INFLIGHT_DECODE_BYTES} bytes"
+        )));
+    }
+    Ok(working)
 }
 
 #[derive(Debug)]
@@ -319,7 +435,10 @@ impl Write for BoundedWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::BoundedWriter;
+    use super::{
+        BoundedWriter, MAXIMUM_INFLIGHT_DECODE_BYTES, MAXIMUM_VISIBLE_MEDIA_IMPORT_BYTES,
+        visible_decode_bytes,
+    };
     use std::io::Write as _;
 
     #[test]
@@ -329,5 +448,15 @@ mod tests {
         assert!(output.write_all(b"de").is_err());
         assert!(output.exceeded());
         assert_eq!(output.into_inner(), b"abc");
+    }
+
+    #[test]
+    fn weighted_decode_admission_accepts_the_exact_current_codec_ceiling() {
+        assert_eq!(
+            visible_decode_bytes(800_000_000, 100_000_000).unwrap(),
+            MAXIMUM_INFLIGHT_DECODE_BYTES
+        );
+        assert!(visible_decode_bytes(800_000_001, 100_000_000).is_err());
+        assert_eq!(MAXIMUM_VISIBLE_MEDIA_IMPORT_BYTES, 1_868_435_456);
     }
 }

@@ -80,6 +80,16 @@ impl BlockingStore {
         *self.released.lock().unwrap() = true;
         self.release_changed.notify_all();
     }
+
+    fn block(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.release_changed.wait(released).unwrap();
+        }
+        self.completed.notify_one();
+    }
 }
 
 impl SecretStore for BlockingStore {
@@ -88,13 +98,7 @@ impl SecretStore for BlockingStore {
         _service: &str,
         _account: &str,
     ) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.entered.notify_one();
-        let mut released = self.released.lock().unwrap();
-        while !*released {
-            released = self.release_changed.wait(released).unwrap();
-        }
-        self.completed.notify_one();
+        self.block();
         Ok(Some(SecretValue::new("secret").unwrap()))
     }
 
@@ -104,12 +108,90 @@ impl SecretStore for BlockingStore {
         _account: &str,
         _secret: &SecretValue,
     ) -> rsi_credentials_protocol::Result<()> {
-        unreachable!("singleflight test does not mutate credentials")
+        self.block();
+        Ok(())
     }
 
     fn unset(&self, _service: &str, _account: &str) -> rsi_credentials_protocol::Result<bool> {
-        unreachable!("singleflight test does not mutate credentials")
+        self.block();
+        Ok(true)
     }
+}
+
+#[tokio::test]
+async fn admin_and_resolve_share_admission_and_dropped_admin_waiter_keeps_its_permit() {
+    let admin_reference = CredentialRef::new("rsi.ai.openai", "admin").unwrap();
+    let resolve_reference = CredentialRef::new("rsi.ai.openai", "resolve").unwrap();
+    let store = Arc::new(BlockingStore::default());
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.credentials.local",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(CredentialsLocalFactory::with_store(
+                    store.clone(),
+                    BTreeMap::new(),
+                )),
+            ),
+            json!({
+                "service":"rsiversi",
+                "maximum_concurrent_store_operations":1
+            }),
+        )
+        .await
+        .unwrap();
+    let admin = runtime
+        .root()
+        .lookup_local::<CredentialsAdminContract>()
+        .unwrap();
+    let resolve = runtime
+        .root()
+        .lookup_local::<CredentialsResolveContract>()
+        .unwrap();
+
+    let admin_task = tokio::spawn({
+        let admin = Arc::clone(&admin);
+        async move {
+            admin
+                .set(&admin_reference, SecretValue::new("secret").unwrap())
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), store.entered.notified())
+        .await
+        .unwrap();
+    let resolve_task = tokio::spawn({
+        let resolve = Arc::clone(&resolve);
+        async move { resolve.resolve(&resolve_reference).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), store.entered.notified())
+            .await
+            .is_err()
+    );
+    admin_task.abort();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), store.entered.notified())
+            .await
+            .is_err(),
+        "dropping the admin waiter released a still-running Store operation"
+    );
+
+    store.release();
+    tokio::time::timeout(Duration::from_secs(1), store.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve_task.await.unwrap().unwrap().secret.expose_secret(),
+        "secret"
+    );
+    assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+    drop(admin);
+    drop(resolve);
+    assert!(fiber.dispose().await.is_clean());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -284,7 +366,7 @@ async fn different_references_obey_the_configured_backend_admission_limit() {
             ),
             json!({
                 "service":"rsiversi",
-                "maximum_concurrent_resolutions":1
+                "maximum_concurrent_store_operations":1
             }),
         )
         .await
@@ -345,7 +427,7 @@ async fn timed_out_unadmitted_reference_does_not_leave_background_work() {
             ),
             json!({
                 "service":"rsiversi",
-                "maximum_concurrent_resolutions":1,
+                "maximum_concurrent_store_operations":1,
                 "resolution_timeout_ms":50
             }),
         )

@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
+#[cfg(unix)]
+use rsi_sandbox::MAXIMUM_SANDBOX_WRAPPER_BYTES;
 use rsi_sandbox::{
-    MAXIMUM_SANDBOX_WRAPPER_BYTES, ProcessRequest, SandboxBackend, SandboxContract, SandboxError,
-    SandboxMode,
+    ProcessRequest, SandboxBackend, SandboxContract, SandboxError, SandboxFileSystem, SandboxMode,
+    SandboxNetwork, SandboxScratch,
 };
 use rsi_sandbox_local::{SandboxLocalFactory, SandboxProbe};
 use serde_json::json;
@@ -90,11 +92,12 @@ async fn bubblewrap_precedes_landlock_and_stamp_matches_selected_wrapper() {
         .unwrap();
     assert!(matches!(
         plan.stamp.backend,
-        SandboxBackend::Bubblewrap { ref path }
-            if path != &bwrap && path.file_name().is_some_and(|name| name == "wrapper")
+        SandboxBackend::Bubblewrap { ref sha256 }
+            if sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     ));
-    assert!(plan.stamp.workspace_writable);
-    assert!(!plan.stamp.network_restricted);
+    assert_eq!(plan.stamp.filesystem, SandboxFileSystem::WorkspaceWrite);
+    assert_eq!(plan.stamp.scratch, SandboxScratch::PrivateTmp);
+    assert_eq!(plan.stamp.network, SandboxNetwork::Host);
     assert!(plan.arguments.windows(3).any(|args| args[0] == "--bind"));
     assert_eq!(std::fs::read(&plan.program).unwrap(), b"probe");
 
@@ -102,7 +105,148 @@ async fn bubblewrap_precedes_landlock_and_stamp_matches_selected_wrapper() {
     assert!(fiber.dispose().await.is_clean());
 }
 
-#[cfg(unix)]
+#[tokio::test]
+async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_rejected() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bwrap = temporary.path().join("bwrap");
+    std::fs::write(&bwrap, b"probe").unwrap();
+    let probe = Arc::new(Probe {
+        replace_during_probe: None,
+        calls: Mutex::new(vec![]),
+    });
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "private-tmp-test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::with_probe(probe)),
+            ),
+            json!({"bubblewrap":[bwrap],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let workspace_root = tempfile::tempdir_in("/tmp").unwrap();
+    let workspace = std::fs::canonicalize(workspace_root.path()).unwrap();
+    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+    let plan = sandbox
+        .confine(ProcessRequest {
+            mode: SandboxMode::WorkspaceWrite,
+            program: shell.clone(),
+            arguments: vec![],
+            cwd: workspace.clone(),
+            workspace: workspace.clone(),
+        })
+        .await
+        .unwrap();
+    let tmpfs = plan
+        .arguments
+        .windows(2)
+        .position(|pair| pair[0] == "--tmpfs" && pair[1] == "/tmp")
+        .unwrap();
+    let bind = plan
+        .arguments
+        .windows(3)
+        .position(|triple| triple[0] == "--bind" && triple[1] == workspace)
+        .unwrap();
+    assert!(tmpfs < bind);
+    let read_only = sandbox
+        .confine(ProcessRequest {
+            mode: SandboxMode::ReadOnly,
+            program: shell.clone(),
+            arguments: vec![],
+            cwd: workspace.clone(),
+            workspace: workspace.clone(),
+        })
+        .await
+        .unwrap();
+    let read_only_tmpfs = read_only
+        .arguments
+        .windows(2)
+        .position(|pair| pair[0] == "--tmpfs" && pair[1] == "/tmp")
+        .unwrap();
+    let read_only_bind = read_only
+        .arguments
+        .windows(3)
+        .position(|triple| triple[0] == "--ro-bind" && triple[1] == workspace)
+        .expect("read-only workspace below /tmp must be rebound after the private tmpfs");
+    assert!(read_only_tmpfs < read_only_bind);
+    for mode in [SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite] {
+        assert!(matches!(
+            sandbox
+                .confine(ProcessRequest {
+                    mode,
+                    program: shell.clone(),
+                    arguments: vec![],
+                    cwd: PathBuf::from("/tmp"),
+                    workspace: PathBuf::from("/tmp"),
+                })
+                .await,
+            Err(SandboxError::InvalidInput(message)) if message.contains("exactly /tmp")
+        ));
+        assert!(matches!(
+            sandbox
+                .confine(ProcessRequest {
+                    mode,
+                    program: shell.clone(),
+                    arguments: vec![],
+                    cwd: PathBuf::from("/"),
+                    workspace: PathBuf::from("/"),
+                })
+                .await,
+            Err(SandboxError::InvalidInput(message)) if message.contains("filesystem root")
+        ));
+    }
+
+    drop(sandbox);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn landlock_rejects_the_filesystem_root_as_a_restricted_workspace() {
+    let temporary = tempfile::tempdir().unwrap();
+    let landlock = temporary.path().join("landlock-run");
+    std::fs::write(&landlock, b"probe").unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "landlock-root-test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::with_probe(Arc::new(Probe {
+                    replace_during_probe: None,
+                    calls: Mutex::new(vec![]),
+                }))),
+            ),
+            json!({"bubblewrap":[],"landlock":[landlock]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+
+    assert!(matches!(
+        sandbox
+            .confine(ProcessRequest {
+                mode: SandboxMode::WorkspaceWrite,
+                program: std::fs::canonicalize("/bin/sh").unwrap(),
+                arguments: vec![],
+                cwd: PathBuf::from("/"),
+                workspace: PathBuf::from("/"),
+            })
+            .await,
+        Err(SandboxError::InvalidInput(message)) if message.contains("filesystem root")
+    ));
+
+    drop(sandbox);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn restricted_plan_preserves_non_utf8_workspace_bytes() {
     use std::ffi::OsString;
@@ -194,8 +338,7 @@ async fn failed_probe_falls_through_to_the_next_explicit_candidate() {
         .unwrap();
     assert!(matches!(
         plan.stamp.backend,
-        SandboxBackend::Bubblewrap { path }
-            if path != second && path.file_name().is_some_and(|name| name == "wrapper")
+        SandboxBackend::Bubblewrap { sha256 } if sha256.len() == 64
     ));
     assert_eq!(
         probe.calls.lock().unwrap().as_slice(),
@@ -403,6 +546,13 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
     assert!(bubblewrap.is_file(), "native bubblewrap is unavailable");
     let temporary = tempfile::tempdir().unwrap();
     let workspace = std::fs::canonicalize(temporary.path()).unwrap();
+    let host_tmp_marker = PathBuf::from(format!(
+        "/tmp/rsi-sandbox-host-marker-{}",
+        std::process::id()
+    ));
+    std::fs::write(&host_tmp_marker, b"host").unwrap();
+    let setsid = PathBuf::from("/usr/bin/setsid");
+    assert!(setsid.is_file(), "native setsid is unavailable");
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
     let runtime = Runtime::default();
     let fiber = runtime
@@ -428,7 +578,10 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
     };
 
     let read_only = sandbox
-        .confine(request(SandboxMode::ReadOnly, "printf blocked > denied"))
+        .confine(request(
+            SandboxMode::ReadOnly,
+            "/usr/bin/setsid /bin/sh -c 'printf blocked > denied'",
+        ))
         .await
         .unwrap();
     let denied = tokio::process::Command::new(&read_only.program)
@@ -443,7 +596,10 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
     let writable = sandbox
         .confine(request(
             SandboxMode::WorkspaceWrite,
-            "printf allowed > allowed",
+            &format!(
+                "test ! -e '{}' && test -r /proc/self/status && printf allowed > allowed && /usr/bin/setsid /bin/sh -c 'printf nested > nested'",
+                host_tmp_marker.display()
+            ),
         ))
         .await
         .unwrap();
@@ -462,7 +618,12 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
         std::fs::read_to_string(workspace.join("allowed")).unwrap(),
         "allowed"
     );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("nested")).unwrap(),
+        "nested"
+    );
 
+    std::fs::remove_file(host_tmp_marker).unwrap();
     drop(sandbox);
     assert!(fiber.dispose().await.is_clean());
 }
