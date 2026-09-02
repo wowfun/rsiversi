@@ -132,7 +132,7 @@ async fn active_capacity_releases_after_settlement_and_termination_kills_the_gro
     assert!(outcome.signal.is_some());
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while PathBuf::from(format!("/proc/{child}")).exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -341,10 +341,19 @@ async fn per_stream_capture_limit_rejects_limit_plus_one_before_spawn() {
 async fn provider_retirement_escalates_term_to_kill_and_waits_for_reaping() {
     let (fiber, process) = activated(json!({"shutdown_timeout_ms":1000})).await;
     let managed = process
-        .spawn(spec("trap '' TERM; while :; do /bin/sleep 1; done", 1024))
+        .spawn(spec(
+            "trap '' TERM; printf ready; while :; do /bin/sleep 1; done",
+            1024,
+        ))
         .unwrap();
     let pid = managed.pid();
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while managed.stdout().read_from(0).unwrap().bytes != b"ready" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fixture process did not install its TERM handler");
     drop(process);
     assert!(fiber.dispose().await.is_clean());
     let outcome = managed.wait().await.unwrap();

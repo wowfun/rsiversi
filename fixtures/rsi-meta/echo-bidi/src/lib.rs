@@ -42,6 +42,7 @@ impl NativePlugin for EchoPlugin {
             call_release_path: config.call_release_path,
             destroy_entered_path: config.destroy_entered_path,
             destroy_release_path: config.destroy_release_path,
+            destroy_thread_path: config.destroy_thread_path,
             upstream: None,
         })
     }
@@ -60,6 +61,7 @@ struct EchoConfig {
     call_release_path: Option<String>,
     destroy_entered_path: Option<String>,
     destroy_release_path: Option<String>,
+    destroy_thread_path: Option<String>,
     validate_entered_path: Option<String>,
     validate_release_path: Option<String>,
     validate_overlap_path: Option<String>,
@@ -87,6 +89,7 @@ impl EchoConfig {
             call_release_path: optional_path(value, "call_release_path")?,
             destroy_entered_path: optional_path(value, "destroy_entered_path")?,
             destroy_release_path: optional_path(value, "destroy_release_path")?,
+            destroy_thread_path: optional_path(value, "destroy_thread_path")?,
             validate_entered_path: optional_path(value, "validate_entered_path")?,
             validate_release_path: optional_path(value, "validate_release_path")?,
             validate_overlap_path: optional_path(value, "validate_overlap_path")?,
@@ -129,6 +132,7 @@ impl EchoConfig {
             "call_release_path": self.call_release_path,
             "destroy_entered_path": self.destroy_entered_path,
             "destroy_release_path": self.destroy_release_path,
+            "destroy_thread_path": self.destroy_thread_path,
             "validate_entered_path": self.validate_entered_path,
             "validate_release_path": self.validate_release_path,
             "validate_overlap_path": self.validate_overlap_path,
@@ -144,6 +148,7 @@ impl EchoConfig {
             &self.call_release_path,
             &self.destroy_entered_path,
             &self.destroy_release_path,
+            &self.destroy_thread_path,
             &self.validate_entered_path,
             &self.validate_release_path,
             &self.validate_overlap_path,
@@ -190,6 +195,7 @@ struct EchoInstance {
     call_release_path: Option<String>,
     destroy_entered_path: Option<String>,
     destroy_release_path: Option<String>,
+    destroy_thread_path: Option<String>,
     upstream: Option<rsi_meta_native::Capability>,
 }
 
@@ -281,12 +287,29 @@ impl NativeInstance for EchoInstance {
 
 impl Drop for EchoInstance {
     fn drop(&mut self) {
+        if let Some(path) = &self.destroy_thread_path {
+            let name = current_thread_name();
+            let _ = std::fs::write(path, name);
+        }
         let _ = signal_and_wait(
             self.destroy_entered_path.as_deref(),
             self.destroy_release_path.as_deref(),
         );
         std::thread::sleep(std::time::Duration::from_millis(self.destroy_delay_ms));
     }
+}
+
+fn current_thread_name() -> String {
+    // A cdylib has its own Rust thread registry, so it cannot recover a host-created worker's
+    // Rust name. Linux exposes the current task name directly (truncated to 15 bytes by the OS).
+    #[cfg(target_os = "linux")]
+    if let Ok(name) = std::fs::read_to_string("/proc/thread-self/comm") {
+        return name.trim_end().to_owned();
+    }
+    std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_owned()
 }
 
 fn delay(config: &Value, field: &str) -> Result<u64, String> {

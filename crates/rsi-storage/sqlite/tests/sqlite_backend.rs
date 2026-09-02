@@ -8,7 +8,6 @@ use rsi_storage_sqlite::SqliteStorageFactory;
 use serde_json::{Value, json};
 use std::fs;
 use std::sync::Arc;
-use std::time::Duration;
 
 fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactory {
     ResolvedFactory::linked(id, "test", UpdateMode::Replayable, factory)
@@ -70,19 +69,6 @@ async fn sqlite_round_trip_and_version_mismatch_are_visible_at_domain_seam() {
     domain.put("a", json!([1, 2, 3])).await.unwrap();
     assert_eq!(domain.snapshot().await["a"], json!([1, 2, 3]));
 
-    let locking = rusqlite::Connection::open(&path).unwrap();
-    locking.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let blocked_put = tokio::spawn({
-        let domain = Arc::clone(&domain);
-        async move { domain.put("busy", json!(true)).await }
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !blocked_put.is_finished(),
-        "a transient SQLite writer lock must wait instead of failing immediately"
-    );
-    locking.execute_batch("COMMIT").unwrap();
-    blocked_put.await.unwrap().unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

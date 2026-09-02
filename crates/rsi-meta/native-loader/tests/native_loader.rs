@@ -71,6 +71,26 @@ fn wait_for_callback_quiescence(catalog: &NativeCatalog) {
     assert_eq!(catalog.snapshot().active_callbacks, 0);
 }
 
+async fn wait_for_staging_release_async(catalog: &NativeCatalog) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while catalog.snapshot().staging_bytes != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("native staging admission did not drain");
+}
+
+async fn wait_for_callback_quiescence_async(catalog: &NativeCatalog) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while catalog.snapshot().active_callbacks != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("native callback admission did not drain");
+}
+
 fn wait_for_catalog_ownership_release(cache: &Path) -> NativeCatalog {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {

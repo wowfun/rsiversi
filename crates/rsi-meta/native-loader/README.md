@@ -142,7 +142,13 @@ instance gate linearizes idle, busy, and poisoned in one admission state;
 callers cannot observe an old poison fact and later claim a reopened gate.
 These gates are fail-fast and do not retain hidden waiter queues.
 Destruction and factory finalization have separately reserved bounded lanes, so
-ordinary callback saturation cannot strand teardown.
+ordinary callback saturation cannot strand teardown. Destruction workers use a
+short indexed thread name, and production callback workers use
+`rsi-cb-<operation>`; both remain distinguishable under Linux's 15-byte `comm`
+limit. Foreign lifecycle behavior remains covered on every supported platform,
+while fixture assertions on the host-created destruction thread name are
+Linux-only because a separately linked cdylib cannot portably read Rust's
+host-side thread registry.
 Loader-owned panic payloads and payloads raised while destroying them cross
 separate unwind boundaries. Only a final payload whose own destruction panics
 again is deliberately forgotten so teardown can continue.

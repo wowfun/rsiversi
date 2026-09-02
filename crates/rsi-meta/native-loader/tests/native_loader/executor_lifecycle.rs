@@ -1,5 +1,29 @@
 use super::*;
 
+fn release_gate_watchdog(
+    release: PathBuf,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (cancel, cancelled) = std::sync::mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if cancelled.recv_timeout(Duration::from_secs(5)).is_err() {
+            let _ = std::fs::write(release, b"watchdog-release");
+        }
+    });
+    (cancel, watchdog)
+}
+
+#[cfg(target_os = "linux")]
+fn assert_destroy_worker(path: &Path) {
+    let name = std::fs::read_to_string(path).expect("fixture recorded destroy thread name");
+    assert!(
+        name.starts_with("rsi-native-d-"),
+        "foreign destruction ran on unexpected thread `{name}`"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_destroy_worker(_path: &Path) {}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn callback_admission_fails_before_spawning_an_extra_native_thread() {
@@ -53,7 +77,7 @@ async fn prepared_creates_fail_fast_at_the_shared_factory_gate() {
         .unwrap();
     wait_active(&upstream).await;
     let factory = catalog.load(native_fixture()).unwrap();
-    wait_for_callback_quiescence(&catalog);
+    wait_for_callback_quiescence_async(&catalog).await;
     let markers = tempfile::tempdir().unwrap();
     let first_entered = markers.path().join("first-create-entered");
     let first_release = markers.path().join("first-create-release");
@@ -326,8 +350,13 @@ async fn timed_out_native_call_defers_destruction_until_the_callback_returns() {
     assert_eq!(retained.host_capabilities, 1, "{retained:?}");
     assert_eq!(retained.pending_instance_destructions, 0, "{retained:?}");
 
-    let disposal = tokio::spawn(async move { native.dispose().await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (disposal_started, started) = tokio::sync::oneshot::channel();
+    let disposal = tokio::spawn(async move {
+        let _ = disposal_started.send(());
+        native.dispose().await
+    });
+    started.await.expect("disposal task entered");
+    tokio::task::yield_now().await;
     assert!(
         !disposal.is_finished(),
         "cleanup completed while its native callback was still running"
@@ -353,7 +382,7 @@ async fn timed_out_native_call_defers_destruction_until_the_callback_returns() {
         .unwrap();
     assert!(report.is_clean(), "{report:?}");
     wait_for_catalog_marker(&destroy_entered, &catalog).await;
-    wait_for_callback_quiescence(&catalog);
+    wait_for_callback_quiescence_async(&catalog).await;
     let released = catalog.snapshot();
     assert_eq!(released.active_callbacks, 0, "{released:?}");
     assert_eq!(released.active_instances, 0, "{released:?}");
@@ -413,6 +442,11 @@ async fn native_create_timeout_terminalizes_without_publishing_the_fiber() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn publication_failure_never_runs_native_destruction_on_the_executor() {
+    let markers = tempfile::tempdir().unwrap();
+    let destroy_entered = markers.path().join("destroy-entered");
+    let destroy_release = markers.path().join("destroy-release");
+    let destroy_thread = markers.path().join("destroy-thread");
+    let (cancel_watchdog, watchdog) = release_gate_watchdog(destroy_release.clone());
     let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(100));
     let runtime = Runtime::default();
     let upstream = runtime
@@ -429,71 +463,69 @@ async fn publication_failure_never_runs_native_destruction_on_the_executor() {
     wait_active(&collision).await;
 
     let factory = catalog.load(native_fixture()).unwrap();
+    let config = json!({
+        "prefix": "native:",
+        "destroy_entered_path": destroy_entered,
+        "destroy_release_path": destroy_release,
+        "destroy_thread_path": destroy_thread
+    });
     let application = tokio::spawn({
         let root = runtime.root();
-        async move {
-            root.apply(
-                factory,
-                json!({
-                    "prefix": "native:",
-                    "create_delay_ms": 50,
-                    "destroy_delay_ms": 200
-                }),
-            )
-            .await
-        }
+        async move { root.apply(factory, config).await }
     });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if runtime
-                .snapshot()
-                .fibers
-                .iter()
-                .any(|fiber| matches!(fiber.state, FiberState::Loading))
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("native activation did not begin");
-    let started = std::time::Instant::now();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_file(&destroy_entered).await;
+    wait_for_file(&destroy_thread).await;
+    assert_destroy_worker(&destroy_thread);
     assert!(
-        started.elapsed() < Duration::from_millis(180),
-        "publication failure ran the foreign destructor on the current-thread executor"
+        !application.is_finished(),
+        "publication failure did not join the gated foreign destructor"
     );
-    let native = application.await.unwrap().unwrap();
+    std::fs::write(&destroy_release, b"release").unwrap();
+    let native = tokio::time::timeout(Duration::from_secs(2), application)
+        .await
+        .expect("publication failure did not join released destruction")
+        .unwrap()
+        .unwrap();
+    let _ = cancel_watchdog.send(());
+    watchdog.join().unwrap();
     assert!(matches!(native.snapshot().state, FiberState::Failed(_)));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_instance_cleanup_joins_destruction_beyond_the_callback_deadline() {
+    let markers = tempfile::tempdir().unwrap();
+    let destroy_entered = markers.path().join("destroy-entered");
+    let destroy_release = markers.path().join("destroy-release");
+    let destroy_thread = markers.path().join("destroy-thread");
+    let (cancel_watchdog, watchdog) = release_gate_watchdog(destroy_release.clone());
     let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(100));
     let runtime = Runtime::default();
     let (native, _service) = apply_delayed_native(
         &runtime,
         &catalog,
-        json!({ "prefix": "native:", "destroy_delay_ms": 200 }),
+        json!({
+            "prefix": "native:",
+            "destroy_entered_path": destroy_entered,
+            "destroy_release_path": destroy_release,
+            "destroy_thread_path": destroy_thread
+        }),
     )
     .await;
-    let started = std::time::Instant::now();
     let disposal = tokio::spawn(async move { native.dispose().await });
-    tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "foreign destructor blocked the current-thread executor"
-    );
+    wait_for_file(&destroy_entered).await;
+    wait_for_file(&destroy_thread).await;
+    assert_destroy_worker(&destroy_thread);
     assert!(
         !disposal.is_finished(),
         "cleanup completed before the foreign destructor returned"
     );
+    std::fs::write(&destroy_release, b"release").unwrap();
     let report = tokio::time::timeout(Duration::from_secs(1), disposal)
         .await
         .expect("cleanup did not join its foreign destructor")
         .unwrap();
+    let _ = cancel_watchdog.send(());
+    watchdog.join().unwrap();
     assert!(report.is_clean(), "{report:?}");
 }
 
@@ -659,6 +691,13 @@ async fn blocked_native_finalization_enforces_the_live_instance_boundary() {
 
 #[tokio::test]
 async fn catalog_destruction_lane_bounds_concurrent_foreign_cleanup() {
+    let markers = tempfile::tempdir().unwrap();
+    let first_entered = markers.path().join("first-entered");
+    let first_release = markers.path().join("first-release");
+    let first_thread = markers.path().join("first-thread");
+    let second_entered = markers.path().join("second-entered");
+    let second_release = markers.path().join("second-release");
+    let second_thread = markers.path().join("second-thread");
     let cache = tempfile::tempdir().unwrap();
     let mut options = CatalogOptions::new(cache.path());
     options.callback_timeout = Duration::from_secs(1);
@@ -669,19 +708,47 @@ async fn catalog_destruction_lane_bounds_concurrent_foreign_cleanup() {
     let (first, first_service) = apply_delayed_native(
         &first_runtime,
         &catalog,
-        json!({ "prefix": "first:", "destroy_delay_ms": 100 }),
+        json!({
+            "prefix": "first:",
+            "destroy_entered_path": first_entered,
+            "destroy_release_path": first_release,
+            "destroy_thread_path": first_thread
+        }),
     )
     .await;
     let (second, second_service) = apply_delayed_native(
         &second_runtime,
         &catalog,
-        json!({ "prefix": "second:", "destroy_delay_ms": 100 }),
+        json!({
+            "prefix": "second:",
+            "destroy_entered_path": second_entered,
+            "destroy_release_path": second_release,
+            "destroy_thread_path": second_thread
+        }),
     )
     .await;
 
     let first_disposal = tokio::spawn(async move { first.dispose().await });
-    let second_disposal = tokio::spawn(async move { second.dispose().await });
+    wait_for_file(&first_entered).await;
+    wait_for_file(&first_thread).await;
+    assert_destroy_worker(&first_thread);
+    let (second_started, second_entered_disposal) = tokio::sync::oneshot::channel();
+    let second_disposal = tokio::spawn(async move {
+        let _ = second_started.send(());
+        second.dispose().await
+    });
+    second_entered_disposal
+        .await
+        .expect("second disposal task entered");
+    tokio::task::yield_now().await;
+    assert!(!second_disposal.is_finished());
+    assert!(!second_entered.exists());
+    std::fs::write(&first_release, b"release").unwrap();
     assert!(first_disposal.await.unwrap().is_clean());
+    wait_for_file(&second_entered).await;
+    wait_for_file(&second_thread).await;
+    assert_destroy_worker(&second_thread);
+    std::fs::write(&second_release, b"release").unwrap();
     assert!(second_disposal.await.unwrap().is_clean());
 
     drop(first_service);

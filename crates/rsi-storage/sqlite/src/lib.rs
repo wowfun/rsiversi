@@ -613,3 +613,115 @@ fn validate_and_privatize_open_file(
 fn set_sqlite_sidecar_permissions(_path: &std::path::Path) -> Result<(), StorageError> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Condvar, Mutex as StdMutex};
+
+    struct BusyProbe {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        released: StdMutex<bool>,
+        release_changed: Condvar,
+    }
+
+    static BUSY_PROBE: StdMutex<Option<Arc<BusyProbe>>> = StdMutex::new(None);
+
+    fn gated_busy_handler(_attempt: i32) -> bool {
+        let probe = BUSY_PROBE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+            .expect("test busy handler requires an installed probe");
+        let _ = probe.entered.send(());
+        let released = probe
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(
+            probe
+                .release_changed
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        true
+    }
+
+    #[tokio::test]
+    async fn writer_contention_waits_after_a_real_sqlite_busy_callback() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("domains.sqlite3");
+        let backend = Arc::new(SqliteBackend::open(&path).unwrap());
+        {
+            let connection = backend
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let timeout_ms = connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap();
+            assert_eq!(timeout_ms, 5_000);
+        }
+
+        let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let probe = Arc::new(BusyProbe {
+            entered,
+            released: StdMutex::new(false),
+            release_changed: Condvar::new(),
+        });
+        {
+            let mut installed = BUSY_PROBE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(installed.replace(Arc::clone(&probe)).is_none());
+        }
+        backend
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .busy_handler(Some(gated_busy_handler))
+            .unwrap();
+
+        let locking = Connection::open(&path).unwrap();
+        locking.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let blocked_put = tokio::spawn({
+            let backend = Arc::clone(&backend);
+            async move {
+                backend
+                    .put("projection", 1, "busy", &Value::Bool(true))
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("SQLite did not invoke the busy callback")
+            .expect("busy probe closed before contention");
+        assert!(
+            !blocked_put.is_finished(),
+            "the operation returned while its real busy callback was gated"
+        );
+
+        locking.execute_batch("COMMIT").unwrap();
+        *probe
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        probe.release_changed.notify_all();
+        tokio::time::timeout(Duration::from_secs(2), blocked_put)
+            .await
+            .expect("writer did not resume after releasing the real lock")
+            .unwrap()
+            .unwrap();
+        backend
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .busy_handler(None)
+            .unwrap();
+        BUSY_PROBE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}

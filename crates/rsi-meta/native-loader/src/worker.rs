@@ -90,7 +90,7 @@ impl NativeExecutor {
             let receiver = Arc::clone(&destruction_receiver);
             let worker_stats = Arc::clone(&stats);
             std::thread::Builder::new()
-                .name(format!("rsi-meta-native-destroy-{index}"))
+                .name(format!("rsi-native-d-{index}"))
                 .spawn(move || destruction_worker(&receiver, &worker_stats))?;
         }
 
@@ -115,7 +115,7 @@ impl NativeExecutor {
         let activity = Activity::begin_callback(Arc::clone(&self.stats));
         let (sender, receiver) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
-            .name(format!("rsi-meta-native-{name}"))
+            .name(callback_thread_name(name))
             .spawn(move || {
                 // Reverse local drop order decrements activity before making
                 // admission reusable, after send and rejected-result drop.
@@ -139,7 +139,7 @@ impl NativeExecutor {
         let activity = Activity::begin_callback(Arc::clone(&self.stats));
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
-            .name(format!("rsi-meta-native-{name}"))
+            .name(callback_thread_name(name))
             .spawn(move || {
                 // Reverse local drop order decrements activity before making
                 // admission reusable, after send and rejected-result drop.
@@ -260,6 +260,10 @@ impl NativeExecutor {
             queued_destructions: self.stats.queued_destructions.load(Ordering::Relaxed),
         }
     }
+}
+
+fn callback_thread_name(operation: &str) -> String {
+    format!("rsi-cb-{operation}")
 }
 
 #[must_use = "dropping the guard ends pending native instance destruction accounting"]
@@ -494,6 +498,23 @@ impl Drop for TimeoutPublication<'_> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn production_callback_thread_names_fit_linux_comm_and_retain_operation() {
+        for operation in ["load", "prepare", "serve", "create", "activate"] {
+            assert!(callback_thread_name(operation).len() <= 15);
+        }
+        let executor = NativeExecutor::new(1, 1, 1, 1).unwrap();
+        let receiver = executor
+            .spawn_blocking_callback("activate", || {
+                std::thread::current().name().map(str::to_owned)
+            })
+            .unwrap();
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Some("rsi-cb-activate".into())
+        );
+    }
 
     struct DropSignal(Arc<Notify>);
 

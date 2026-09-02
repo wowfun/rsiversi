@@ -604,12 +604,20 @@ fn catalog_rejects_a_fifo_without_waiting_for_a_writer() {
             .expect("run mkfifo")
             .success()
     );
-    let started = std::time::Instant::now();
-    assert!(matches!(
-        catalog.load(&path),
-        Err(rsi_meta_native_loader::LoaderError::InvalidInput(_))
-    ));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let load = std::thread::spawn(move || {
+        let result = matches!(
+            catalog.load(&path),
+            Err(rsi_meta_native_loader::LoaderError::InvalidInput(_))
+        );
+        let _ = result_tx.send(result);
+    });
+    assert!(
+        result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("FIFO open blocked instead of using the nonblocking file boundary")
+    );
+    load.join().unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -666,7 +674,7 @@ async fn cache_commit_rejects_staging_mutation_after_native_validation_started()
         load.await.unwrap(),
         Err(LoaderError::StagedArtifactChanged)
     ));
-    wait_for_staging_release(&catalog);
+    wait_for_staging_release_async(&catalog).await;
     let snapshot = catalog.snapshot();
     assert_eq!(snapshot.cache_artifacts, 0);
     assert_eq!(snapshot.cache_bytes, 0);

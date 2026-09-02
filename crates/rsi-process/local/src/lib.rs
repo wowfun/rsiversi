@@ -881,7 +881,7 @@ mod tests {
         old.release_active();
 
         old.terminate();
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
 
         let registry = lock_registry(&service);
         assert_eq!(registry.active, 1);
