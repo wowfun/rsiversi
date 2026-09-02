@@ -5,18 +5,20 @@
 
 mod json_extract;
 mod json_projection;
+mod sse;
 
 pub use json_extract::{
     BoundedJsonExtractor, JsonExtractEvent, JsonExtractProgress, JsonExtraction,
     JsonExtractionLimits,
 };
 pub use json_projection::{JsonProjectionLimits, project_json_body};
+pub use sse::{SseData, SseStream, decode_sse};
 
 use std::{
     collections::{HashMap, HashSet},
     fmt,
     pin::Pin,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -26,7 +28,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt as _};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
-use memchr::memchr2;
 use rsi_ai_protocol::{
     AiError, DispatchStatus, ErrorKind, ErrorPhase, TokenUsage, sanitize_error_summary,
     validate_identifier,
@@ -40,16 +41,10 @@ use zeroize::Zeroizing;
 
 /// Default ceiling for delta-oriented SSE provider frames.
 pub const DEFAULT_SSE_FRAME_BYTES: usize = 256 * 1024;
+/// Maximum bytes in one production HTTP response stream item.
+pub const MAX_HTTP_RESPONSE_ITEM_BYTES: usize = 256 * 1024;
 /// Absolute ceiling a concrete provider may select for one SSE frame.
 pub const MAX_PROVIDER_SSE_FRAME_BYTES: usize = MAX_PROVIDER_REQUEST_BODY_BYTES;
-const SSE_FRAME_ADMISSION_UNIT_BYTES: usize = 1024 * 1024;
-const MAXIMUM_SSE_FRAME_ADMISSION_UNITS: usize =
-    MAX_PROVIDER_SSE_FRAME_BYTES / SSE_FRAME_ADMISSION_UNIT_BYTES;
-static SSE_FRAME_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
-    Arc::new(tokio::sync::Semaphore::new(
-        MAXIMUM_SSE_FRAME_ADMISSION_UNITS,
-    ))
-});
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
@@ -75,8 +70,6 @@ pub fn bearer_authorization_header(secret: &SecretValue) -> Result<HeaderValue, 
 
 /// Pull-based HTTP body bytes. Each transport failure is terminal.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, TransportError>> + Send + 'static>>;
-/// Pull-based decoded SSE `data` fields.
-pub type SseStream = Pin<Box<dyn Stream<Item = Result<String, TransportError>> + Send + 'static>>;
 
 enum RequestBodyPart {
     Bytes(Bytes),
@@ -623,7 +616,8 @@ impl fmt::Debug for HttpRequest {
 pub struct HttpResponse {
     pub status: u16,
     pub headers: HeaderMap,
-    /// Pull-based response body; each transport failure is terminal.
+    /// Pull-based response body; production transport items are bounded by
+    /// [`MAX_HTTP_RESPONSE_ITEM_BYTES`] and each transport failure is terminal.
     pub body: ByteStream,
 }
 
@@ -722,7 +716,21 @@ impl HttpTransport for ReqwestTransport {
                         return;
                     }
                     next = body.next() => match next {
-                        Some(Ok(bytes)) => yield Ok(bytes),
+                        Some(Ok(bytes)) if bytes.len() <= MAX_HTTP_RESPONSE_ITEM_BYTES => {
+                            yield Ok(bytes);
+                        }
+                        Some(Ok(bytes)) => {
+                            // Copy before yielding so no bounded slice retains the complete
+                            // oversized upstream backing allocation across a consumer yield.
+                            let items = bytes
+                                .chunks(MAX_HTTP_RESPONSE_ITEM_BYTES)
+                                .map(Bytes::copy_from_slice)
+                                .collect::<Vec<_>>();
+                            drop(bytes);
+                            for item in items {
+                                yield Ok(item);
+                            }
+                        }
                         Some(Err(error)) => {
                             yield Err(reqwest_error(&error));
                             return;
@@ -929,153 +937,6 @@ pub fn reclassify_context_limit(error: AiError) -> AiError {
         error.with_kind(ErrorKind::ContextLimit)
     } else {
         error
-    }
-}
-
-/// Decodes SSE framing incrementally under one provider-selected finite frame bound.
-#[allow(clippy::too_many_lines)] // One state machine owns cross-chunk CR/LF and frame grammar.
-pub fn decode_sse(
-    mut body: ByteStream,
-    termination: SseTermination,
-    maximum_frame_bytes: usize,
-) -> SseStream {
-    Box::pin(stream! {
-        let admission_units = match sse_frame_admission_units(maximum_frame_bytes) {
-            Ok(units) => units,
-            Err(error) => {
-                yield Err(error);
-                return;
-            }
-        };
-        let Ok(_frame_admission) = Arc::clone(&SSE_FRAME_ADMISSION)
-            .acquire_many_owned(admission_units)
-            .await
-        else {
-            yield Err(TransportError::new(
-                "sse.admission_closed",
-                "SSE frame admission is closed",
-            ));
-            return;
-        };
-        let mut frame = Vec::new();
-        let mut line = Vec::new();
-        let mut previous_was_cr = false;
-        let mut done = false;
-        while let Some(chunk) = body.next().await {
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    yield Err(error);
-                    return;
-                }
-            };
-            let mut offset = 0;
-            if previous_was_cr && chunk.first() == Some(&b'\n') {
-                offset = 1;
-            }
-            previous_was_cr = false;
-            while offset < chunk.len() {
-                let Some(relative) = memchr2(b'\r', b'\n', &chunk[offset..]) else {
-                    line.extend_from_slice(&chunk[offset..]);
-                    if frame.len().saturating_add(line.len()) > maximum_frame_bytes {
-                        yield Err(TransportError::new(
-                            "sse.frame_too_large",
-                            format!("SSE frame exceeds {maximum_frame_bytes} bytes"),
-                        ));
-                        return;
-                    }
-                    break;
-                };
-                let terminator = offset + relative;
-                line.extend_from_slice(&chunk[offset..terminator]);
-                if frame.len().saturating_add(line.len()) > maximum_frame_bytes {
-                    yield Err(TransportError::new(
-                        "sse.frame_too_large",
-                        format!("SSE frame exceeds {maximum_frame_bytes} bytes"),
-                    ));
-                    return;
-                }
-                if line.is_empty() {
-                    let complete = std::mem::take(&mut frame);
-                    match decode_sse_frame(&complete) {
-                        Ok(Some(data))
-                            if termination == SseTermination::DoneSentinel && data == "[DONE]" => {
-                            done = true;
-                            break;
-                        }
-                        Ok(Some(data)) => yield Ok(data),
-                        Ok(None) => {}
-                        Err(error) => {
-                            yield Err(error);
-                            return;
-                        }
-                    }
-                } else {
-                    frame.append(&mut line);
-                    frame.push(b'\n');
-                }
-                previous_was_cr = chunk[terminator] == b'\r';
-                offset = terminator + 1;
-                if previous_was_cr && chunk.get(offset) == Some(&b'\n') {
-                    offset += 1;
-                    previous_was_cr = false;
-                }
-                if done { break; }
-            }
-            if done {
-                break;
-            }
-        }
-        if done {
-            return;
-        }
-        if !frame.is_empty() || !line.is_empty() {
-            yield Err(TransportError::new(
-                "sse.incomplete_frame",
-                "SSE stream ended inside a frame",
-            ));
-            return;
-        }
-        if termination == SseTermination::DoneSentinel {
-            yield Err(TransportError::new(
-                "sse.missing_done",
-                "SSE stream ended without [DONE]",
-            ));
-        }
-    })
-}
-
-fn sse_frame_admission_units(maximum_frame_bytes: usize) -> Result<u32, TransportError> {
-    if maximum_frame_bytes == 0 || maximum_frame_bytes > MAX_PROVIDER_SSE_FRAME_BYTES {
-        return Err(TransportError::new(
-            "sse.invalid_frame_limit",
-            format!("SSE frame limit must be between 1 and {MAX_PROVIDER_SSE_FRAME_BYTES} bytes"),
-        ));
-    }
-    let units = maximum_frame_bytes.saturating_add(SSE_FRAME_ADMISSION_UNIT_BYTES - 1)
-        / SSE_FRAME_ADMISSION_UNIT_BYTES;
-    u32::try_from(units).map_err(|_| {
-        TransportError::new(
-            "sse.invalid_frame_limit",
-            "SSE frame admission weight exceeds its representation",
-        )
-    })
-}
-
-fn decode_sse_frame(frame: &[u8]) -> Result<Option<String>, TransportError> {
-    let text = std::str::from_utf8(frame)
-        .map_err(|_| TransportError::new("sse.invalid_utf8", "SSE frame is not valid UTF-8"))?;
-    let mut data = Vec::new();
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(value) = line.strip_prefix("data:") {
-            data.push(value.strip_prefix(' ').unwrap_or(value));
-        }
-    }
-    if data.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(data.join("\n")))
     }
 }
 

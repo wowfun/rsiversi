@@ -1,7 +1,7 @@
 use rsi_ai_protocol::{
     AiCapability, ContentDelta, ContentStart, DeferredLanguageBatch, DeferredLanguageCheckpoint,
     DeferredStatus, LanguageAssembler, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, ModelRef,
-    PreparedCallSnapshot, RetryPolicy,
+    PreparedCallSnapshot, ProviderExtension, RetryPolicy,
 };
 use serde_json::json;
 
@@ -50,6 +50,52 @@ fn runtime_contracts_revalidate_during_deserialization() {
         "provider_state": null
     }))
     .expect_err("terminal checkpoint without a sequence must fail during decode");
+}
+
+#[test]
+fn deferred_checkpoint_wire_is_stable_while_clones_share_immutable_state() {
+    let provider_state =
+        ProviderExtension::new("fixture", 1, json!({"cursor": 7})).expect("bounded state");
+    let checkpoint = DeferredLanguageCheckpoint::new(
+        PreparedCallSnapshot {
+            call_id: "call-1".to_owned(),
+            deployment_id: "deployment".to_owned(),
+            provider_family: "provider".to_owned(),
+            capability: AiCapability::Language,
+            model: "model".to_owned(),
+            protocol: "protocol".to_owned(),
+            transport: "transport".to_owned(),
+            endpoint_fingerprint: "endpoint".to_owned(),
+            config_generation: 1,
+            credential_source: None,
+            retry_policy: RetryPolicy::default(),
+            request_sha256: "0".repeat(64),
+        },
+        "operation-1",
+        DeferredStatus::InProgress,
+        Some(provider_state),
+    )
+    .expect("valid checkpoint");
+    let encoded = serde_json::to_string(&checkpoint).expect("serializable checkpoint");
+    assert_eq!(
+        encoded,
+        concat!(
+            r#"{"call":{"call_id":"call-1","deployment_id":"deployment","provider_family":"provider","capability":"language","model":"model","protocol":"protocol","transport":"transport","endpoint_fingerprint":"endpoint","config_generation":1,"credential_source":null,"retry_policy":{"max_retries":2,"retryable_kinds":["rate_limited","server","timeout","transport","output_validation"],"initial_delay_ms":500,"max_delay_ms":10000,"jitter_per_mille":100},"request_sha256":"#,
+            "\"",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            r#""},"operation_id":"operation-1","status":"in_progress","event_stream_terminal":false,"sequence_number":null,"provider_state":{"namespace":"fixture","version":1,"value":{"cursor":7}}}"#,
+        )
+    );
+
+    let clone = checkpoint.clone();
+    assert!(std::ptr::eq(checkpoint.call(), clone.call()));
+    assert!(std::ptr::eq(
+        checkpoint.provider_state().unwrap().value(),
+        clone.provider_state().unwrap().value(),
+    ));
+    let decoded: DeferredLanguageCheckpoint =
+        serde_json::from_str(&encoded).expect("stable wire decodes");
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
 }
 
 #[test]

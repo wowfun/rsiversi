@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::fmt;
 
-use crate::{MAX_EXTENSION_BYTES, MAX_ID_BYTES, MAX_JSON_DEPTH, MAX_JSON_NODES};
+use crate::{MAX_ID_BYTES, MAX_JSON_DEPTH, MAX_JSON_NODES};
 
 /// Validates the shared provider-neutral identifier syntax and byte bound.
 pub fn identifier(field: &str, value: &str) -> Result<(), String> {
@@ -25,17 +25,6 @@ pub(crate) fn tool_name(field: &str, value: &str) -> Result<(), String> {
     {
         return Err(format!(
             "{field} must start with an ASCII alphanumeric and contain only ASCII alphanumerics, '.', '_', or '-'"
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn extension_size(field: &str, value: &serde_json::Value) -> Result<(), String> {
-    let encoded = serde_json::to_vec(value)
-        .map_err(|error| format!("{field} could not be encoded: {error}"))?;
-    if encoded.len() > MAX_EXTENSION_BYTES {
-        return Err(format!(
-            "{field} exceeds the {MAX_EXTENSION_BYTES}-byte encoded limit"
         ));
     }
     Ok(())

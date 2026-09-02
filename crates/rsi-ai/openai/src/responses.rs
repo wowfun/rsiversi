@@ -237,7 +237,7 @@ fn validate_responses_request(request: &LanguageRequest) -> Result<(), AiError> 
 }
 
 fn responses_replay_id(extension: &ProviderExtension) -> Result<&str, AiError> {
-    if extension.namespace != "openai.responses.replay" || extension.version != 0 {
+    if extension.namespace() != "openai.responses.replay" || extension.version() != 0 {
         return Err(ai_error(
             ErrorKind::Unsupported,
             ErrorPhase::Prepare,
@@ -246,7 +246,7 @@ fn responses_replay_id(extension: &ProviderExtension) -> Result<&str, AiError> {
         ));
     }
     extension
-        .value
+        .value()
         .get("response_id")
         .and_then(Value::as_str)
         .filter(|response_id| !response_id.is_empty())
@@ -516,10 +516,7 @@ fn deferred_status_at(value: &str, phase: ErrorPhase) -> Result<DeferredStatus, 
 }
 
 #[allow(clippy::needless_pass_by_value)] // Directly usable with Result::map_err.
-fn deferred_checkpoint_error(
-    phase: ErrorPhase,
-    error: rsi_ai_provider::ProviderSdkError,
-) -> AiError {
+fn deferred_checkpoint_error(phase: ErrorPhase, error: impl std::fmt::Display) -> AiError {
     ai_error(
         ErrorKind::Protocol,
         phase,
@@ -873,11 +870,25 @@ struct StoredResponsesParser {
     saw_tool: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ResponsesParser {
     next_index: u32,
     open: BTreeMap<String, OpenBlock>,
     saw_tool: bool,
+    provider_state: ProviderExtension,
+    provider_state_dirty: bool,
+}
+
+impl Default for ResponsesParser {
+    fn default() -> Self {
+        Self {
+            next_index: 0,
+            open: BTreeMap::new(),
+            saw_tool: false,
+            provider_state: empty_parser_provider_state(),
+            provider_state_dirty: false,
+        }
+    }
 }
 
 impl ResponsesParser {
@@ -885,7 +896,8 @@ impl ResponsesParser {
         let Some(state) = state else {
             return Ok(Self::default());
         };
-        if state.namespace != DEFERRED_PARSER_NAMESPACE || state.version != DEFERRED_PARSER_VERSION
+        if state.namespace() != DEFERRED_PARSER_NAMESPACE
+            || state.version() != DEFERRED_PARSER_VERSION
         {
             return Err(ai_error(
                 ErrorKind::Protocol,
@@ -895,7 +907,7 @@ impl ResponsesParser {
             ));
         }
         let stored: StoredResponsesParser =
-            serde_json::from_value(state.value.clone()).map_err(|_| {
+            serde_json::from_value(state.value().clone()).map_err(|_| {
                 ai_error(
                     ErrorKind::Protocol,
                     ErrorPhase::DeferredPoll,
@@ -942,10 +954,15 @@ impl ResponsesParser {
             next_index: stored.next_index,
             open,
             saw_tool: stored.saw_tool,
+            provider_state: state.clone(),
+            provider_state_dirty: false,
         })
     }
 
-    fn provider_state(&self) -> ProviderExtension {
+    fn provider_state(&mut self) -> ProviderExtension {
+        if !self.provider_state_dirty {
+            return self.provider_state.clone();
+        }
         let stored = StoredResponsesParser {
             next_index: self.next_index,
             open: self
@@ -959,11 +976,14 @@ impl ResponsesParser {
                 .collect(),
             saw_tool: self.saw_tool,
         };
-        ProviderExtension {
-            namespace: DEFERRED_PARSER_NAMESPACE.to_owned(),
-            version: DEFERRED_PARSER_VERSION,
-            value: serde_json::to_value(stored).expect("parser state is serializable"),
-        }
+        self.provider_state = ProviderExtension::new(
+            DEFERRED_PARSER_NAMESPACE,
+            DEFERRED_PARSER_VERSION,
+            serde_json::to_value(stored).expect("parser state is serializable"),
+        )
+        .expect("bounded parser state is valid");
+        self.provider_state_dirty = false;
+        self.provider_state.clone()
     }
 
     #[allow(clippy::too_many_lines)] // One exhaustive transition owns the Responses stream grammar.
@@ -1025,6 +1045,7 @@ impl ResponsesParser {
                             kind: block_kind,
                         },
                     );
+                    self.provider_state_dirty = true;
                 }
                 let block = self.open.get(&key).expect("block inserted");
                 let delta =
@@ -1055,6 +1076,15 @@ impl ResponsesParser {
                     )?;
                     let name =
                         required_response_string(item, "name", "OpenAI tool call has no name")?;
+                    let key = parser_block_key(item_id, OpenBlockKind::Tool, None);
+                    if self.open.contains_key(&key) {
+                        return Err(ai_error(
+                            ErrorKind::Protocol,
+                            ErrorPhase::Stream,
+                            DispatchStatus::Dispatched,
+                            "OpenAI Responses repeated a function item id",
+                        ));
+                    }
                     if usize::try_from(self.next_index)
                         .map_or(true, |value| value >= rsi_ai_protocol::MAX_CONTENT_BLOCKS)
                     {
@@ -1080,25 +1110,14 @@ impl ResponsesParser {
                             },
                         },
                     });
-                    let key = parser_block_key(item_id, OpenBlockKind::Tool, None);
-                    if self
-                        .open
-                        .insert(
-                            key,
-                            OpenBlock {
-                                index,
-                                kind: OpenBlockKind::Tool,
-                            },
-                        )
-                        .is_some()
-                    {
-                        return Err(ai_error(
-                            ErrorKind::Protocol,
-                            ErrorPhase::Stream,
-                            DispatchStatus::Dispatched,
-                            "OpenAI Responses repeated a function item id",
-                        ));
-                    }
+                    self.open.insert(
+                        key,
+                        OpenBlock {
+                            index,
+                            kind: OpenBlockKind::Tool,
+                        },
+                    );
+                    self.provider_state_dirty = true;
                     let arguments_field = if item_type == Some("custom_tool_call") {
                         "input"
                     } else {
@@ -1163,7 +1182,7 @@ impl ResponsesParser {
                 } else {
                     FinishReason::Stop
                 };
-                self.finish_response(response, reason, &mut output);
+                self.finish_response(response, reason, &mut output)?;
             }
             "response.output_text.annotation.added" => {
                 let item_id =
@@ -1202,7 +1221,7 @@ impl ResponsesParser {
             "response.incomplete" => {
                 let response = event.get("response").unwrap_or(&Value::Null);
                 if is_max_output_incomplete(event) {
-                    self.finish_response(response, FinishReason::MaxTokens, &mut output);
+                    self.finish_response(response, FinishReason::MaxTokens, &mut output)?;
                 } else {
                     output.push(language_failed(ai_error(
                         ErrorKind::Server,
@@ -1248,10 +1267,11 @@ impl ResponsesParser {
         response: &Value,
         reason: FinishReason,
         output: &mut Vec<LanguageEvent>,
-    ) {
+    ) -> Result<(), AiError> {
         for block in std::mem::take(&mut self.open).into_values() {
             output.push(LanguageEvent::ContentFinished { index: block.index });
         }
+        self.provider_state_dirty = true;
         if let Some(usage) = response.get("usage") {
             output.push(LanguageEvent::Usage {
                 usage: responses_usage(usage),
@@ -1260,13 +1280,43 @@ impl ResponsesParser {
         let replay = response
             .get("id")
             .and_then(Value::as_str)
-            .map(|id| ProviderExtension {
-                namespace: "openai.responses.replay".to_owned(),
-                version: 0,
-                value: json!({"response_id":id}),
-            });
+            .map(|id| {
+                if id.is_empty() {
+                    return Err(ai_error(
+                        ErrorKind::OutputValidation,
+                        ErrorPhase::Stream,
+                        DispatchStatus::Dispatched,
+                        "OpenAI response id is outside replay-state bounds",
+                    ));
+                }
+                ProviderExtension::new("openai.responses.replay", 0, json!({"response_id":id}))
+                    .map_err(|_| {
+                        ai_error(
+                            ErrorKind::OutputValidation,
+                            ErrorPhase::Stream,
+                            DispatchStatus::Dispatched,
+                            "OpenAI response id is outside replay-state bounds",
+                        )
+                    })
+            })
+            .transpose()?;
         output.push(LanguageEvent::Finished { reason, replay });
+        Ok(())
     }
+}
+
+fn empty_parser_provider_state() -> ProviderExtension {
+    ProviderExtension::new(
+        DEFERRED_PARSER_NAMESPACE,
+        DEFERRED_PARSER_VERSION,
+        serde_json::to_value(StoredResponsesParser {
+            next_index: 0,
+            open: Vec::new(),
+            saw_tool: false,
+        })
+        .expect("empty parser state is serializable"),
+    )
+    .expect("empty parser state is valid")
 }
 
 fn responses_failure(event: &Value) -> AiError {
@@ -1395,13 +1445,14 @@ fn translate_responses(mut input: rsi_ai_transport::SseStream) -> LanguageAdapte
                     return;
                 }
             };
-            let event = match parse_provider_json(&payload, ErrorPhase::Stream) {
+            let event = match parse_provider_json(payload.as_str(), ErrorPhase::Stream) {
                 Ok(event) => event,
                 Err(error) => {
                     yield Ok(language_failed(error));
                     return;
                 }
             };
+            drop(payload);
             let events = match parser.apply(&event) {
                 Ok(events) => events,
                 Err(error) => {
@@ -1409,6 +1460,7 @@ fn translate_responses(mut input: rsi_ai_transport::SseStream) -> LanguageAdapte
                     return;
                 }
             };
+            drop(event);
             let terminal = events.iter().any(is_language_terminal_event);
             for event in events {
                 yield Ok(event);
@@ -1434,7 +1486,8 @@ fn translate_deferred_responses(
     Box::pin(try_stream! {
         while let Some(payload) = input.next().await {
             let payload = payload.map_err(transport_stream_error)?;
-            let event = parse_provider_json(&payload, ErrorPhase::Stream)?;
+            let event = parse_provider_json(payload.as_str(), ErrorPhase::Stream)?;
+            drop(payload);
             let sequence = event.get("sequence_number").and_then(Value::as_u64).ok_or_else(|| {
                 ai_error(ErrorKind::Protocol, ErrorPhase::DeferredPoll, DispatchStatus::Dispatched, "OpenAI background stream event has no sequence_number")
             })?;
@@ -1450,6 +1503,7 @@ fn translate_deferred_responses(
                 sequence,
                 parser.provider_state(),
             )?;
+            drop(event);
             let event_stream_terminal = batch.checkpoint().event_stream_terminal();
             yield batch;
             if event_stream_terminal {
@@ -1592,6 +1646,29 @@ fn deferred_transport_error(error: TransportError, phase: ErrorPhase) -> AiError
 mod tests {
     use super::*;
 
+    fn deferred_test_checkpoint() -> DeferredLanguageCheckpoint {
+        DeferredLanguageCheckpoint::new(
+            rsi_ai_protocol::PreparedCallSnapshot {
+                call_id: "deployment:1".to_owned(),
+                deployment_id: "deployment".to_owned(),
+                provider_family: "openai".to_owned(),
+                capability: rsi_ai_protocol::AiCapability::Language,
+                model: "model".to_owned(),
+                protocol: "responses".to_owned(),
+                transport: "https".to_owned(),
+                endpoint_fingerprint: "endpoint".to_owned(),
+                config_generation: 1,
+                credential_source: None,
+                retry_policy: rsi_ai_protocol::RetryPolicy::default(),
+                request_sha256: "0".repeat(64),
+            },
+            "response-1",
+            DeferredStatus::Queued,
+            Some(empty_parser_provider_state()),
+        )
+        .expect("test checkpoint")
+    }
+
     #[test]
     fn documented_queued_event_preserves_deferred_status() {
         let event = json!({
@@ -1602,6 +1679,155 @@ mod tests {
             deferred_event_status("response.queued", &event, DeferredStatus::Queued,)
                 .expect("documented queued event"),
             DeferredStatus::Queued
+        );
+    }
+
+    #[test]
+    fn rejected_deferred_batch_does_not_advance_the_shared_checkpoint() {
+        let initial = deferred_test_checkpoint();
+        let checkpoint = Mutex::new(initial.clone());
+        let events = vec![
+            LanguageEvent::ContentFinished { index: 0 };
+            rsi_ai_protocol::MAX_CONTENT_BLOCKS + 3
+        ];
+
+        assert!(
+            commit_deferred_batch(
+                &checkpoint,
+                events,
+                "response.output_item.done",
+                &json!({"type": "response.output_item.done", "sequence_number": 1}),
+                1,
+                empty_parser_provider_state(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            *checkpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            initial
+        );
+    }
+
+    #[test]
+    fn ordinary_text_deltas_reuse_the_cached_provider_state() {
+        let mut parser = ResponsesParser::default();
+        let delta = "x".repeat(32);
+        let event = json!({
+            "type": "response.output_text.delta",
+            "item_id": "message-1",
+            "content_index": 0,
+            "delta": delta,
+        });
+        let first_events = parser.apply(&event).expect("first delta");
+        assert_eq!(first_events.len(), 2);
+        let first_state = parser.provider_state();
+        let mut emitted = first_events.len();
+
+        for _ in 1..10_000 {
+            let events = parser.apply(&event).expect("ordinary delta");
+            assert_eq!(events.len(), 1);
+            emitted += events.len();
+            let state = parser.provider_state();
+            assert!(std::ptr::eq(first_state.value(), state.value()));
+        }
+
+        assert_eq!(emitted, 10_001);
+    }
+
+    #[test]
+    fn duplicate_tool_item_is_rejected_without_mutating_parser_state() {
+        let mut parser = ResponsesParser::default();
+        let event = json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item-1",
+                "call_id": "call-1",
+                "name": "lookup",
+                "arguments": "{}"
+            }
+        });
+        parser.apply(&event).expect("first tool item");
+        let checkpoint = parser.provider_state();
+
+        parser
+            .apply(&event)
+            .expect_err("a repeated provider item id must be rejected");
+
+        let key = parser_block_key("item-1", OpenBlockKind::Tool, None);
+        assert_eq!(parser.next_index, 1);
+        assert_eq!(parser.open.get(&key).expect("original block").index, 0);
+        assert!(!parser.provider_state_dirty);
+        assert_eq!(parser.provider_state(), checkpoint);
+    }
+
+    #[test]
+    fn deferred_parser_wire_and_output_are_stable_across_open_block_counts() {
+        for block_count in [1_u32, 16, 256] {
+            let mut parser = ResponsesParser::default();
+            for index in 0..block_count {
+                parser
+                    .apply(&json!({
+                        "type": "response.output_text.delta",
+                        "item_id": format!("message-{index}"),
+                        "content_index": 0,
+                        "delta": "x",
+                    }))
+                    .expect("bounded open block");
+            }
+            let state = parser.provider_state();
+            assert_eq!(state.value()["next_index"], json!(block_count));
+            assert_eq!(
+                state.value()["open"].as_array().expect("open blocks").len(),
+                block_count as usize
+            );
+            assert_eq!(state.value()["saw_tool"], json!(false));
+
+            let wire = serde_json::to_vec(&state).expect("state wire");
+            let decoded: ProviderExtension =
+                serde_json::from_slice(&wire).expect("state wire decodes");
+            assert_eq!(serde_json::to_vec(&decoded).unwrap(), wire);
+
+            let next = json!({
+                "type": "response.output_text.delta",
+                "item_id": "message-0",
+                "content_index": 0,
+                "delta": "next",
+            });
+            let expected = parser.apply(&next).expect("resident parser advances");
+            let mut restored =
+                ResponsesParser::from_provider_state(Some(&state)).expect("state restores");
+            assert_eq!(restored.apply(&next).unwrap(), expected);
+            assert_eq!(restored.provider_state(), parser.provider_state());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_event_finishes_without_waiting_for_the_http_body_to_close() {
+        let first = futures_util::stream::once(async {
+            Ok::<_, TransportError>(bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\"}}\n\n",
+            ))
+        });
+        let stalled = futures_util::stream::pending();
+        let body: ByteStream = Box::pin(first.chain(stalled));
+        let input = decode_sse(body, SseTermination::Eof, MAX_DEFERRED_CONTROL_BODY_BYTES);
+        let mut events = translate_responses(input);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+                .await
+                .expect("terminal event was not emitted")
+                .expect("terminal event")
+                .expect("valid terminal event"),
+            LanguageEvent::Finished { .. }
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+                .await
+                .expect("adapter polled the stalled body after its terminal event")
+                .is_none()
         );
     }
 }

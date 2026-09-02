@@ -20,11 +20,7 @@ fn call() -> PreparedCallSnapshot {
 }
 
 fn state() -> ProviderExtension {
-    ProviderExtension {
-        namespace: "provider.deferred".to_owned(),
-        version: 0,
-        value: json!({"open":[]}),
-    }
+    ProviderExtension::new("provider.deferred", 0, json!({"open":[]})).unwrap()
 }
 
 #[test]

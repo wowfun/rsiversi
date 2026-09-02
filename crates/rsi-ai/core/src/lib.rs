@@ -14,10 +14,10 @@ use rsi_ai_protocol::{
     sanitize_error_summary,
 };
 use rsi_ai_provider::{
-    AbortSignal, DeferredLanguageAdapterHandle, DeferredLanguageCheckpoint as AdapterCheckpoint,
-    DurableMediaResolver, LanguageAdapterStream, LanguageRegistrar, LanguageRegistrarContract,
-    MediaResolver, MissingMediaResolver, PrepareContext, Prepared, ProviderLease,
-    ProviderRegistration, ProviderSdkError, RegistrationGate, validate_media_admission_bytes,
+    AbortSignal, DeferredLanguageAdapterHandle, DurableMediaResolver, LanguageAdapterStream,
+    LanguageRegistrar, LanguageRegistrarContract, MediaResolver, MissingMediaResolver,
+    PrepareContext, Prepared, ProviderLease, ProviderRegistration, ProviderSdkError,
+    RegistrationGate, validate_media_admission_bytes,
 };
 use rsi_credentials_protocol::{CredentialsResolve, CredentialsResolveContract};
 use rsi_media_protocol::MediaReadContract;
@@ -259,17 +259,16 @@ impl LanguageCall for Router {
         let context = self
             .restore_context(&route.registration, &checkpoint)
             .await?;
-        let adapter_checkpoint = AdapterCheckpoint::from_caller(&checkpoint)
-            .map_err(|error| invalid(error.to_string()))?;
+        let expected_call = checkpoint.call().clone();
         let operation = route
             .registration
             .language()
             .expect("route checked its Language facet")
-            .restore_deferred(context, adapter_checkpoint)
+            .restore_deferred(context, checkpoint)
             .await?;
         Ok(Box::new(PinnedDeferredOperation {
             operation,
-            expected_call: checkpoint.call().clone(),
+            expected_call,
         }))
     }
 }
@@ -401,7 +400,6 @@ impl DeferredLanguageCall for PinnedDeferredOperation {
         self.operation
             .poll(AbortSignal::from_cancellation_token(cancellation))
             .await
-            .map(Into::into)
     }
 
     async fn resume(
@@ -415,9 +413,6 @@ impl DeferredLanguageCall for PinnedDeferredOperation {
         let expected_call = self.expected_call.clone();
         Ok(Box::pin(stream.map(move |batch| {
             batch.and_then(|batch| {
-                let batch = batch
-                    .to_caller()
-                    .map_err(|error| invalid(error.to_string()))?;
                 if batch.checkpoint().call() != &expected_call {
                     return Err(invalid(
                         "provider deferred batch changed its pinned prepared-call snapshot",
@@ -432,23 +427,19 @@ impl DeferredLanguageCall for PinnedDeferredOperation {
         self.operation
             .cancel(AbortSignal::from_cancellation_token(cancellation))
             .await
-            .map(Into::into)
     }
 }
 
 fn project_deferred_checkpoint(
-    checkpoint: &AdapterCheckpoint,
+    checkpoint: &DeferredLanguageCheckpoint,
     expected_call: &PreparedCallSnapshot,
 ) -> Result<DeferredLanguageCheckpoint, AiError> {
-    let checkpoint = checkpoint
-        .to_caller()
-        .map_err(|error| invalid(error.to_string()))?;
     if checkpoint.call() != expected_call {
         return Err(invalid(
             "provider deferred checkpoint changed its pinned prepared-call snapshot",
         ));
     }
-    Ok(checkpoint)
+    Ok(checkpoint.clone())
 }
 
 fn validate_prepared_snapshot(

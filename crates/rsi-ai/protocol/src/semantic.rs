@@ -358,7 +358,7 @@ impl LanguageProfile {
     /// Returns whether private state may be forwarded to this exact profile.
     pub fn accepts_extension(&self, extension: &ProviderExtension) -> bool {
         self.accepted_provider_extensions.iter().any(|accepted| {
-            accepted.namespace == extension.namespace && accepted.version == extension.version
+            accepted.namespace == extension.namespace() && accepted.version == extension.version()
         })
     }
 
@@ -594,8 +594,8 @@ fn validate_message_content(
             validation::safe_text(field, text, MAX_REQUEST_BYTES, false)
                 .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))?;
         }
-        MessageContent::Reasoning { text, evidence } => {
-            validate_reasoning_content(text, evidence.as_ref(), field)?;
+        MessageContent::Reasoning { text, .. } => {
+            validate_reasoning_content(text, field)?;
         }
         MessageContent::Image(media) => {
             if media.kind() != MediaKind::Image {
@@ -689,21 +689,9 @@ fn message_content_allowed(role: MessageRole, block: &MessageContent) -> bool {
     )
 }
 
-fn validate_reasoning_content(
-    text: &str,
-    evidence: Option<&ProviderExtension>,
-    field: &str,
-) -> Result<(), SemanticError> {
+fn validate_reasoning_content(text: &str, field: &str) -> Result<(), SemanticError> {
     validation::safe_text(field, text, MAX_REQUEST_BYTES, false)
-        .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))?;
-    if let Some(evidence) = evidence {
-        evidence
-            .validate(&format!("{field}.evidence"))
-            .map_err(|error| {
-                SemanticError::new("message.invalid_content", field, error.to_string())
-            })?;
-    }
-    Ok(())
+        .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))
 }
 
 /// Function-tool selection policy.
@@ -1440,10 +1428,7 @@ fn validate_hosted_tools(hosted_tools: &[HostedTool]) -> Result<(), SemanticErro
 fn validate_extensions(extensions: &[ProviderExtension]) -> Result<(), SemanticError> {
     let mut namespaces = BTreeSet::new();
     for extension in extensions {
-        extension.validate("request.extensions").map_err(|error| {
-            SemanticError::new("request.invalid_extension", "extensions", error.to_string())
-        })?;
-        if !namespaces.insert(extension.namespace.as_str()) {
+        if !namespaces.insert(extension.namespace()) {
             return Err(SemanticError::new(
                 "request.duplicate_extension",
                 "extensions",

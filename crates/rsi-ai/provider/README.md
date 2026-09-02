@@ -9,9 +9,10 @@ sequence cursor, explicit event-stream terminal, and
 bounded parser state; accumulated model output remains caller-owned. Remote
 terminal status does not close resumption by itself because polling may observe
 completion before the caller has consumed any output events.
-Decoded provider checkpoints revalidate this complete contract. The public
-router reports an adapter-to-caller checkpoint conversion failure as a typed AI
-error; a provider contract violation must not panic the caller process.
+The provider SDK directly re-exports the protocol-owned deferred status,
+checkpoint, and batch types; it has no parallel representation or conversion
+step. Decoded durable checkpoints revalidate the complete protocol contract,
+and adapters advance the same typed checkpoint in place.
 
 Capability adapters expose a synchronous compatibility preflight with no
 credential, media, filesystem, or network access. Routers run it before

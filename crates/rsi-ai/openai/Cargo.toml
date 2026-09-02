@@ -38,3 +38,7 @@ rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "deferred_parser"
+harness = false

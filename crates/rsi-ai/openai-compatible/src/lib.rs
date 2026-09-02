@@ -776,7 +776,7 @@ fn translate_chat_stream(mut input: rsi_ai_transport::SseStream) -> LanguageAdap
                     return;
                 }
             };
-            let Ok(chunk) = serde_json::from_str::<ChatCompletionsChunk>(&payload) else {
+            let Ok(chunk) = serde_json::from_str::<ChatCompletionsChunk>(payload.as_str()) else {
                 yield Ok(failed(ai_error(
                     ErrorKind::Protocol,
                     ErrorPhase::Stream,
@@ -785,6 +785,7 @@ fn translate_chat_stream(mut input: rsi_ai_transport::SseStream) -> LanguageAdap
                 )));
                 return;
             };
+            drop(payload);
             if chunk.choices.len() > 1 {
                 yield Ok(failed(ai_error(
                     ErrorKind::OutputValidation,

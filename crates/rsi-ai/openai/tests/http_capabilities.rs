@@ -240,21 +240,9 @@ fn responses_replay_extension_is_fully_validated_before_start() {
         Arc::new(ReqwestTransport::new().expect("transport")),
     );
     for extension in [
-        ProviderExtension {
-            namespace: "another.provider".into(),
-            version: 0,
-            value: json!({"response_id":"resp-1"}),
-        },
-        ProviderExtension {
-            namespace: "openai.responses.replay".into(),
-            version: 0,
-            value: json!({"response_id":""}),
-        },
-        ProviderExtension {
-            namespace: "openai.responses.replay".into(),
-            version: 0,
-            value: json!({}),
-        },
+        ProviderExtension::new("another.provider", 0, json!({"response_id":"resp-1"})).unwrap(),
+        ProviderExtension::new("openai.responses.replay", 0, json!({"response_id":""})).unwrap(),
+        ProviderExtension::new("openai.responses.replay", 0, json!({})).unwrap(),
     ] {
         let request = LanguageRequest::new(vec![Message::user_text("continue").unwrap()])
             .unwrap()
@@ -325,6 +313,31 @@ async fn endpoint(
                 echoed_output
             )))
             .expect("large terminal response");
+    }
+    if uri.path() == "/v1/responses"
+        && body
+            .windows(b"oversized-response-id-case".len())
+            .any(|part| part == b"oversized-response-id-case")
+    {
+        let response_id = "r".repeat(rsi_ai_protocol::MAX_EXTENSION_BYTES);
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(format!(
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"status\":\"completed\"}}}}\n\ndata: [DONE]\n\n"
+            )))
+            .expect("oversized response id");
+    }
+    if uri.path() == "/v1/responses"
+        && body
+            .windows(b"empty-response-id-case".len())
+            .any(|part| part == b"empty-response-id-case")
+    {
+        return Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"\",\"status\":\"completed\"}}\n\ndata: [DONE]\n\n",
+            ))
+            .expect("empty response id");
     }
     if uri.path() == "/v1/responses"
         && body
@@ -725,7 +738,7 @@ async fn max_output_token_incomplete_response_preserves_partial_output() {
     );
     assert_eq!(output.usage.expect("usage").output_tokens, 8);
     assert_eq!(
-        output.replay.expect("replay").value["response_id"],
+        output.replay.expect("replay").value()["response_id"],
         "resp-limit"
     );
 }
@@ -800,6 +813,46 @@ async fn responses_accepts_a_terminal_snapshot_larger_than_the_default_delta_fra
         .await
         .expect("the terminal snapshot repeats already streamed output within its body bound");
     assert_eq!(output.visible_text(), "visible");
+}
+
+#[tokio::test]
+async fn responses_rejects_a_response_id_that_cannot_become_replay_state() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("oversized-response-id-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect_err("oversized provider response identity must be a typed stream failure");
+    let provider = error.provider_error().expect("provider error facts");
+    assert_eq!(provider.kind(), ErrorKind::OutputValidation);
+    assert_eq!(
+        provider.safe_summary(),
+        "OpenAI response id is outside replay-state bounds"
+    );
+}
+
+#[tokio::test]
+async fn responses_rejects_an_empty_response_id() {
+    let error = language_model(Capture::default())
+        .await
+        .complete(
+            LanguageRequest::new(vec![
+                Message::user_text("empty-response-id-case").expect("message"),
+            ])
+            .expect("request"),
+        )
+        .await
+        .expect_err("empty provider response identity must be a typed stream failure");
+    let provider = error.provider_error().expect("provider error facts");
+    assert_eq!(provider.kind(), ErrorKind::OutputValidation);
+    assert_eq!(
+        provider.safe_summary(),
+        "OpenAI response id is outside replay-state bounds"
+    );
 }
 
 #[tokio::test]

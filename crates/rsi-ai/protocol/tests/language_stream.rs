@@ -207,16 +207,7 @@ fn provider_extensions_obey_the_shared_json_complexity_bound() {
         value = serde_json::Value::Array(vec![value]);
     }
 
-    let mut assembler = LanguageAssembler::new();
-    let error = assembler
-        .push(&LanguageEvent::Finished {
-            reason: FinishReason::Stop,
-            replay: Some(ProviderExtension {
-                namespace: "provider.test".to_owned(),
-                version: 1,
-                value,
-            }),
-        })
+    let error = ProviderExtension::new("provider.test", 1, value)
         .expect_err("provider extensions use the shared JSON depth bound");
     assert_eq!(error.code(), "stream.invalid_extension");
 }

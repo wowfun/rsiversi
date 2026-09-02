@@ -52,7 +52,15 @@ error kind is otherwise retryable.
 SSE remains bounded per provider wire contract. OpenAI Responses admits a
 larger finite frame because documented terminal events may include the complete
 response; Chat-compatible providers retain the smaller default delta-frame
-bound. A decoder atomically acquires the complete selected frame weight from a
-fixed process-wide budget before reading response bytes, so concurrent large
-frames cannot create unbounded retention or partial-weight deadlock. Semantic
-output and event-count bounds still apply after decoding.
+bound. Each transport item has a separate 256 KiB ceiling, so an untrusted
+stream cannot retain a large multi-event backing allocation across consumer
+yields while accounting only for the current event. Larger frames are assembled
+from multiple bounded items. A decoder admits retained frame bytes incrementally from a fixed
+process-wide budget. Each unfinished frame declares its finite maximum, and
+growth is granted only while the complete set of unfinished claims remains in
+a safe state where every frame can finish in some order, releasing its
+admission for the remaining frames.
+Completed `data` values retain only their actual weight until the consumer
+drops them. This prevents both unbounded retention and partial-weight deadlock
+without serializing streams merely because their declared maxima overlap.
+Semantic output and event-count bounds still apply after decoding.

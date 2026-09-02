@@ -1,9 +1,10 @@
 use rsi_ai_protocol::{
     FreeformFormat, FreeformToolDefinition, HostedTool, LanguageModelLimits, LanguageModelProfiles,
-    LanguageProfile, LanguageRequest, LanguageSettings, MAX_LANGUAGE_MEDIA_BYTES,
-    MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_REQUEST_BYTES, MediaDescriptor, MediaKind, Message,
-    MessageContent, ProviderExtension, ProviderExtensionFormat, ReasoningEffort, ResponseFormat,
-    ToolCall, ToolCallKind, ToolChoice, ToolDefinition, validate_json_structure,
+    LanguageProfile, LanguageRequest, LanguageSettings, MAX_EXTENSION_BYTES,
+    MAX_LANGUAGE_MEDIA_BYTES, MAX_LANGUAGE_MEDIA_OCCURRENCES, MAX_REQUEST_BYTES, MediaDescriptor,
+    MediaKind, Message, MessageContent, ProviderExtension, ProviderExtensionFormat,
+    ReasoningEffort, ResponseFormat, ToolCall, ToolCallKind, ToolChoice, ToolDefinition,
+    validate_json_structure,
 };
 
 #[test]
@@ -157,24 +158,22 @@ fn language_profile_and_extension_formats_revalidate_during_deserialization() {
 }
 
 #[test]
-fn provider_extensions_and_reasoning_evidence_revalidate_at_every_public_boundary() {
-    let invalid = ProviderExtension {
-        namespace: "not valid".to_owned(),
-        version: 1,
-        value: json!({"proof": true}),
-    };
-    let error = Message::assistant(vec![MessageContent::Reasoning {
-        text: "reasoning".to_owned(),
-        evidence: Some(invalid.clone()),
-    }])
-    .expect_err("reasoning evidence must be validated");
-    assert_eq!(error.code(), "message.invalid_content");
-
-    let error = serde_json::from_value::<ProviderExtension>(
-        serde_json::to_value(invalid).expect("extension JSON"),
-    )
+fn provider_extensions_are_closed_at_construction_and_decode() {
+    assert!(ProviderExtension::new("not valid", 1, json!({"proof": true})).is_err());
+    let error = serde_json::from_value::<ProviderExtension>(json!({
+        "namespace": "not valid",
+        "version": 1,
+        "value": {"proof": true}
+    }))
     .expect_err("a direct extension decode must validate its namespace");
     assert!(error.to_string().contains("namespace"), "{error}");
+}
+
+#[test]
+fn provider_extension_bound_includes_its_complete_wire_envelope() {
+    let error = ProviderExtension::new("fixture", 1, json!("x".repeat(MAX_EXTENSION_BYTES - 2)))
+        .expect_err("a maximum-size value leaves no room for the extension envelope");
+    assert_eq!(error.code(), "stream.extension_too_large");
 }
 
 fn call(id: &str) -> MessageContent {
@@ -674,11 +673,9 @@ fn aggregate_request_size_is_rechecked_by_builders() {
     ])
     .expect("base request remains below the aggregate limit");
     let error = request
-        .with_extensions(vec![ProviderExtension {
-            namespace: "fixture".to_owned(),
-            version: 1,
-            value: json!("x".repeat(200_000)),
-        }])
+        .with_extensions(vec![
+            ProviderExtension::new("fixture", 1, json!("x".repeat(200_000))).unwrap(),
+        ])
         .expect_err("builder must recheck the complete request size");
     assert_eq!(error.code(), "request.too_large");
 }

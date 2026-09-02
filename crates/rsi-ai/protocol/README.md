@@ -20,6 +20,19 @@ Each normalized language event exposes the same context-free field validation
 for durable envelopes; `LanguageAssembler` adds ordering, aggregate, and
 terminal grammar across the complete event stream.
 
+`ProviderExtension` is a construction- and decode-validated closed value. Its
+namespace, version, JSON value, and exact encoded length are immutable and
+shared across clones; callers receive borrowed accessors rather than mutable
+fields or the internal `Arc`. Its JSON object shape and field order remain the
+durable wire contract. This package is also the sole authority for deferred
+status, checkpoint, and batch types. Checkpoint clones share frozen call and
+operation identity while advance validates only the new monotonic transition
+and the typed extension's cached encoded bound. Creating or decoding the closed
+extension performs its full identifier, JSON-structure, and size validation;
+trusted in-process checkpoint clones and batches do not serialize or revalidate
+that immutable state per event. Serialization preserves the existing six-field
+wire.
+
 Language tool declarations always retain a bounded JSON function schema and
 may additionally carry one bounded provider-neutral Lark freeform projection.
 Because Tools is a reusable capability with a wider identifier and JSON node

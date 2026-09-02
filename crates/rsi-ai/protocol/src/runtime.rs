@@ -1,10 +1,10 @@
-use std::{fmt, pin::Pin};
+use std::{fmt, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_credentials_protocol::CredentialSource;
 use rsi_meta_contract::LocalContract;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct as _};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -364,15 +364,35 @@ impl DeferredStatus {
 }
 
 /// Persistable cursor for a provider-managed background language response.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeferredLanguageCheckpoint {
-    call: PreparedCallSnapshot,
-    operation_id: String,
+    identity: Arc<DeferredLanguageIdentity>,
     status: DeferredStatus,
     event_stream_terminal: bool,
     sequence_number: Option<u64>,
     provider_state: Option<ProviderExtension>,
+}
+
+#[derive(Debug, PartialEq)]
+struct DeferredLanguageIdentity {
+    call: PreparedCallSnapshot,
+    operation_id: String,
+}
+
+impl Serialize for DeferredLanguageCheckpoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut wire = serializer.serialize_struct("DeferredLanguageCheckpoint", 6)?;
+        wire.serialize_field("call", &self.identity.call)?;
+        wire.serialize_field("operation_id", &self.identity.operation_id)?;
+        wire.serialize_field("status", &self.status)?;
+        wire.serialize_field("event_stream_terminal", &self.event_stream_terminal)?;
+        wire.serialize_field("sequence_number", &self.sequence_number)?;
+        wire.serialize_field("provider_state", &self.provider_state)?;
+        wire.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for DeferredLanguageCheckpoint {
@@ -393,8 +413,10 @@ impl<'de> Deserialize<'de> for DeferredLanguageCheckpoint {
 
         let wire = WireCheckpoint::deserialize(deserializer)?;
         let checkpoint = Self {
-            call: wire.call,
-            operation_id: wire.operation_id,
+            identity: Arc::new(DeferredLanguageIdentity {
+                call: wire.call,
+                operation_id: wire.operation_id,
+            }),
             status: wire.status,
             event_stream_terminal: wire.event_stream_terminal,
             sequence_number: wire.sequence_number,
@@ -416,8 +438,10 @@ impl DeferredLanguageCheckpoint {
         provider_state: Option<ProviderExtension>,
     ) -> Result<Self, AiContractError> {
         let checkpoint = Self {
-            call,
-            operation_id: operation_id.into(),
+            identity: Arc::new(DeferredLanguageIdentity {
+                call,
+                operation_id: operation_id.into(),
+            }),
             status,
             event_stream_terminal: false,
             sequence_number: None,
@@ -429,8 +453,8 @@ impl DeferredLanguageCheckpoint {
 
     /// Revalidates a decoded durable cursor.
     pub fn validate(&self) -> Result<(), AiContractError> {
-        self.call.validate()?;
-        validate_identifier("operation_id", &self.operation_id)
+        self.identity.call.validate()?;
+        validate_identifier("operation_id", &self.identity.operation_id)
             .map_err(AiContractError::invalid)?;
         if self.event_stream_terminal
             && (self.sequence_number.is_none() || !self.status.is_terminal())
@@ -439,29 +463,18 @@ impl DeferredLanguageCheckpoint {
                 "terminal deferred output requires terminal status and a sequence number",
             ));
         }
-        if let Some(state) = &self.provider_state {
-            state
-                .validate("provider_state")
-                .map_err(|error| AiContractError::invalid(error.to_string()))?;
-            let bytes = serde_json::to_vec(state)
-                .map_err(|error| AiContractError::invalid(error.to_string()))?;
-            if bytes.len() > MAX_EXTENSION_BYTES {
-                return Err(AiContractError::invalid(
-                    "deferred provider state exceeds its byte bound",
-                ));
-            }
-        }
+        validate_deferred_provider_state(self.provider_state.as_ref())?;
         Ok(())
     }
 
     /// Returns the original frozen call facts.
-    pub const fn call(&self) -> &PreparedCallSnapshot {
-        &self.call
+    pub fn call(&self) -> &PreparedCallSnapshot {
+        &self.identity.call
     }
 
     /// Returns the remote operation identity.
     pub fn operation_id(&self) -> &str {
-        &self.operation_id
+        &self.identity.operation_id
     }
 
     /// Returns the latest status.
@@ -484,6 +497,13 @@ impl DeferredLanguageCheckpoint {
         self.provider_state.as_ref()
     }
 
+    /// Applies one status observation without permitting regression.
+    pub fn observe_status(&mut self, status: DeferredStatus) -> Result<(), AiContractError> {
+        validate_deferred_status_transition(self.status, status)?;
+        self.status = status;
+        Ok(())
+    }
+
     /// Advances this caller checkpoint after atomically committing one batch.
     pub fn advance(
         &mut self,
@@ -492,12 +512,8 @@ impl DeferredLanguageCheckpoint {
         sequence_number: u64,
         provider_state: Option<ProviderExtension>,
     ) -> Result<(), AiContractError> {
-        if self.status.is_terminal() && self.status != status
-            || matches!(
-                (self.status, status),
-                (DeferredStatus::InProgress, DeferredStatus::Queued)
-            )
-            || self.event_stream_terminal && !event_stream_terminal
+        validate_deferred_status_transition(self.status, status)?;
+        if self.event_stream_terminal && !event_stream_terminal
             || event_stream_terminal && !status.is_terminal()
             || self
                 .sequence_number
@@ -507,12 +523,44 @@ impl DeferredLanguageCheckpoint {
                 "deferred checkpoint status or sequence regressed",
             ));
         }
+        validate_deferred_provider_state(provider_state.as_ref())?;
         self.status = status;
         self.event_stream_terminal = event_stream_terminal;
         self.sequence_number = Some(sequence_number);
         self.provider_state = provider_state;
-        self.validate()
+        Ok(())
     }
+}
+
+fn validate_deferred_provider_state(
+    provider_state: Option<&ProviderExtension>,
+) -> Result<(), AiContractError> {
+    let Some(state) = provider_state else {
+        return Ok(());
+    };
+    if state.encoded_len() > MAX_EXTENSION_BYTES {
+        return Err(AiContractError::invalid(
+            "deferred provider state exceeds its byte bound",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_deferred_status_transition(
+    current: DeferredStatus,
+    next: DeferredStatus,
+) -> Result<(), AiContractError> {
+    if current.is_terminal() && current != next
+        || matches!(
+            (current, next),
+            (DeferredStatus::InProgress, DeferredStatus::Queued)
+        )
+    {
+        return Err(AiContractError::invalid(
+            "deferred checkpoint status regressed or changed after terminal",
+        ));
+    }
+    Ok(())
 }
 
 /// One atomic normalized event batch and the checkpoint immediately after it.
@@ -538,7 +586,6 @@ impl DeferredLanguageBatch {
                 .validate()
                 .map_err(|error| AiContractError::invalid(error.to_string()))?;
         }
-        checkpoint.validate()?;
         Ok(Self { events, checkpoint })
     }
 

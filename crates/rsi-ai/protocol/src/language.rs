@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct as _};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    AiError, MAX_CONTENT_BLOCKS, MAX_LANGUAGE_EVENTS, MAX_LANGUAGE_OUTPUT_BYTES, MAX_SOURCES,
-    MAX_WARNINGS, validation,
+    AiError, MAX_CONTENT_BLOCKS, MAX_EXTENSION_BYTES, MAX_LANGUAGE_EVENTS,
+    MAX_LANGUAGE_OUTPUT_BYTES, MAX_SOURCES, MAX_WARNINGS, validation,
 };
 
 const MAX_SOURCE_FIELD_BYTES: usize = 16 * 1024;
@@ -130,15 +130,41 @@ pub struct Warning {
 }
 
 /// Bounded provider-private JSON that never contains binary data or secrets.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, PartialEq)]
 pub struct ProviderExtension {
-    /// Provider-family namespace that owns the extension meaning.
-    pub namespace: String,
-    /// Namespace-local extension format version.
-    pub version: u32,
-    /// Bounded JSON value containing no secrets or binary media.
-    pub value: Value,
+    inner: Arc<ProviderExtensionInner>,
+}
+
+#[derive(PartialEq)]
+struct ProviderExtensionInner {
+    namespace: String,
+    version: u32,
+    value: Value,
+    encoded_len: usize,
+}
+
+impl fmt::Debug for ProviderExtension {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderExtension")
+            .field("namespace", &self.inner.namespace)
+            .field("version", &self.inner.version)
+            .field("value", &self.inner.value)
+            .finish()
+    }
+}
+
+impl Serialize for ProviderExtension {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut wire = serializer.serialize_struct("ProviderExtension", 3)?;
+        wire.serialize_field("namespace", &self.inner.namespace)?;
+        wire.serialize_field("version", &self.inner.version)?;
+        wire.serialize_field("value", &self.inner.value)?;
+        wire.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for ProviderExtension {
@@ -155,26 +181,69 @@ impl<'de> Deserialize<'de> for ProviderExtension {
         }
 
         let wire = WireExtension::deserialize(deserializer)?;
-        let extension = Self {
-            namespace: wire.namespace,
-            version: wire.version,
-            value: wire.value,
-        };
-        extension
-            .validate("provider_extension")
-            .map(|()| extension)
-            .map_err(serde::de::Error::custom)
+        Self::new(wire.namespace, wire.version, wire.value).map_err(serde::de::Error::custom)
     }
 }
 
 impl ProviderExtension {
-    pub(crate) fn validate(&self, field: &str) -> Result<(), StreamError> {
-        validation::identifier(&format!("{field}.namespace"), &self.namespace)
+    /// Creates one validated immutable provider extension.
+    pub fn new(
+        namespace: impl Into<String>,
+        version: u32,
+        value: Value,
+    ) -> Result<Self, StreamError> {
+        #[derive(Serialize)]
+        struct WireExtension<'a> {
+            namespace: &'a str,
+            version: u32,
+            value: &'a Value,
+        }
+
+        let namespace = namespace.into();
+        validation::identifier("provider_extension.namespace", &namespace)
             .map_err(|message| StreamError::invalid("stream.invalid_extension", message))?;
-        validation::validate_json_structure(&self.value)
+        validation::validate_json_structure(&value)
             .map_err(|error| StreamError::invalid("stream.invalid_extension", error.to_string()))?;
-        validation::extension_size(&format!("{field}.value"), &self.value)
-            .map_err(|message| StreamError::invalid("stream.extension_too_large", message))
+        let encoded_len = validation::encoded_len(&WireExtension {
+            namespace: &namespace,
+            version,
+            value: &value,
+        })
+        .map_err(|error| StreamError::invalid("stream.invalid_extension", error))?;
+        if encoded_len > MAX_EXTENSION_BYTES {
+            return Err(StreamError::invalid(
+                "stream.extension_too_large",
+                format!("provider extension exceeds the {MAX_EXTENSION_BYTES}-byte encoded limit"),
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(ProviderExtensionInner {
+                namespace,
+                version,
+                value,
+                encoded_len,
+            }),
+        })
+    }
+
+    /// Returns the provider-family namespace.
+    pub fn namespace(&self) -> &str {
+        &self.inner.namespace
+    }
+
+    /// Returns the namespace-local format version.
+    pub fn version(&self) -> u32 {
+        self.inner.version
+    }
+
+    /// Returns the bounded provider-private JSON value.
+    pub fn value(&self) -> &Value {
+        &self.inner.value
+    }
+
+    /// Returns the cached exact JSON wire length.
+    pub fn encoded_len(&self) -> usize {
+        self.inner.encoded_len
     }
 }
 
@@ -307,22 +376,10 @@ impl LanguageEvent {
                 )
                 .map_err(|message| StreamError::invalid("stream.invalid_warning", message))
             }
-            Self::Usage { .. } => Ok(()),
-            Self::Finished { replay, .. } => {
-                if let Some(replay) = replay {
-                    replay.validate("replay")?;
-                }
-                Ok(())
-            }
-            Self::Failed { error, replay } => {
-                error.validate().map_err(|error| {
-                    StreamError::invalid("stream.invalid_provider_error", error.to_string())
-                })?;
-                if let Some(replay) = replay {
-                    replay.validate("replay")?;
-                }
-                Ok(())
-            }
+            Self::Usage { .. } | Self::Finished { .. } => Ok(()),
+            Self::Failed { error, .. } => error.validate().map_err(|error| {
+                StreamError::invalid("stream.invalid_provider_error", error.to_string())
+            }),
         }
     }
 }

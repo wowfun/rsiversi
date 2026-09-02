@@ -15,12 +15,25 @@ only the provider-neutral kind and preserves every already-validated status,
 provider code, phase, dispatch fact, retry hint, request ID, and safe summary.
 
 SSE decoding requires the provider to select a finite frame ceiling within the
-transport's absolute bound. Delta-oriented protocols use the 256 KiB default.
+transport's absolute bound. The production HTTP transport normalizes upstream
+body chunks into items of at most 256 KiB before the decoder can retain one
+across a yielded event; injected transports must honor the same item contract.
+Larger wire frames remain valid when delivered as multiple bounded items.
+Delta-oriented protocols use the 256 KiB default.
 OpenAI Responses uses a larger bounded ceiling because a terminal event may
 carry the complete response; normalized event-count and output-byte limits
-remain separate semantic gates. The decoder acquires the selected ceiling as
-one process-wide byte weight before consuming the stream; waiting decoders hold
-no partial admission.
+remain separate semantic gates. The decoder admits retained bytes in 256 KiB
+units. Each unfinished frame begins with one unit and grows only when the
+process-wide claim set remains safe: all unfinished frames can reach their
+declared ceilings and finish in some release order. Empty transport items do
+not alter cross-item CR/LF framing state. A delivered `data` value owns
+its actual units until the consumer drops it. Cancellation removes a queued
+growth claim, and no admission lock is held while waiting for bytes or capacity.
+Frame storage grows geometrically within already acquired admission rather than
+copying the accumulated frame at every admission-unit boundary.
+At most 1,024 unfinished claims exist. Admission state changes run one bounded
+scheduler that wakes only the waiters it actually grants; waiter tasks do not
+repeat global safe-state simulations after a broadcast wake-up.
 
 Text-only JSON requests remain one buffered body with a `Content-Length`.
 Requests containing binary media stream base64 from retained bytes without an
