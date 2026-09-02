@@ -8,14 +8,14 @@ use rsi_agent_context::{ContextFold, ContextLimits};
 use rsi_agent_executor::ExecutorFactory;
 use rsi_agent_kernel::KernelFactory;
 use rsi_agent_session_protocol::{
-    AgentPresetId, BudgetDimension, FrozenAgentProfile, SessionFactBody, SessionHeader, SessionId,
-    TurnBudget, TurnOutcome,
+    AgentPresetId, BudgetDimension, FrozenAgentSettings, SessionFactBody, SessionHeader, SessionId,
+    TurnBudget, TurnId, TurnOutcome,
 };
 use rsi_agent_store_protocol::{SessionStore, StoredContextCheckpoint, WriteContextCheckpoint};
 use rsi_agent_testkit::{MemoryStore, MemoryStoreFactory};
 use rsi_agent_turn_protocol::{
-    ContextCheckpoint, FinalizationResult, SubmitImage, SubmitSession, SubmitTurn, SubmittedTurn,
-    TurnCompletionBlocker, TurnExecutionContract, TurnFinalizationContext,
+    ContextCheckpoint, FinalizationResult, PublishAttempt, SubmitImage, SubmitSession, SubmitTurn,
+    SubmittedTurn, TurnCompletionBlocker, TurnExecutionContract, TurnFinalizationContext,
     TurnFinalizationContract, TurnFinalizationError, TurnFinalizationReport, TurnFinalizer,
     TurnServiceContract,
 };
@@ -51,6 +51,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+fn client_turn_id() -> TurnId {
+    static NEXT_CLIENT_TURN: AtomicUsize = AtomicUsize::new(1);
+    TurnId::new(format!(
+        "caller-turn-{}",
+        NEXT_CLIENT_TURN.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap()
+}
 
 #[derive(Debug)]
 struct AllowApproval;
@@ -641,7 +650,7 @@ fn header_with_budget(turn_budget: TurnBudget) -> SessionHeader {
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentProfile::new_with_budget(
+        FrozenAgentSettings::new_with_budget(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),
@@ -969,6 +978,7 @@ impl BaseStack {
             .unwrap();
         let submitted = turns
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: self.fresh(header).await,
                 text: text.into(),
                 model: None,
@@ -1024,6 +1034,7 @@ impl BaseStack {
             .unwrap();
         let submitted = turns
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: SubmitSession::Resume(turns.prepare_resume(&session_id).await.unwrap()),
                 text: text.into(),
                 model: None,
@@ -1156,6 +1167,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
         async move {
             let submitted = turns
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: fresh,
                     text: "delay the tool".into(),
                     model: None,
@@ -1267,6 +1279,7 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
         .unwrap();
     let submitted = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: stack.fresh(header_with_budget(budget)).await,
             text: "recover the pending tool".into(),
             model: None,
@@ -1379,6 +1392,7 @@ async fn successfully_recovered_tool_releases_its_tracking_pin_after_commit() {
         .unwrap();
     let submitted = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "recover and finish the pending tool".into(),
             model: None,
@@ -1468,6 +1482,7 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
         async move {
             let submitted = turns
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: fresh,
                     text: "delay the tool".into(),
                     model: None,
@@ -1574,6 +1589,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap();
     let first = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "first".into(),
             model: None,
@@ -1583,6 +1599,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap();
     let second = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "second private".into(),
             model: None,
@@ -1592,6 +1609,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap();
     let third = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "third private".into(),
             model: None,
@@ -1611,8 +1629,8 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(first_claim.turn_id, first.turn_id);
-    let terminal = execution
+    assert_eq!(first_claim.turn_id(), &first.turn_id);
+    let terminal = match execution
         .publish(
             &first_claim,
             vec![SessionFactBody::TurnTerminal {
@@ -1621,14 +1639,18 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+    {
+        PublishAttempt::Published(facts) => facts,
+        PublishAttempt::FlushRequired { .. } => panic!("terminal unexpectedly required a flush"),
+    };
     execution
         .flush(&first_claim, terminal.last().unwrap().seq())
         .await
         .unwrap();
 
     let mut fold =
-        ContextFold::with_limits(first_claim.header.clone(), ContextLimits::default()).unwrap();
+        ContextFold::with_limits(first_claim.header().clone(), ContextLimits::default()).unwrap();
     loop {
         let after_seq = fold.through_seq();
         let page = execution
@@ -1651,7 +1673,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
             .write_context_checkpoint(
                 &first_claim,
                 ContextCheckpoint {
-                    header_fingerprint: first_claim.header.fingerprint().unwrap(),
+                    header_fingerprint: first_claim.header().fingerprint().unwrap(),
                     through_seq: fold.through_seq(),
                     fact_prefix_sha256: fold.fact_prefix_sha256(),
                     bytes: fold.checkpoint_bytes().unwrap(),
@@ -2234,6 +2256,7 @@ async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() 
         .unwrap();
     let first = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "first".into(),
             model: None,
@@ -2249,6 +2272,7 @@ async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() 
     .expect("executor did not publish the first streamed event");
     let second = turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Resume(turns.prepare_resume(&first.session_id).await.unwrap()),
             text: "second".into(),
             model: None,
@@ -2442,6 +2466,7 @@ async fn image_turn_flushes_each_media_ref_and_preserves_partial_failure() {
         .unwrap();
     let submitted = turns
         .submit_image(SubmitImage {
+            turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             model: ModelRef::new("deployment", "image-model").unwrap(),
             request: ImageRequest::new("draw three tiles", 3).unwrap(),
@@ -2533,6 +2558,7 @@ async fn executor_shutdown_releases_a_claimed_nonterminal_turn_without_reclaimin
         .unwrap();
     turns
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: stack.fresh(header()).await,
             text: "remain nonterminal".into(),
             model: None,

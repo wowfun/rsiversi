@@ -1723,7 +1723,6 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
- "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",

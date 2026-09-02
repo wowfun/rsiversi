@@ -13,6 +13,11 @@ invoked. Image outputs enter Media and each ref is durably flushed before the
 stream advances; later failure preserves those refs in `partial_failed`.
 Every exact-prefix durability wait has a validated executor-local deadline, so
 a persistently unhealthy Store cannot occupy that executor indefinitely.
+When publication reports `FlushRequired`, the executor flushes the current
+live prefix and retries with the exact returned owned bodies. The normal
+publish path does not clone bodies in anticipation of this uncommon branch.
+Kernel shutdown during publication stops the driver without synthesizing an
+`executor.internal` terminal outcome that the closing Kernel cannot accept.
 The complete pre-terminal finalizer snapshot has a separate validated deadline;
 expiry becomes `turn.finalization_timeout` and the sole durable turn failure.
 Finalization resolves the outcome before any budget marker is published, so a
@@ -28,7 +33,7 @@ If an executor reclaims history containing a completed Model event but no turn
 terminal, it records interruption rather than repeating the completed external
 effect.
 
-The immutable session profile supplies the mandatory elapsed, provider, Tool,
+The immutable session settings supply the mandatory elapsed, provider, Tool,
 generated-Fact, and generated-byte budget. The elapsed deadline bounds the
 complete driver future, including provider preparation and Media import; it
 drops a non-cooperative caller future at expiry while effect owners retain any

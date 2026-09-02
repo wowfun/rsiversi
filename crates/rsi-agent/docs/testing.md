@@ -9,7 +9,8 @@ aggregate-byte pagination, and pre-commit failure injection.
 SQLite integration tests separately cover session and per-turn pagination,
 open-turn indexing and cursor pagination, optimistic conflicts, rejection of
 representative old schemas, index integrity,
-CAS integrity, reopen recovery, exclusive writer leases, and direct database
+CAS integrity, fast reopen with dormant corruption, first-access rejection,
+explicit full verification, reader/writer WAL snapshots, exclusive writer leases, and direct database
 tampering with header or Fact rows above their framing bounds. Checkpoint-row
 tampering also proves reads reject a mismatched immutable-header fingerprint
 or a cursor beyond the durable session tail before returning opaque bytes.

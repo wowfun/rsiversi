@@ -22,14 +22,19 @@ the Media service; Agent Facts retain immutable references only.
 
 SQLite owns files below its configured root and acquires an exclusive writer
 lease before schema or recovery access. It rejects symlinked or non-directory
-roots that cannot be canonicalized safely. CAS publication writes new immutable
+roots that cannot be canonicalized safely, and every SQLite database connection
+uses the no-follow open flag after its path precheck. CAS publication writes new immutable
 objects and verifies their digest; cleanup must never follow or delete a path
 supplied by a session Fact.
 
 The Store's derived turn rows are committed in the same transaction as their
-canonical Facts. Reopen checks their relational and lifecycle consistency;
-Kernel recovery never trusts an index row without decoding and validating that
-turn's bounded Fact stream.
+canonical Facts. Open checks the exact schema; first access checks the selected
+session's relational and lifecycle consistency. The explicit offline verifier
+performs the whole-database physical, foreign-key, and logical audit while
+holding the writer lease. Kernel recovery never trusts an index row without
+decoding and validating the selected bounded Facts, while cold outcome lookup
+uses a Store-validated acceptance/terminal boundary pair whose decoded sequence,
+turn, and kind exactly match the selecting relational rows.
 
 The Kernel accepts an external-effect start marker only after its matching
 intent is durable; the executor then durably flushes that start before

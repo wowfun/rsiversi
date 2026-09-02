@@ -6,20 +6,21 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    EMPTY_FACT_PREFIX_DIGEST, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    EMPTY_FACT_PREFIX_DIGEST, SessionFact, SessionHeader, SessionId, TurnId,
     advance_fact_prefix_digest, fact_prefix_sha256,
 };
 use rsi_agent_store_protocol::{
     AppendBatch, AppendCommit, CasObjectRef, MAXIMUM_STORE_CAS_BYTES,
-    MAXIMUM_STORE_FACT_PAGE_BYTES, Result, SessionStore, SessionStoreContract, StoreError,
-    StoreFactPage, StoreOpenTurn, StoreOpenTurnPage, StoreSessionPage, StoreTurnFactPage,
-    StoredContextCheckpoint, WriteContextCheckpoint, validate_read_limit,
-    validate_session_read_limit,
+    MAXIMUM_STORE_FACT_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
+    StoreBackwardFactPage, StoreError, StoreFactPage, StoreFactTurnRole, StoreOpenTurn,
+    StoreOpenTurnPage, StoreRecentSession, StoreRecentSessionCursor, StoreRecentSessionPage,
+    StoreSessionPage, StoreTurnBoundary, StoreTurnFactPage, StoredContextCheckpoint,
+    WriteContextCheckpoint, validate_read_limit, validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +34,7 @@ pub struct MemoryStore {
 #[derive(Debug, Default)]
 struct MemoryState {
     sessions: BTreeMap<SessionId, MemorySession>,
+    recent_sessions: BTreeSet<(u64, SessionId)>,
     cas: BTreeMap<String, Arc<[u8]>>,
     fact_read_cursors: Vec<u64>,
 }
@@ -41,8 +43,15 @@ struct MemoryState {
 struct MemorySession {
     header: SessionHeader,
     facts: Vec<SessionFact>,
+    turns: BTreeMap<TurnId, MemoryTurnBoundary>,
     fact_prefix_digest: [u8; 32],
     checkpoint: Option<StoredContextCheckpoint>,
+}
+
+#[derive(Clone, Debug)]
+struct MemoryTurnBoundary {
+    accepted_seq: u64,
+    terminal_seq: Option<u64>,
 }
 
 impl MemoryStore {
@@ -140,12 +149,36 @@ pub async fn assert_mechanical_store_contract(
     let second = store.read_facts(&session_id, 1, 1).await.unwrap();
     assert_eq!(second.facts, vec![event.clone()]);
     assert!(second.caught_up());
+    let newest = store.read_facts_before(&session_id, 0, 1).await.unwrap();
+    assert_eq!(newest.before_seq, 3);
+    assert_eq!(newest.facts, vec![event.clone()]);
+    assert!(newest.has_more);
+    let oldest = store
+        .read_facts_before(&session_id, event.seq(), 1)
+        .await
+        .unwrap();
+    assert_eq!(oldest.facts, vec![accepted.clone()]);
+    assert!(!oldest.has_more);
     let turn = store
         .read_turn_facts(&session_id, &turn_id, 0, 8)
         .await
         .unwrap();
     assert_eq!(turn.facts, vec![accepted.clone(), event.clone()]);
     assert!(!turn.has_more);
+    let open_boundary = store
+        .read_turn_boundary(&session_id, &turn_id)
+        .await
+        .unwrap();
+    assert_eq!(open_boundary.turn_id(), &turn_id);
+    assert_eq!(open_boundary.accepted(), &accepted);
+    assert_eq!(open_boundary.terminal(), None);
+    assert_eq!(open_boundary.durable_seq(), 2);
+    assert!(matches!(
+        store
+            .read_turn_boundary(&session_id, &TurnId::new("turn-absent").unwrap())
+            .await,
+        Err(StoreError::TurnNotFound { .. })
+    ));
     let open = store.list_open_turns(&session_id, 0, 8).await.unwrap();
     assert_eq!(open.turns.len(), 1);
     assert_eq!(open.turns[0].turn_id, turn_id);
@@ -170,6 +203,14 @@ pub async fn assert_mechanical_store_contract(
             .turns
             .is_empty()
     );
+    let closed_boundary = store
+        .read_turn_boundary(&session_id, &turn_id)
+        .await
+        .unwrap();
+    assert_eq!(closed_boundary.turn_id(), &turn_id);
+    assert_eq!(closed_boundary.accepted(), &accepted);
+    assert_eq!(closed_boundary.terminal(), Some(&terminal));
+    assert_eq!(closed_boundary.durable_seq(), 3);
     assert!(matches!(
         store
             .write_context_checkpoint(WriteContextCheckpoint {
@@ -240,8 +281,19 @@ pub async fn assert_mechanical_store_contract(
         })
     ));
     let sessions = store.list_sessions(None, 8).await.unwrap();
-    assert_eq!(sessions.sessions, vec![session_id]);
+    assert_eq!(sessions.sessions, vec![session_id.clone()]);
     assert!(!sessions.has_more);
+    let recent = store.list_recent_sessions(None, 8).await.unwrap();
+    assert_eq!(recent.sessions.len(), 1);
+    assert_eq!(recent.sessions[0].header, header);
+    assert!(
+        store
+            .list_recent_sessions(Some(&recent.sessions[0].cursor()), 8)
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
     let closed_sessions = store.list_open_sessions(None, 8).await.unwrap();
     assert!(closed_sessions.sessions.is_empty());
     assert!(!closed_sessions.has_more);
@@ -276,7 +328,7 @@ impl SessionStore for MemoryStore {
                     "existing session cannot replace its immutable header".into(),
                 ));
             }
-            index_turn_lifecycle(session.facts.iter().chain(batch.facts.iter()))?;
+            let turn_updates = index_appended_turns(&session.turns, &batch.facts)?;
             let fact_prefix_digest =
                 batch
                     .facts
@@ -286,6 +338,7 @@ impl SessionStore for MemoryStore {
                             .map_err(|error| StoreError::Invalid(error.to_string()))
                     })?;
             session.facts.extend(batch.facts);
+            session.turns.extend(turn_updates);
             session.fact_prefix_digest = fact_prefix_digest;
             Ok(AppendCommit {
                 durable_seq: session
@@ -309,7 +362,7 @@ impl SessionStore for MemoryStore {
                 .last()
                 .expect("a validated append is nonempty")
                 .seq();
-            index_turn_lifecycle(&batch.facts)?;
+            let turns = index_appended_turns(&BTreeMap::new(), &batch.facts)?;
             let fact_prefix_digest =
                 batch
                     .facts
@@ -318,11 +371,15 @@ impl SessionStore for MemoryStore {
                         advance_fact_prefix_digest(digest, fact)
                             .map_err(|error| StoreError::Invalid(error.to_string()))
                     })?;
+            state
+                .recent_sessions
+                .insert((header.created_at_ms(), batch.session_id.clone()));
             state.sessions.insert(
                 batch.session_id,
                 MemorySession {
                     header,
                     facts: batch.facts,
+                    turns,
                     fact_prefix_digest,
                     checkpoint: None,
                 },
@@ -386,6 +443,63 @@ impl SessionStore for MemoryStore {
         Ok(page)
     }
 
+    async fn read_facts_before(
+        &self,
+        session_id: &SessionId,
+        exclusive_before_seq: u64,
+        limit: usize,
+    ) -> Result<StoreBackwardFactPage> {
+        validate_read_limit(limit)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
+        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let maximum_before = durable_seq
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("durable sequence is exhausted".into()))?;
+        let before_seq = if exclusive_before_seq == 0 {
+            maximum_before
+        } else {
+            exclusive_before_seq
+        };
+        if before_seq > maximum_before {
+            return Err(StoreError::Invalid(
+                "backward Fact cursor exceeds one past the durable tail".into(),
+            ));
+        }
+        let take = usize::try_from(before_seq - 1)
+            .map_err(|_| StoreError::Invalid("Fact cursor does not fit memory".into()))?;
+        let mut facts = Vec::new();
+        let mut encoded_bytes = 0_usize;
+        for fact in session.facts.iter().take(take).rev() {
+            let projected = encoded_bytes
+                .checked_add(fact.encoded_len())
+                .ok_or_else(|| StoreError::Corrupt("backward Fact page size overflow".into()))?;
+            if facts.len() == limit
+                || (!facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES)
+            {
+                break;
+            }
+            encoded_bytes = projected;
+            facts.push(fact.clone());
+        }
+        facts.reverse();
+        let has_more = facts.first().is_some_and(|fact| fact.seq() > 1);
+        let page = StoreBackwardFactPage {
+            before_seq,
+            facts,
+            durable_seq,
+            has_more,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
     async fn read_turn_facts(
         &self,
         session_id: &SessionId,
@@ -408,11 +522,7 @@ impl SessionStore for MemoryStore {
                 "turn Fact cursor exceeds the durable tail".into(),
             ));
         }
-        if !session
-            .facts
-            .iter()
-            .any(|fact| fact.body().turn_id() == turn_id)
-        {
+        if !session.turns.contains_key(turn_id) {
             return Err(StoreError::TurnNotFound {
                 session: session_id.to_string(),
                 turn: turn_id.to_string(),
@@ -450,6 +560,45 @@ impl SessionStore for MemoryStore {
         Ok(page)
     }
 
+    async fn read_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<StoreTurnBoundary> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
+        let boundary = session
+            .turns
+            .get(turn_id)
+            .ok_or_else(|| StoreError::TurnNotFound {
+                session: session_id.to_string(),
+                turn: turn_id.to_string(),
+            })?;
+        let accepted = session
+            .facts
+            .get(usize::try_from(boundary.accepted_seq - 1).expect("bounded sequence"))
+            .expect("turn index acceptance points into Facts");
+        let terminal = boundary.terminal_seq.map(|seq| {
+            session
+                .facts
+                .get(usize::try_from(seq - 1).expect("bounded sequence"))
+                .expect("turn index terminal points into Facts")
+                .clone()
+        });
+        StoreTurnBoundary::new(
+            turn_id.clone(),
+            accepted.clone(),
+            terminal,
+            session.facts.last().map_or(0, SessionFact::seq),
+        )
+    }
+
     async fn list_open_turns(
         &self,
         session_id: &SessionId,
@@ -471,14 +620,15 @@ impl SessionStore for MemoryStore {
                 "open-turn cursor exceeds the durable tail".into(),
             ));
         }
-        let lifecycle = index_turn_lifecycle(&session.facts)?;
-        let mut turns = lifecycle
-            .into_iter()
-            .filter_map(|(turn_id, (accepted_seq, open))| {
-                (open && accepted_seq > after_accepted_seq).then_some(StoreOpenTurn {
-                    turn_id,
-                    accepted_seq,
-                })
+        let mut turns = session
+            .turns
+            .iter()
+            .filter_map(|(turn_id, boundary)| {
+                (boundary.terminal_seq.is_none() && boundary.accepted_seq > after_accepted_seq)
+                    .then_some(StoreOpenTurn {
+                        turn_id: turn_id.clone(),
+                        accepted_seq: boundary.accepted_seq,
+                    })
             })
             .collect::<Vec<_>>();
         turns.sort_by_key(|turn| turn.accepted_seq);
@@ -522,6 +672,46 @@ impl SessionStore for MemoryStore {
         Ok(page)
     }
 
+    async fn list_recent_sessions(
+        &self,
+        after: Option<&StoreRecentSessionCursor>,
+        limit: usize,
+    ) -> Result<StoreRecentSessionPage> {
+        validate_session_read_limit(limit)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = state
+            .recent_sessions
+            .iter()
+            .rev()
+            .filter(|(created_at_ms, session_id)| {
+                after.is_none_or(|after| {
+                    (*created_at_ms, session_id) < (after.created_at_ms, &after.session_id)
+                })
+            })
+            .take(limit + 1)
+            .map(|(_, session_id)| StoreRecentSession {
+                header: state
+                    .sessions
+                    .get(session_id)
+                    .expect("recent index references its Session")
+                    .header
+                    .clone(),
+            })
+            .collect::<Vec<_>>();
+        let has_more = sessions.len() > limit;
+        sessions.truncate(limit);
+        let page = StoreRecentSessionPage {
+            after: after.cloned(),
+            sessions,
+            has_more,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
     async fn list_open_sessions(
         &self,
         after: Option<&SessionId>,
@@ -537,8 +727,10 @@ impl SessionStore for MemoryStore {
             .iter()
             .filter(|(session_id, session)| {
                 after.is_none_or(|after| *session_id > after)
-                    && index_turn_lifecycle(&session.facts)
-                        .is_ok_and(|turns| turns.values().any(|(_, open)| *open))
+                    && session
+                        .turns
+                        .values()
+                        .any(|boundary| boundary.terminal_seq.is_none())
             })
             .map(|(session_id, _)| session_id.clone())
             .take(limit + 1)
@@ -643,44 +835,53 @@ impl SessionStore for MemoryStore {
     }
 }
 
-fn index_turn_lifecycle<'a>(
-    facts: impl IntoIterator<Item = &'a SessionFact>,
-) -> Result<BTreeMap<TurnId, (u64, bool)>> {
-    let mut lifecycle = BTreeMap::<TurnId, (u64, bool)>::new();
+fn index_appended_turns(
+    turns: &BTreeMap<TurnId, MemoryTurnBoundary>,
+    facts: &[SessionFact],
+) -> Result<BTreeMap<TurnId, MemoryTurnBoundary>> {
+    let mut updates = BTreeMap::new();
     for fact in facts {
-        match fact.body() {
-            SessionFactBody::TurnAccepted { turn_id, .. }
-            | SessionFactBody::ImageRequested { turn_id, .. } => {
-                if lifecycle
-                    .insert(turn_id.clone(), (fact.seq(), true))
-                    .is_some()
+        let role = rsi_agent_store_protocol::store_fact_turn_role(fact.body());
+        let turn_id = fact.body().turn_id();
+        match role {
+            StoreFactTurnRole::Acceptance => {
+                if turns.contains_key(turn_id) || updates.contains_key(turn_id) {
+                    return Err(StoreError::Corrupt(role.rejected_message().into()));
+                }
+                updates.insert(
+                    turn_id.clone(),
+                    MemoryTurnBoundary {
+                        accepted_seq: fact.seq(),
+                        terminal_seq: None,
+                    },
+                );
+            }
+            StoreFactTurnRole::Terminal => {
+                if !updates.contains_key(turn_id) {
+                    let boundary = turns
+                        .get(turn_id)
+                        .cloned()
+                        .ok_or_else(|| StoreError::Corrupt(role.rejected_message().into()))?;
+                    updates.insert(turn_id.clone(), boundary);
+                }
+                let boundary = updates.get_mut(turn_id).expect("boundary was inserted");
+                if boundary.terminal_seq.is_some() {
+                    return Err(StoreError::Corrupt(role.rejected_message().into()));
+                }
+                boundary.terminal_seq = Some(fact.seq());
+            }
+            StoreFactTurnRole::Event => {
+                if updates
+                    .get(turn_id)
+                    .or_else(|| turns.get(turn_id))
+                    .is_none_or(|boundary| boundary.terminal_seq.is_some())
                 {
-                    return Err(StoreError::Corrupt(
-                        "durable turn was accepted more than once".into(),
-                    ));
-                }
-            }
-            SessionFactBody::TurnTerminal { turn_id, .. } => {
-                let (_, open) = lifecycle.get_mut(turn_id).ok_or_else(|| {
-                    StoreError::Corrupt("terminal references a closed or unknown turn".into())
-                })?;
-                if !*open {
-                    return Err(StoreError::Corrupt(
-                        "terminal references a closed or unknown turn".into(),
-                    ));
-                }
-                *open = false;
-            }
-            body => {
-                if !lifecycle.get(body.turn_id()).is_some_and(|(_, open)| *open) {
-                    return Err(StoreError::Corrupt(
-                        "nonterminal Fact references a closed or unknown turn".into(),
-                    ));
+                    return Err(StoreError::Corrupt(role.rejected_message().into()));
                 }
             }
         }
     }
-    Ok(lifecycle)
+    Ok(updates)
 }
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.

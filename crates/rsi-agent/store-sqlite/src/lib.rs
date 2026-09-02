@@ -12,31 +12,36 @@ use rsi_agent_session_protocol::{
 use rsi_agent_store_protocol::{
     AGENT_STORE_SCHEMA_VERSION, AppendBatch, AppendCommit, CasObjectRef,
     MAXIMUM_CONTEXT_CHECKPOINT_BYTES, MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
-    Result, SessionStore, SessionStoreContract, StoreError, StoreFactPage, StoreOpenTurn,
-    StoreOpenTurnPage, StoreTurnFactPage, StoredContextCheckpoint, WriteContextCheckpoint,
-    validate_read_limit,
+    Result, SessionStore, SessionStoreContract, StoreBackwardFactPage, StoreError, StoreFactPage,
+    StoreFactTurnRole, StoreOpenTurn, StoreOpenTurnPage, StoreRecentSession,
+    StoreRecentSessionCursor, StoreRecentSessionPage, StoreTurnBoundary, StoreTurnFactPage,
+    StoredContextCheckpoint, WriteContextCheckpoint, validate_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
+const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const EXPECTED_TABLES: [(&str, &str); 5] = [
     (
         "sessions",
         "CREATE TABLE sessions (
             session_id TEXT PRIMARY KEY NOT NULL,
+            created_at_ms INTEGER NOT NULL CHECK (created_at_ms > 0),
             header_json TEXT NOT NULL,
             durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
             fact_prefix_sha256 TEXT NOT NULL
@@ -89,7 +94,7 @@ const EXPECTED_TABLES: [(&str, &str); 5] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 2] = [
+const EXPECTED_INDEXES: [(&str, &str); 3] = [
     (
         "facts_by_turn",
         "CREATE INDEX facts_by_turn ON facts (session_id, turn_id, seq)",
@@ -98,6 +103,11 @@ const EXPECTED_INDEXES: [(&str, &str); 2] = [
         "open_turns_by_session",
         "CREATE INDEX open_turns_by_session ON turns (session_id, accepted_seq)
          WHERE terminal_seq IS NULL",
+    ),
+    (
+        "sessions_by_created_at",
+        "CREATE INDEX sessions_by_created_at
+         ON sessions (created_at_ms DESC, session_id DESC)",
     ),
 ];
 
@@ -123,13 +133,59 @@ impl SqliteStoreConfig {
 /// Open Store holding the exact root writer lease until its last clone drops.
 #[derive(Clone)]
 pub struct SqliteStore {
-    connection: Arc<Mutex<Connection>>,
-    database_admission: Arc<Semaphore>,
+    connections: Arc<DatabaseConnections>,
+    writer_admission: Arc<Semaphore>,
+    reader_admission: Arc<Semaphore>,
+    validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
+    validation_gates: Arc<Mutex<BTreeMap<SessionId, Weak<AsyncMutex<()>>>>>,
+    #[cfg(test)]
+    validation_runs: Arc<AtomicU64>,
     cas_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
     cas_staging_dir: Arc<PathBuf>,
     _writer_lock: Arc<File>,
+}
+
+struct DatabaseConnections {
+    // Rust drops fields in declaration order. Keeping the reader first makes
+    // the writer SQLite's last connection on clean shutdown, which checkpoints
+    // and removes the WAL after all Store operations release this shared pair.
+    reader: Mutex<Connection>,
+    writer: Mutex<Connection>,
+}
+
+#[derive(Debug, Default)]
+struct ValidatedSessionCache {
+    recency: VecDeque<SessionId>,
+}
+
+impl ValidatedSessionCache {
+    fn touch(&mut self, session_id: &SessionId) -> bool {
+        let Some(index) = self
+            .recency
+            .iter()
+            .position(|candidate| candidate == session_id)
+        else {
+            return false;
+        };
+        let session_id = self
+            .recency
+            .remove(index)
+            .expect("located validated session is present");
+        self.recency.push_back(session_id);
+        true
+    }
+
+    fn insert(&mut self, session_id: SessionId) {
+        if self.touch(&session_id) {
+            return;
+        }
+        if self.recency.len() == VALIDATED_SESSION_CACHE_CAPACITY {
+            self.recency.pop_front();
+        }
+        self.recency.push_back(session_id);
+    }
 }
 
 impl std::fmt::Debug for SqliteStore {
@@ -144,6 +200,13 @@ impl std::fmt::Debug for SqliteStore {
 
 impl SqliteStore {
     /// Opens or creates one exact-schema Store after acquiring its writer lease.
+    ///
+    /// Opening validates the exact schema, owned paths, and writer exclusivity.
+    /// First access validates the selected session's bounded Header, mechanical
+    /// watermark, stored digest shape, and Fact/turn index relationships, then
+    /// caches that proof with bounded recency. It does not decode every Fact or
+    /// recompute the canonical prefix digest; use [`Self::verify`] for that
+    /// explicit full audit.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = prepare_root(root.as_ref())?;
         let writer_lock = Arc::new(acquire_writer_lock(&root)?);
@@ -153,13 +216,35 @@ impl SqliteStore {
         prepare_cas_staging_directory(&cas_staging_dir)?;
         let database_path = root.join("sessions.sqlite3");
         reject_symlink_if_present(&database_path, "SQLite database")?;
-        let mut connection = Connection::open(&database_path).map_err(sql_error)?;
-        configure(&connection)?;
-        initialize_or_validate_schema(&mut connection)?;
-        validate_database(&connection)?;
+        let may_initialize = match fs::metadata(&database_path) {
+            Ok(metadata) => metadata.len() == 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut writer_connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(sql_error)?;
+        configure_writer(&writer_connection)?;
+        initialize_or_validate_schema(&mut writer_connection, may_initialize)?;
+        let reader_connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(sql_error)?;
+        configure_reader(&reader_connection)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-            database_admission: Arc::new(Semaphore::new(1)),
+            connections: Arc::new(DatabaseConnections {
+                reader: Mutex::new(reader_connection),
+                writer: Mutex::new(writer_connection),
+            }),
+            writer_admission: Arc::new(Semaphore::new(1)),
+            reader_admission: Arc::new(Semaphore::new(1)),
+            validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
+            validation_gates: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(test)]
+            validation_runs: Arc::new(AtomicU64::new(0)),
             cas_admission: Arc::new(Semaphore::new(1)),
             root: Arc::new(root),
             cas_dir: Arc::new(cas_dir),
@@ -168,15 +253,55 @@ impl SqliteStore {
         })
     }
 
-    async fn with_database<T, F>(&self, operation: F) -> Result<T>
+    /// Verifies an existing Store without creating any database or CAS path.
+    ///
+    /// The offline audit acquires the same writer lease as [`Self::open`] and
+    /// checks the exact schema, `SQLite` integrity, foreign keys, every bounded
+    /// Header and Fact, durable watermark, recomputed canonical Fact-prefix
+    /// digest, and all turn-index relationships.
+    pub fn verify(root: impl AsRef<Path>) -> Result<()> {
+        let root = existing_root(root.as_ref())?;
+        let _writer_lock = acquire_existing_writer_lock(&root)?;
+        reject_uncheckpointed_wal(&root)?;
+        let database_path = root.join("sessions.sqlite3");
+        let metadata = fs::symlink_metadata(&database_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                StoreError::NotFound(database_path.display().to_string())
+            } else {
+                io_error(error)
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(StoreError::Corrupt(
+                "SQLite database is not a regular file".into(),
+            ));
+        }
+        let connection = open_verification_database(&database_path)?;
+        configure_reader(&connection)?;
+        let version = pragma_user_version(&connection)?;
+        if version != AGENT_STORE_SCHEMA_VERSION {
+            return Err(StoreError::SchemaMismatch {
+                expected: AGENT_STORE_SCHEMA_VERSION,
+                actual: version,
+            });
+        }
+        validate_schema_shape(&connection)?;
+        validate_database(&connection)
+    }
+
+    async fn with_database<T, F>(
+        admission: Arc<Semaphore>,
+        closed_message: &'static str,
+        operation: F,
+    ) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
-        let permit = Arc::clone(&self.database_admission)
+        let permit = admission
             .acquire_owned()
             .await
-            .map_err(|_| StoreError::Io("SQLite database admission closed".into()))?;
+            .map_err(|_| StoreError::Io(closed_message.into()))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             operation()
@@ -185,17 +310,107 @@ impl SqliteStore {
         .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
     }
 
-    async fn with_connection<T, F>(&self, operation: F) -> Result<T>
+    async fn with_writer<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let connection = Arc::clone(&self.connection);
-        self.with_database(move || {
-            let mut connection = connection
-                .lock()
-                .map_err(|_| StoreError::Io("SQLite connection mutex was poisoned".into()))?;
-            operation(&mut connection)
+        let connections = Arc::clone(&self.connections);
+        Self::with_database(
+            Arc::clone(&self.writer_admission),
+            "SQLite writer admission closed",
+            move || {
+                let mut connection = connections.writer.lock().map_err(|_| {
+                    StoreError::Io("SQLite writer connection mutex was poisoned".into())
+                })?;
+                operation(&mut connection)
+            },
+        )
+        .await
+    }
+
+    async fn with_reader<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let connections = Arc::clone(&self.connections);
+        Self::with_database(
+            Arc::clone(&self.reader_admission),
+            "SQLite reader admission closed",
+            move || {
+                let mut connection = connections.reader.lock().map_err(|_| {
+                    StoreError::Io("SQLite reader connection mutex was poisoned".into())
+                })?;
+                operation(&mut connection)
+            },
+        )
+        .await
+    }
+
+    fn mark_session_validated(&self, session_id: SessionId) -> Result<()> {
+        self.validated_sessions
+            .lock()
+            .map_err(|_| StoreError::Io("validated-session cache mutex was poisoned".into()))?
+            .insert(session_id);
+        Ok(())
+    }
+
+    fn touch_validated_session(&self, session_id: &SessionId) -> Result<bool> {
+        Ok(self
+            .validated_sessions
+            .lock()
+            .map_err(|_| StoreError::Io("validated-session cache mutex was poisoned".into()))?
+            .touch(session_id))
+    }
+
+    fn validation_gate(&self, session_id: &SessionId) -> Result<Arc<AsyncMutex<()>>> {
+        let mut gates = self
+            .validation_gates
+            .lock()
+            .map_err(|_| StoreError::Io("session-validation gate mutex was poisoned".into()))?;
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates.get(session_id).and_then(Weak::upgrade) {
+            return Ok(gate);
+        }
+        let gate = Arc::new(AsyncMutex::new(()));
+        gates.insert(session_id.clone(), Arc::downgrade(&gate));
+        Ok(gate)
+    }
+
+    async fn ensure_session_validated(&self, session_id: &SessionId) -> Result<()> {
+        if self.touch_validated_session(session_id)? {
+            return Ok(());
+        }
+        let gate = self.validation_gate(session_id)?;
+        let _gate = gate.lock().await;
+        if self.touch_validated_session(session_id)? {
+            return Ok(());
+        }
+        let candidate = session_id.clone();
+        #[cfg(test)]
+        self.validation_runs.fetch_add(1, Ordering::Relaxed);
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            validate_session(&transaction, &candidate)?;
+            transaction.commit().map_err(sql_error)
+        })
+        .await?;
+        self.mark_session_validated(session_id.clone())
+    }
+
+    async fn session_exists(&self, session_id: &SessionId) -> Result<bool> {
+        let candidate = session_id.clone();
+        self.with_reader(move |connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                    [candidate.as_str()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sql_error)
         })
         .await
     }
@@ -219,27 +434,38 @@ impl SqliteStore {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit> {
         batch.validate()?;
-        self.with_connection(move |connection| {
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(sql_error)?;
-            admit_append(&transaction, &batch)?;
-            for fact in &batch.facts {
-                insert_fact(&transaction, &batch.session_id, fact)?;
-            }
-            let durable_seq = advance_watermark(&transaction, &batch)?;
-            transaction.commit().map_err(sql_error)?;
-            Ok(AppendCommit { durable_seq })
-        })
-        .await
+        let session_id = batch.session_id.clone();
+        if !self.touch_validated_session(&session_id)?
+            && (batch.header.is_none() || self.session_exists(&session_id).await?)
+        {
+            self.ensure_session_validated(&session_id).await?;
+        }
+        let commit = self
+            .with_writer(move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(sql_error)?;
+                admit_append(&transaction, &batch)?;
+                for fact in &batch.facts {
+                    insert_fact(&transaction, &batch.session_id, fact)?;
+                }
+                let durable_seq = advance_watermark(&transaction, &batch)?;
+                transaction.commit().map_err(sql_error)?;
+                Ok(AppendCommit { durable_seq })
+            })
+            .await?;
+        self.mark_session_validated(session_id)?;
+        Ok(commit)
     }
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        self.with_connection(move |connection| {
+        self.with_reader(move |connection| {
             let projection = connection
                 .query_row(
                     "SELECT length(CAST(header_json AS BLOB)),
@@ -268,9 +494,13 @@ impl SessionStore for SqliteStore {
         limit: usize,
     ) -> Result<StoreFactPage> {
         validate_read_limit(limit)?;
+        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        self.with_connection(move |connection| {
-            let durable_seq = connection
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let durable_seq = transaction
                 .query_row(
                     "SELECT durable_seq FROM sessions WHERE session_id = ?1",
                     [session_id.as_str()],
@@ -285,49 +515,155 @@ impl SessionStore for SqliteStore {
                     "Fact cursor exceeds the durable tail".into(),
                 ));
             }
-            let mut statement = connection
-                .prepare(
-                    "SELECT length(CAST(fact_json AS BLOB)),
+            let page = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT length(CAST(fact_json AS BLOB)),
                             CASE WHEN length(CAST(fact_json AS BLOB)) <= ?4
                                  THEN fact_json END
                      FROM facts
                      WHERE session_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
-                )
-                .map_err(sql_error)?;
-            let rows = statement
-                .query_map(
-                    params![
-                        session_id.as_str(),
-                        sqlite_u64("Fact cursor", after_seq)?,
-                        i64::try_from(limit)
-                            .map_err(|_| StoreError::Invalid("read limit exceeds SQLite".into()))?,
-                        i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                            .expect("session Fact bound fits SQLite INTEGER"),
-                    ],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
-                .map_err(sql_error)?;
-            let mut facts = Vec::new();
-            let mut encoded_bytes = 0_usize;
-            for row in rows {
-                let projection = row.map_err(sql_error)?;
-                let fact: SessionFact =
-                    decode_projected_json("session Fact", projection, MAXIMUM_SESSION_FACT_BYTES)?;
-                let projected = encoded_bytes
-                    .checked_add(fact.encoded_len())
-                    .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
-                if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
-                    break;
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("Fact cursor", after_seq)?,
+                            i64::try_from(limit).map_err(|_| {
+                                StoreError::Invalid("read limit exceeds SQLite".into())
+                            })?,
+                            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                                .expect("session Fact bound fits SQLite INTEGER"),
+                        ],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .map_err(sql_error)?;
+                let mut facts = Vec::new();
+                let mut encoded_bytes = 0_usize;
+                for row in rows {
+                    let projection = row.map_err(sql_error)?;
+                    let fact: SessionFact = decode_projected_json(
+                        "session Fact",
+                        projection,
+                        MAXIMUM_SESSION_FACT_BYTES,
+                    )?;
+                    let projected = encoded_bytes
+                        .checked_add(fact.encoded_len())
+                        .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
+                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                        break;
+                    }
+                    encoded_bytes = projected;
+                    facts.push(fact);
                 }
-                encoded_bytes = projected;
-                facts.push(fact);
-            }
-            let page = StoreFactPage {
-                after_seq,
-                facts,
-                durable_seq,
+                let page = StoreFactPage {
+                    after_seq,
+                    facts,
+                    durable_seq,
+                };
+                page.validate()?;
+                page
             };
-            page.validate()?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(page)
+        })
+        .await
+    }
+
+    async fn read_facts_before(
+        &self,
+        session_id: &SessionId,
+        exclusive_before_seq: u64,
+        limit: usize,
+    ) -> Result<StoreBackwardFactPage> {
+        validate_read_limit(limit)?;
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let durable_seq = transaction
+                .query_row(
+                    "SELECT durable_seq FROM sessions WHERE session_id = ?1",
+                    [session_id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
+                .and_then(|value| decode_u64("durable sequence", value))?;
+            let maximum_before = durable_seq
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Corrupt("durable sequence is exhausted".into()))?;
+            let before_seq = if exclusive_before_seq == 0 {
+                maximum_before
+            } else {
+                exclusive_before_seq
+            };
+            if before_seq > maximum_before {
+                return Err(StoreError::Invalid(
+                    "backward Fact cursor exceeds one past the durable tail".into(),
+                ));
+            }
+            let page = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT length(CAST(fact_json AS BLOB)),
+                                CASE WHEN length(CAST(fact_json AS BLOB)) <= ?4
+                                     THEN fact_json END
+                         FROM facts
+                         WHERE session_id = ?1 AND seq < ?2
+                         ORDER BY seq DESC LIMIT ?3",
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("backward Fact cursor", before_seq)?,
+                            i64::try_from(limit).map_err(|_| {
+                                StoreError::Invalid("read limit exceeds SQLite".into())
+                            })?,
+                            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                                .expect("session Fact bound fits SQLite INTEGER"),
+                        ],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .map_err(sql_error)?;
+                let mut facts = Vec::new();
+                let mut encoded_bytes = 0_usize;
+                for row in rows {
+                    let fact: SessionFact = decode_projected_json(
+                        "session Fact",
+                        row.map_err(sql_error)?,
+                        MAXIMUM_SESSION_FACT_BYTES,
+                    )?;
+                    let projected =
+                        encoded_bytes
+                            .checked_add(fact.encoded_len())
+                            .ok_or_else(|| {
+                                StoreError::Corrupt("backward Fact page size overflow".into())
+                            })?;
+                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                        break;
+                    }
+                    encoded_bytes = projected;
+                    facts.push(fact);
+                }
+                facts.reverse();
+                let has_more = facts.first().is_some_and(|fact| fact.seq() > 1);
+                let page = StoreBackwardFactPage {
+                    before_seq,
+                    facts,
+                    durable_seq,
+                    has_more,
+                };
+                page.validate()?;
+                page
+            };
+            transaction.commit().map_err(sql_error)?;
             Ok(page)
         })
         .await
@@ -341,10 +677,14 @@ impl SessionStore for SqliteStore {
         limit: usize,
     ) -> Result<StoreTurnFactPage> {
         validate_read_limit(limit)?;
+        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         let turn_id = turn_id.clone();
-        self.with_connection(move |connection| {
-            let durable_seq = connection
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let durable_seq = transaction
                 .query_row(
                     "SELECT durable_seq FROM sessions WHERE session_id = ?1",
                     [session_id.as_str()],
@@ -359,7 +699,7 @@ impl SessionStore for SqliteStore {
                     "turn Fact cursor exceeds the durable tail".into(),
                 ));
             }
-            let turn_exists = connection
+            let turn_exists = transaction
                 .query_row(
                     "SELECT EXISTS(
                        SELECT 1 FROM turns WHERE session_id = ?1 AND turn_id = ?2
@@ -376,59 +716,117 @@ impl SessionStore for SqliteStore {
             }
             let sqlite_limit = i64::try_from(limit + 1)
                 .map_err(|_| StoreError::Invalid("turn read limit exceeds SQLite".into()))?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT length(CAST(fact_json AS BLOB)),
+            let page = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT length(CAST(fact_json AS BLOB)),
                             CASE WHEN length(CAST(fact_json AS BLOB)) <= ?5
                                  THEN fact_json END
                      FROM facts
                      WHERE session_id = ?1 AND turn_id = ?2 AND seq > ?3
                      ORDER BY seq LIMIT ?4",
-                )
-                .map_err(sql_error)?;
-            let rows = statement
-                .query_map(
-                    params![
-                        session_id.as_str(),
-                        turn_id.as_str(),
-                        sqlite_u64("turn Fact cursor", after_seq)?,
-                        sqlite_limit,
-                        i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                            .expect("session Fact bound fits SQLite INTEGER"),
-                    ],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
-                .map_err(sql_error)?;
-            let mut facts = Vec::new();
-            let mut encoded_bytes = 0_usize;
-            let mut has_more = false;
-            for row in rows {
-                if facts.len() == limit {
-                    has_more = true;
-                    break;
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            session_id.as_str(),
+                            turn_id.as_str(),
+                            sqlite_u64("turn Fact cursor", after_seq)?,
+                            sqlite_limit,
+                            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                                .expect("session Fact bound fits SQLite INTEGER"),
+                        ],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .map_err(sql_error)?;
+                let mut facts = Vec::new();
+                let mut encoded_bytes = 0_usize;
+                let mut has_more = false;
+                for row in rows {
+                    if facts.len() == limit {
+                        has_more = true;
+                        break;
+                    }
+                    let projection = row.map_err(sql_error)?;
+                    let fact: SessionFact = decode_projected_json(
+                        "session Fact",
+                        projection,
+                        MAXIMUM_SESSION_FACT_BYTES,
+                    )?;
+                    let projected =
+                        encoded_bytes
+                            .checked_add(fact.encoded_len())
+                            .ok_or_else(|| {
+                                StoreError::Corrupt("turn Fact page size overflow".into())
+                            })?;
+                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                        has_more = true;
+                        break;
+                    }
+                    encoded_bytes = projected;
+                    facts.push(fact);
                 }
-                let projection = row.map_err(sql_error)?;
-                let fact: SessionFact =
-                    decode_projected_json("session Fact", projection, MAXIMUM_SESSION_FACT_BYTES)?;
-                let projected = encoded_bytes
-                    .checked_add(fact.encoded_len())
-                    .ok_or_else(|| StoreError::Corrupt("turn Fact page size overflow".into()))?;
-                if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
-                    has_more = true;
-                    break;
-                }
-                encoded_bytes = projected;
-                facts.push(fact);
-            }
-            let page = StoreTurnFactPage {
-                turn_id,
-                after_seq,
-                facts,
-                durable_seq,
-                has_more,
+                let page = StoreTurnFactPage {
+                    turn_id,
+                    after_seq,
+                    facts,
+                    durable_seq,
+                    has_more,
+                };
+                page.validate()?;
+                page
             };
-            page.validate()?;
+            transaction.commit().map_err(sql_error)?;
             Ok(page)
+        })
+        .await
+    }
+
+    async fn read_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<StoreTurnBoundary> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let turn_id = turn_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let indexed = transaction
+                .query_row(
+                    "SELECT session.durable_seq, turn.accepted_seq, turn.terminal_seq
+                     FROM sessions AS session
+                     LEFT JOIN turns AS turn
+                       ON turn.session_id = session.session_id AND turn.turn_id = ?2
+                     WHERE session.session_id = ?1",
+                    params![session_id.as_str(), turn_id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+            let durable_seq = decode_u64("durable sequence", indexed.0)?;
+            let accepted_seq = indexed.1.ok_or_else(|| StoreError::TurnNotFound {
+                session: session_id.to_string(),
+                turn: turn_id.to_string(),
+            })?;
+            let accepted = read_indexed_fact(&transaction, &session_id, accepted_seq)?;
+            let terminal = indexed
+                .2
+                .map(|seq| read_indexed_fact(&transaction, &session_id, seq))
+                .transpose()?;
+            let boundary = StoreTurnBoundary::new(turn_id, accepted, terminal, durable_seq)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(boundary)
         })
         .await
     }
@@ -440,9 +838,13 @@ impl SessionStore for SqliteStore {
         limit: usize,
     ) -> Result<StoreOpenTurnPage> {
         validate_read_limit(limit)?;
+        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        self.with_connection(move |connection| {
-            let durable_seq = connection
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let durable_seq = transaction
                 .query_row(
                     "SELECT durable_seq FROM sessions WHERE session_id = ?1",
                     [session_id.as_str()],
@@ -459,42 +861,46 @@ impl SessionStore for SqliteStore {
             }
             let sqlite_limit = i64::try_from(limit + 1)
                 .map_err(|_| StoreError::Invalid("open-turn limit exceeds SQLite".into()))?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT turn_id, accepted_seq FROM turns
+            let page = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT turn_id, accepted_seq FROM turns
                      WHERE session_id = ?1 AND terminal_seq IS NULL
                        AND accepted_seq > ?2
                      ORDER BY accepted_seq LIMIT ?3",
-                )
-                .map_err(sql_error)?;
-            let rows = statement
-                .query_map(
-                    params![
-                        session_id.as_str(),
-                        sqlite_u64("open-turn cursor", after_accepted_seq)?,
-                        sqlite_limit,
-                    ],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .map_err(sql_error)?;
-            let mut turns = Vec::with_capacity(limit + 1);
-            for row in rows {
-                let (turn_id, accepted_seq) = row.map_err(sql_error)?;
-                turns.push(StoreOpenTurn {
-                    turn_id: TurnId::new(turn_id)
-                        .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-                    accepted_seq: decode_u64("turn acceptance sequence", accepted_seq)?,
-                });
-            }
-            let has_more = turns.len() > limit;
-            turns.truncate(limit);
-            let page = StoreOpenTurnPage {
-                after_accepted_seq,
-                turns,
-                durable_seq,
-                has_more,
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map(
+                        params![
+                            session_id.as_str(),
+                            sqlite_u64("open-turn cursor", after_accepted_seq)?,
+                            sqlite_limit,
+                        ],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(sql_error)?;
+                let mut turns = Vec::with_capacity(limit + 1);
+                for row in rows {
+                    let (turn_id, accepted_seq) = row.map_err(sql_error)?;
+                    turns.push(StoreOpenTurn {
+                        turn_id: TurnId::new(turn_id)
+                            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                        accepted_seq: decode_u64("turn acceptance sequence", accepted_seq)?,
+                    });
+                }
+                let has_more = turns.len() > limit;
+                turns.truncate(limit);
+                let page = StoreOpenTurnPage {
+                    after_accepted_seq,
+                    turns,
+                    durable_seq,
+                    has_more,
+                };
+                page.validate()?;
+                page
             };
-            page.validate()?;
+            transaction.commit().map_err(sql_error)?;
             Ok(page)
         })
         .await
@@ -507,7 +913,7 @@ impl SessionStore for SqliteStore {
     ) -> Result<rsi_agent_store_protocol::StoreSessionPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)?;
         let after = after.cloned();
-        self.with_connection(move |connection| {
+        self.with_reader(move |connection| {
             let sqlite_limit = i64::try_from(limit + 1)
                 .map_err(|_| StoreError::Invalid("session read limit exceeds SQLite".into()))?;
             let mut sessions = Vec::with_capacity(limit + 1);
@@ -558,6 +964,108 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn list_recent_sessions(
+        &self,
+        after: Option<&StoreRecentSessionCursor>,
+        limit: usize,
+    ) -> Result<StoreRecentSessionPage> {
+        rsi_agent_store_protocol::validate_session_read_limit(limit)?;
+        let after = after.cloned();
+        let validated_sessions = Arc::clone(&self.validated_sessions);
+        #[cfg(test)]
+        let validation_runs = Arc::clone(&self.validation_runs);
+        let page = self
+            .with_reader(move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .map_err(sql_error)?;
+                let sqlite_limit = i64::try_from(limit + 1)
+                    .map_err(|_| StoreError::Invalid("session read limit exceeds SQLite".into()))?;
+                let mut projections = Vec::with_capacity(limit + 1);
+                if let Some(after) = &after {
+                    let mut statement = transaction
+                        .prepare(
+                            "SELECT session_id, created_at_ms FROM sessions
+                         WHERE (created_at_ms, session_id) < (?1, ?2)
+                         ORDER BY created_at_ms DESC, session_id DESC LIMIT ?3",
+                        )
+                        .map_err(sql_error)?;
+                    let rows = statement
+                        .query_map(
+                            params![
+                                sqlite_u64("recent-session cursor timestamp", after.created_at_ms)?,
+                                after.session_id.as_str(),
+                                sqlite_limit,
+                            ],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        )
+                        .map_err(sql_error)?;
+                    for row in rows {
+                        let (session_id, created_at_ms) = row.map_err(sql_error)?;
+                        projections.push((session_id, created_at_ms));
+                    }
+                } else {
+                    let mut statement = transaction
+                        .prepare(
+                            "SELECT session_id, created_at_ms FROM sessions
+                         ORDER BY created_at_ms DESC, session_id DESC LIMIT ?1",
+                        )
+                        .map_err(sql_error)?;
+                    let rows = statement
+                        .query_map([sqlite_limit], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                        })
+                        .map_err(sql_error)?;
+                    for row in rows {
+                        let (session_id, created_at_ms) = row.map_err(sql_error)?;
+                        projections.push((session_id, created_at_ms));
+                    }
+                }
+                let has_more = projections.len() > limit;
+                projections.truncate(limit);
+                let mut sessions = Vec::with_capacity(projections.len());
+                for (encoded_session_id, created_at_ms) in projections {
+                    let session_id = SessionId::new(encoded_session_id)
+                        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                    let cached = validated_sessions
+                        .lock()
+                        .map_err(|_| {
+                            StoreError::Io("validated-session cache mutex was poisoned".into())
+                        })?
+                        .touch(&session_id);
+                    let header = if cached {
+                        read_session_header_row(&transaction, &session_id)?.0
+                    } else {
+                        #[cfg(test)]
+                        validation_runs.fetch_add(1, Ordering::Relaxed);
+                        validate_session(&transaction, &session_id)?
+                    };
+                    if header.created_at_ms()
+                        != decode_u64("session creation timestamp", created_at_ms)?
+                    {
+                        return Err(StoreError::Corrupt(
+                            "recent-session ordering timestamp differs from its durable header"
+                                .into(),
+                        ));
+                    }
+                    sessions.push(StoreRecentSession { header });
+                }
+                let page = StoreRecentSessionPage {
+                    after,
+                    sessions,
+                    has_more,
+                };
+                page.validate()?;
+                transaction.commit().map_err(sql_error)?;
+                Ok(page)
+            })
+            .await?;
+        for session in &page.sessions {
+            self.mark_session_validated(session.header.session_id().clone())?;
+        }
+        Ok(page)
+    }
+
     async fn list_open_sessions(
         &self,
         after: Option<&SessionId>,
@@ -565,7 +1073,7 @@ impl SessionStore for SqliteStore {
     ) -> Result<rsi_agent_store_protocol::StoreSessionPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)?;
         let after = after.cloned();
-        self.with_connection(move |connection| {
+        self.with_reader(move |connection| {
             let sqlite_limit = i64::try_from(limit + 1)
                 .map_err(|_| StoreError::Invalid("session read limit exceeds SQLite".into()))?;
             let mut sessions = Vec::with_capacity(limit + 1);
@@ -623,9 +1131,13 @@ impl SessionStore for SqliteStore {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<StoredContextCheckpoint>> {
+        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        self.with_connection(move |connection| {
-            let exists = connection
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let exists = transaction
                 .query_row(
                     "SELECT 1 FROM sessions WHERE session_id = ?1",
                     [session_id.as_str()],
@@ -637,7 +1149,7 @@ impl SessionStore for SqliteStore {
             if !exists {
                 return Err(StoreError::NotFound(session_id.to_string()));
             }
-            let projection = connection
+            let projection = transaction
                 .query_row(
                     "SELECT c.header_fingerprint, c.through_seq, c.fact_prefix_sha256,
                             length(c.checkpoint_bytes),
@@ -672,14 +1184,17 @@ impl SessionStore for SqliteStore {
                 )
                 .optional()
                 .map_err(sql_error)?;
-            projection.map(decode_context_checkpoint).transpose()
+            let checkpoint = projection.map(decode_context_checkpoint).transpose()?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(checkpoint)
         })
         .await
     }
 
     async fn write_context_checkpoint(&self, write: WriteContextCheckpoint) -> Result<()> {
         write.validate()?;
-        self.with_connection(move |connection| {
+        self.ensure_session_validated(&write.session_id).await?;
+        self.with_writer(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
@@ -769,7 +1284,7 @@ impl SessionStore for SqliteStore {
                 Ok(reference)
             })
             .await?;
-        self.with_connection(move |connection| {
+        self.with_writer(move |connection| {
             if let Some(existing) = connection
                 .query_row(
                     "SELECT byte_len FROM cas_objects WHERE sha256 = ?1",
@@ -804,7 +1319,7 @@ impl SessionStore for SqliteStore {
         object.validate()?;
         let object = object.clone();
         let verified = object.clone();
-        self.with_connection(move |connection| {
+        self.with_reader(move |connection| {
             let byte_len = connection
                 .query_row(
                     "SELECT byte_len FROM cas_objects WHERE sha256 = ?1",
@@ -859,10 +1374,11 @@ fn admit_append(transaction: &Transaction<'_>, batch: &AppendBatch) -> Result<()
         (None, Some(header)) => transaction
             .execute(
                 "INSERT INTO sessions
-                    (session_id, header_json, durable_seq, fact_prefix_sha256)
-                 VALUES (?1, ?2, 0, ?3)",
+                    (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
                 params![
                     batch.session_id.as_str(),
+                    sqlite_u64("session creation timestamp", header.created_at_ms())?,
                     encode_json("session header", header)?,
                     hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                 ],
@@ -903,38 +1419,38 @@ fn update_turn_index(
     session_id: &SessionId,
     fact: &SessionFact,
 ) -> Result<()> {
-    let changed = match fact.body() {
-        SessionFactBody::TurnAccepted { turn_id, .. }
-        | SessionFactBody::ImageRequested { turn_id, .. } => transaction
+    let role = rsi_agent_store_protocol::store_fact_turn_role(fact.body());
+    let changed = match role {
+        StoreFactTurnRole::Acceptance => transaction
             .execute(
                 "INSERT OR IGNORE INTO turns
                  (session_id, turn_id, accepted_seq, terminal_seq)
                  VALUES (?1, ?2, ?3, NULL)",
                 params![
                     session_id.as_str(),
-                    turn_id.as_str(),
+                    fact.body().turn_id().as_str(),
                     sqlite_u64("turn acceptance sequence", fact.seq())?,
                 ],
             )
             .map_err(sql_error)?,
-        SessionFactBody::TurnTerminal { turn_id, .. } => transaction
+        StoreFactTurnRole::Terminal => transaction
             .execute(
                 "UPDATE turns SET terminal_seq = ?1
                  WHERE session_id = ?2 AND turn_id = ?3 AND terminal_seq IS NULL",
                 params![
                     sqlite_u64("turn terminal sequence", fact.seq())?,
                     session_id.as_str(),
-                    turn_id.as_str(),
+                    fact.body().turn_id().as_str(),
                 ],
             )
             .map_err(sql_error)?,
-        body => transaction
+        StoreFactTurnRole::Event => transaction
             .query_row(
                 "SELECT EXISTS(
                    SELECT 1 FROM turns
                    WHERE session_id = ?1 AND turn_id = ?2 AND terminal_seq IS NULL
                  )",
-                params![session_id.as_str(), body.turn_id().as_str()],
+                params![session_id.as_str(), fact.body().turn_id().as_str()],
                 |row| row.get::<_, bool>(0),
             )
             .map(usize::from)
@@ -943,17 +1459,7 @@ fn update_turn_index(
     if changed == 1 {
         return Ok(());
     }
-    let message = if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
-        "terminal references a closed or unknown turn"
-    } else if matches!(
-        fact.body(),
-        SessionFactBody::TurnAccepted { .. } | SessionFactBody::ImageRequested { .. }
-    ) {
-        "durable turn was accepted more than once"
-    } else {
-        "nonterminal Fact references a closed or unknown turn"
-    };
-    Err(StoreError::Corrupt(message.into()))
+    Err(StoreError::Corrupt(role.rejected_message().into()))
 }
 
 fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBatch) -> Result<u64> {
@@ -995,6 +1501,11 @@ fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBatch) -> Resu
 }
 
 fn prepare_root(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() || path.as_os_str().is_empty() {
+        return Err(StoreError::Invalid(
+            "SQLite Agent Store root must be an absolute path".into(),
+        ));
+    }
     reject_symlink_if_present(path, "Store root")?;
     create_private_directories(path)?;
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
@@ -1004,6 +1515,27 @@ fn prepare_root(path: &Path) -> Result<PathBuf> {
         ));
     }
     set_directory_permissions(path)?;
+    fs::canonicalize(path).map_err(io_error)
+}
+
+fn existing_root(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() || path.as_os_str().is_empty() {
+        return Err(StoreError::Invalid(
+            "SQLite Agent Store root must be an absolute path".into(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StoreError::NotFound(path.display().to_string())
+        } else {
+            io_error(error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(StoreError::Invalid(
+            "SQLite Agent Store root must be a real directory".into(),
+        ));
+    }
     fs::canonicalize(path).map_err(io_error)
 }
 
@@ -1075,16 +1607,51 @@ fn reject_symlink_if_present(path: &Path, label: &str) -> Result<()> {
     }
 }
 
+fn reject_uncheckpointed_wal(root: &Path) -> Result<()> {
+    let wal_path = root.join("sessions.sqlite3-wal");
+    let metadata = match fs::symlink_metadata(&wal_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(StoreError::Corrupt(
+            "SQLite WAL is not a regular file".into(),
+        ));
+    }
+    if metadata.len() != 0 {
+        return Err(StoreError::Invalid(
+            "verification requires a cleanly closed Store or SQLite backup; found a nonempty WAL"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn acquire_writer_lock(root: &Path) -> Result<File> {
+    open_writer_lock(root, true)
+}
+
+fn acquire_existing_writer_lock(root: &Path) -> Result<File> {
+    open_writer_lock(root, false)
+}
+
+fn open_writer_lock(root: &Path, create: bool) -> Result<File> {
     let path = root.join(".writer.lock");
     reject_symlink_if_present(&path, "Store writer lock")?;
     let file = OpenOptions::new()
-        .create(true)
+        .create(create)
         .truncate(false)
         .read(true)
-        .write(true)
+        .write(create)
         .open(&path)
-        .map_err(io_error)?;
+        .map_err(|error| {
+            if !create && error.kind() == std::io::ErrorKind::NotFound {
+                StoreError::NotFound(path.display().to_string())
+            } else {
+                io_error(error)
+            }
+        })?;
     validate_open_file(&path, &file, "Store writer lock")?;
     if let Err(error) = file.try_lock() {
         let error: std::io::Error = error.into();
@@ -1121,7 +1688,7 @@ fn validate_open_file(path: &Path, file: &File, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn configure(connection: &Connection) -> Result<()> {
+fn configure_writer(connection: &Connection) -> Result<()> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(sql_error)?;
@@ -1134,10 +1701,59 @@ fn configure(connection: &Connection) -> Result<()> {
         .map_err(sql_error)
 }
 
-fn initialize_or_validate_schema(connection: &mut Connection) -> Result<()> {
+fn configure_reader(connection: &Connection) -> Result<()> {
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(sql_error)?;
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA query_only = ON;",
+        )
+        .map_err(sql_error)
+}
+
+fn open_verification_database(path: &Path) -> Result<Connection> {
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt as _;
+        path.as_os_str().as_bytes()
+    };
+    #[cfg(not(unix))]
+    let path_text = path
+        .to_str()
+        .ok_or_else(|| StoreError::Invalid("SQLite database path is not Unicode".into()))?;
+    #[cfg(not(unix))]
+    let bytes = path_text.as_bytes();
+    let uri = immutable_sqlite_uri(bytes);
+    Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(sql_error)
+}
+
+fn immutable_sqlite_uri(bytes: &[u8]) -> String {
+    let mut uri = String::with_capacity(bytes.len().saturating_mul(3).saturating_add(17));
+    uri.push_str("file:");
+    for byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b':' | b'-' | b'.' | b'_' | b'~')
+        {
+            uri.push(char::from(*byte));
+        } else {
+            write!(&mut uri, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
+}
+
+fn initialize_or_validate_schema(connection: &mut Connection, may_initialize: bool) -> Result<()> {
     let version = pragma_user_version(connection)?;
     let tables = user_tables(connection)?;
-    if version == 0 && tables.is_empty() {
+    if version == 0 && tables.is_empty() && may_initialize {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
@@ -1275,6 +1891,128 @@ fn user_indexes(connection: &Connection) -> Result<BTreeSet<String>> {
         .map_err(sql_error)
 }
 
+fn validate_session(connection: &Connection, session_id: &SessionId) -> Result<SessionHeader> {
+    let (header, durable_seq) = read_session_header_row(connection, session_id)?;
+
+    let (fact_count, maximum_sequence) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(seq), 0)
+             FROM facts WHERE session_id = ?1",
+            [session_id.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(sql_error)?;
+    if decode_u64("session Fact count", fact_count)? != durable_seq
+        || decode_u64("session maximum Fact sequence", maximum_sequence)? != durable_seq
+    {
+        return Err(StoreError::Corrupt(
+            "session durable watermark differs from its contiguous Fact stream".into(),
+        ));
+    }
+
+    validate_turn_index(connection, session_id)?;
+    Ok(header)
+}
+
+fn read_session_header_row(
+    connection: &Connection,
+    session_id: &SessionId,
+) -> Result<(SessionHeader, u64)> {
+    let (created_at_ms, durable_seq, fact_prefix_sha256, header_encoded_len, header_json) =
+        connection
+            .query_row(
+                "SELECT created_at_ms, durable_seq, fact_prefix_sha256,
+                    length(CAST(header_json AS BLOB)),
+                    CASE WHEN length(CAST(header_json AS BLOB)) <= ?2
+                         THEN header_json END
+             FROM sessions WHERE session_id = ?1",
+                params![
+                    session_id.as_str(),
+                    i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
+                        .expect("session header bound fits SQLite INTEGER"),
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sql_error)?
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+    let durable_seq = decode_u64("durable sequence", durable_seq)?;
+    validate_sha256("Fact-prefix digest", &fact_prefix_sha256)?;
+    let header: SessionHeader = decode_projected_json(
+        "session header",
+        (header_encoded_len, header_json),
+        MAXIMUM_SESSION_HEADER_BYTES,
+    )?;
+    if header.session_id() != session_id {
+        return Err(StoreError::Corrupt(
+            "session header identity differs from its durable row".into(),
+        ));
+    }
+    if header.created_at_ms() != decode_u64("session creation timestamp", created_at_ms)? {
+        return Err(StoreError::Corrupt(
+            "session creation timestamp differs from its durable header".into(),
+        ));
+    }
+    Ok((header, durable_seq))
+}
+
+fn validate_turn_index(connection: &Connection, session_id: &SessionId) -> Result<()> {
+    let invalid = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM facts AS fact
+               LEFT JOIN turns AS turn
+                 ON turn.session_id = fact.session_id AND turn.turn_id = fact.turn_id
+               WHERE fact.session_id = ?1 AND (
+                    turn.turn_id IS NULL
+                    OR (fact.fact_kind = 'accepted' AND turn.accepted_seq != fact.seq)
+                    OR (fact.fact_kind = 'terminal' AND turn.terminal_seq != fact.seq)
+                    OR (fact.fact_kind = 'event' AND (
+                         fact.seq <= turn.accepted_seq
+                         OR (turn.terminal_seq IS NOT NULL AND fact.seq >= turn.terminal_seq)
+                       ))
+                  )
+               UNION ALL
+               SELECT 1
+               FROM turns AS turn
+               WHERE turn.session_id = ?1 AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM facts AS accepted
+                      WHERE accepted.session_id = turn.session_id
+                        AND accepted.seq = turn.accepted_seq
+                        AND accepted.turn_id = turn.turn_id
+                        AND accepted.fact_kind = 'accepted'
+                    )
+                    OR (turn.terminal_seq IS NOT NULL AND NOT EXISTS (
+                      SELECT 1 FROM facts AS terminal
+                      WHERE terminal.session_id = turn.session_id
+                        AND terminal.seq = turn.terminal_seq
+                        AND terminal.turn_id = turn.turn_id
+                        AND terminal.fact_kind = 'terminal'
+                    ))
+                  )
+             )",
+            [session_id.as_str()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(sql_error)?;
+    if invalid {
+        return Err(StoreError::Corrupt(
+            "turn index differs from the canonical Fact stream".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_database(connection: &Connection) -> Result<()> {
     let integrity = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
@@ -1296,81 +2034,83 @@ fn validate_database(connection: &Connection) -> Result<()> {
             "SQLite foreign_key_check reported a violation".into(),
         ));
     }
-    let invalid_watermark = connection
-        .query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM sessions AS session
-               WHERE session.durable_seq != (
-                 SELECT COUNT(*) FROM facts WHERE facts.session_id = session.session_id
-               ) OR session.durable_seq != COALESCE((
-                 SELECT MAX(seq) FROM facts WHERE facts.session_id = session.session_id
-               ), 0)
-             )",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(sql_error)?;
-    if invalid_watermark {
-        return Err(StoreError::Corrupt(
-            "session durable watermark differs from its contiguous Fact stream".into(),
-        ));
+    let session_ids = {
+        let mut statement = connection
+            .prepare("SELECT session_id FROM sessions ORDER BY session_id")
+            .map_err(sql_error)?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sql_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_error)?
+    };
+    for encoded_session_id in session_ids {
+        let session_id = SessionId::new(encoded_session_id).map_err(|error| {
+            StoreError::Corrupt(format!("durable session identity is invalid: {error}"))
+        })?;
+        validate_session(connection, &session_id)?;
+        validate_canonical_fact_prefix(connection, &session_id)?;
     }
-    let invalid_fact_prefix_digest = connection
+    Ok(())
+}
+
+fn validate_canonical_fact_prefix(connection: &Connection, session_id: &SessionId) -> Result<()> {
+    let expected_digest = connection
         .query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM sessions
-               WHERE typeof(fact_prefix_sha256) != 'text'
-                  OR length(fact_prefix_sha256) != 64
-                  OR fact_prefix_sha256 GLOB '*[^0-9a-f]*'
-             )",
-            [],
-            |row| row.get::<_, bool>(0),
+            "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
+            [session_id.as_str()],
+            |row| row.get::<_, String>(0),
         )
         .map_err(sql_error)?;
-    if invalid_fact_prefix_digest {
-        return Err(StoreError::Corrupt(
-            "Fact-prefix digest is not lowercase SHA-256".into(),
-        ));
+    let mut digest = EMPTY_FACT_PREFIX_DIGEST;
+    let mut next_sequence = 1_u64;
+    let mut statement = connection
+        .prepare(
+            "SELECT seq, turn_id, fact_kind, length(CAST(fact_json AS BLOB)),
+                    CASE WHEN length(CAST(fact_json AS BLOB)) <= ?2
+                         THEN fact_json END
+             FROM facts WHERE session_id = ?1 ORDER BY seq",
+        )
+        .map_err(sql_error)?;
+    let mut rows = statement
+        .query(params![
+            session_id.as_str(),
+            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                .expect("session Fact bound fits SQLite INTEGER")
+        ])
+        .map_err(sql_error)?;
+    while let Some(row) = rows.next().map_err(sql_error)? {
+        let sequence = decode_u64("Fact sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
+        let turn_id = row.get::<_, String>(1).map_err(sql_error)?;
+        let fact_kind = row.get::<_, String>(2).map_err(sql_error)?;
+        let fact: SessionFact = decode_projected_json(
+            "session Fact",
+            (
+                row.get::<_, i64>(3).map_err(sql_error)?,
+                row.get::<_, Option<String>>(4).map_err(sql_error)?,
+            ),
+            MAXIMUM_SESSION_FACT_BYTES,
+        )?;
+        if sequence != next_sequence || fact.seq() != sequence {
+            return Err(StoreError::Corrupt(
+                "session Fact JSON sequence differs from its contiguous durable row".into(),
+            ));
+        }
+        if fact.body().turn_id().as_str() != turn_id || fact_index_kind(fact.body()) != fact_kind {
+            return Err(StoreError::Corrupt(
+                "session Fact JSON differs from its durable turn index columns".into(),
+            ));
+        }
+        digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
+            StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
+        })?;
+        next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
+            StoreError::Corrupt("session Fact sequence overflowed during audit".into())
+        })?;
     }
-    let invalid_turn_index = connection
-        .query_row(
-            "SELECT EXISTS(
-               SELECT 1
-               FROM facts AS fact
-               LEFT JOIN turns AS turn
-                 ON turn.session_id = fact.session_id AND turn.turn_id = fact.turn_id
-               WHERE turn.turn_id IS NULL
-                  OR (fact.fact_kind = 'accepted' AND turn.accepted_seq != fact.seq)
-                  OR (fact.fact_kind = 'terminal' AND turn.terminal_seq != fact.seq)
-                  OR (fact.fact_kind = 'event' AND (
-                       fact.seq <= turn.accepted_seq
-                       OR (turn.terminal_seq IS NOT NULL AND fact.seq >= turn.terminal_seq)
-                     ))
-               UNION ALL
-               SELECT 1
-               FROM turns AS turn
-               WHERE NOT EXISTS (
-                       SELECT 1 FROM facts AS accepted
-                       WHERE accepted.session_id = turn.session_id
-                         AND accepted.seq = turn.accepted_seq
-                         AND accepted.turn_id = turn.turn_id
-                         AND accepted.fact_kind = 'accepted'
-                     )
-                  OR (turn.terminal_seq IS NOT NULL AND NOT EXISTS (
-                       SELECT 1 FROM facts AS terminal
-                       WHERE terminal.session_id = turn.session_id
-                         AND terminal.seq = turn.terminal_seq
-                         AND terminal.turn_id = turn.turn_id
-                         AND terminal.fact_kind = 'terminal'
-                     ))
-             )",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(sql_error)?;
-    if invalid_turn_index {
+    if hex::encode(digest) != expected_digest {
         return Err(StoreError::Corrupt(
-            "turn index differs from the canonical Fact streams".into(),
+            "Fact-prefix digest differs from the canonical Fact stream".into(),
         ));
     }
     Ok(())
@@ -1638,6 +2378,56 @@ fn decode_projected_json<T: serde::de::DeserializeOwned>(
     decode_json(label, &json)
 }
 
+fn read_indexed_fact(
+    connection: &Connection,
+    session_id: &SessionId,
+    sequence: i64,
+) -> Result<SessionFact> {
+    let projection = connection
+        .query_row(
+            "SELECT seq, turn_id, fact_kind,
+                    length(CAST(fact_json AS BLOB)),
+                    CASE WHEN length(CAST(fact_json AS BLOB)) <= ?3
+                         THEN fact_json END
+             FROM facts WHERE session_id = ?1 AND seq = ?2",
+            params![
+                session_id.as_str(),
+                sequence,
+                i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                    .expect("session Fact bound fits SQLite INTEGER"),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| {
+            StoreError::Corrupt("turn index references an absent canonical Fact".into())
+        })?;
+    let fact: SessionFact = decode_projected_json(
+        "session Fact",
+        (projection.3, projection.4),
+        MAXIMUM_SESSION_FACT_BYTES,
+    )?;
+    let indexed_sequence = decode_u64("indexed Fact sequence", projection.0)?;
+    if fact.seq() != indexed_sequence
+        || fact.body().turn_id().as_str() != projection.1
+        || fact_index_kind(fact.body()) != projection.2
+    {
+        return Err(StoreError::Corrupt(
+            "indexed Fact JSON differs from its relational row".into(),
+        ));
+    }
+    Ok(fact)
+}
+
 fn sqlite_u64(label: &str, value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::Invalid(format!("{label} exceeds SQLite INTEGER")))
 }
@@ -1647,10 +2437,10 @@ fn decode_u64(label: &str, value: i64) -> Result<u64> {
 }
 
 const fn fact_index_kind(body: &SessionFactBody) -> &'static str {
-    match body {
-        SessionFactBody::TurnAccepted { .. } | SessionFactBody::ImageRequested { .. } => "accepted",
-        SessionFactBody::TurnTerminal { .. } => "terminal",
-        _ => "event",
+    match rsi_agent_store_protocol::store_fact_turn_role(body) {
+        StoreFactTurnRole::Acceptance => "accepted",
+        StoreFactTurnRole::Terminal => "terminal",
+        StoreFactTurnRole::Event => "event",
     }
 }
 
@@ -1719,6 +2509,42 @@ impl PluginFactory for SqliteStoreFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings};
+    use rsi_ai_protocol::ModelRef;
+    use rsi_sandbox::SandboxMode;
+
+    fn test_header(session_id: &str) -> SessionHeader {
+        SessionHeader::new(
+            SessionId::new(session_id).unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test-agent").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                ModelRef::new("deployment", "model").unwrap(),
+                SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn test_fact(sequence: u64) -> SessionFact {
+        SessionFact::new(
+            sequence,
+            sequence,
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new(format!("turn-{sequence}")).unwrap(),
+                text: "hello".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap()
+    }
 
     #[test]
     fn prepared_store_charge_includes_inline_and_dynamic_config_state() {
@@ -1729,6 +2555,228 @@ mod tests {
         assert_eq!(
             store_config_retained_bytes(&config).unwrap(),
             std::mem::size_of::<SqliteStoreConfig>() + config.root.as_os_str().len()
+        );
+    }
+
+    #[test]
+    fn validated_session_cache_has_exact_recency_eviction() {
+        let first = SessionId::new("session-000").unwrap();
+        let mut cache = ValidatedSessionCache::default();
+        cache.insert(first.clone());
+        for index in 1..=VALIDATED_SESSION_CACHE_CAPACITY {
+            cache.insert(SessionId::new(format!("session-{index:03}")).unwrap());
+        }
+
+        assert!(!cache.touch(&first));
+        assert!(cache.touch(&SessionId::new("session-001").unwrap()));
+        assert_eq!(cache.recency.len(), VALIDATED_SESSION_CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let connection = store.connections.reader.lock().unwrap();
+        let detail = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN
+                 SELECT session_id, created_at_ms FROM sessions
+                 WHERE (created_at_ms, session_id) < (?1, ?2)
+                 ORDER BY created_at_ms DESC, session_id DESC LIMIT ?3",
+                params![1_i64, "session", 8_i64],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap();
+        assert!(detail.contains("sessions_by_created_at"));
+        assert!(detail.contains("created_at_ms,session_id"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_access_runs_one_session_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new("session-single-flight").unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        store
+            .append(AppendBatch {
+                session_id: session_id.clone(),
+                expected_seq: 0,
+                header: Some(test_header(session_id.as_str())),
+                facts: vec![test_fact(1)],
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = Arc::new(SqliteStore::open(root.path()).unwrap());
+        let barrier = Arc::new(tokio::sync::Barrier::new(17));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let session_id = session_id.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.header(&session_id).await.unwrap()
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            assert_eq!(task.await.unwrap().session_id(), &session_id);
+        }
+        assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_recent_listing_reuses_the_session_validation_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let session_id = SessionId::new("session-recent-cache").unwrap();
+        store
+            .append(AppendBatch {
+                session_id: session_id.clone(),
+                expected_seq: 0,
+                header: Some(test_header(session_id.as_str())),
+                facts: vec![test_fact(1)],
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = SqliteStore::open(root.path()).unwrap();
+        assert_eq!(
+            store
+                .list_recent_sessions(None, 1)
+                .await
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+        assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            store
+                .list_recent_sessions(None, 1)
+                .await
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+        assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let first = SessionId::new("session-000").unwrap();
+        store
+            .append(AppendBatch {
+                session_id: first.clone(),
+                expected_seq: 0,
+                header: Some(test_header(first.as_str())),
+                facts: vec![test_fact(1)],
+            })
+            .await
+            .unwrap();
+        for index in 1..=VALIDATED_SESSION_CACHE_CAPACITY {
+            let session_id = SessionId::new(format!("session-{index:03}")).unwrap();
+            store
+                .append(AppendBatch {
+                    session_id: session_id.clone(),
+                    expected_seq: 0,
+                    header: Some(test_header(session_id.as_str())),
+                    facts: vec![test_fact(1)],
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.validation_runs.load(Ordering::Relaxed), 0);
+
+        assert_eq!(store.header(&first).await.unwrap().session_id(), &first);
+        assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+        assert_eq!(store.header(&first).await.unwrap().session_id(), &first);
+        assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn validation_gates_are_shared_only_within_one_session() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let first = SessionId::new("session-first").unwrap();
+        let second = SessionId::new("session-second").unwrap();
+
+        let first_gate = store.validation_gate(&first).unwrap();
+        let same_session_gate = store.validation_gate(&first).unwrap();
+        let other_session_gate = store.validation_gate(&second).unwrap();
+
+        assert!(Arc::ptr_eq(&first_gate, &same_session_gate));
+        assert!(!Arc::ptr_eq(&first_gate, &other_session_gate));
+    }
+
+    #[tokio::test]
+    async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new("session-snapshot").unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        store
+            .append(AppendBatch {
+                session_id: session_id.clone(),
+                expected_seq: 0,
+                header: Some(test_header(session_id.as_str())),
+                facts: vec![test_fact(1)],
+            })
+            .await
+            .unwrap();
+
+        let database = root.path().join("sessions.sqlite3");
+        let writer_session = session_id.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut connection = Connection::open(database).unwrap();
+            configure_writer(&connection).unwrap();
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let batch = AppendBatch {
+                session_id: writer_session,
+                expected_seq: 1,
+                header: None,
+                facts: vec![test_fact(2)],
+            };
+            admit_append(&transaction, &batch).unwrap();
+            insert_fact(&transaction, &batch.session_id, &batch.facts[0]).unwrap();
+            advance_watermark(&transaction, &batch).unwrap();
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            transaction.commit().unwrap();
+        });
+
+        entered_rx.await.unwrap();
+        let before = store.read_facts(&session_id, 0, 8).await.unwrap();
+        assert_eq!(before.durable_seq, 1);
+        assert_eq!(before.facts.len(), 1);
+        release_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || writer.join().unwrap())
+            .await
+            .unwrap();
+        let after = store.read_facts(&session_id, 0, 8).await.unwrap();
+        assert_eq!(after.durable_seq, 2);
+        assert_eq!(after.facts.len(), 2);
+
+        let reader = store.connections.reader.lock().unwrap();
+        assert_eq!(
+            reader
+                .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            reader
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5_000
         );
     }
 }

@@ -18,7 +18,7 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 3;
+pub const SESSION_FORMAT_VERSION: u32 = 4;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -327,8 +327,8 @@ impl BudgetDimension {
 /// Immutable redacted settings captured when one session becomes durable.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FrozenAgentProfile {
-    profile_id: String,
+pub struct FrozenAgentSettings {
+    settings_id: String,
     system_prompt: String,
     default_model: ModelRef,
     sandbox: SandboxMode,
@@ -336,15 +336,15 @@ pub struct FrozenAgentProfile {
     turn_budget: TurnBudget,
 }
 
-impl<'de> Deserialize<'de> for FrozenAgentProfile {
+impl<'de> Deserialize<'de> for FrozenAgentSettings {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct WireProfile {
-            profile_id: String,
+        struct WireSettings {
+            settings_id: String,
             system_prompt: String,
             default_model: ModelRef,
             sandbox: SandboxMode,
@@ -352,9 +352,9 @@ impl<'de> Deserialize<'de> for FrozenAgentProfile {
             turn_budget: TurnBudget,
         }
 
-        let wire = WireProfile::deserialize(deserializer)?;
+        let wire = WireSettings::deserialize(deserializer)?;
         Self::new_with_budget(
-            wire.profile_id,
+            wire.settings_id,
             wire.system_prompt,
             wire.default_model,
             wire.sandbox,
@@ -365,17 +365,17 @@ impl<'de> Deserialize<'de> for FrozenAgentProfile {
     }
 }
 
-impl FrozenAgentProfile {
-    /// Creates a bounded immutable profile without resolved secrets.
+impl FrozenAgentSettings {
+    /// Creates bounded immutable Agent settings without resolved secrets.
     pub fn new(
-        profile_id: impl Into<String>,
+        settings_id: impl Into<String>,
         system_prompt: impl Into<String>,
         default_model: ModelRef,
         sandbox: SandboxMode,
         require_approval: bool,
     ) -> Result<Self> {
         Self::new_with_budget(
-            profile_id,
+            settings_id,
             system_prompt,
             default_model,
             sandbox,
@@ -384,30 +384,30 @@ impl FrozenAgentProfile {
         )
     }
 
-    /// Creates a bounded immutable profile with an explicit tightened turn budget.
+    /// Creates bounded immutable Agent settings with an explicit tightened turn budget.
     pub fn new_with_budget(
-        profile_id: impl Into<String>,
+        settings_id: impl Into<String>,
         system_prompt: impl Into<String>,
         default_model: ModelRef,
         sandbox: SandboxMode,
         require_approval: bool,
         turn_budget: TurnBudget,
     ) -> Result<Self> {
-        let profile = Self {
-            profile_id: profile_id.into(),
+        let settings = Self {
+            settings_id: settings_id.into(),
             system_prompt: system_prompt.into(),
             default_model,
             sandbox,
             require_approval,
             turn_budget,
         };
-        profile.validate()?;
-        Ok(profile)
+        settings.validate()?;
+        Ok(settings)
     }
 
-    /// Revalidates a decoded profile.
+    /// Revalidates decoded Agent settings.
     pub fn validate(&self) -> Result<()> {
-        validate_identifier("profile", &self.profile_id)?;
+        validate_identifier("Agent settings", &self.settings_id)?;
         validate_safe_text(
             "system prompt",
             &self.system_prompt,
@@ -426,9 +426,9 @@ impl FrozenAgentProfile {
         Ok(())
     }
 
-    /// Returns the exact profile identity.
-    pub fn profile_id(&self) -> &str {
-        &self.profile_id
+    /// Returns the exact Agent-settings identity.
+    pub fn settings_id(&self) -> &str {
+        &self.settings_id
     }
 
     /// Returns the frozen system instruction.
@@ -456,7 +456,7 @@ impl FrozenAgentProfile {
         &self.turn_budget
     }
 
-    /// Returns the lowercase SHA-256 of the canonical redacted profile.
+    /// Returns the lowercase SHA-256 of the canonical redacted settings.
     pub fn fingerprint(&self) -> Result<String> {
         let bytes =
             serde_json::to_vec(self).map_err(|error| SessionError::Encoding(error.to_string()))?;
@@ -473,7 +473,7 @@ pub struct SessionHeader {
     created_at_ms: u64,
     canonical_cwd: String,
     agent_preset_id: AgentPresetId,
-    profile: FrozenAgentProfile,
+    settings: FrozenAgentSettings,
 }
 
 impl<'de> Deserialize<'de> for SessionHeader {
@@ -489,7 +489,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             created_at_ms: Option<serde_json::Value>,
             canonical_cwd: Option<serde_json::Value>,
             agent_preset_id: Option<serde_json::Value>,
-            profile: Option<serde_json::Value>,
+            settings: Option<serde_json::Value>,
         }
 
         let wire = WireHeader::deserialize(deserializer)?;
@@ -504,7 +504,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             created_at_ms: decode_header_field(wire.created_at_ms, "created_at_ms")?,
             canonical_cwd: decode_header_field(wire.canonical_cwd, "canonical_cwd")?,
             agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
-            profile: decode_header_field(wire.profile, "profile")?,
+            settings: decode_header_field(wire.settings, "settings")?,
         };
         header
             .validate()
@@ -532,7 +532,7 @@ impl SessionHeader {
         created_at_ms: u64,
         canonical_cwd: impl Into<String>,
         agent_preset_id: AgentPresetId,
-        profile: FrozenAgentProfile,
+        settings: FrozenAgentSettings,
     ) -> Result<Self> {
         let header = Self {
             format_version: SESSION_FORMAT_VERSION,
@@ -540,7 +540,7 @@ impl SessionHeader {
             created_at_ms,
             canonical_cwd: canonical_cwd.into(),
             agent_preset_id,
-            profile,
+            settings,
         };
         header.validate()?;
         Ok(header)
@@ -557,7 +557,7 @@ impl SessionHeader {
             ));
         }
         validate_canonical_path(&self.canonical_cwd)?;
-        self.profile.validate()?;
+        self.settings.validate()?;
         let encoded_len = compact_json_len(self)?;
         if encoded_len > MAXIMUM_SESSION_HEADER_BYTES {
             return Err(SessionError::TooLarge {
@@ -604,9 +604,9 @@ impl SessionHeader {
         Ok(self)
     }
 
-    /// Returns the frozen creation-time profile.
-    pub const fn profile(&self) -> &FrozenAgentProfile {
-        &self.profile
+    /// Returns the frozen creation-time Agent settings.
+    pub const fn settings(&self) -> &FrozenAgentSettings {
+        &self.settings
     }
 
     /// Returns lowercase SHA-256 of the exact canonical immutable header.
@@ -874,7 +874,7 @@ impl SessionFactBody {
                 sandbox,
                 require_approval,
             } => {
-                validate_safe_text("turn text", text, MAXIMUM_TURN_TEXT_BYTES, false)?;
+                validate_turn_text(text)?;
                 if let Some(model) = model {
                     model
                         .validate()
@@ -1245,6 +1245,11 @@ pub fn validate_identifier(kind: &str, value: &str) -> Result<()> {
 /// Validates one nonempty bounded diagnostic using the durable safety rules.
 pub fn validate_safe_diagnostic(kind: &str, value: &str) -> Result<()> {
     validate_safe_text(kind, value, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, false)
+}
+
+/// Validates one user turn text using the durable Fact contract.
+pub fn validate_turn_text(value: &str) -> Result<()> {
+    validate_safe_text("turn text", value, MAXIMUM_TURN_TEXT_BYTES, false)
 }
 
 fn validate_safe_text(kind: &str, value: &str, maximum: usize, allow_empty: bool) -> Result<()> {

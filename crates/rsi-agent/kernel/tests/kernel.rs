@@ -5,25 +5,25 @@ use rsi_agent_composition_protocol::{
     AgentSessionDraft, PreparedFreshSession,
 };
 use rsi_agent_kernel::{
-    Clock, DEFAULT_MAXIMUM_ACTIVE_OBSERVERS, IdSource, KernelFactory, KernelLimits,
-    MAXIMUM_ACTIVE_SESSIONS, SessionKernel,
+    Clock, DEFAULT_MAXIMUM_ACTIVE_OBSERVERS, KernelFactory, KernelLimits, MAXIMUM_ACTIVE_SESSIONS,
+    MAXIMUM_PENDING_FACT_BYTES, SessionKernel,
 };
 use rsi_agent_session_protocol::{
-    AgentPresetId, BudgetDimension, EffectId, EffectKind, FrozenAgentProfile,
+    AgentPresetId, BudgetDimension, EffectId, EffectKind, FrozenAgentSettings,
     MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_FACTS_PER_READ, MAXIMUM_SESSION_FACT_BYTES,
-    MAXIMUM_TURN_TEXT_BYTES, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnBudget,
-    TurnId, TurnOutcome, fact_prefix_sha256,
+    MAXIMUM_TURN_GENERATED_FACT_BYTES, MAXIMUM_TURN_TEXT_BYTES, SessionFact, SessionFactBody,
+    SessionHeader, SessionId, TurnBudget, TurnId, TurnOutcome, fact_prefix_sha256,
 };
 use rsi_agent_store_protocol::{
     AppendBatch, AppendCommit, CasObjectRef, SessionStore, StoreError, StoreFactPage,
-    StoreOpenTurnPage, StoreSessionPage, StoreTurnFactPage, StoredContextCheckpoint,
-    WriteContextCheckpoint,
+    StoreOpenTurnPage, StoreSessionPage, StoreTurnBoundary, StoreTurnFactPage,
+    StoredContextCheckpoint, WriteContextCheckpoint,
 };
 use rsi_agent_testkit::{MemoryStore, MemoryStoreFactory};
 use rsi_agent_turn_protocol::{
-    ContextCheckpoint, SubmitSession, SubmitTurn, TurnError, TurnExecution,
-    TurnFinalizationContext, TurnFinalizationError, TurnFinalizationReport, TurnFinalizer,
-    TurnService, TurnUpdate,
+    ContextCheckpoint, PublishAttempt, SubmitSession, SubmitTurn, TurnClaimIssuer, TurnError,
+    TurnExecution, TurnFinalizationContext, TurnFinalizationError, TurnFinalizationReport,
+    TurnFinalizer, TurnService, TurnUpdate,
 };
 use rsi_ai_protocol::{
     AiCapability, ContentDelta, ContentStart, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, ModelRef,
@@ -44,6 +44,19 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+trait PublishedFacts {
+    fn published(self) -> Vec<Arc<SessionFact>>;
+}
+
+impl PublishedFacts for PublishAttempt {
+    fn published(self) -> Vec<Arc<SessionFact>> {
+        match self {
+            PublishAttempt::Published(facts) => facts,
+            PublishAttempt::FlushRequired { .. } => panic!("expected published Facts"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FixedClock;
 
@@ -53,13 +66,11 @@ impl Clock for FixedClock {
     }
 }
 
-#[derive(Debug, Default)]
-struct SequenceIds(Mutex<u64>);
-
 #[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
     block_header_reads: AtomicBool,
+    blocked_header_session: Mutex<Option<SessionId>>,
     header_read_attempts: AtomicUsize,
     release_header_reads: Notify,
     pause_read: AtomicBool,
@@ -71,10 +82,15 @@ struct FactReadRaceStore {
     open_turn_read_attempts: AtomicUsize,
     open_turn_read_captured: Notify,
     release_open_turn_read: Notify,
+    block_turn_boundary_reads: AtomicBool,
+    turn_boundary_read_attempts: AtomicUsize,
+    turn_boundary_read_started: Notify,
+    release_turn_boundary_read: Notify,
     append_attempts: AtomicUsize,
     pause_append_at: AtomicUsize,
     append_blocked: Notify,
     release_append: Notify,
+    permanent_append_failure_for: Mutex<Option<SessionId>>,
     fail_checkpoint_write: AtomicBool,
 }
 
@@ -83,6 +99,7 @@ impl FactReadRaceStore {
         Self {
             inner,
             block_header_reads: AtomicBool::new(false),
+            blocked_header_session: Mutex::new(None),
             header_read_attempts: AtomicUsize::new(0),
             release_header_reads: Notify::new(),
             pause_read: AtomicBool::new(false),
@@ -94,15 +111,28 @@ impl FactReadRaceStore {
             open_turn_read_attempts: AtomicUsize::new(0),
             open_turn_read_captured: Notify::new(),
             release_open_turn_read: Notify::new(),
+            block_turn_boundary_reads: AtomicBool::new(false),
+            turn_boundary_read_attempts: AtomicUsize::new(0),
+            turn_boundary_read_started: Notify::new(),
+            release_turn_boundary_read: Notify::new(),
             append_attempts: AtomicUsize::new(0),
             pause_append_at: AtomicUsize::new(0),
             append_blocked: Notify::new(),
             release_append: Notify::new(),
+            permanent_append_failure_for: Mutex::new(None),
             fail_checkpoint_write: AtomicBool::new(false),
         }
     }
 
     fn block_header_reads(&self) {
+        self.block_header_reads.store(true, Ordering::Release);
+    }
+
+    fn block_header_reads_for(&self, session_id: SessionId) {
+        *self
+            .blocked_header_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
         self.block_header_reads.store(true, Ordering::Release);
     }
 
@@ -116,6 +146,10 @@ impl FactReadRaceStore {
 
     fn release_blocked_header_reads(&self) {
         self.block_header_reads.store(false, Ordering::Release);
+        self.blocked_header_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.release_header_reads.notify_waiters();
     }
 
@@ -171,6 +205,11 @@ impl FactReadRaceStore {
         self.pause_append_at.store(attempt, Ordering::Release);
     }
 
+    fn pause_next_append(&self) {
+        let attempt = self.append_attempts.load(Ordering::Acquire) + 1;
+        self.pause_append_at.store(attempt, Ordering::Release);
+    }
+
     async fn wait_until_append_is_blocked(&self) {
         self.append_blocked.notified().await;
     }
@@ -179,8 +218,34 @@ impl FactReadRaceStore {
         self.release_append.notify_one();
     }
 
+    fn fail_appends_for(&self, session_id: SessionId) {
+        *self
+            .permanent_append_failure_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
+    }
+
     fn fail_next_checkpoint_write(&self) {
         self.fail_checkpoint_write.store(true, Ordering::Release);
+    }
+
+    fn block_turn_boundary_reads(&self) {
+        self.block_turn_boundary_reads
+            .store(true, Ordering::Release);
+    }
+
+    async fn wait_for_turn_boundary_attempts(&self, expected: usize) {
+        while self.turn_boundary_read_attempts.load(Ordering::Acquire) < expected {
+            self.turn_boundary_read_started.notified().await;
+        }
+    }
+
+    fn turn_boundary_read_attempts(&self) -> usize {
+        self.turn_boundary_read_attempts.load(Ordering::Acquire)
+    }
+
+    fn release_one_turn_boundary_read(&self) {
+        self.release_turn_boundary_read.notify_one();
     }
 }
 
@@ -192,6 +257,17 @@ impl SessionStore for FactReadRaceStore {
             self.append_blocked.notify_one();
             self.release_append.notified().await;
         }
+        if self
+            .permanent_append_failure_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(&batch.session_id)
+        {
+            return Err(StoreError::Invalid(
+                "injected permanent append failure".into(),
+            ));
+        }
         self.inner.append(batch).await
     }
 
@@ -201,7 +277,16 @@ impl SessionStore for FactReadRaceStore {
     ) -> rsi_agent_store_protocol::Result<SessionHeader> {
         self.header_read_attempts.fetch_add(1, Ordering::AcqRel);
         let released = self.release_header_reads.notified();
-        if self.block_header_reads.load(Ordering::Acquire) {
+        let blocked_session = self
+            .blocked_header_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if self.block_header_reads.load(Ordering::Acquire)
+            && blocked_session
+                .as_ref()
+                .is_none_or(|blocked| blocked == session_id)
+        {
             released.await;
         }
         self.inner.header(session_id).await
@@ -230,6 +315,17 @@ impl SessionStore for FactReadRaceStore {
         Ok(page)
     }
 
+    async fn read_facts_before(
+        &self,
+        session_id: &SessionId,
+        exclusive_before_seq: u64,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreBackwardFactPage> {
+        self.inner
+            .read_facts_before(session_id, exclusive_before_seq, limit)
+            .await
+    }
+
     async fn read_turn_facts(
         &self,
         session_id: &SessionId,
@@ -240,6 +336,20 @@ impl SessionStore for FactReadRaceStore {
         self.inner
             .read_turn_facts(session_id, turn_id, after_seq, limit)
             .await
+    }
+
+    async fn read_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> rsi_agent_store_protocol::Result<StoreTurnBoundary> {
+        self.turn_boundary_read_attempts
+            .fetch_add(1, Ordering::AcqRel);
+        self.turn_boundary_read_started.notify_waiters();
+        if self.block_turn_boundary_reads.load(Ordering::Acquire) {
+            self.release_turn_boundary_read.notified().await;
+        }
+        self.inner.read_turn_boundary(session_id, turn_id).await
     }
 
     async fn list_open_turns(
@@ -266,6 +376,14 @@ impl SessionStore for FactReadRaceStore {
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<StoreSessionPage> {
         self.inner.list_sessions(after, limit).await
+    }
+
+    async fn list_recent_sessions(
+        &self,
+        after: Option<&rsi_agent_store_protocol::StoreRecentSessionCursor>,
+        limit: usize,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSessionPage> {
+        self.inner.list_recent_sessions(after, limit).await
     }
 
     async fn list_open_sessions(
@@ -367,12 +485,13 @@ impl TurnFinalizer for RecordingFinalizer {
     }
 }
 
-impl IdSource for SequenceIds {
-    fn next_id(&self, prefix: &str) -> rsi_agent_kernel::Result<String> {
-        let mut next = self.0.lock().unwrap();
-        *next += 1;
-        Ok(format!("{prefix}-{next}"))
-    }
+fn client_turn_id() -> TurnId {
+    static NEXT_CLIENT_TURN: AtomicUsize = AtomicUsize::new(1);
+    TurnId::new(format!(
+        "caller-turn-{}",
+        NEXT_CLIENT_TURN.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap()
 }
 
 #[derive(Debug)]
@@ -585,8 +704,8 @@ async fn resume(kernel: &SessionKernel, session_id: SessionId) -> SubmitSession 
     SubmitSession::Resume(kernel.prepare_resume(&session_id).await.unwrap())
 }
 
-fn profile() -> FrozenAgentProfile {
-    FrozenAgentProfile::new(
+fn profile() -> FrozenAgentSettings {
+    FrozenAgentSettings::new(
         "default",
         "system",
         ModelRef::new("deployment", "model").unwrap(),
@@ -702,14 +821,9 @@ fn budget_fact(
 
 async fn kernel(store: Arc<MemoryStore>) -> SessionKernel {
     let store: Arc<dyn SessionStore> = store;
-    SessionKernel::recover_with_sources(
-        store,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap()
+    SessionKernel::recover_with_clock(store, composition(), Arc::new(FixedClock))
+        .await
+        .unwrap()
 }
 
 async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: usize) {
@@ -766,6 +880,7 @@ async fn submit(
 ) -> rsi_agent_turn_protocol::SubmittedTurn {
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: fresh(header(session_id)),
             text: text.into(),
             model: None,
@@ -776,32 +891,292 @@ async fn submit(
 }
 
 #[tokio::test(start_paused = true)]
-async fn fresh_session_is_live_immediately_and_lazy_until_the_200ms_flush() {
+async fn fresh_submission_returns_only_after_its_acceptance_is_durable() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
     let worker = kernel.start_write_behind();
     let submitted = submit(&kernel, "session-lazy", "hello").await;
     let session = submitted.session_id.clone();
-    assert!(store.header(&session).await.is_err());
-
-    let mut observation = kernel.observe(&session, 0).await.unwrap();
-    assert!(matches!(
-        observation.next().await.unwrap().unwrap(),
-        TurnUpdate::Fact { durable_seq: 0, .. }
-    ));
-    tokio::time::advance(std::time::Duration::from_millis(199)).await;
-    tokio::task::yield_now().await;
-    assert!(store.header(&session).await.is_err());
-    tokio::time::advance(std::time::Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
     assert_eq!(
         store.header(&session).await.unwrap(),
         header("session-lazy")
     );
+
+    let mut observation = kernel.observe(&session, 0).await.unwrap();
+    assert!(matches!(
+        observation.next().await.unwrap().unwrap(),
+        TurnUpdate::Fact { durable_seq: 1, .. }
+    ));
     assert_eq!(
         store.read_facts(&session, 0, 8).await.unwrap().durable_seq,
         1
     );
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn submission_without_a_running_write_behind_worker_fails_within_a_bound() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(61),
+        kernel.submit(SubmitTurn {
+            turn_id: TurnId::new("turn-no-worker").unwrap(),
+            session: fresh(header("session-no-worker")),
+            text: "must not wait forever".into(),
+            model: None,
+            sandbox: None,
+        }),
+    )
+    .await
+    .expect("the Kernel must bound a durability wait without its worker");
+    assert!(
+        matches!(result, Err(TurnError::Flush(ref message)) if message.contains("timed out")),
+        "unexpected result: {result:?}"
+    );
+
+    let worker = kernel.start_write_behind();
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
+    let memory = Arc::new(MemoryStore::new());
+    let session_id = SessionId::new("session-blocked-retry").unwrap();
+    let turn_id = TurnId::new("turn-blocked-retry").unwrap();
+    memory
+        .append(AppendBatch {
+            session_id: session_id.clone(),
+            expected_seq: 0,
+            header: Some(header(session_id.as_str())),
+            facts: vec![
+                SessionFact::new(
+                    1,
+                    1,
+                    SessionFactBody::TurnAccepted {
+                        turn_id: turn_id.clone(),
+                        text: "retry body".into(),
+                        model: None,
+                        sandbox: SandboxMode::WorkspaceWrite,
+                        require_approval: false,
+                    },
+                )
+                .unwrap(),
+                SessionFact::new(
+                    2,
+                    2,
+                    SessionFactBody::TurnTerminal {
+                        turn_id: turn_id.clone(),
+                        outcome: TurnOutcome::Completed,
+                    },
+                )
+                .unwrap(),
+            ],
+        })
+        .await
+        .unwrap();
+    let store = Arc::new(FactReadRaceStore::new(memory));
+    let kernel = SessionKernel::recover_with_clock(
+        store.clone() as Arc<dyn SessionStore>,
+        composition(),
+        Arc::new(FixedClock),
+    )
+    .await
+    .unwrap();
+    let worker = kernel.start_write_behind();
+    store.block_header_reads_for(session_id.clone());
+    let blocked = tokio::spawn({
+        let kernel = kernel.clone();
+        async move {
+            kernel
+                .submit(SubmitTurn {
+                    turn_id,
+                    session: fresh(header(session_id.as_str())),
+                    text: "retry body".into(),
+                    model: None,
+                    sandbox: None,
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while store.header_read_attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry must reach the blocked Store read");
+
+    let independent = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        submit(&kernel, "session-independent", "independent"),
+    )
+    .await;
+    store.release_blocked_header_reads();
+    assert!(blocked.await.unwrap().is_ok());
+    assert!(
+        independent.is_ok(),
+        "an unrelated Session was serialized behind blocked Store I/O"
+    );
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn caller_turn_id_is_idempotent_live_and_after_restart_but_body_changes_conflict() {
+    let store = Arc::new(MemoryStore::new());
+    let initial = kernel(Arc::clone(&store)).await;
+    let worker = initial.start_write_behind();
+    let turn_id = TurnId::new("caller-retry-turn").unwrap();
+    let request = || SubmitTurn {
+        turn_id: turn_id.clone(),
+        session: fresh(header("session-idempotent-submit")),
+        text: "same canonical body".into(),
+        model: None,
+        sandbox: None,
+    };
+
+    let first = initial.submit(request()).await.unwrap();
+    assert_eq!(initial.submit(request()).await.unwrap(), first);
+    assert!(matches!(
+        initial
+            .submit(SubmitTurn {
+                text: "different body".into(),
+                ..request()
+            })
+            .await,
+        Err(TurnError::SubmissionConflict { session, turn })
+            if session == "session-idempotent-submit" && turn == "caller-retry-turn"
+    ));
+    initial.shutdown(worker).await.unwrap();
+
+    let restarted = kernel(Arc::clone(&store)).await;
+    let restarted_worker = restarted.start_write_behind();
+    assert_eq!(restarted.submit(request()).await.unwrap(), first);
+    let stored = store
+        .read_turn_boundary(&first.session_id, &turn_id)
+        .await
+        .unwrap();
+    assert_eq!(stored.accepted_seq(), first.accepted_seq);
+    restarted.shutdown(restarted_worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn indexed_turn_boundary_reads_share_the_process_store_read_admission() {
+    let memory = Arc::new(MemoryStore::new());
+    append_terminal_history(&memory, "session-boundary-admission-a", 1).await;
+    append_terminal_history(&memory, "session-boundary-admission-b", 1).await;
+    let store = Arc::new(FactReadRaceStore::new(memory));
+    let kernel = SessionKernel::recover_with_clock_and_limits(
+        store.clone() as Arc<dyn SessionStore>,
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    store.block_turn_boundary_reads();
+    let turn = TurnId::new("turn-history-0").unwrap();
+    let first = tokio::spawn({
+        let kernel = kernel.clone();
+        let turn = turn.clone();
+        async move {
+            kernel
+                .outcome(
+                    &SessionId::new("session-boundary-admission-a").unwrap(),
+                    &turn,
+                )
+                .await
+        }
+    });
+    store.wait_for_turn_boundary_attempts(1).await;
+    let second = tokio::spawn({
+        let kernel = kernel.clone();
+        async move {
+            kernel
+                .outcome(
+                    &SessionId::new("session-boundary-admission-b").unwrap(),
+                    &TurnId::new("turn-history-0").unwrap(),
+                )
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        store.turn_boundary_read_attempts(),
+        1,
+        "the second maximum-weight boundary read bypassed Store-read admission"
+    );
+    store.release_one_turn_boundary_read();
+    store.wait_for_turn_boundary_attempts(2).await;
+    store.release_one_turn_boundary_read();
+    assert_eq!(first.await.unwrap().unwrap(), Some(TurnOutcome::Completed));
+    assert_eq!(second.await.unwrap().unwrap(), Some(TurnOutcome::Completed));
+}
+
+#[tokio::test]
+async fn caller_turn_id_retry_after_terminal_pruning_does_not_reexecute() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(Arc::clone(&store)).await;
+    let worker = kernel.start_write_behind();
+    let turn_id = TurnId::new("pruned-retry-turn").unwrap();
+    let request = || SubmitTurn {
+        turn_id: turn_id.clone(),
+        session: fresh(header("session-pruned-retry")),
+        text: "retried body".into(),
+        model: None,
+        sandbox: None,
+    };
+
+    let first = kernel.submit(request()).await.unwrap();
+    // A second live turn keeps the session resident while the first turn's
+    // durable terminal entry is pruned from the in-memory turn index.
+    let keeper = kernel
+        .submit(SubmitTurn {
+            turn_id: TurnId::new("resident-keeper-turn").unwrap(),
+            session: resume(&kernel, first.session_id.clone()).await,
+            text: "keeper".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("executor-pruned".into()).unwrap();
+    let claim = kernel
+        .claim("executor-pruned", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.turn_id(), &first.turn_id);
+    let terminal = kernel
+        .publish(
+            &claim,
+            vec![SessionFactBody::TurnTerminal {
+                turn_id: first.turn_id.clone(),
+                outcome: TurnOutcome::Completed,
+            }],
+        )
+        .await
+        .unwrap()
+        .published();
+    kernel
+        .flush(&claim, terminal.last().unwrap().seq())
+        .await
+        .unwrap();
+
+    // The terminal turn is pruned while the session stays resident; a retry
+    // must resolve against the Store instead of re-accepting the turn.
+    assert_eq!(kernel.submit(request()).await.unwrap(), first);
+
+    // The only claimable turn is the keeper: the retry did not re-enqueue.
+    let next = kernel
+        .claim("executor-pruned", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.turn_id(), &keeper.turn_id);
     kernel.shutdown(worker).await.unwrap();
 }
 
@@ -811,14 +1186,14 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
+    let worker = kernel.start_write_behind();
 
     let first_header = header("session-generation-a");
     let first_pin = composition
@@ -828,6 +1203,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     let first_tools = first_pin.tools();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Fresh(
                 PreparedFreshSession::new(first_header, first_pin).unwrap(),
             ),
@@ -840,6 +1216,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     composition.select_digest('b');
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: resume(&kernel, SessionId::new("session-generation-a").unwrap()).await,
             text: "resident still A".into(),
             model: None,
@@ -855,6 +1232,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     let second_tools = second_pin.tools();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Fresh(
                 PreparedFreshSession::new(second_header, second_pin).unwrap(),
             ),
@@ -872,7 +1250,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(first_claim.session_id.as_str(), "session-generation-a");
+    assert_eq!(first_claim.session_id().as_str(), "session-generation-a");
     let first_claim_pin = kernel.composition(&first_claim).unwrap();
     assert_eq!(first_claim_pin.source_digest(), "a".repeat(64));
     assert!(Arc::ptr_eq(&first_claim_pin.tools(), &first_tools));
@@ -881,7 +1259,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(second_claim.session_id.as_str(), "session-generation-b");
+    assert_eq!(second_claim.session_id().as_str(), "session-generation-b");
     let second_claim_pin = kernel.composition(&second_claim).unwrap();
     assert_eq!(second_claim_pin.source_digest(), "b".repeat(64));
     assert!(Arc::ptr_eq(&second_claim_pin.tools(), &second_tools));
@@ -889,6 +1267,7 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
         &first_claim_pin.tools(),
         &second_claim_pin.tools()
     ));
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -909,6 +1288,7 @@ async fn shutdown_releases_resident_generation_pins_while_service_handles_escape
 
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Fresh(PreparedFreshSession::new(session_header, pin).unwrap()),
             text: "keep the resident generation pinned".into(),
             model: None,
@@ -941,11 +1321,10 @@ async fn unavailable_cold_preset_fails_before_fact_log_materialization() {
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
@@ -987,11 +1366,10 @@ async fn dropping_an_unsubmitted_cold_resume_releases_its_pin_without_hydration(
     });
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
@@ -1047,11 +1425,10 @@ async fn resume_token_from_another_kernel_is_rejected_and_releases_its_pin() {
     });
     let source_store_contract: Arc<dyn SessionStore> = source_store;
     let composition_contract: Arc<dyn AgentComposition> = composition;
-    let source = SessionKernel::recover_with_sources(
+    let source = SessionKernel::recover_with_clock(
         source_store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
@@ -1063,6 +1440,7 @@ async fn resume_token_from_another_kernel_is_rejected_and_releases_its_pin() {
 
     let error = target
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
             text: "must not cross Kernel authority".into(),
             model: None,
@@ -1083,14 +1461,14 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
+    let worker = kernel.start_write_behind();
     let session_header = header("session-resident-damaged-source");
     let pin = composition
         .pin(session_header.agent_preset_id())
@@ -1098,6 +1476,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
         .unwrap();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Fresh(PreparedFreshSession::new(session_header, pin).unwrap()),
             text: "resident A".into(),
             model: None,
@@ -1113,6 +1492,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
         .unwrap();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
             text: "resident A remains available".into(),
             model: None,
@@ -1121,6 +1501,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
         .await
         .unwrap();
     assert_eq!(composition.calls.load(Ordering::Acquire), 1);
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -1131,17 +1512,18 @@ async fn cold_resume_after_process_restart_pins_the_current_generation() {
     composition.select_digest('b');
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition;
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
+    let worker = kernel.start_write_behind();
 
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: resume(
                 &kernel,
                 SessionId::new("session-cold-generation-b").unwrap(),
@@ -1163,6 +1545,7 @@ async fn cold_resume_after_process_restart_pins_the_current_generation() {
         kernel.composition(&claim).unwrap().source_digest(),
         "b".repeat(64)
     );
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -1171,11 +1554,10 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
@@ -1187,6 +1569,7 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
         .unwrap();
     let first = kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Fresh(PreparedFreshSession::new(session_header, pin).unwrap()),
             text: "generation A".into(),
             model: None,
@@ -1209,7 +1592,8 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&first_claim, terminal.last().unwrap().seq())
         .await
@@ -1219,6 +1603,7 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
     let prepared = kernel.prepare_resume(&first.session_id).await.unwrap();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
             text: "generation B".into(),
             model: None,
@@ -1245,14 +1630,9 @@ async fn cold_composition_failure_has_a_utf8_safe_bounded_diagnostic() {
     append_terminal_history(&memory, "session-unbounded-composition", 1).await;
     let store: Arc<dyn SessionStore> = memory;
     let composition: Arc<dyn AgentComposition> = Arc::new(UnboundedDiagnosticComposition);
-    let kernel = SessionKernel::recover_with_sources(
-        store,
-        composition,
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel = SessionKernel::recover_with_clock(store, composition, Arc::new(FixedClock))
+        .await
+        .unwrap();
 
     let Err(TurnError::Composition(message)) = kernel
         .prepare_resume(&SessionId::new("session-unbounded-composition").unwrap())
@@ -1269,24 +1649,20 @@ async fn store_read_failure_has_a_utf8_safe_bounded_turn_diagnostic() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     store.fail_next_read(format!(
         "{}\0tail",
         "界".repeat(MAXIMUM_AGENT_DIAGNOSTIC_BYTES)
     ));
 
-    let Err(TurnError::Flush(message)) = kernel
+    let Err(TurnError::Store(message)) = kernel
         .observe(&SessionId::new("session-store-diagnostic").unwrap(), 0)
         .await
     else {
-        panic!("Store read failure must preserve its typed error class");
+        panic!("ordinary Store read failure must not be classified as a durability flush");
     };
     assert!(message.len() <= MAXIMUM_AGENT_DIAGNOSTIC_BYTES);
     assert!(std::str::from_utf8(message.as_bytes()).is_ok());
@@ -1316,7 +1692,8 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     store.fail_next_appends(1);
     let through = facts.last().unwrap().seq();
     let flush = tokio::spawn({
@@ -1326,7 +1703,14 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
     });
     tokio::task::yield_now().await;
     assert!(!flush.is_finished());
-    assert!(store.header(&submitted.session_id).await.is_err());
+    assert_eq!(
+        store
+            .read_facts(&submitted.session_id, 0, 8)
+            .await
+            .unwrap()
+            .durable_seq,
+        submitted.accepted_seq
+    );
     tokio::time::advance(std::time::Duration::from_millis(199)).await;
     tokio::task::yield_now().await;
     assert!(!flush.is_finished());
@@ -1389,7 +1773,8 @@ async fn effect_start_requires_its_intent_to_be_durable() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let through = intent.last().unwrap().seq();
     kernel.flush(&claim, through).await.unwrap();
     kernel
@@ -1401,7 +1786,8 @@ async fn effect_start_requires_its_intent_to_be_durable() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
 
     kernel.shutdown(worker).await.unwrap();
 }
@@ -1440,7 +1826,8 @@ async fn cancellation_single_assigns_cancelled_even_if_executor_reports_complete
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, terminal.last().unwrap().seq())
         .await
@@ -1471,6 +1858,7 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
     let first = submit(&kernel, "session-horizon", "FIRST_PRIVATE_PROMPT").await;
     let later = kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "LATER_PRIVATE_PROMPT".into(),
             model: None,
@@ -1484,7 +1872,7 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(claim.turn_id, first.turn_id);
+    assert_eq!(claim.turn_id(), &first.turn_id);
 
     let initial = kernel.read_facts(&claim, 0, 8).await.unwrap();
     assert_eq!(initial.through_seq, later.accepted_seq);
@@ -1505,7 +1893,8 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let incremental = kernel
         .read_facts(&claim, initial.through_seq, 8)
         .await
@@ -1526,6 +1915,7 @@ async fn checkpoint_maintenance_reads_the_exact_prefix_including_queued_turns() 
     let first = submit(&kernel, "session-checkpoint-queue", "first").await;
     let queued = kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "queued".into(),
             model: None,
@@ -1548,7 +1938,8 @@ async fn checkpoint_maintenance_reads_the_exact_prefix_including_queued_turns() 
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, terminal.last().unwrap().seq())
         .await
@@ -1572,7 +1963,7 @@ async fn checkpoint_maintenance_reads_the_exact_prefix_including_queued_turns() 
 }
 
 #[tokio::test]
-async fn checkpoint_maintenance_rejects_a_mutated_terminal_claim() {
+async fn checkpoint_maintenance_rejects_a_foreign_terminal_claim() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
     let worker = kernel.start_write_behind();
@@ -1592,17 +1983,26 @@ async fn checkpoint_maintenance_rejects_a_mutated_terminal_claim() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, terminal.last().unwrap().seq())
         .await
         .unwrap();
 
-    let mut mutated = claim.clone();
-    mutated.claim_id += 1;
+    let foreign = TurnClaimIssuer::new().issue(
+        claim.executor_id().to_owned(),
+        claim.claim_id(),
+        claim.session_id().clone(),
+        claim.turn_id().clone(),
+        Arc::new(claim.header().clone()),
+        claim.accepted_at_ms(),
+        claim.accepted_seq(),
+        claim.live_seq(),
+    );
     assert!(matches!(
         kernel
-            .read_checkpoint_facts(&mutated, 0, MAXIMUM_FACTS_PER_READ)
+            .read_checkpoint_facts(&foreign, 0, MAXIMUM_FACTS_PER_READ)
             .await,
         Err(TurnError::StaleClaim)
     ));
@@ -1615,14 +2015,10 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_write_behind();
     let submitted = submit(&kernel, "session-checkpoint-write-failure", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
@@ -1640,7 +2036,8 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let through_seq = terminal.last().unwrap().seq();
     kernel.flush(&claim, through_seq).await.unwrap();
     store.fail_next_checkpoint_write();
@@ -1650,14 +2047,14 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
             .write_context_checkpoint(
                 &claim,
                 ContextCheckpoint {
-                    header_fingerprint: claim.header.fingerprint().unwrap(),
+                    header_fingerprint: claim.header().fingerprint().unwrap(),
                     through_seq,
                     fact_prefix_sha256: "0".repeat(64),
                     bytes: Arc::from(b"checkpoint".as_slice()),
                 },
             )
             .await,
-        Err(TurnError::Flush(message)) if message.contains("injected checkpoint write failure")
+        Err(TurnError::Store(message)) if message.contains("injected checkpoint write failure")
     ));
     kernel.shutdown(worker).await.unwrap();
 }
@@ -1666,11 +2063,10 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
 async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources_and_limits(
+    let kernel = SessionKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
         KernelLimits {
             maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
             ..KernelLimits::default()
@@ -1695,7 +2091,8 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let through_seq = terminal.last().unwrap().seq();
     kernel.flush(&claim, through_seq).await.unwrap();
 
@@ -1707,7 +2104,7 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
             .is_none()
     );
     let durable = store
-        .read_facts(&claim.session_id, 0, MAXIMUM_FACTS_PER_READ)
+        .read_facts(claim.session_id(), 0, MAXIMUM_FACTS_PER_READ)
         .await
         .unwrap();
     assert!(
@@ -1715,7 +2112,7 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
             .write_context_checkpoint(
                 &claim,
                 ContextCheckpoint {
-                    header_fingerprint: claim.header.fingerprint().unwrap(),
+                    header_fingerprint: claim.header().fingerprint().unwrap(),
                     through_seq,
                     fact_prefix_sha256: fact_prefix_sha256(&durable.facts).unwrap(),
                     bytes: Arc::from(b"disabled-checkpoint".as_slice()),
@@ -1726,7 +2123,7 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
     );
     assert!(
         store
-            .read_context_checkpoint(&claim.session_id)
+            .read_context_checkpoint(claim.session_id())
             .await
             .unwrap()
             .is_none()
@@ -1739,14 +2136,10 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
 async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel = SessionKernel::recover_with_sources(
-        store.clone(),
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_write_behind();
     let submitted = submit(&kernel, "session-read-race", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
@@ -1766,7 +2159,8 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, intent.last().unwrap().seq())
         .await
@@ -1780,7 +2174,8 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, started.last().unwrap().seq())
         .await
@@ -1807,7 +2202,11 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
             },
         }),
     );
-    kernel.publish(&claim, first_batch).await.unwrap();
+    kernel
+        .publish(&claim, first_batch)
+        .await
+        .unwrap()
+        .published();
     kernel
         .publish(
             &claim,
@@ -1821,7 +2220,8 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
 
     store.pause_next_read();
     let read = tokio::spawn({
@@ -1860,14 +2260,10 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
 async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_io() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel = SessionKernel::recover_with_sources(
-        store.clone(),
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_write_behind();
     let submitted = submit(&kernel, "session-captured-live-horizon", "first").await;
     let _lease = kernel.register("executor".into()).unwrap();
@@ -1890,7 +2286,8 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let captured_live_seq = intent.last().unwrap().seq();
 
     store.pause_next_read();
@@ -1900,19 +2297,31 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
         async move { kernel.read_facts(&claim, 0, MAXIMUM_FACTS_PER_READ).await }
     });
     store.wait_until_read_is_captured().await;
-    let later = kernel
-        .submit(SubmitTurn {
-            session: resume(&kernel, submitted.session_id).await,
-            text: "LATER_PRIVATE_PROMPT".into(),
-            model: None,
-            sandbox: None,
-        })
-        .await
-        .unwrap();
+    let worker = kernel.start_write_behind();
+    let later = tokio::spawn({
+        let kernel = kernel.clone();
+        async move {
+            kernel
+                .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
+                    session: resume(&kernel, submitted.session_id).await,
+                    text: "LATER_PRIVATE_PROMPT".into(),
+                    model: None,
+                    sandbox: None,
+                })
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !later.is_finished(),
+        "a maximum-weight boundary read must wait behind the captured Store page"
+    );
     store.release_captured_read();
 
     let page = read.await.unwrap().unwrap();
-    assert_eq!(page.through_seq, captured_live_seq);
+    let later = later.await.unwrap().unwrap();
+    assert!(page.through_seq <= captured_live_seq);
     assert!(
         page.facts
             .iter()
@@ -1925,7 +2334,6 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
         )
     }));
 
-    let worker = kernel.start_write_behind();
     kernel.shutdown(worker).await.unwrap();
 }
 
@@ -1950,7 +2358,8 @@ async fn executor_cannot_classify_cancellation_without_a_durable_request() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, terminal.last().unwrap().seq())
         .await
@@ -1978,7 +2387,10 @@ async fn executor_cannot_classify_cancellation_without_a_durable_request() {
 async fn terminal_outcome_and_fact_are_hidden_until_their_prefix_is_durable() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
+    let initial_worker = kernel.start_write_behind();
     let submitted = submit(&kernel, "session-terminal-fence", "hello").await;
+    initial_worker.abort();
+    let _ = initial_worker.await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
         .claim("executor", CancellationToken::new())
@@ -1994,7 +2406,8 @@ async fn terminal_outcome_and_fact_are_hidden_until_their_prefix_is_durable() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     assert_eq!(
         kernel
             .outcome(&submitted.session_id, &submitted.turn_id)
@@ -2168,6 +2581,7 @@ async fn persistent_store_failure_eventually_latches_a_flush_error() {
     assert!(matches!(
         kernel
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: resume(&kernel, submitted.session_id.clone()).await,
                 text: "must not wedge behind the permanent failure".into(),
                 model: None,
@@ -2202,7 +2616,8 @@ async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() 
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     kernel
         .flush(&claim, intent.last().unwrap().seq())
         .await
@@ -2216,7 +2631,8 @@ async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() 
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let mut chunk = MAX_LANGUAGE_OUTPUT_BYTES;
     while chunk > 0 {
         let result = kernel
@@ -2269,8 +2685,26 @@ async fn shutdown_timeout_stops_the_worker_and_releases_its_store_owner() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
     let worker = kernel.start_write_behind();
+    let submitted = submit(&kernel, "session-shutdown-failure", "hello").await;
+    let _lease = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
     store.fail_next_appends(usize::MAX);
-    let _submitted = submit(&kernel, "session-shutdown-failure", "hello").await;
+    kernel
+        .publish(
+            &claim,
+            vec![SessionFactBody::ModelIntent {
+                turn_id: submitted.turn_id,
+                effect_id: EffectId::new("shutdown-pending").unwrap(),
+                snapshot: snapshot(),
+            }],
+        )
+        .await
+        .unwrap()
+        .published();
 
     let shutdown = tokio::spawn({
         let kernel = kernel.clone();
@@ -2303,7 +2737,7 @@ async fn shutdown_snapshots_flush_waiters_before_terminal_sessions_can_be_evicte
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.turn_id, submitted.turn_id);
+        assert_eq!(claim.turn_id(), &submitted.turn_id);
         kernel
             .publish(
                 &claim,
@@ -2313,7 +2747,8 @@ async fn shutdown_snapshots_flush_waiters_before_terminal_sessions_can_be_evicte
                 }],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .published();
     }
 
     kernel
@@ -2330,6 +2765,65 @@ async fn shutdown_snapshots_flush_waiters_before_terminal_sessions_can_be_evicte
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+    let store_contract: Arc<dyn SessionStore> = store.clone();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_write_behind();
+    let submitted = submit(&kernel, "session-shutdown-publish", "hello").await;
+    let _lease = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let effect_id = EffectId::new("shutdown-publish").unwrap();
+    store.pause_next_append();
+    kernel
+        .publish(
+            &claim,
+            vec![SessionFactBody::ModelIntent {
+                turn_id: submitted.turn_id.clone(),
+                effect_id: effect_id.clone(),
+                snapshot: snapshot(),
+            }],
+        )
+        .await
+        .unwrap()
+        .published();
+
+    let shutdown = tokio::spawn({
+        let kernel = kernel.clone();
+        async move { kernel.shutdown(worker).await }
+    });
+    store.wait_until_append_is_blocked().await;
+    assert!(matches!(
+        kernel
+            .publish(
+                &claim,
+                vec![SessionFactBody::ModelStarted {
+                    turn_id: submitted.turn_id.clone(),
+                    effect_id,
+                }],
+            )
+            .await,
+        Err(TurnError::ShuttingDown)
+    ));
+
+    store.release_blocked_append();
+    shutdown.await.unwrap().unwrap();
+    let page = memory
+        .read_facts(&submitted.session_id, 0, 8)
+        .await
+        .unwrap();
+    assert_eq!(page.durable_seq, 2);
+}
+
 #[tokio::test]
 async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pin() {
     let memory = Arc::new(MemoryStore::new());
@@ -2342,11 +2836,10 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
     });
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
@@ -2360,6 +2853,7 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "leader".into(),
                     model: None,
@@ -2376,6 +2870,7 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "follower".into(),
                     model: None,
@@ -2414,6 +2909,7 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
     let first = submit(&kernel, "session-queue", "first").await;
     let second = kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: resume(&kernel, first.session_id.clone()).await,
             text: "second".into(),
             model: None,
@@ -2428,7 +2924,7 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(first_claim.turn_id, first.turn_id);
+    assert_eq!(first_claim.turn_id(), &first.turn_id);
     let terminal = kernel
         .publish(
             &first_claim,
@@ -2438,7 +2934,8 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     let waiting = tokio::spawn({
         let kernel = kernel.clone();
         async move { kernel.claim("two", CancellationToken::new()).await }
@@ -2450,43 +2947,56 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
         .await
         .unwrap();
     assert_eq!(
-        waiting.await.unwrap().unwrap().unwrap().turn_id,
-        second.turn_id
+        waiting.await.unwrap().unwrap().unwrap().turn_id(),
+        &second.turn_id
     );
     kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
-async fn rejected_turn_does_not_leave_control_state_when_the_pending_suffix_is_full() {
+async fn conflicting_retry_does_not_replace_the_original_turn_control_state() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let text = "x".repeat(MAXIMUM_TURN_TEXT_BYTES);
-    let first = submit(&kernel, "session-full", &text).await;
-    let mut next_id = 2_u64;
-    loop {
-        let result = kernel
+    let worker = kernel.start_write_behind();
+    let turn_id = TurnId::new("caller-stable-turn").unwrap();
+    let first = kernel
+        .submit(SubmitTurn {
+            turn_id: turn_id.clone(),
+            session: fresh(header("session-conflicting-retry")),
+            text: "original".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        kernel
             .submit(SubmitTurn {
-                session: resume(&kernel, first.session_id.clone()).await,
-                text: text.clone(),
+                turn_id: turn_id.clone(),
+                session: fresh(header("session-conflicting-retry")),
+                text: "changed".into(),
                 model: None,
                 sandbox: None,
             })
-            .await;
-        if result.is_err() {
-            let rejected = TurnId::new(format!("turn-{next_id}")).unwrap();
-            assert!(matches!(
-                kernel.outcome(&first.session_id, &rejected).await,
-                Err(TurnError::TurnNotFound { turn, .. }) if turn == rejected.to_string()
-            ));
-            break;
-        }
-        next_id += 1;
-    }
+            .await,
+        Err(TurnError::SubmissionConflict { .. })
+    ));
+    let _lease = kernel.register("executor-conflict".into()).unwrap();
+    let claim = kernel
+        .claim("executor-conflict", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.session_id(), &first.session_id);
+    assert_eq!(claim.turn_id(), &turn_id);
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
-async fn process_capacity_rejection_does_not_advance_turn_control_state() {
+#[allow(clippy::too_many_lines)] // Keep the exact admission, flush, and retry timeline visible.
+async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state() {
     let turn_id = TurnId::new("turn-1").unwrap();
+    let effect_id = EffectId::new("effect-capacity").unwrap();
     let accepted = SessionFact::new(
         1,
         42,
@@ -2499,29 +3009,64 @@ async fn process_capacity_rejection_does_not_advance_turn_control_state() {
         },
     )
     .unwrap();
-    let body = SessionFactBody::ModelIntent {
+    let intent = SessionFactBody::ModelIntent {
         turn_id: turn_id.clone(),
-        effect_id: EffectId::new("effect-capacity").unwrap(),
+        effect_id: effect_id.clone(),
         snapshot: snapshot(),
     };
-    let body_bytes = SessionFact::new(2, 42, body.clone()).unwrap().encoded_len();
+    let started = SessionFactBody::ModelStarted {
+        turn_id: turn_id.clone(),
+        effect_id: effect_id.clone(),
+    };
+    let body = SessionFactBody::ModelEvent {
+        turn_id: turn_id.clone(),
+        effect_id: effect_id.clone(),
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("x".repeat(1024)),
+        },
+    };
+    let second_body = SessionFactBody::ModelEvent {
+        turn_id: turn_id.clone(),
+        effect_id,
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("y".repeat(1024)),
+        },
+    };
+    let body_bytes = [
+        intent.clone(),
+        started.clone(),
+        body.clone(),
+        second_body.clone(),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, body)| {
+        SessionFact::new(u64::try_from(index + 2).unwrap(), 42, body)
+            .unwrap()
+            .encoded_len()
+    })
+    .max()
+    .unwrap();
     let limits = KernelLimits {
         maximum_process_pending_fact_bytes: accepted.encoded_len().max(body_bytes),
         ..KernelLimits::default()
     };
-    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-    let kernel = SessionKernel::recover_with_sources_and_limits(
+    let memory = Arc::new(MemoryStore::new());
+    let store: Arc<dyn SessionStore> = memory.clone();
+    let kernel = SessionKernel::recover_with_clock_and_limits(
         store,
         composition(),
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
         limits,
     )
     .await
     .unwrap();
     let worker = kernel.start_write_behind();
-    let submitted = kernel
+    let _submitted = kernel
         .submit(SubmitTurn {
+            turn_id: turn_id.clone(),
             session: fresh(header("session-process-publish")),
             text: "hello".into(),
             model: None,
@@ -2535,29 +3080,515 @@ async fn process_capacity_rejection_does_not_advance_turn_control_state() {
         .await
         .unwrap()
         .unwrap();
+    let intent = kernel
+        .publish(&claim, vec![intent])
+        .await
+        .unwrap()
+        .published();
+    kernel
+        .flush(&claim, intent.last().unwrap().seq())
+        .await
+        .unwrap();
+    let started = kernel
+        .publish(&claim, vec![started])
+        .await
+        .unwrap()
+        .published();
+    kernel
+        .flush(&claim, started.last().unwrap().seq())
+        .await
+        .unwrap();
+    memory.fail_next_appends(usize::MAX);
+    let published = kernel
+        .publish(&claim, vec![body])
+        .await
+        .unwrap()
+        .published();
+    let first_rejection = kernel.publish(&claim, vec![second_body.clone()]).await;
+    assert!(
+        matches!(
+            &first_rejection,
+            Ok(PublishAttempt::FlushRequired { unpublished }) if unpublished == &vec![second_body.clone()]
+        ),
+        "unexpected capacity result: {first_rejection:?}"
+    );
     assert!(matches!(
-        kernel.publish(&claim, vec![body.clone()]).await,
-        Err(TurnError::Capacity)
+        kernel.publish(&claim, vec![second_body.clone()]).await,
+        Ok(PublishAttempt::FlushRequired { unpublished }) if unpublished == vec![second_body.clone()]
     ));
-    assert!(matches!(
-        kernel.publish(&claim, vec![body.clone()]).await,
-        Err(TurnError::Capacity)
-    ));
-    kernel.flush(&claim, submitted.accepted_seq).await.unwrap();
-    assert_eq!(kernel.publish(&claim, vec![body]).await.unwrap().len(), 1);
+    memory.fail_next_appends(0);
+    kernel
+        .flush(&claim, published.last().unwrap().seq())
+        .await
+        .unwrap();
+    assert_eq!(
+        kernel
+            .publish(&claim, vec![second_body])
+            .await
+            .unwrap()
+            .published()
+            .len(),
+        1
+    );
     kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
+async fn publication_larger_than_an_empty_process_budget_is_invalid() {
+    let turn_id = TurnId::new("turn-oversized-publication").unwrap();
+    let intent = SessionFactBody::ModelIntent {
+        turn_id: turn_id.clone(),
+        effect_id: EffectId::new("effect-oversized-publication").unwrap(),
+        snapshot: snapshot(),
+    };
+    let accepted_bytes = SessionFact::new(
+        1,
+        42,
+        SessionFactBody::TurnAccepted {
+            turn_id: turn_id.clone(),
+            text: "hello".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    )
+    .unwrap()
+    .encoded_len();
+    assert!(
+        SessionFact::new(2, 42, intent.clone())
+            .unwrap()
+            .encoded_len()
+            > accepted_bytes
+    );
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let kernel = SessionKernel::recover_with_clock_and_limits(
+        store,
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_process_pending_fact_bytes: accepted_bytes,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let worker = kernel.start_write_behind();
+    kernel
+        .submit(SubmitTurn {
+            turn_id: turn_id.clone(),
+            session: fresh(header("session-oversized-publication")),
+            text: "hello".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        kernel.publish(&claim, vec![intent]).await,
+        Err(TurnError::Invalid(_))
+    ));
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure() {
+    let memory = Arc::new(MemoryStore::new());
+    let kernel = kernel(memory.clone()).await;
+    let worker = kernel.start_write_behind();
+    let submitted = submit(&kernel, "session-cancel-pending-capacity", "hello").await;
+    let _lease = kernel
+        .register("executor-capacity-taxonomy".into())
+        .unwrap();
+    let claim = kernel
+        .claim("executor-capacity-taxonomy", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let effect_id = EffectId::new("effect-capacity-taxonomy").unwrap();
+    let intent = kernel
+        .publish(
+            &claim,
+            vec![SessionFactBody::ModelIntent {
+                turn_id: submitted.turn_id.clone(),
+                effect_id: effect_id.clone(),
+                snapshot: snapshot(),
+            }],
+        )
+        .await
+        .unwrap()
+        .published();
+    let intent_bytes = intent[0].encoded_len();
+    kernel.flush(&claim, intent[0].seq()).await.unwrap();
+
+    let started = SessionFactBody::ModelStarted {
+        turn_id: submitted.turn_id.clone(),
+        effect_id: effect_id.clone(),
+    };
+    let first_delta = SessionFactBody::ModelEvent {
+        turn_id: submitted.turn_id.clone(),
+        effect_id: effect_id.clone(),
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("x".repeat(MAX_LANGUAGE_OUTPUT_BYTES)),
+        },
+    };
+    let second_delta_base = SessionFactBody::ModelEvent {
+        turn_id: submitted.turn_id.clone(),
+        effect_id: effect_id.clone(),
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("y".into()),
+        },
+    };
+    let started_bytes = SessionFact::new(3, 42, started.clone())
+        .unwrap()
+        .encoded_len();
+    let first_delta_bytes = SessionFact::new(4, 42, first_delta.clone())
+        .unwrap()
+        .encoded_len();
+    let second_base_bytes = SessionFact::new(5, 42, second_delta_base)
+        .unwrap()
+        .encoded_len();
+    let pending_budget = usize::try_from(MAXIMUM_TURN_GENERATED_FACT_BYTES).unwrap() - intent_bytes;
+    let second_text_bytes = pending_budget
+        .checked_sub(started_bytes + first_delta_bytes + second_base_bytes - 1)
+        .expect("maximum deltas leave room for the second event");
+    assert!(second_text_bytes <= MAX_LANGUAGE_OUTPUT_BYTES);
+    let second_delta = SessionFactBody::ModelEvent {
+        turn_id: submitted.turn_id.clone(),
+        effect_id,
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("y".repeat(second_text_bytes)),
+        },
+    };
+
+    memory.fail_next_appends(usize::MAX);
+    assert!(matches!(
+        kernel
+            .publish(&claim, vec![started, first_delta, second_delta])
+            .await
+            .unwrap(),
+        PublishAttempt::Published(_)
+    ));
+    assert_eq!(MAXIMUM_PENDING_FACT_BYTES, 64 * 1024 * 1024);
+    assert_eq!(
+        kernel
+            .cancel(
+                &submitted.session_id,
+                &submitted.turn_id,
+                Some("c".repeat(MAXIMUM_AGENT_DIAGNOSTIC_BYTES)),
+            )
+            .await,
+        Err(TurnError::Capacity)
+    );
+
+    memory.fail_next_appends(0);
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::too_many_lines)] // One scenario keeps both Sessions and the blocked durable commit ordered.
+async fn cross_session_process_pressure_waits_for_global_durable_progress() {
+    let first_turn = TurnId::new("turn-process-pressure-a").unwrap();
+    let second_turn = TurnId::new("turn-process-pressure-b").unwrap();
+    let first_body = SessionFactBody::ModelIntent {
+        turn_id: first_turn.clone(),
+        effect_id: EffectId::new("effect-process-pressure-a").unwrap(),
+        snapshot: snapshot(),
+    };
+    let second_body = SessionFactBody::ModelIntent {
+        turn_id: second_turn.clone(),
+        effect_id: EffectId::new("effect-process-pressure-b").unwrap(),
+        snapshot: snapshot(),
+    };
+    let fact_bytes = [
+        SessionFact::new(
+            1,
+            42,
+            SessionFactBody::TurnAccepted {
+                turn_id: first_turn.clone(),
+                text: "first".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap()
+        .encoded_len(),
+        SessionFact::new(2, 42, first_body.clone())
+            .unwrap()
+            .encoded_len(),
+        SessionFact::new(
+            1,
+            42,
+            SessionFactBody::TurnAccepted {
+                turn_id: second_turn.clone(),
+                text: "second".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap()
+        .encoded_len(),
+        SessionFact::new(2, 42, second_body.clone())
+            .unwrap()
+            .encoded_len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory));
+    let kernel = SessionKernel::recover_with_clock_and_limits(
+        store.clone() as Arc<dyn SessionStore>,
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_process_pending_fact_bytes: fact_bytes,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let worker = kernel.start_write_behind();
+    let first = kernel
+        .submit(SubmitTurn {
+            turn_id: first_turn,
+            session: fresh(header("session-process-pressure-a")),
+            text: "first".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let second = kernel
+        .submit(SubmitTurn {
+            turn_id: second_turn,
+            session: fresh(header("session-process-pressure-b")),
+            text: "second".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let _first_lease = kernel.register("executor-pressure-a".into()).unwrap();
+    let _second_lease = kernel.register("executor-pressure-b".into()).unwrap();
+    let first_claim = kernel
+        .claim("executor-pressure-a", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_claim = kernel
+        .claim("executor-pressure-b", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_claim.turn_id(), &first.turn_id);
+    assert_eq!(second_claim.turn_id(), &second.turn_id);
+    let first_fact = kernel
+        .publish(&first_claim, vec![first_body])
+        .await
+        .unwrap()
+        .published()
+        .pop()
+        .unwrap();
+    store.pause_next_append();
+    let first_flush = tokio::spawn({
+        let kernel = kernel.clone();
+        let first_claim = first_claim.clone();
+        async move { kernel.flush(&first_claim, first_fact.seq()).await }
+    });
+    store.wait_until_append_is_blocked().await;
+    let second_publish = tokio::spawn({
+        let kernel = kernel.clone();
+        let second_claim = second_claim.clone();
+        async move { kernel.publish(&second_claim, vec![second_body]).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !second_publish.is_finished(),
+        "cross-Session pressure must wait for global durable progress"
+    );
+
+    store.release_blocked_append();
+    first_flush.await.unwrap().unwrap();
+    assert!(matches!(
+        second_publish.await.unwrap().unwrap(),
+        PublishAttempt::Published(_)
+    ));
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::too_many_lines)] // One scenario keeps both Sessions, pressure, and failure ordered.
+async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
+    let target_session = SessionId::new("session-process-failure-a").unwrap();
+    let blocker_session = SessionId::new("session-process-failure-b").unwrap();
+    let target_turn = TurnId::new("turn-process-failure-a").unwrap();
+    let blocker_turn = TurnId::new("turn-process-failure-b").unwrap();
+    let target_effect = EffectId::new("effect-process-failure-a").unwrap();
+    let blocker_effect = EffectId::new("effect-process-failure-b").unwrap();
+    let target_first = SessionFactBody::ModelEvent {
+        turn_id: target_turn.clone(),
+        effect_id: target_effect.clone(),
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("x".repeat(4096)),
+        },
+    };
+    let target_second = SessionFactBody::ModelEvent {
+        turn_id: target_turn.clone(),
+        effect_id: target_effect.clone(),
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("y".repeat(4096)),
+        },
+    };
+    let blocker_first = SessionFactBody::ModelEvent {
+        turn_id: blocker_turn.clone(),
+        effect_id: blocker_effect.clone(),
+        event: LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("z".repeat(4096)),
+        },
+    };
+    let process_bytes = SessionFact::new(4, 42, target_first.clone())
+        .unwrap()
+        .encoded_len()
+        + SessionFact::new(4, 42, blocker_first.clone())
+            .unwrap()
+            .encoded_len();
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory));
+    let kernel = SessionKernel::recover_with_clock_and_limits(
+        store.clone() as Arc<dyn SessionStore>,
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_process_pending_fact_bytes: process_bytes,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let worker = kernel.start_write_behind();
+    kernel
+        .submit(SubmitTurn {
+            turn_id: target_turn.clone(),
+            session: fresh(header(target_session.as_str())),
+            text: "target".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    kernel
+        .submit(SubmitTurn {
+            turn_id: blocker_turn.clone(),
+            session: fresh(header(blocker_session.as_str())),
+            text: "blocker".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let _target_lease = kernel.register("executor-failure-a".into()).unwrap();
+    let _blocker_lease = kernel.register("executor-failure-b".into()).unwrap();
+    let target_claim = kernel
+        .claim("executor-failure-a", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let blocker_claim = kernel
+        .claim("executor-failure-b", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (claim, turn_id, effect_id) in [
+        (&target_claim, &target_turn, &target_effect),
+        (&blocker_claim, &blocker_turn, &blocker_effect),
+    ] {
+        let intent = kernel
+            .publish(
+                claim,
+                vec![SessionFactBody::ModelIntent {
+                    turn_id: turn_id.clone(),
+                    effect_id: effect_id.clone(),
+                    snapshot: snapshot(),
+                }],
+            )
+            .await
+            .unwrap()
+            .published();
+        kernel.flush(claim, intent[0].seq()).await.unwrap();
+        let started = kernel
+            .publish(
+                claim,
+                vec![SessionFactBody::ModelStarted {
+                    turn_id: turn_id.clone(),
+                    effect_id: effect_id.clone(),
+                }],
+            )
+            .await
+            .unwrap()
+            .published();
+        kernel.flush(claim, started[0].seq()).await.unwrap();
+    }
+
+    kernel
+        .publish(&target_claim, vec![target_first])
+        .await
+        .unwrap();
+    kernel
+        .publish(&blocker_claim, vec![blocker_first])
+        .await
+        .unwrap();
+    store.fail_appends_for(target_session);
+    store.pause_second_following_append();
+    let waiting = tokio::spawn({
+        let kernel = kernel.clone();
+        let target_claim = target_claim.clone();
+        async move { kernel.publish(&target_claim, vec![target_second]).await }
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.wait_until_append_is_blocked(),
+    )
+    .await
+    .expect("the unrelated Session flush must remain blocked");
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(100), waiting)
+        .await
+        .expect("the Session's permanent flush failure must wake its pressured publication")
+        .unwrap();
+    assert!(matches!(result, Err(TurnError::Flush(_))));
+
+    store.release_blocked_append();
+    assert!(kernel.shutdown(worker).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
 async fn live_session_working_set_has_an_exact_global_bound() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
+    let worker = kernel.start_write_behind();
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         submit(&kernel, &format!("session-bound-{index}"), "queued").await;
     }
     assert_eq!(
         kernel
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: fresh(header("session-bound-overflow")),
                 text: "overflow".into(),
                 model: None,
@@ -2566,21 +3597,22 @@ async fn live_session_working_set_has_an_exact_global_bound() {
             .await,
         Err(TurnError::Capacity)
     );
+    kernel.shutdown(worker).await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn active_observer_capacity_is_exact_and_released_on_drop() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store;
-    let kernel = SessionKernel::recover_with_sources_and_limits(
+    let kernel = SessionKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
         KernelLimits::default(),
     )
     .await
     .unwrap();
+    let worker = kernel.start_write_behind();
     let submitted = submit(&kernel, "session-observer-bound", "queued").await;
     let mut observers = Vec::with_capacity(DEFAULT_MAXIMUM_ACTIVE_OBSERVERS);
     for _ in 0..DEFAULT_MAXIMUM_ACTIVE_OBSERVERS {
@@ -2592,6 +3624,8 @@ async fn active_observer_capacity_is_exact_and_released_on_drop() {
     ));
     drop(observers.pop());
     observers.push(kernel.observe(&submitted.session_id, 0).await.unwrap());
+    drop(observers);
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -2621,7 +3655,8 @@ async fn observation_reports_durability_that_advanced_while_unpolled() {
             }],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .published();
     assert!(matches!(
         observation.next().await,
         Some(Ok(TurnUpdate::Fact { fact, .. })) if fact.seq() == published[0].seq()
@@ -2683,6 +3718,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
         terminal_turns.push((session_id, turn_id));
     }
     let kernel = kernel(store).await;
+    let worker = kernel.start_write_behind();
     for (session_id, turn_id) in terminal_turns {
         assert!(
             kernel
@@ -2695,6 +3731,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
 
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: fresh(header("capacity-remains-free")),
             text: "new".into(),
             model: None,
@@ -2702,6 +3739,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
         })
         .await
         .unwrap();
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -2750,6 +3788,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
         assert!(matches!(
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: resume(&kernel, session_id).await,
                     text: oversized.clone(),
                     model: None,
@@ -2760,8 +3799,10 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
         ));
     }
 
+    let worker = kernel.start_write_behind();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: fresh(header("capacity-after-invalid-resumes")),
             text: "new".into(),
             model: None,
@@ -2769,6 +3810,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
         })
         .await
         .expect("invalid resume input must not retain idle durable sessions");
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -2779,11 +3821,10 @@ async fn failed_admission_after_hydration_releases_idle_resident_capacity() {
     }
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources_and_limits(
+    let kernel = SessionKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
         KernelLimits {
             maximum_process_pending_fact_bytes: 1,
             ..KernelLimits::default()
@@ -2791,11 +3832,11 @@ async fn failed_admission_after_hydration_releases_idle_resident_capacity() {
     )
     .await
     .unwrap();
-
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         assert!(matches!(
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: resume(
                         &kernel,
                         SessionId::new(format!("failed-admission-session-{index}")).unwrap(),
@@ -2814,6 +3855,7 @@ async fn failed_admission_after_hydration_releases_idle_resident_capacity() {
     assert!(matches!(
         kernel
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: fresh(header("capacity-after-failed-admissions")),
                 text: "cannot fit either".into(),
                 model: None,
@@ -2835,14 +3877,10 @@ async fn historical_outcome_lookup_does_not_page_the_complete_session_log() {
     append_terminal_history(&memory, "session-indexed-outcome", 300).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     store.reset_read_attempts();
 
     assert_eq!(
@@ -2869,14 +3907,9 @@ async fn recovery_skips_fact_pages_for_sessions_without_open_turns() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
 
-    SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        .await
+        .unwrap();
 
     assert_eq!(
         store.read_attempts(),
@@ -2896,14 +3929,10 @@ async fn durable_observation_pages_store_reads_instead_of_reading_one_fact_at_a_
     append_terminal_history(&memory, "session-observation-pages", 300).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     store.reset_read_attempts();
 
     let session = SessionId::new("session-observation-pages").unwrap();
@@ -2929,14 +3958,11 @@ async fn concurrent_resumes_join_one_control_state_load() {
     append_terminal_history(&memory, "session-joined-load", 1).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_write_behind();
     store.reset_read_attempts();
     store.reset_open_turn_read_attempts();
     store.pause_next_open_turn_read();
@@ -2948,6 +3974,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "first".into(),
                     model: None,
@@ -2964,6 +3991,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "second".into(),
                     model: None,
@@ -2982,6 +4010,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
         1,
         "concurrent resumes of one idle session must join one Store load"
     );
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -2992,14 +4021,14 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_sources(
+    let kernel = SessionKernel::recover_with_clock(
         store_contract,
         composition_contract,
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
     )
     .await
     .unwrap();
+    let worker = kernel.start_write_behind();
     store.pause_next_open_turn_read();
 
     let first = tokio::spawn({
@@ -3009,6 +4038,7 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "first".into(),
                     model: None,
@@ -3026,6 +4056,7 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "second".into(),
                     model: None,
@@ -3042,6 +4073,7 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
     second.await.unwrap().unwrap();
     assert_eq!(store.open_turn_read_attempts(), 1);
     assert_eq!(composition.calls.load(Ordering::Acquire), 1);
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -3049,14 +4081,10 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     store.block_header_reads();
     let drops = Arc::new(AtomicUsize::new(0));
     let session_header = header("session-cancelled-fresh");
@@ -3072,6 +4100,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         async move {
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Fresh(
                         PreparedFreshSession::new(session_header, pin).unwrap(),
                     ),
@@ -3082,16 +4111,27 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
                 .await
         }
     });
-    while store.header_read_attempts() != 1 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while store.header_read_attempts() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "fresh header lookup did not block exactly once; observed {} attempts",
+            store.header_read_attempts()
+        )
+    });
     first.abort();
     let _ = first.await;
     assert_eq!(drops.load(Ordering::Acquire), 1);
     store.release_blocked_header_reads();
+    let worker = kernel.start_write_behind();
 
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: fresh(header("session-cancelled-fresh")),
             text: "retry".into(),
             model: None,
@@ -3099,17 +4139,17 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         })
         .await
         .expect("dropping the first lookup must release its reservation");
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
 async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources_and_limits(
+    let kernel = SessionKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
         KernelLimits {
             maximum_process_pending_fact_bytes: 1,
             ..KernelLimits::default()
@@ -3131,6 +4171,7 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
     assert_eq!(
         kernel
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: SubmitSession::Fresh(
                     PreparedFreshSession::new(session_header, pin).unwrap(),
                 ),
@@ -3151,14 +4192,10 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
     append_terminal_history(&memory, "session-cancelled-hydration", 1).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     store.pause_next_open_turn_read();
     let leader = tokio::spawn({
         let kernel = kernel.clone();
@@ -3167,6 +4204,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "leader".into(),
                     model: None,
@@ -3183,6 +4221,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
             let prepared = kernel.prepare_resume(&session_id).await?;
             kernel
                 .submit(SubmitTurn {
+                    turn_id: client_turn_id(),
                     session: SubmitSession::Resume(prepared),
                     text: "follower".into(),
                     model: None,
@@ -3202,8 +4241,10 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
             .is_err()
     );
 
+    let worker = kernel.start_write_behind();
     kernel
         .submit(SubmitTurn {
+            turn_id: client_turn_id(),
             session: resume(
                 &kernel,
                 SessionId::new("session-cancelled-hydration").unwrap(),
@@ -3215,22 +4256,20 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
         })
         .await
         .expect("a later hydration attempt must be admitted");
+    kernel.shutdown(worker).await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
     let memory = Arc::new(MemoryStore::new());
     append_terminal_history(&memory, "session-capacity-cold-resume", 1).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_sources(
-        store_contract,
-        composition(),
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_write_behind();
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         submit(&kernel, &format!("session-resident-{index}"), "queued").await;
     }
@@ -3239,6 +4278,7 @@ async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
     assert_eq!(
         kernel
             .submit(SubmitTurn {
+                turn_id: client_turn_id(),
                 session: resume(
                     &kernel,
                     SessionId::new("session-capacity-cold-resume").unwrap(),
@@ -3256,6 +4296,7 @@ async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
         1,
         "cold resume must read its durable preset before resident admission"
     );
+    kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
@@ -3356,14 +4397,10 @@ async fn startup_recovery_repairs_open_turns_without_resolving_the_preset() {
     composition.set_unavailable();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
 
-    let kernel = SessionKernel::recover_with_sources(
-        store,
-        composition_contract,
-        Arc::new(FixedClock),
-        Arc::new(SequenceIds::default()),
-    )
-    .await
-    .expect("startup repair must not require an executable Agent preset");
+    let kernel =
+        SessionKernel::recover_with_clock(store, composition_contract, Arc::new(FixedClock))
+            .await
+            .expect("startup repair must not require an executable Agent preset");
 
     assert!(matches!(
         kernel.outcome(&session, &turn).await.unwrap(),
@@ -3439,7 +4476,7 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentProfile::new_with_budget(
+        FrozenAgentSettings::new_with_budget(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),
@@ -3471,14 +4508,9 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
         .unwrap();
     let overused_store: Arc<dyn SessionStore> = overused;
     assert!(
-        SessionKernel::recover_with_sources(
-            overused_store,
-            composition(),
-            Arc::new(FixedClock),
-            Arc::new(SequenceIds::default()),
-        )
-        .await
-        .is_err(),
+        SessionKernel::recover_with_clock(overused_store, composition(), Arc::new(FixedClock),)
+            .await
+            .is_err(),
         "recovery must apply the immutable provider-attempt limit"
     );
 
@@ -3499,14 +4531,9 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
         .unwrap();
     let mismatched_store: Arc<dyn SessionStore> = mismatched;
     assert!(
-        SessionKernel::recover_with_sources(
-            mismatched_store,
-            composition(),
-            Arc::new(FixedClock),
-            Arc::new(SequenceIds::default()),
-        )
-        .await
-        .is_err(),
+        SessionKernel::recover_with_clock(mismatched_store, composition(), Arc::new(FixedClock),)
+            .await
+            .is_err(),
         "a durable exhaustion marker must match the immutable budget"
     );
 }
@@ -3523,7 +4550,7 @@ async fn recovery_preserves_a_valid_durable_budget_classification() {
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentProfile::new_with_budget(
+        FrozenAgentSettings::new_with_budget(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),

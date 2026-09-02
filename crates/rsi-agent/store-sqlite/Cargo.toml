@@ -27,3 +27,7 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "store_scaling"
+harness = false

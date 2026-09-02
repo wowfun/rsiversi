@@ -15,9 +15,13 @@ pin, publish ordered Facts, and wait for explicit durable watermarks before
 external I/O. Delayed Tool work must retain that exact pin rather than consult
 a process-global mutable catalog. Dropping an observation is
 detach; there is no fork operation.
-Each claim also carries a private Kernel-issued binding over every public claim
-field. Live operations require both that binding and current ownership;
-post-terminal checkpoint maintenance retains only the binding because terminal
+Each claim exposes only borrowed getters and carries a private Kernel-issued
+seal plus the resident session's shared immutable Header allocation. Live
+operations require that seal, current claim identity, and the exact resident
+Header allocation; callers cannot fabricate fields or obtain the internal
+`Arc`. The typed Header is validated at its construction or durable decoding
+boundary, and claim issuance does not serialize it again. Post-terminal
+checkpoint maintenance retains only a clone of the immutable claim because terminal
 commit has already retired live claim state.
 
 Nonterminal Facts are live-first and carry the durable watermark that existed
@@ -28,6 +32,14 @@ forever for a terminal that the Store can no longer commit.
 Every process-local Fact seam uses `Arc<SessionFact>`: publication, claim
 pages, and observation share one immutable allocation while the Store remains
 the serialization owner.
+Publication consumes owned Fact bodies. `Published` returns shared Facts only
+after live commit; `FlushRequired` returns the canonical unpublished bodies for
+an explicit durability flush and retry. Terminal canonicalization may therefore
+be visible to that retry even though nothing entered the live interval.
+`TurnError::Flush` is reserved for a
+real durable flush or shutdown failure, never ordinary pending-capacity
+backpressure or Store reads. A Store failure outside a requested durability
+barrier is reported separately as `TurnError::Store`.
 
 The executor-facing seam also carries optional opaque Context checkpoints and
 a maintenance-only unfiltered durable Fact page available only after the

@@ -1,5 +1,5 @@
 use rsi_agent_session_protocol::{
-    AgentPresetId, EffectId, FrozenAgentProfile, SessionFact, SessionFactBody, SessionHeader,
+    AgentPresetId, EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader,
     SessionId, TurnId, TurnOutcome,
 };
 use rsi_agent_store_protocol::{
@@ -15,7 +15,7 @@ fn header() -> SessionHeader {
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentProfile::new(
+        FrozenAgentSettings::new(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),

@@ -34,6 +34,10 @@ does transactionally index exact turn membership and the presence of a
 terminal Fact, so cold outcome reads and recovery do not scan unrelated
 history. Its CAS accepts immutable bounded bytes by digest and never treats a
 caller-provided path as owned data.
+Store open validates ownership and the exact schema without scanning dormant
+history. First access lazily validates one session's mechanical watermark,
+stored digest shape, and Fact/turn indexes; only the explicit offline verifier
+decodes every Fact and recomputes every canonical prefix digest.
 
 The Kernel owns an in-memory speculative suffix after the Store's durable
 prefix. It publishes nonterminal Facts immediately to live observers. Its
@@ -64,8 +68,8 @@ later configuration drift. The header records the durable preset identity, not
 an in-process composition-generation capability.
 
 Before first submission, an `AgentSessionDraft` owns the candidate header and
-one exact composition pin without creating Store state or reserving Kernel
-capacity. Changing its preset fully constructs and validates the replacement
+one exact composition pin without creating Store state, reserving Kernel
+capacity, or registering the candidate Workspace. Changing its preset fully constructs and validates the replacement
 generation before atomically exchanging the draft's identity and pin. Consuming
 the draft yields one move-only fresh-session value; after that ownership
 transfer no switching interface exists. Failure or dropping an unsubmitted
@@ -126,6 +130,12 @@ eviction or process restart, preparation deliberately acquires the latest
 generation for the same durable preset identity. Dropping an unsubmitted token
 releases its pin and has no Store or workspace semantics.
 
+Attaching a durable Session is deliberately narrower than preparing execution:
+the application reads its validated Header and exposes history, cancellation,
+observation, and approvals without consulting current presets, provider routes,
+filesystem state, or the Workspace registry. A later submit prepares only the
+dependencies of that operation.
+
 The executor follows one ordering rule for every external effect. The Kernel
 rejects a start marker unless its matching intent is already durable, so an
 executor cannot collapse the first durability fence into one publication:
@@ -154,12 +164,13 @@ The Kernel also owns an ordered effect-owned pre-terminal finalizer registry.
 The executor runs its snapshot before the sole terminal Fact and applies its
 validated finalization deadline to the complete call. Deadline expiry becomes
 the turn's durable finalization failure; it releases the executor waiter but
-does not claim that arbitrary third-party work was forcibly stopped. Standard
-Headless installs a Jobs finalizer whose own contract cancels and boundedly
-joins unfinished process-local work.
+does not claim that arbitrary third-party work was forcibly stopped. The
+standard Session composition installs a Jobs finalizer whose own contract
+cancels and boundedly joins unfinished process-local work.
 
-The Turn service is the single application seam. Submit returns a turn
-identity, not a durability receipt; callers open live observation separately.
+The Turn service is the single application seam. Submit returns the turn
+identity and exact acceptance sequence only after that acceptance is durable;
+callers open live observation separately for later Facts and terminal state.
 Submission resolves the session default and invocation override into one exact
 durable execution policy. Unconfined execution always requires a live approval
 decision. The executor pins the Approval and Sandbox generations, records the

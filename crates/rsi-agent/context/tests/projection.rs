@@ -1,6 +1,6 @@
 use rsi_agent_context::{ContextError, ContextFold, ContextLimits};
 use rsi_agent_session_protocol::{
-    AgentPresetId, EffectId, FrozenAgentProfile, SessionFact, SessionFactBody, SessionHeader,
+    AgentPresetId, EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader,
     SessionId, TurnId, TurnOutcome,
 };
 use rsi_ai_protocol::{
@@ -17,7 +17,7 @@ fn header(system: &str) -> SessionHeader {
         1,
         "/secret/workspace-name",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentProfile::new(
+        FrozenAgentSettings::new(
             "default",
             system,
             ModelRef::new("deployment", "model").unwrap(),

@@ -9,7 +9,6 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
-getrandom.workspace = true
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-agent-store-protocol = { path = "../store-protocol" }

@@ -13,7 +13,7 @@ use rsi_agent_session_protocol::{
     SessionFactBody, TurnOutcome,
 };
 use rsi_agent_turn_protocol::{
-    ContextCheckpoint, TurnClaim, TurnError, TurnExecution, TurnExecutionContract,
+    ContextCheckpoint, PublishAttempt, TurnClaim, TurnError, TurnExecution, TurnExecutionContract,
     TurnFinalization, TurnFinalizationContext, TurnFinalizationContract, TurnFinalizationError,
 };
 use rsi_ai_protocol::{
@@ -23,7 +23,7 @@ use rsi_ai_protocol::{
     ToolCallKind,
 };
 use rsi_approval_protocol::{
-    Approval, ApprovalContract, ApprovalDecision, ApprovalError, ApprovalRequest,
+    Approval, ApprovalContract, ApprovalDecision, ApprovalError, ApprovalRequest, ApprovalSubject,
 };
 use rsi_jobs::{JobScopeAuthority, JobScopeId, Jobs, JobsContract};
 use rsi_media_protocol::{Media, MediaContract, MediaRef};
@@ -220,8 +220,8 @@ impl Driver {
             };
             let claim_stop = stop.child_token();
             let deadline_fired = Arc::new(AtomicBool::new(false));
-            let elapsed = unix_now_ms().saturating_sub(claim.accepted_at_ms);
-            let limit = claim.header.profile().turn_budget().maximum_elapsed_ms();
+            let elapsed = unix_now_ms().saturating_sub(claim.accepted_at_ms());
+            let limit = claim.header().settings().turn_budget().maximum_elapsed_ms();
             let remaining = limit.saturating_sub(elapsed);
             let deadline_task = tokio::spawn({
                 let deadline_fired = Arc::clone(&deadline_fired);
@@ -233,7 +233,7 @@ impl Driver {
                 }
             });
             let limits = self.context_limits();
-            let mut fold = match ContextFold::with_limits(claim.header.clone(), limits) {
+            let mut fold = match ContextFold::with_limits(claim.header().clone(), limits) {
                 Ok(fold) => fold,
                 Err(error) => {
                     deadline_task.abort();
@@ -257,7 +257,7 @@ impl Driver {
             deadline_task.abort();
             if elapsed_deadline_wins(deadline_fired.load(Ordering::Acquire), &drive) {
                 let consumed = unix_now_ms()
-                    .saturating_sub(claim.accepted_at_ms)
+                    .saturating_sub(claim.accepted_at_ms())
                     .max(limit);
                 if self
                     .finish_budget(
@@ -302,7 +302,7 @@ impl Driver {
     ) -> std::result::Result<JobScopeAuthority, String> {
         let id = JobScopeId::new(
             "rsi.agent.turn",
-            [claim.session_id.as_str(), claim.turn_id.as_str()],
+            [claim.session_id().as_str(), claim.turn_id().as_str()],
         )
         .map_err(|error| error.to_string())?;
         self.jobs
@@ -453,7 +453,7 @@ impl Driver {
         })?;
         let model = state
             .model
-            .unwrap_or_else(|| claim.header.profile().default_model().clone());
+            .unwrap_or_else(|| claim.header().settings().default_model().clone());
         self.run_language(
             claim,
             composition,
@@ -611,7 +611,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ImageIntent {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     snapshot,
                 }],
@@ -623,7 +623,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ImageStarted {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                 }],
             )
@@ -719,7 +719,7 @@ impl Driver {
                         claim,
                         fold,
                         vec![SessionFactBody::ImageOutput {
-                            turn_id: claim.turn_id.clone(),
+                            turn_id: claim.turn_id().clone(),
                             effect_id: effect_id.clone(),
                             index,
                             media: reference.clone(),
@@ -774,7 +774,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ModelIntent {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     snapshot: snapshot.clone(),
                 }],
@@ -786,7 +786,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ModelStarted {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                 }],
             )
@@ -875,7 +875,7 @@ impl Driver {
                     claim,
                     fold,
                     vec![SessionFactBody::ModelEvent {
-                        turn_id: claim.turn_id.clone(),
+                        turn_id: claim.turn_id().clone(),
                         effect_id: effect_id.clone(),
                         event,
                     }],
@@ -957,7 +957,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ToolIntent {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     identity: identity.clone(),
                     name: call.name,
@@ -972,7 +972,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ToolStarted {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     identity: identity.clone(),
                 }],
@@ -1006,7 +1006,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ToolResult {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id,
                     identity: identity.clone(),
                     result,
@@ -1033,8 +1033,8 @@ impl Driver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 (
-                    claim.session_id.as_str().to_owned(),
-                    claim.turn_id.as_str().to_owned(),
+                    claim.session_id().as_str().to_owned(),
+                    claim.turn_id().as_str().to_owned(),
                 ),
                 TrackedTool {
                     composition,
@@ -1045,8 +1045,8 @@ impl Driver {
 
     fn clear_tracked_tool(&self, claim: &TurnClaim, identity: &ToolResultIdentity) {
         let key = (
-            claim.session_id.as_str().to_owned(),
-            claim.turn_id.as_str().to_owned(),
+            claim.session_id().as_str().to_owned(),
+            claim.turn_id().as_str().to_owned(),
         );
         let mut active = self
             .active_tools
@@ -1062,8 +1062,8 @@ impl Driver {
 
     fn retire_tracked_tool(&self, claim: &TurnClaim, stop: &CancellationToken) {
         let key = (
-            claim.session_id.as_str().to_owned(),
-            claim.turn_id.as_str().to_owned(),
+            claim.session_id().as_str().to_owned(),
+            claim.turn_id().as_str().to_owned(),
         );
         let tracked = self
             .active_tools
@@ -1138,7 +1138,7 @@ impl Driver {
         stop: &CancellationToken,
     ) -> std::result::Result<ToolResult, DriveFailure> {
         let combined = combine_cancellation(cancellation, stop);
-        let cwd = std::path::PathBuf::from(claim.header.canonical_cwd());
+        let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
         let result = prepared
             .start(ToolStart {
                 cancellation: combined.token(),
@@ -1189,11 +1189,17 @@ impl Driver {
             return Ok(None);
         }
         let request = ApprovalRequest {
+            subject: ApprovalSubject::new(
+                claim.session_id().as_str(),
+                claim.turn_id().as_str(),
+                effect_id.as_str(),
+            )
+            .map_err(|error| failed("approval.invalid_subject", error.to_string()))?,
             id: effect_id.as_str().to_owned(),
             action: format!("run tool {tool_name}"),
             reason: format!(
                 "Agent turn {} requested this Tool effect",
-                claim.turn_id.as_str()
+                claim.turn_id().as_str()
             ),
         };
         let outcome = tokio::select! {
@@ -1235,7 +1241,7 @@ impl Driver {
                         claim,
                         fold,
                         vec![SessionFactBody::ToolResult {
-                            turn_id: claim.turn_id.clone(),
+                            turn_id: claim.turn_id().clone(),
                             effect_id: effect_id.clone(),
                             identity: identity.clone(),
                             result,
@@ -1298,7 +1304,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ModelEvent {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     event: LanguageEvent::Failed {
                         error,
@@ -1343,8 +1349,8 @@ impl Driver {
         outcome: TurnOutcome,
     ) -> TurnOutcome {
         let context = TurnFinalizationContext {
-            session_id: claim.session_id.clone(),
-            turn_id: claim.turn_id.clone(),
+            session_id: claim.session_id().clone(),
+            turn_id: claim.turn_id().clone(),
             job_scope: job_scope.cloned(),
         };
         match tokio::time::timeout(
@@ -1458,17 +1464,13 @@ impl Driver {
         fold: &mut ContextFold,
         bodies: Vec<SessionFactBody>,
     ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
-        let facts = match self.turns.publish(claim, bodies.clone()).await {
-            Ok(facts) => facts,
-            Err(TurnError::Flush(_)) if fold.through_seq() > 0 => {
-                self.flush_durable(claim, fold.through_seq()).await?;
-                self.turns
-                    .publish(claim, bodies)
-                    .await
-                    .map_err(turn_failure)?
-            }
-            Err(error) => return Err(turn_failure(error)),
-        };
+        let facts = publish_nonterminal_with_capacity_retry(
+            self.turns.as_ref(),
+            &self.config,
+            claim,
+            bodies,
+        )
+        .await?;
         if facts
             .first()
             .is_some_and(|fact| fact.seq() != fold.through_seq() + 1)
@@ -1548,18 +1550,18 @@ impl Driver {
     ) -> std::result::Result<ScannedTurn, DriveFailure> {
         let mut state = ScannedTurn::default();
         let mut cursor = 0;
-        if let Ok(Some(checkpoint)) = self.turns.read_context_checkpoint(&claim.session_id).await
-            && checkpoint.through_seq < claim.accepted_seq
-            && checkpoint.through_seq <= claim.live_seq
+        if let Ok(Some(checkpoint)) = self.turns.read_context_checkpoint(claim.session_id()).await
+            && checkpoint.through_seq < claim.accepted_seq()
+            && checkpoint.through_seq <= claim.live_seq()
             && let Ok(restored) = ContextFold::from_checkpoint(
-                claim.header.clone(),
+                claim.header().clone(),
                 self.context_limits(),
                 &checkpoint.bytes,
             )
             && restored.through_seq() == checkpoint.through_seq
             && restored.fact_prefix_sha256() == checkpoint.fact_prefix_sha256
             && claim
-                .header
+                .header()
                 .fingerprint()
                 .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
         {
@@ -1588,6 +1590,34 @@ impl Driver {
     }
 }
 
+async fn publish_nonterminal_with_capacity_retry(
+    turns: &dyn TurnExecution,
+    config: &ExecutorConfig,
+    claim: &TurnClaim,
+    bodies: Vec<SessionFactBody>,
+) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
+    match turns.publish(claim, bodies).await {
+        Ok(PublishAttempt::Published(facts)) => Ok(facts),
+        Ok(PublishAttempt::FlushRequired { unpublished }) => {
+            let tail = live_tail(turns, claim).await?;
+            if tail == 0 {
+                return Err(fatal(
+                    "Fact publication requires a nonempty flushable prefix",
+                ));
+            }
+            flush_execution_prefix(turns, config, claim, tail).await?;
+            match turns.publish(claim, unpublished).await {
+                Ok(PublishAttempt::Published(facts)) => Ok(facts),
+                Ok(PublishAttempt::FlushRequired { .. }) => Err(fatal(
+                    "Fact publication remained full after its durable flush",
+                )),
+                Err(error) => Err(turn_failure(error)),
+            }
+        }
+        Err(error) => Err(turn_failure(error)),
+    }
+}
+
 async fn publish_terminal(
     turns: &dyn TurnExecution,
     config: &ExecutorConfig,
@@ -1595,19 +1625,14 @@ async fn publish_terminal(
     outcome: TurnOutcome,
 ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
     let mut last_capacity_flush = None;
+    let mut bodies = vec![SessionFactBody::TurnTerminal {
+        turn_id: claim.turn_id().clone(),
+        outcome,
+    }];
     let facts = loop {
-        match turns
-            .publish(
-                claim,
-                vec![SessionFactBody::TurnTerminal {
-                    turn_id: claim.turn_id.clone(),
-                    outcome: outcome.clone(),
-                }],
-            )
-            .await
-        {
-            Ok(facts) => break facts,
-            Err(TurnError::Flush(_)) => {
+        match turns.publish(claim, bodies).await {
+            Ok(PublishAttempt::Published(facts)) => break facts,
+            Ok(PublishAttempt::FlushRequired { unpublished }) => {
                 let tail = live_tail(turns, claim).await?;
                 if tail == 0 || last_capacity_flush.is_some_and(|flushed| flushed >= tail) {
                     return Err(fatal(
@@ -1616,8 +1641,9 @@ async fn publish_terminal(
                 }
                 flush_execution_prefix(turns, config, claim, tail).await?;
                 last_capacity_flush = Some(tail);
+                bodies = unpublished;
             }
-            Err(error) => return Err(fatal(error)),
+            Err(error) => return Err(turn_failure(error)),
         }
     };
     let fact = facts
@@ -1636,17 +1662,17 @@ async fn publish_budget_exhaustion(
     consumed: u64,
     limit: u64,
 ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
-    let body = SessionFactBody::BudgetExhausted {
-        turn_id: claim.turn_id.clone(),
+    let mut bodies = vec![SessionFactBody::BudgetExhausted {
+        turn_id: claim.turn_id().clone(),
         dimension,
         consumed,
         limit,
-    };
+    }];
     let mut last_capacity_flush = None;
     let facts = loop {
-        match turns.publish(claim, vec![body.clone()]).await {
-            Ok(facts) => break facts,
-            Err(TurnError::Flush(_)) => {
+        match turns.publish(claim, bodies).await {
+            Ok(PublishAttempt::Published(facts)) => break facts,
+            Ok(PublishAttempt::FlushRequired { unpublished }) => {
                 let tail = live_tail(turns, claim).await?;
                 if tail == 0 || last_capacity_flush.is_some_and(|flushed| flushed >= tail) {
                     return Err(fatal(
@@ -1655,6 +1681,7 @@ async fn publish_budget_exhaustion(
                 }
                 flush_execution_prefix(turns, config, claim, tail).await?;
                 last_capacity_flush = Some(tail);
+                bodies = unpublished;
             }
             Err(error) => return Err(turn_failure(error)),
         }
@@ -1673,7 +1700,7 @@ async fn live_tail(
 ) -> std::result::Result<u64, DriveFailure> {
     // Facts at or before the claim were already represented by its live watermark.
     // Only scan the executor-owned suffix when recovering publication capacity.
-    let mut cursor = claim.live_seq;
+    let mut cursor = claim.live_seq();
     loop {
         let page = turns
             .read_facts(
@@ -1781,7 +1808,7 @@ fn scan_turn(
                 sandbox,
                 require_approval,
                 ..
-            } if turn_id == &claim.turn_id => {
+            } if turn_id == claim.turn_id() => {
                 state.model.clone_from(model);
                 state.turn_policy = Some(ResolvedTurnPolicy {
                     sandbox: *sandbox,
@@ -1792,14 +1819,14 @@ fn scan_turn(
                 turn_id,
                 model,
                 request,
-            } if turn_id == &claim.turn_id => {
+            } if turn_id == claim.turn_id() => {
                 state.image = Some((model.clone(), request.clone()));
             }
-            SessionFactBody::ModelIntent { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::ModelIntent { turn_id, .. } if turn_id == claim.turn_id() => {
                 state.completed_model_without_successor = false;
                 state.effect = Some(ResumeEffect::Model { started: false });
             }
-            SessionFactBody::ModelStarted { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::ModelStarted { turn_id, .. } if turn_id == claim.turn_id() => {
                 match &mut state.effect {
                     Some(ResumeEffect::Model { started }) => *started = true,
                     _ => {
@@ -1807,10 +1834,10 @@ fn scan_turn(
                     }
                 }
             }
-            SessionFactBody::ImageIntent { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::ImageIntent { turn_id, .. } if turn_id == claim.turn_id() => {
                 state.effect = Some(ResumeEffect::Image { started: false });
             }
-            SessionFactBody::ImageStarted { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::ImageStarted { turn_id, .. } if turn_id == claim.turn_id() => {
                 match &mut state.effect {
                     Some(ResumeEffect::Image { started }) => *started = true,
                     _ => {
@@ -1819,7 +1846,7 @@ fn scan_turn(
                 }
             }
             SessionFactBody::ModelEvent { turn_id, event, .. }
-                if turn_id == &claim.turn_id
+                if turn_id == claim.turn_id()
                     && matches!(
                         event,
                         LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
@@ -1833,7 +1860,7 @@ fn scan_turn(
                 effect_id,
                 identity,
                 ..
-            } if turn_id == &claim.turn_id => {
+            } if turn_id == claim.turn_id() => {
                 state.completed_model_without_successor = false;
                 state.effect = Some(ResumeEffect::Tool {
                     effect_id: effect_id.clone(),
@@ -1841,7 +1868,7 @@ fn scan_turn(
                     started: false,
                 });
             }
-            SessionFactBody::ToolStarted { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::ToolStarted { turn_id, .. } if turn_id == claim.turn_id() => {
                 match &mut state.effect {
                     Some(ResumeEffect::Tool { started, .. }) => *started = true,
                     _ => {
@@ -1849,10 +1876,10 @@ fn scan_turn(
                     }
                 }
             }
-            SessionFactBody::ToolResult { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::ToolResult { turn_id, .. } if turn_id == claim.turn_id() => {
                 state.effect = None;
             }
-            SessionFactBody::TurnTerminal { turn_id, .. } if turn_id == &claim.turn_id => {
+            SessionFactBody::TurnTerminal { turn_id, .. } if turn_id == claim.turn_id() => {
                 state.terminal = true;
                 state.completed_model_without_successor = false;
                 state.effect = None;
@@ -1862,7 +1889,7 @@ fn scan_turn(
                 dimension,
                 consumed,
                 limit,
-            } if turn_id == &claim.turn_id => {
+            } if turn_id == claim.turn_id() => {
                 state.budget_exhausted = Some((*dimension, *consumed, *limit));
             }
             SessionFactBody::TurnAccepted { .. }
@@ -2044,6 +2071,8 @@ fn tool_failure(error: &ToolError) -> DriveFailure {
     match error {
         ToolError::Cancelled => DriveFailure::Turn(TurnOutcome::Cancelled),
         ToolError::Timeout => failed("tool.timeout", "Tool invocation timed out"),
+        ToolError::Capacity => failed("tool.capacity", "Tool capacity is exhausted"),
+        ToolError::ShuttingDown => failed("tool.shutting_down", "Tool provider is shutting down"),
         ToolError::InvalidInput(_)
         | ToolError::Duplicate(_)
         | ToolError::Unknown(_)
@@ -2073,6 +2102,7 @@ fn fatal(error: impl fmt::Display) -> DriveFailure {
 
 fn turn_failure(error: TurnError) -> DriveFailure {
     match error {
+        TurnError::ShuttingDown => DriveFailure::Stopped,
         TurnError::BudgetExceeded {
             dimension,
             consumed,
@@ -2197,13 +2227,13 @@ async fn rebuild_context_checkpoint(
     turns: &Arc<dyn TurnExecution>,
     request: &CheckpointRequest,
 ) -> Option<ContextCheckpoint> {
-    let mut fold = ContextFold::with_limits(request.claim.header.clone(), request.limits).ok()?;
+    let mut fold = ContextFold::with_limits(request.claim.header().clone(), request.limits).ok()?;
     let mut cursor = 0;
     if let Ok(Some(checkpoint)) = turns
-        .read_context_checkpoint(&request.claim.session_id)
+        .read_context_checkpoint(request.claim.session_id())
         .await
         && let Ok(restored) = ContextFold::from_checkpoint(
-            request.claim.header.clone(),
+            request.claim.header().clone(),
             request.limits,
             &checkpoint.bytes,
         )
@@ -2211,7 +2241,7 @@ async fn rebuild_context_checkpoint(
         && restored.fact_prefix_sha256() == checkpoint.fact_prefix_sha256
         && request
             .claim
-            .header
+            .header()
             .fingerprint()
             .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
     {
@@ -2234,7 +2264,7 @@ async fn rebuild_context_checkpoint(
         cursor = page.through_seq;
     }
     Some(ContextCheckpoint {
-        header_fingerprint: request.claim.header.fingerprint().ok()?,
+        header_fingerprint: request.claim.header().fingerprint().ok()?,
         through_seq: fold.through_seq(),
         fact_prefix_sha256: fold.fact_prefix_sha256(),
         bytes: fold.checkpoint_bytes().ok()?,
@@ -2363,13 +2393,13 @@ impl PluginFactory for ExecutorFactory {
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::{
-        AgentPresetId, FrozenAgentProfile, SessionHeader, SessionId, TurnId,
+        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId, TurnId,
     };
     use rsi_agent_turn_protocol::ExecutorLease;
     use rsi_media_protocol::MediaId;
     use rsi_sandbox::SandboxMode;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     #[test]
     fn prepared_executor_charge_includes_inline_and_dynamic_config_state() {
@@ -2400,6 +2430,29 @@ mod tests {
         };
         assert!(message.len() <= MAXIMUM_AGENT_DIAGNOSTIC_BYTES);
         assert!(std::str::from_utf8(message.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn tool_admission_failures_keep_their_stable_terminal_codes() {
+        for (error, expected_code, expected_message) in [
+            (
+                ToolError::Capacity,
+                "tool.capacity",
+                "Tool capacity is exhausted",
+            ),
+            (
+                ToolError::ShuttingDown,
+                "tool.shutting_down",
+                "Tool provider is shutting down",
+            ),
+        ] {
+            let DriveFailure::Turn(TurnOutcome::Failed { code, message }) = tool_failure(&error)
+            else {
+                panic!("tool admission failure changed terminal class")
+            };
+            assert_eq!(code, expected_code);
+            assert_eq!(message, expected_message);
+        }
     }
 
     #[test]
@@ -2471,10 +2524,13 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FullBeforeTerminal {
-        accepted: SessionFact,
+    struct FullBeforePublish {
+        facts: Vec<Arc<SessionFact>>,
+        required_flush_seq: u64,
+        durable_seq: AtomicU64,
         publish_calls: AtomicUsize,
         flushes: Mutex<Vec<u64>>,
+        shutdown_on_publish: bool,
     }
 
     #[derive(Debug)]
@@ -2546,7 +2602,7 @@ mod tests {
             &self,
             _claim: &TurnClaim,
             _bodies: Vec<SessionFactBody>,
-        ) -> rsi_agent_turn_protocol::Result<Vec<Arc<SessionFact>>> {
+        ) -> rsi_agent_turn_protocol::Result<PublishAttempt> {
             unreachable!("checkpoint writer test does not publish")
         }
 
@@ -2571,7 +2627,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl TurnExecution for FullBeforeTerminal {
+    impl TurnExecution for FullBeforePublish {
         fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
             unreachable!("terminal publication test does not register")
         }
@@ -2595,11 +2651,14 @@ mod tests {
             &self,
             _claim: &TurnClaim,
             after_seq: u64,
-            _limit: usize,
+            limit: usize,
         ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::ClaimFactPage> {
-            let facts = (after_seq == 0)
-                .then(|| Arc::new(self.accepted.clone()))
-                .into_iter()
+            let facts = self
+                .facts
+                .iter()
+                .filter(|fact| fact.seq() > after_seq)
+                .take(limit)
+                .cloned()
                 .collect::<Vec<_>>();
             Ok(rsi_agent_turn_protocol::ClaimFactPage {
                 through_seq: facts.last().map_or(after_seq, |fact| fact.seq()),
@@ -2609,19 +2668,29 @@ mod tests {
 
         async fn publish(
             &self,
-            claim: &TurnClaim,
+            _claim: &TurnClaim,
             bodies: Vec<SessionFactBody>,
-        ) -> rsi_agent_turn_protocol::Result<Vec<Arc<SessionFact>>> {
-            if self.publish_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(TurnError::Flush("speculative buffer is full".into()));
+        ) -> rsi_agent_turn_protocol::Result<PublishAttempt> {
+            if self.shutdown_on_publish {
+                return Err(TurnError::ShuttingDown);
             }
-            assert!(matches!(
-                bodies.as_slice(),
-                [SessionFactBody::TurnTerminal { turn_id, .. }] if turn_id == &claim.turn_id
-            ));
-            Ok(vec![Arc::new(
-                SessionFact::new(2, 2, bodies.into_iter().next().unwrap()).unwrap(),
-            )])
+            if self.publish_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(PublishAttempt::FlushRequired {
+                    unpublished: bodies,
+                });
+            }
+            if self.durable_seq.load(Ordering::SeqCst) < self.required_flush_seq {
+                return Ok(PublishAttempt::FlushRequired {
+                    unpublished: bodies,
+                });
+            }
+            let next_seq = self
+                .facts
+                .last()
+                .map_or(1, |fact| fact.seq().saturating_add(1));
+            Ok(PublishAttempt::Published(vec![Arc::new(
+                SessionFact::new(next_seq, next_seq, bodies.into_iter().next().unwrap()).unwrap(),
+            )]))
         }
 
         async fn flush(
@@ -2630,6 +2699,7 @@ mod tests {
             through_seq: u64,
         ) -> rsi_agent_turn_protocol::Result<u64> {
             self.flushes.lock().unwrap().push(through_seq);
+            self.durable_seq.store(through_seq, Ordering::SeqCst);
             Ok(through_seq)
         }
 
@@ -2653,7 +2723,7 @@ mod tests {
             1,
             "/tmp",
             AgentPresetId::new("test-agent").unwrap(),
-            FrozenAgentProfile::new(
+            FrozenAgentSettings::new(
                 "test",
                 "system",
                 ModelRef::new("test", "model").unwrap(),
@@ -2676,9 +2746,16 @@ mod tests {
         )
         .unwrap();
         (
-            rsi_agent_turn_protocol::TurnClaimIssuer::new()
-                .issue("executor".into(), 1, session_id, turn_id, header, 1, 1, 1)
-                .unwrap(),
+            rsi_agent_turn_protocol::TurnClaimIssuer::new().issue(
+                "executor".into(),
+                1,
+                session_id,
+                turn_id,
+                Arc::new(header),
+                1,
+                1,
+                1,
+            ),
             accepted,
         )
     }
@@ -2686,10 +2763,13 @@ mod tests {
     #[tokio::test]
     async fn terminal_publication_flushes_and_retries_a_full_speculative_suffix() {
         let (claim, accepted) = claim();
-        let turns = FullBeforeTerminal {
-            accepted,
+        let turns = FullBeforePublish {
+            facts: vec![Arc::new(accepted)],
+            required_flush_seq: 1,
+            durable_seq: AtomicU64::new(0),
             publish_calls: AtomicUsize::new(0),
             flushes: Mutex::new(Vec::new()),
+            shutdown_on_publish: false,
         };
         let config = ExecutorConfig {
             executor_id: "executor".into(),
@@ -2708,6 +2788,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_publication_treats_kernel_shutdown_as_driver_stop() {
+        let (claim, accepted) = claim();
+        let turns = FullBeforePublish {
+            facts: vec![Arc::new(accepted)],
+            required_flush_seq: 1,
+            durable_seq: AtomicU64::new(0),
+            publish_calls: AtomicUsize::new(0),
+            flushes: Mutex::new(Vec::new()),
+            shutdown_on_publish: true,
+        };
+        let config = ExecutorConfig {
+            executor_id: "executor".into(),
+            max_context_messages: default_context_messages(),
+            max_context_bytes: default_context_bytes(),
+            durability_wait_ms: 1_000,
+            finalization_wait_ms: 1_000,
+            retained_tool_wait_ms: 1_000,
+        };
+
+        assert!(matches!(
+            publish_terminal(&turns, &config, &claim, TurnOutcome::Completed).await,
+            Err(DriveFailure::Stopped)
+        ));
+    }
+
+    #[tokio::test]
+    async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
+        let (claim, accepted) = claim();
+        let later = SessionFact::new(
+            2,
+            2,
+            SessionFactBody::CancelRequested {
+                turn_id: claim.turn_id().clone(),
+                reason: Some("published outside the fold".into()),
+            },
+        )
+        .unwrap();
+        let turns = FullBeforePublish {
+            facts: vec![Arc::new(accepted), Arc::new(later)],
+            required_flush_seq: 2,
+            durable_seq: AtomicU64::new(0),
+            publish_calls: AtomicUsize::new(0),
+            flushes: Mutex::new(Vec::new()),
+            shutdown_on_publish: false,
+        };
+        let config = ExecutorConfig {
+            executor_id: "executor".into(),
+            max_context_messages: default_context_messages(),
+            max_context_bytes: default_context_bytes(),
+            durability_wait_ms: 1_000,
+            finalization_wait_ms: 1_000,
+            retained_tool_wait_ms: 1_000,
+        };
+
+        let facts = publish_nonterminal_with_capacity_retry(
+            &turns,
+            &config,
+            &claim,
+            vec![SessionFactBody::CancelRequested {
+                turn_id: claim.turn_id().clone(),
+                reason: Some("retry".into()),
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(facts.last().unwrap().seq(), 3);
+        assert_eq!(turns.flushes.lock().unwrap().as_slice(), [2]);
+    }
+
+    #[tokio::test]
     async fn checkpoint_writer_coalesces_and_preserves_a_queued_turn() {
         let (claim, accepted) = claim();
         let queued_turn = TurnId::new("turn-queued").unwrap();
@@ -2719,7 +2870,7 @@ mod tests {
                         2,
                         2,
                         SessionFactBody::TurnTerminal {
-                            turn_id: claim.turn_id.clone(),
+                            turn_id: claim.turn_id().clone(),
                             outcome: TurnOutcome::Completed,
                         },
                     )
@@ -2757,9 +2908,12 @@ mod tests {
         let writes = fixture.writes.lock().unwrap();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].through_seq, 3);
-        let restored =
-            ContextFold::from_checkpoint(claim.header, ContextLimits::default(), &writes[0].bytes)
-                .unwrap();
+        let restored = ContextFold::from_checkpoint(
+            claim.header().clone(),
+            ContextLimits::default(),
+            &writes[0].bytes,
+        )
+        .unwrap();
         assert_eq!(restored.through_seq(), 3);
         assert!(
             serde_json::to_string(&restored.project(ContextLimits::default()).unwrap().messages)
@@ -2778,7 +2932,7 @@ mod tests {
                 2,
                 2,
                 SessionFactBody::ModelIntent {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     snapshot: PreparedCallSnapshot {
                         call_id: "call-1".into(),
@@ -2801,7 +2955,7 @@ mod tests {
                 3,
                 3,
                 SessionFactBody::ModelStarted {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                 },
             )
@@ -2810,7 +2964,7 @@ mod tests {
                 4,
                 4,
                 SessionFactBody::ModelEvent {
-                    turn_id: claim.turn_id.clone(),
+                    turn_id: claim.turn_id().clone(),
                     effect_id,
                     event: LanguageEvent::Finished {
                         reason: FinishReason::Stop,

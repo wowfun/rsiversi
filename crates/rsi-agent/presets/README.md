@@ -71,6 +71,6 @@ transport, and cross-process authorization belong to their owning modules.
 Generation compilation and resolution remain authoritative because roster
 health is only a point-in-time discovery result.
 
-The legacy Headless Profile fragment remains temporarily for the current
-standard composition. It binds one absolute Store root, then starts Kernel and
-one executor generation; the owning product still registers those factories.
+The Session Profile fragment binds one absolute Store root, then starts Kernel
+and one executor generation. The standard product registers those factories
+and composes the fragment into its one shared local Host.

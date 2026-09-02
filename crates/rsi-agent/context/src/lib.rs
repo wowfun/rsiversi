@@ -164,11 +164,11 @@ impl ContextFold {
         header
             .validate()
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
-        let system_message = if header.profile().system_prompt().is_empty() {
+        let system_message = if header.settings().system_prompt().is_empty() {
             None
         } else {
             Some(
-                Message::system_text(header.profile().system_prompt())
+                Message::system_text(header.settings().system_prompt())
                     .map_err(|error| ContextError::Invalid(error.to_string()))?,
             )
         };

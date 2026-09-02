@@ -4,12 +4,34 @@ SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
 exact current schema is accepted; this pre-release implementation does not
-migrate old layouts. Open validates SQLite integrity, foreign keys, mechanical
-Fact watermarks, and the lowercase SHA-256 encoding of every stored Fact-prefix
-digest without redundantly decoding all typed history or recomputing every prefix;
-Kernel recovery owns paged header/Fact validation, while each CAS read validates
-the exact requested body. Header and Fact reads project SQLite byte length and
-return no TEXT body to Rust when that row exceeds its protocol bound. CAS publication never deletes caller or unrelated
+migrate old layouts. Open validates root ownership and the exact schema without
+scanning dormant session history. The first header, Fact, turn, checkpoint, or
+append access to an existing session validates that session's bounded Header,
+durable watermark, Fact-prefix digest shape, and Fact/turn index relationships
+inside one read snapshot. A bounded 256-session recency cache avoids repeating
+that work; eviction only causes revalidation. This lazy check does not decode
+every Fact JSON body, but its watermark count and turn-membership queries scan
+the selected session's Fact/turn index ranges and therefore cost O(that
+session's durable history) on an uncached first access. Recent listing validates
+every uncached returned session in its original snapshot, reuses prior cached
+proofs, and refreshes the recency cache.
+`SqliteStore::verify` is the
+explicit no-create full-store check for SQLite integrity, foreign keys, all
+bounded Headers, mechanical watermarks, recomputed canonical Fact-prefix
+digests, and Fact/turn relationships. The audit streams and validates every
+Fact body. It opens the existing writer-lock file and database read-only,
+performs no writes, and does not perform WAL recovery. A nonempty WAL makes the
+audit fail explicitly because the immutable read-only connection cannot inspect
+that committed tail; run it against a cleanly closed Store or a standalone copy
+produced with SQLite's backup facilities. This audit covers the complete SQLite
+logical state; CAS objects remain validated on each exact read rather than by
+`verify`. Kernel recovery owns paged Fact semantics, while each CAS read validates
+the exact requested body digest. Indexed boundary reads compare every decoded Fact's
+sequence, turn, and kind with the relational row that selected it. Recent
+listing returns validated bounded Headers from its original read snapshot
+instead of requiring one later reader job per row. Header and
+Fact reads project SQLite byte length and return no
+TEXT body to Rust when that row exceeds its protocol bound. CAS publication never deletes caller or unrelated
 files. It stages publication in a dedicated private directory that is reset
 after the writer lease is acquired on open, so a process crash cannot retain
 partial CAS files indefinitely.
@@ -20,14 +42,27 @@ Network or shared filesystems that weaken those operations are outside this
 backend's durability and single-writer contract; the Store does not infer their
 behavior from a path string.
 
-SQLite work and CAS file work use separate single-slot blocking admissions.
-Hashing and immutable file publication do not hold the SQLite connection mutex;
-metadata is checked or inserted only after the file phase completes.
+SQLite owns one serialized writer connection and one serialized read-only,
+no-create reader connection. Multi-statement reads use a deferred transaction
+so watermarks and rows come from one WAL snapshot. CAS file work has a separate
+single-slot blocking admission. Hashing and immutable file publication do not
+hold a SQLite connection mutex; metadata is checked or inserted only after the
+file phase completes.
+
+The two connections share one lifetime: clean shutdown closes the reader first
+and the writer last, checkpointing the WAL into `sessions.sqlite3`. The main
+database is therefore a complete standalone copy after the final Store handle
+and operation close. A live backup must still use SQLite's backup facilities or
+capture the database and WAL consistently. Open initializes only a missing or
+zero-length database; an existing nonempty database without the exact schema is
+rejected instead of being republished as an empty Store.
 
 On Unix, owned Store and CAS directories are created and tightened to mode
-`0700` before database, writer-lock, or CAS files are opened.
+`0700` before database, writer-lock, or CAS files are opened. Every SQLite
+connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
+final-component symlink window after the path precheck.
 
-The exact schema version 6 admits only the current mandatory Agent-preset
+The exact schema version 7 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Index maintenance is atomic with append;

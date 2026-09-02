@@ -11,10 +11,10 @@ The durable
 value records which preset a session selected; process-local composition
 generation handles are deliberately outside this format.
 
-Each immutable profile carries a `TurnBudget`. The first protocol generation
+Each immutable settings value carries a `TurnBudget`. The first protocol generation
 uses repository hard maxima of 30 elapsed minutes, 64 provider attempts, 256
 Tool calls, 65,536 generated Facts, and 64 MiB of generated Fact bytes; a
-profile may only tighten them. Budget exhaustion is itself a nonterminal Fact
+settings may only tighten them. Budget exhaustion is itself a nonterminal Fact
 followed by the sole `budget_exceeded` terminal outcome, so interrupted
 observers and recovery can classify the stop from durable history.
 Both records validate that their frozen limit is positive and no greater than
@@ -28,7 +28,7 @@ direct Image request is durable before preparation, each successfully imported
 image is committed as an ordered `MediaRef` Fact, and a later failure terminates
 as `partial_failed` with those already-durable refs. Facts never contain media
 bytes, resolved credentials, filesystem locators, or live capabilities.
-An unconfined (`danger-full-access`) frozen profile is valid only when live
+Unconfined (`danger-full-access`) frozen settings are valid only when live
 approval is required; this cross-field invariant is enforced on construction
 and deserialization.
 

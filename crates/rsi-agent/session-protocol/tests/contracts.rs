@@ -5,8 +5,8 @@ use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
-fn profile() -> FrozenAgentProfile {
-    FrozenAgentProfile::new(
+fn settings() -> FrozenAgentSettings {
+    FrozenAgentSettings::new(
         "default",
         "Be precise.",
         ModelRef::new("openai", "gpt-test").unwrap(),
@@ -64,7 +64,7 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
         1,
         "/workspace",
         AgentPresetId::new("code-agent").unwrap(),
-        profile(),
+        settings(),
     )
     .unwrap();
     assert_eq!(header.agent_preset_id().as_str(), "code-agent");
@@ -77,7 +77,7 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
     let mut value = serde_json::to_value(&header).unwrap();
     value["format_version"] = 2.into();
     value.as_object_mut().unwrap().remove("agent_preset_id");
-    value["profile"]
+    value["settings"]
         .as_object_mut()
         .unwrap()
         .remove("turn_budget");
@@ -96,7 +96,7 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
     assert!(serde_json::from_value::<SessionHeader>(missing_preset).is_err());
 
     let mut missing_budget = serde_json::to_value(&header).unwrap();
-    missing_budget["profile"]
+    missing_budget["settings"]
         .as_object_mut()
         .unwrap()
         .remove("turn_budget");
@@ -110,7 +110,7 @@ fn header_round_trips_and_rejects_old_format_or_noncanonical_path() {
             1,
             "relative/path",
             AgentPresetId::new("code-agent").unwrap(),
-            profile()
+            settings()
         )
         .is_err()
     );
@@ -209,9 +209,9 @@ fn exhaustion_records_cannot_widen_the_named_budget_dimension() {
 }
 
 #[test]
-fn frozen_profile_serializes_its_creation_time_turn_budget() {
+fn frozen_settings_serialize_their_creation_time_turn_budget() {
     let tightened = TurnBudget::new(60_000, 3, 4, 5, 6_000).unwrap();
-    let profile = FrozenAgentProfile::new_with_budget(
+    let settings = FrozenAgentSettings::new_with_budget(
         "bounded",
         "Be precise.",
         ModelRef::new("openai", "gpt-test").unwrap(),
@@ -221,9 +221,9 @@ fn frozen_profile_serializes_its_creation_time_turn_budget() {
     )
     .unwrap();
 
-    assert_eq!(profile.turn_budget(), &tightened);
+    assert_eq!(settings.turn_budget(), &tightened);
     assert_eq!(
-        serde_json::from_value::<FrozenAgentProfile>(serde_json::to_value(&profile).unwrap())
+        serde_json::from_value::<FrozenAgentSettings>(serde_json::to_value(&settings).unwrap())
             .unwrap()
             .turn_budget(),
         &tightened
@@ -232,7 +232,7 @@ fn frozen_profile_serializes_its_creation_time_turn_budget() {
 
 #[test]
 fn maximum_escaped_header_stays_inside_its_framing_bound() {
-    let profile = FrozenAgentProfile::new(
+    let settings = FrozenAgentSettings::new(
         "p".repeat(MAXIMUM_AGENT_IDENTIFIER_BYTES),
         "\u{1}".repeat(MAXIMUM_SYSTEM_PROMPT_BYTES),
         ModelRef::new(
@@ -249,7 +249,7 @@ fn maximum_escaped_header_stays_inside_its_framing_bound() {
         1,
         format!("/{}", "\u{1}".repeat(MAXIMUM_WORKSPACE_PATH_BYTES - 1)),
         AgentPresetId::new("a".repeat(MAXIMUM_AGENT_PRESET_ID_BYTES)).unwrap(),
-        profile,
+        settings,
     )
     .unwrap();
 
@@ -257,9 +257,9 @@ fn maximum_escaped_header_stays_inside_its_framing_bound() {
 }
 
 #[test]
-fn profile_fingerprint_is_canonical_and_secrets_have_no_field() {
-    let left = profile();
-    let round_trip: FrozenAgentProfile =
+fn settings_fingerprint_is_canonical_and_secrets_have_no_field() {
+    let left = settings();
+    let round_trip: FrozenAgentSettings =
         serde_json::from_value(serde_json::to_value(&left).unwrap()).unwrap();
     assert_eq!(
         left.fingerprint().unwrap(),
@@ -271,10 +271,10 @@ fn profile_fingerprint_is_canonical_and_secrets_have_no_field() {
 }
 
 #[test]
-fn unconfined_profiles_require_live_approval() {
+fn unconfined_settings_require_live_approval() {
     let model = ModelRef::new("openai", "gpt-test").unwrap();
     assert!(
-        FrozenAgentProfile::new(
+        FrozenAgentSettings::new(
             "unsafe",
             "Be precise.",
             model.clone(),
@@ -284,8 +284,8 @@ fn unconfined_profiles_require_live_approval() {
         .is_err()
     );
     assert!(
-        serde_json::from_value::<FrozenAgentProfile>(json!({
-            "profile_id": "unsafe",
+        serde_json::from_value::<FrozenAgentSettings>(json!({
+            "settings_id": "unsafe",
             "system_prompt": "Be precise.",
             "default_model": { "deployment": "openai", "model": "gpt-test" },
             "sandbox": "danger-full-access",
@@ -294,7 +294,7 @@ fn unconfined_profiles_require_live_approval() {
         .is_err()
     );
     assert!(
-        FrozenAgentProfile::new(
+        FrozenAgentSettings::new(
             "reviewed",
             "Be precise.",
             model,

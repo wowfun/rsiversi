@@ -6,7 +6,8 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    MAXIMUM_FACTS_PER_READ, SessionFact, SessionHeader, SessionId, TurnId, validate_fact_sequence,
+    MAXIMUM_FACTS_PER_READ, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    validate_fact_sequence,
 };
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 6;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 7;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -30,6 +31,39 @@ pub const MAXIMUM_SESSIONS_PER_READ: usize = 256;
 /// Maximum opaque Context checkpoint bytes retained for one session.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
+
+/// Mechanical role of one Fact in the Store's per-turn membership index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreFactTurnRole {
+    /// Creates one accepted turn boundary.
+    Acceptance,
+    /// Closes one accepted turn boundary.
+    Terminal,
+    /// Belongs strictly inside one currently open turn boundary.
+    Event,
+}
+
+impl StoreFactTurnRole {
+    /// Returns the shared corruption diagnostic for a rejected membership update.
+    pub const fn rejected_message(self) -> &'static str {
+        match self {
+            Self::Acceptance => "durable turn was accepted more than once",
+            Self::Terminal => "terminal references a closed or unknown turn",
+            Self::Event => "nonterminal Fact references a closed or unknown turn",
+        }
+    }
+}
+
+/// Classifies one validated Fact body for mechanical turn indexing.
+pub const fn store_fact_turn_role(body: &SessionFactBody) -> StoreFactTurnRole {
+    match body {
+        SessionFactBody::TurnAccepted { .. } | SessionFactBody::ImageRequested { .. } => {
+            StoreFactTurnRole::Acceptance
+        }
+        SessionFactBody::TurnTerminal { .. } => StoreFactTurnRole::Terminal,
+        _ => StoreFactTurnRole::Event,
+    }
+}
 
 /// Opaque bounded Context-owned checkpoint returned by the mechanical Store.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,6 +232,68 @@ impl StoreFactPage {
     }
 }
 
+/// One bounded backward page returned in ascending durable sequence order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreBackwardFactPage {
+    /// Effective exclusive cursor. Input zero resolves to one past the read-time tail.
+    pub before_seq: u64,
+    /// Ordered contiguous Facts immediately before the cursor.
+    pub facts: Vec<SessionFact>,
+    /// Exact durable tail at read time.
+    pub durable_seq: u64,
+    /// Whether at least one earlier Fact existed at read time.
+    pub has_more: bool,
+}
+
+impl StoreBackwardFactPage {
+    /// Revalidates cursor, contiguity, watermark, count, and byte bounds.
+    pub fn validate(&self) -> Result<()> {
+        let maximum_before = self
+            .durable_seq
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("durable sequence is exhausted".into()))?;
+        if self.before_seq == 0
+            || self.before_seq > maximum_before
+            || self.facts.len() > MAXIMUM_FACTS_PER_READ
+            || (self.facts.is_empty() && self.has_more)
+        {
+            return Err(StoreError::Corrupt(
+                "backward Fact page has invalid cursor or count bounds".into(),
+            ));
+        }
+        let expected_after = self
+            .facts
+            .first()
+            .map_or(self.before_seq - 1, |fact| fact.seq() - 1);
+        validate_fact_sequence(expected_after, &self.facts)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        match self.facts.last() {
+            Some(fact) if fact.seq() != self.before_seq - 1 => {
+                return Err(StoreError::Corrupt(
+                    "backward Fact page does not end immediately before its cursor".into(),
+                ));
+            }
+            None if self.before_seq != 1 => {
+                return Err(StoreError::Corrupt(
+                    "empty backward Fact page does not begin at the initial cursor".into(),
+                ));
+            }
+            _ => {}
+        }
+        let bytes = self.facts.iter().try_fold(0_usize, |total, fact| {
+            total
+                .checked_add(fact.encoded_len())
+                .ok_or_else(|| StoreError::Corrupt("backward Fact page size overflow".into()))
+        })?;
+        if bytes > MAXIMUM_STORE_FACT_PAGE_BYTES {
+            return Err(StoreError::Corrupt(format!(
+                "backward Fact page exceeds {MAXIMUM_STORE_FACT_PAGE_BYTES} encoded bytes"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// One bounded ordered page selected from a single durable turn stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoreTurnFactPage {
@@ -248,6 +344,90 @@ impl StoreTurnFactPage {
             )));
         }
         Ok(())
+    }
+}
+
+/// Mechanically validated acceptance and optional terminal boundary for one turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreTurnBoundary {
+    turn_id: TurnId,
+    accepted: SessionFact,
+    terminal: Option<SessionFact>,
+    durable_seq: u64,
+}
+
+impl StoreTurnBoundary {
+    /// Validates indexed boundary Facts and constructs one narrow Store result.
+    pub fn new(
+        turn_id: TurnId,
+        accepted: SessionFact,
+        terminal: Option<SessionFact>,
+        durable_seq: u64,
+    ) -> Result<Self> {
+        accepted
+            .validate()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if accepted.seq() > durable_seq
+            || accepted.body().turn_id() != &turn_id
+            || !matches!(
+                accepted.body(),
+                SessionFactBody::TurnAccepted { .. } | SessionFactBody::ImageRequested { .. }
+            )
+        {
+            return Err(StoreError::Corrupt(
+                "turn boundary acceptance does not match its index".into(),
+            ));
+        }
+        if let Some(terminal) = &terminal {
+            terminal
+                .validate()
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            if terminal.seq() <= accepted.seq()
+                || terminal.seq() > durable_seq
+                || terminal.body().turn_id() != &turn_id
+                || !matches!(terminal.body(), SessionFactBody::TurnTerminal { .. })
+            {
+                return Err(StoreError::Corrupt(
+                    "turn boundary terminal does not match its index".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            turn_id,
+            accepted,
+            terminal,
+            durable_seq,
+        })
+    }
+
+    /// Returns the exact selected turn.
+    pub const fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
+    /// Returns the session sequence containing turn acceptance.
+    pub const fn accepted_seq(&self) -> u64 {
+        self.accepted.seq()
+    }
+
+    /// Returns the exact typed acceptance Fact.
+    pub const fn accepted(&self) -> &SessionFact {
+        &self.accepted
+    }
+
+    /// Returns the optional typed terminal Fact.
+    pub const fn terminal(&self) -> Option<&SessionFact> {
+        self.terminal.as_ref()
+    }
+
+    /// Returns the exact session durable tail observed with the boundary.
+    pub const fn durable_seq(&self) -> u64 {
+        self.durable_seq
+    }
+
+    /// Consumes the boundary into its validated indexed values.
+    pub fn into_parts(self) -> (TurnId, SessionFact, Option<SessionFact>, u64) {
+        (self.turn_id, self.accepted, self.terminal, self.durable_seq)
     }
 }
 
@@ -337,6 +517,70 @@ impl StoreSessionPage {
     }
 }
 
+/// Exact cursor for creation-time-descending session enumeration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreRecentSessionCursor {
+    /// Durable creation timestamp in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Session identity used as the deterministic tie-breaker.
+    pub session_id: SessionId,
+}
+
+/// One durable session summary ordered by creation time and identity descending.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreRecentSession {
+    /// Complete validated immutable Header selected in the listing snapshot.
+    pub header: SessionHeader,
+}
+
+impl StoreRecentSession {
+    /// Returns the exact cursor selecting rows after this summary.
+    pub fn cursor(&self) -> StoreRecentSessionCursor {
+        StoreRecentSessionCursor {
+            created_at_ms: self.header.created_at_ms(),
+            session_id: self.header.session_id().clone(),
+        }
+    }
+}
+
+/// One bounded creation-time-descending page of durable sessions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreRecentSessionPage {
+    /// Exclusive descending cursor supplied by the caller.
+    pub after: Option<StoreRecentSessionCursor>,
+    /// Strictly descending rows after the cursor.
+    pub sessions: Vec<StoreRecentSession>,
+    /// Whether at least one later page row existed at read time.
+    pub has_more: bool,
+}
+
+impl StoreRecentSessionPage {
+    /// Revalidates ordering, cursor, timestamp, and page bounds.
+    pub fn validate(&self) -> Result<()> {
+        if self.sessions.len() > MAXIMUM_SESSIONS_PER_READ
+            || (self.sessions.is_empty() && self.has_more)
+        {
+            return Err(StoreError::Corrupt(
+                "recent-session page has invalid bounds".into(),
+            ));
+        }
+        let mut previous = self.after.clone();
+        for session in &self.sessions {
+            let current = session.cursor();
+            if previous.as_ref().is_some_and(|previous| {
+                (current.created_at_ms, &current.session_id)
+                    >= (previous.created_at_ms, &previous.session_id)
+            }) {
+                return Err(StoreError::Corrupt(
+                    "recent-session page is not strictly descending".into(),
+                ));
+            }
+            previous = Some(current);
+        }
+        Ok(())
+    }
+}
+
 /// Immutable CAS object identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -403,6 +647,16 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after_seq: u64,
         limit: usize,
     ) -> Result<StoreFactPage>;
+    /// Reads at most `limit` contiguous Facts immediately before one exclusive cursor.
+    ///
+    /// Cursor zero selects one past the read-time durable tail. Results are
+    /// always returned in ascending sequence order.
+    async fn read_facts_before(
+        &self,
+        session_id: &SessionId,
+        exclusive_before_seq: u64,
+        limit: usize,
+    ) -> Result<StoreBackwardFactPage>;
     /// Reads at most `limit` ordered Facts for one exact turn after a session cursor.
     async fn read_turn_facts(
         &self,
@@ -411,6 +665,12 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after_seq: u64,
         limit: usize,
     ) -> Result<StoreTurnFactPage>;
+    /// Reads and validates the indexed acceptance and optional terminal boundary for one turn.
+    async fn read_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<StoreTurnBoundary>;
     /// Lists at most `limit` accepted turns without a terminal Fact.
     async fn list_open_turns(
         &self,
@@ -424,6 +684,12 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after: Option<&SessionId>,
         limit: usize,
     ) -> Result<StoreSessionPage>;
+    /// Lists at most `limit` sessions after an exclusive creation-time-descending cursor.
+    async fn list_recent_sessions(
+        &self,
+        after: Option<&StoreRecentSessionCursor>,
+        limit: usize,
+    ) -> Result<StoreRecentSessionPage>;
     /// Lists at most `limit` sessions containing at least one open turn after
     /// an exclusive lexical cursor.
     async fn list_open_sessions(
@@ -532,6 +798,18 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn cancellation_fact(sequence: u64) -> SessionFact {
+        SessionFact::new(
+            sequence,
+            sequence,
+            SessionFactBody::CancelRequested {
+                turn_id: TurnId::new("turn-backward-page").unwrap(),
+                reason: None,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn append_batch_rejects_an_empty_fact_suffix() {
         let batch = AppendBatch {
@@ -547,5 +825,30 @@ mod tests {
                 "Store append must contain 1..={MAXIMUM_STORE_BATCH_FACTS} Facts"
             )))
         );
+    }
+
+    #[test]
+    fn backward_page_must_end_immediately_before_its_cursor() {
+        let skipped_suffix = StoreBackwardFactPage {
+            before_seq: 8,
+            facts: vec![cancellation_fact(4), cancellation_fact(5)],
+            durable_seq: 8,
+            has_more: true,
+        };
+        assert!(matches!(
+            skipped_suffix.validate(),
+            Err(StoreError::Corrupt(message)) if message.contains("cursor")
+        ));
+
+        let impossible_empty_page = StoreBackwardFactPage {
+            before_seq: 8,
+            facts: Vec::new(),
+            durable_seq: 8,
+            has_more: false,
+        };
+        assert!(matches!(
+            impossible_empty_page.validate(),
+            Err(StoreError::Corrupt(message)) if message.contains("cursor")
+        ));
     }
 }

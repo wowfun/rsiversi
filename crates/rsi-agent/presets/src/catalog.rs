@@ -53,6 +53,30 @@ pub struct AgentPresetRoot {
     trust: AgentPresetTrust,
 }
 
+/// One immutable root input that participates in standard Host selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPresetLaunchRoot {
+    /// Exact absolute discovery authority.
+    pub path: PathBuf,
+    /// Optional sole preset identity for a byte-verified system asset.
+    pub exact_id: Option<AgentPresetId>,
+    /// Root precedence class.
+    pub source: AgentPresetSource,
+    /// Trust inherited by presets from this root.
+    pub trust: AgentPresetTrust,
+    /// Whether catalog authoring may mutate this root.
+    pub writable: bool,
+}
+
+/// Frozen Agent-preset inputs relevant to one standard Host generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPresetLaunchIdentity {
+    /// Deployment default before any user Settings override.
+    pub base_default: AgentPresetId,
+    /// Ordered discovery roots and exact-preset authorities.
+    pub roots: Vec<AgentPresetLaunchRoot>,
+}
+
 impl AgentPresetRoot {
     /// Creates one root from explicit absolute filesystem authority.
     ///
@@ -350,6 +374,27 @@ impl AgentPresetCatalog {
             compiler,
             mutations: Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    /// Returns the frozen root/trust identity without reading preset sources or Settings.
+    ///
+    /// The current user default and every preset source digest are deliberately
+    /// excluded: they select an Agent generation inside an already running Host.
+    pub fn launch_identity(&self) -> AgentPresetLaunchIdentity {
+        AgentPresetLaunchIdentity {
+            base_default: self.base_default.clone(),
+            roots: self
+                .roots
+                .iter()
+                .map(|root| AgentPresetLaunchRoot {
+                    path: root.path.clone(),
+                    exact_id: root.exact_id.clone(),
+                    source: root.source,
+                    trust: root.trust,
+                    writable: root.writable,
+                })
+                .collect(),
+        }
     }
 
     /// Re-reads every root and returns a path-free roster.

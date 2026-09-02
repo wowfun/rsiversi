@@ -1,5 +1,5 @@
 use rsi_agent_session_protocol::{
-    AgentPresetId, FrozenAgentProfile, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
+    AgentPresetId, FrozenAgentSettings, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
     SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_store_protocol::{
@@ -11,6 +11,8 @@ use rsi_agent_testkit::assert_mechanical_store_contract;
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
 use rusqlite::Connection;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::Arc;
 
 fn header(session: &str) -> SessionHeader {
@@ -19,7 +21,7 @@ fn header(session: &str) -> SessionHeader {
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentProfile::new(
+        FrozenAgentSettings::new(
             "default",
             "system",
             ModelRef::new("deployment", "model").unwrap(),
@@ -89,6 +91,7 @@ async fn sqlite_store_passes_the_shared_mechanical_contract() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One scenario pins append, both page orders, conflict, and reopen.
 async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -170,6 +173,29 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
         second_sessions.sessions,
         vec![SessionId::new("session-3").unwrap()]
     );
+    let recent = store.list_recent_sessions(None, 2).await.unwrap();
+    assert_eq!(
+        recent
+            .sessions
+            .iter()
+            .map(|row| row.header.session_id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-3", "session-2"]
+    );
+    assert!(recent.has_more);
+    let next_recent = store
+        .list_recent_sessions(Some(&recent.sessions[1].cursor()), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        next_recent
+            .sessions
+            .iter()
+            .map(|row| row.header.session_id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-1"]
+    );
+    assert!(!next_recent.has_more);
     assert!(!second_sessions.has_more);
     drop(store);
 
@@ -189,6 +215,50 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
             .durable_seq,
         4
     );
+}
+
+#[tokio::test]
+async fn clean_close_makes_the_main_database_a_complete_store() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = SessionId::new("session-clean-close").unwrap();
+    store
+        .append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(header(session.as_str())),
+            facts: vec![fact(1)],
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let copy = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        root.path().join("sessions.sqlite3"),
+        copy.path().join("sessions.sqlite3"),
+    )
+    .unwrap();
+    let copied = SqliteStore::open(copy.path()).unwrap();
+    assert_eq!(
+        copied.header(&session).await.unwrap(),
+        header(session.as_str())
+    );
+}
+
+#[test]
+fn open_does_not_initialize_an_existing_nonempty_database() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("sessions.sqlite3");
+    let connection = Connection::open(&database).unwrap();
+    connection.execute_batch("VACUUM;").unwrap();
+    drop(connection);
+    assert_ne!(std::fs::metadata(&database).unwrap().len(), 0);
+
+    assert!(matches!(
+        SqliteStore::open(root.path()),
+        Err(StoreError::SchemaMismatch { actual: 0, .. })
+    ));
 }
 
 #[tokio::test]
@@ -376,10 +446,13 @@ async fn oversized_fact_rows_are_rejected_by_sql_length_before_json_decode() {
     assert!(
         matches!(store.header(&session).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
     );
+    assert!(
+        matches!(store.list_recent_sessions(None, 1).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
+    );
 }
 
 #[test]
-fn reopen_rejects_a_turn_index_that_disagrees_with_canonical_facts() {
+fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -388,6 +461,14 @@ fn reopen_rejects_a_turn_index_that_disagrees_with_canonical_facts() {
             session_id: SessionId::new("session-index-corrupt").unwrap(),
             expected_seq: 0,
             header: Some(header("session-index-corrupt")),
+            facts: vec![fact(1)],
+        }))
+        .unwrap();
+    runtime
+        .block_on(store.append(AppendBatch {
+            session_id: SessionId::new("session-valid").unwrap(),
+            expected_seq: 0,
+            header: Some(header("session-valid")),
             facts: vec![fact(1)],
         }))
         .unwrap();
@@ -402,14 +483,74 @@ fn reopen_rejects_a_turn_index_that_disagrees_with_canonical_facts() {
         .unwrap();
     drop(connection);
 
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    assert_eq!(
+        runtime
+            .block_on(reopened.header(&SessionId::new("session-valid").unwrap()))
+            .unwrap()
+            .session_id()
+            .as_str(),
+        "session-valid"
+    );
     assert!(matches!(
-        SqliteStore::open(root.path()),
+        runtime.block_on(reopened.header(&SessionId::new("session-index-corrupt").unwrap())),
+        Err(StoreError::Corrupt(message)) if message.contains("turn index")
+    ));
+    drop(reopened);
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
         Err(StoreError::Corrupt(_))
     ));
 }
 
 #[test]
-fn reopen_rejects_a_malformed_fact_prefix_digest() {
+fn indexed_turn_boundary_rejects_fact_json_with_a_different_sequence() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let session = SessionId::new("session-indexed-fact-sequence").unwrap();
+    let turn = TurnId::new("turn-1").unwrap();
+    runtime
+        .block_on(store.append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(header(session.as_str())),
+            facts: vec![fact(1)],
+        }))
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let fact_json = connection
+        .query_row(
+            "SELECT fact_json FROM facts WHERE session_id = ?1 AND seq = 1",
+            [session.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE facts SET fact_json = ?1 WHERE session_id = ?2 AND seq = 1",
+                [
+                    fact_json.replacen("\"seq\":1", "\"seq\":2", 1),
+                    session.to_string()
+                ],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    assert!(matches!(
+        runtime.block_on(reopened.read_turn_boundary(&session, &turn)),
+        Err(StoreError::Corrupt(message)) if message.contains("indexed Fact")
+    ));
+}
+
+#[test]
+fn malformed_fact_prefix_digest_is_rejected_on_access_and_by_verify() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -432,14 +573,115 @@ fn reopen_rejects_a_malformed_fact_prefix_digest() {
         .unwrap();
     drop(connection);
 
+    let reopened = SqliteStore::open(root.path()).unwrap();
     assert!(matches!(
-        SqliteStore::open(root.path()),
+        runtime.block_on(reopened.header(&SessionId::new("session-prefix-corrupt").unwrap())),
+        Err(StoreError::Corrupt(message)) if message.contains("Fact-prefix digest")
+    ));
+    drop(reopened);
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
         Err(StoreError::Corrupt(message)) if message.contains("Fact-prefix digest")
     ));
 }
 
+#[test]
+fn verify_decodes_every_dormant_session_header() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(store.append(AppendBatch {
+            session_id: SessionId::new("session-header-corrupt").unwrap(),
+            expected_seq: 0,
+            header: Some(header("session-header-corrupt")),
+            facts: vec![fact(1)],
+        }))
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET header_json = '{not-json' WHERE session_id = ?1",
+            ["session-header-corrupt"],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::Corrupt(message)) if message.contains("session header")
+    ));
+}
+
+#[test]
+fn verify_recomputes_every_canonical_fact_prefix_digest() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let session = SessionId::new("session-fact-corrupt").unwrap();
+    runtime
+        .block_on(store.append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(header("session-fact-corrupt")),
+            facts: vec![fact(1)],
+        }))
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE facts SET fact_json = replace(fact_json, 'text-1', 'tampered')
+                 WHERE session_id = ?1 AND seq = 1",
+                ["session-fact-corrupt"],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    assert_eq!(
+        runtime
+            .block_on(reopened.header(&session))
+            .unwrap()
+            .session_id(),
+        &session
+    );
+    assert_eq!(
+        runtime
+            .block_on(reopened.read_facts(&session, 0, 8))
+            .unwrap()
+            .facts
+            .len(),
+        1
+    );
+    drop(reopened);
+
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::Corrupt(message)) if message.contains("Fact-prefix digest")
+    ));
+}
+
+#[test]
+fn verify_never_creates_a_missing_store() {
+    let parent = tempfile::tempdir().unwrap();
+    let missing = parent.path().join("missing-agent-store");
+
+    assert!(matches!(
+        SqliteStore::verify(&missing),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(!missing.exists());
+}
+
 #[tokio::test]
-async fn cas_is_immutable_verified_and_does_not_delete_unowned_files() {
+async fn cas_is_immutable_digest_verified_and_does_not_delete_unowned_files() {
     let root = tempfile::tempdir().unwrap();
     let unrelated = root.path().join("keep-me.txt");
     std::fs::write(&unrelated, b"user-owned").unwrap();
@@ -447,7 +689,12 @@ async fn cas_is_immutable_verified_and_does_not_delete_unowned_files() {
     let bytes: Arc<[u8]> = Arc::from(&b"immutable"[..]);
     let reference = store.put_cas(bytes.clone()).await.unwrap();
     assert_eq!(store.read_cas(&reference).await.unwrap(), bytes);
-    std::fs::write(root.path().join("cas").join(&reference.sha256), b"corrupt").unwrap();
+    assert_eq!(b"immutable".len(), b"mutated!!".len());
+    std::fs::write(
+        root.path().join("cas").join(&reference.sha256),
+        b"mutated!!",
+    )
+    .unwrap();
     assert!(matches!(
         store.read_cas(&reference).await,
         Err(StoreError::Corrupt(_))
@@ -483,19 +730,75 @@ fn writer_lease_is_held_from_open_until_last_clone_drops() {
         SqliteStore::open(root.path()),
         Err(StoreError::WriterLocked)
     ));
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::WriterLocked)
+    ));
     drop(store);
     assert!(matches!(
         SqliteStore::open(root.path()),
         Err(StoreError::WriterLocked)
     ));
     drop(clone);
-    SqliteStore::open(root.path()).unwrap();
+    SqliteStore::verify(root.path()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_accepts_a_clean_read_only_store_copy() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store ?#% copy");
+    std::fs::create_dir(&root).unwrap();
+    let store = SqliteStore::open(&root).unwrap();
+    drop(store);
+    let database = root.join("sessions.sqlite3");
+    let writer_lock = root.join(".writer.lock");
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o400)).unwrap();
+    std::fs::set_permissions(&writer_lock, std::fs::Permissions::from_mode(0o400)).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let result = SqliteStore::verify(&root);
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(&writer_lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    result.unwrap();
+}
+
+#[test]
+fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
+    let live_root = tempfile::tempdir().unwrap();
+    drop(SqliteStore::open(live_root.path()).unwrap());
+    let live_store = SqliteStore::open(live_root.path()).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(live_store.append(AppendBatch {
+            session_id: SessionId::new("session-in-wal").unwrap(),
+            expected_seq: 0,
+            header: Some(header("session-in-wal")),
+            facts: vec![fact(1)],
+        }))
+        .unwrap();
+    let wal = live_root.path().join("sessions.sqlite3-wal");
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+
+    let snapshot = tempfile::tempdir().unwrap();
+    for name in ["sessions.sqlite3", "sessions.sqlite3-wal", ".writer.lock"] {
+        std::fs::copy(live_root.path().join(name), snapshot.path().join(name)).unwrap();
+    }
+
+    assert!(matches!(
+        SqliteStore::verify(snapshot.path()),
+        Err(StoreError::Invalid(message))
+            if message.contains("nonempty WAL") && message.contains("cleanly closed")
+    ));
+    drop(live_store);
 }
 
 #[test]
 fn old_or_partial_schema_is_rejected_without_migration() {
-    assert_eq!(AGENT_STORE_SCHEMA_VERSION, 6);
-    for (version, partial) in [(5, false), (2, false), (0, true)] {
+    assert_eq!(AGENT_STORE_SCHEMA_VERSION, 7);
+    for (version, partial) in [(6, false), (5, false), (2, false), (0, true)] {
         let root = tempfile::tempdir().unwrap();
         let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         if partial {

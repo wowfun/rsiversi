@@ -1,4 +1,4 @@
-//! Bounded Agent-preset catalog, authoring, and legacy Headless composition.
+//! Bounded Agent-preset catalog, authoring, and Session composition fragment.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -22,9 +22,10 @@ fn clean_metadata_text(value: Option<String>) -> Option<String> {
 
 pub use catalog::{
     AgentPresetCatalog, AgentPresetCatalogConfig, AgentPresetDefaultStore, AgentPresetDocument,
-    AgentPresetHealth, AgentPresetRoot, AgentPresetRoster, AgentPresetRow, AgentPresetSource,
-    AgentPresetTrust, COMPOSITION_FILE, MAX_COPY_BYTES, MAX_COPY_DEPTH, MAX_COPY_ENTRIES,
-    MAX_METADATA_BYTES, MAX_ROOTS, MAX_ROSTER_ROWS, METADATA_FILE,
+    AgentPresetHealth, AgentPresetLaunchIdentity, AgentPresetLaunchRoot, AgentPresetRoot,
+    AgentPresetRoster, AgentPresetRow, AgentPresetSource, AgentPresetTrust, COMPOSITION_FILE,
+    MAX_COPY_BYTES, MAX_COPY_DEPTH, MAX_COPY_ENTRIES, MAX_METADATA_BYTES, MAX_ROOTS,
+    MAX_ROSTER_ROWS, METADATA_FILE,
 };
 pub use rsi_agent_session_protocol::AgentPresetId;
 pub use source::{AgentPresetProfileCompiler, MAX_PROFILE_HEALTH_REASON_BYTES};
@@ -36,23 +37,23 @@ pub const KERNEL_FACTORY: &str = "rsi.agent.kernel";
 /// Linked factory key for the sequential Agent executor.
 pub const EXECUTOR_FACTORY: &str = "rsi.agent.executor";
 
-/// Stable Headless Agent Profile fragment identity.
-pub const HEADLESS_FRAGMENT_ID: &str = "rsi.agent.headless";
-/// Stable Store instance identity within the Headless fragment.
-pub const HEADLESS_STORE_INSTANCE: &str = "rsi-agent-store";
-/// Stable Kernel instance identity within the Headless fragment.
-pub const HEADLESS_KERNEL_INSTANCE: &str = "rsi-agent-kernel";
-/// Stable executor instance identity within the Headless fragment.
-pub const HEADLESS_EXECUTOR_INSTANCE: &str = "rsi-agent-executor";
+/// Stable Session Agent Profile fragment identity.
+pub const SESSION_FRAGMENT_ID: &str = "rsi.agent.session";
+/// Stable Store instance identity within the Session fragment.
+pub const SESSION_STORE_INSTANCE: &str = "rsi-agent-store";
+/// Stable Kernel instance identity within the Session fragment.
+pub const SESSION_KERNEL_INSTANCE: &str = "rsi-agent-kernel";
+/// Stable executor instance identity within the Session fragment.
+pub const SESSION_EXECUTOR_INSTANCE: &str = "rsi-agent-executor";
 
-/// Configuration needed to freeze the standard Headless Agent fragment.
+/// Configuration needed to freeze the standard Session Agent fragment.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HeadlessAgentConfig {
+pub struct SessionAgentConfig {
     store_root: PathBuf,
     executor_id: String,
 }
 
-impl HeadlessAgentConfig {
+impl SessionAgentConfig {
     /// Creates a fragment configuration from explicit durable authority.
     ///
     /// # Errors
@@ -66,7 +67,7 @@ impl HeadlessAgentConfig {
         }
         Ok(Self {
             store_root,
-            executor_id: HEADLESS_EXECUTOR_INSTANCE.to_owned(),
+            executor_id: SESSION_EXECUTOR_INSTANCE.to_owned(),
         })
     }
 
@@ -97,19 +98,19 @@ impl HeadlessAgentConfig {
     }
 }
 
-/// Builds the immutable standard Headless Agent fragment.
-pub fn headless_fragment(config: &HeadlessAgentConfig) -> ProfileFragment {
+/// Builds the immutable standard Session Agent fragment.
+pub fn session_fragment(config: &SessionAgentConfig) -> ProfileFragment {
     ProfileFragment::new(
-        HEADLESS_FRAGMENT_ID,
+        SESSION_FRAGMENT_ID,
         [
             ProfileEntry::new(
-                HEADLESS_STORE_INSTANCE,
+                SESSION_STORE_INSTANCE,
                 SQLITE_STORE_FACTORY,
                 json!({ "root": config.store_root }),
             ),
-            ProfileEntry::new(HEADLESS_KERNEL_INSTANCE, KERNEL_FACTORY, Value::Null),
+            ProfileEntry::new(SESSION_KERNEL_INSTANCE, KERNEL_FACTORY, Value::Null),
             ProfileEntry::new(
-                HEADLESS_EXECUTOR_INSTANCE,
+                SESSION_EXECUTOR_INSTANCE,
                 EXECUTOR_FACTORY,
                 json!({ "executor_id": config.executor_id }),
             ),

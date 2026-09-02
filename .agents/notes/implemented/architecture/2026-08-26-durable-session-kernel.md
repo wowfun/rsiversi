@@ -30,15 +30,17 @@ those Turn contracts plus the exact Language, Image, Media, and Tool Local
 services it uses. There is no family adapter or public
 `rsi.agent.sessions` service.
 
-The Kernel publishes an accepted Fact to the live stream immediately and owns
-an in-memory speculative suffix after the Store's durable prefix. Its worker
+The Kernel owns an in-memory speculative suffix after the Store's durable
+prefix, but a caller-visible submission receipt is returned only after its
+accepted Fact is durable. Its worker
 scans eligible contiguous batches at least every 200 ms, with the Store-owned
 limits of 512 Facts and 64 MiB encoded bytes; Store admission and I/O determine
 commit latency. Transient append failure retains the exact suffix and pauses
 new external effects until a bounded retry sequence commits it or latches a
 permanent flush failure. The latch rejects later submissions to the affected
 session rather than accepting work that can never be claimed. A submit result
-is a turn identity, not a durability receipt; observation is opened separately.
+is the caller's turn identity plus its exact durable acceptance sequence;
+observation is opened separately.
 
 Every external effect follows prepare, durable intent, durable start, invoke,
 and durable outcome order. The Kernel accepts a start marker only after its
@@ -65,10 +67,11 @@ byte bounds; the durable Fact log remains complete.
 
 ## Alternatives considered
 
-Synchronous durability before returning from every submit was rejected for the
-chosen low-latency live admission contract. Callers that need an effect fence
-use the durable watermarks and explicit flush operations; terminal outcome is
-not published before its prefix is durable.
+Returning a live-only admission from submit was rejected for the product-wide
+Session application because reconnectable idempotency requires an unambiguous
+durable receipt. Internal Fact publication remains write-behind; executor
+effects still use durable watermarks and explicit flush operations, and a
+terminal outcome is not published before its prefix is durable.
 
 Store-owned effect transitions and recovery classification were rejected
 because they make persistence adapters semantic and shallow. A mechanical
@@ -84,9 +87,9 @@ none is part of the implemented foundation.
 
 ## Consequences
 
-A process crash before the first write-behind flush can lose a newly accepted
-live turn. Live observations and durable watermarks expose that interval
-instead of claiming it is durable.
+A process crash can discard a speculative accepted suffix only before submit
+returns its receipt. Retrying the caller-owned Turn identity resolves against
+the durable acceptance boundary and cannot re-execute the same canonical body.
 
 Executor context reconstruction first restores an integrity-checked Context
 checkpoint when its immutable header, retention limits, cursor, and durable
@@ -98,8 +101,10 @@ session, checkpoint, per-read, projection, pending-suffix, and Store limits.
 Checkpointing is a cache optimization and does not change durable Fact truth or
 make projection constant with session length.
 
-SQLite reopen validates its exact schema, relational integrity, and durable
-watermarks. Kernel recovery revalidates typed headers and Fact sequences, while
+SQLite reopen validates root ownership and its exact schema. First session
+access validates that session's bounded Header, relational integrity, and
+durable watermark; an explicit offline verifier performs the complete physical
+and logical database audit. Kernel recovery revalidates typed headers and Fact sequences, while
 CAS digest and length are verified on exact read; startup deliberately avoids a
 full scan of every referenced immutable object. Durable session meaning
 survives executor, AI, and Tool generation replacement because only the

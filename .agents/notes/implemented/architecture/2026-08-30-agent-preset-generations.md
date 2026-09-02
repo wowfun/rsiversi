@@ -32,8 +32,11 @@ current source.
 Selected generation resolution walks only the exact preset id through root
 precedence; sibling discovery and health compilation happen only for an
 explicit roster request. A catalog that loses its last owner cancels active
-calls, removes its settled retained results, and discards late settlements so
-process-wide retained capacity cannot outlive the authority able to commit it.
+calls, removes its settled retained results, and discards late settlements.
+Query and commit authority therefore ends with the catalog, while an active
+Tool body continues to own process-wide settlement admission until it truly
+settles; withdrawing authority cannot manufacture quiescence or recycle a slot
+still used by trusted code.
 
 Fresh session drafts are move-only and carry an exact generation pin. The
 durable Header records a separate required preset id. A resident Kernel session

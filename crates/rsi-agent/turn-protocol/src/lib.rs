@@ -143,13 +143,23 @@ impl SubmitSession {
             Self::Resume(prepared) => prepared.header().session_id(),
         }
     }
+
+    /// Returns the exact immutable header selected for submission.
+    pub const fn header(&self) -> &SessionHeader {
+        match self {
+            Self::Fresh(prepared) => prepared.header(),
+            Self::Resume(prepared) => prepared.header(),
+        }
+    }
 }
 
-/// One user turn submission without a durability receipt promise.
+/// One idempotent user turn submission.
 #[derive(Debug)]
 pub struct SubmitTurn {
     /// Fresh header or existing durable identity.
     pub session: SubmitSession,
+    /// Caller-preallocated durable turn identity.
+    pub turn_id: TurnId,
     /// Exact user text.
     pub text: String,
     /// Optional exact model override for this turn only.
@@ -163,20 +173,22 @@ pub struct SubmitTurn {
 pub struct SubmitImage {
     /// Fresh header or existing durable identity.
     pub session: SubmitSession,
+    /// Caller-preallocated durable turn identity.
+    pub turn_id: TurnId,
     /// Exact invocation-scoped Image route.
     pub model: rsi_ai_protocol::ModelRef,
     /// Complete bounded provider-neutral request.
     pub request: rsi_ai_protocol::ImageRequest,
 }
 
-/// Accepted live turn identity.
+/// Durable idempotent turn-acceptance receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmittedTurn {
     /// Exact session identity.
     pub session_id: SessionId,
     /// Exact turn identity.
     pub turn_id: TurnId,
-    /// Live Fact sequence assigned to `TurnAccepted`.
+    /// Durable Fact sequence assigned to `TurnAccepted`.
     pub accepted_seq: u64,
 }
 
@@ -253,41 +265,62 @@ impl LocalContract for TurnServiceContract {
 /// Exact executor claim over one oldest nonterminal turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnClaim {
-    /// Registered executor identity.
-    pub executor_id: String,
-    /// Kernel-issued process-local claim generation.
-    pub claim_id: u64,
-    /// Exact session identity.
-    pub session_id: SessionId,
-    /// Exact turn identity.
-    pub turn_id: TurnId,
-    /// Immutable session header.
-    pub header: SessionHeader,
-    /// Durable acceptance timestamp from which elapsed budget is measured.
-    pub accepted_at_ms: u64,
-    /// Exact Fact sequence of this turn's acceptance boundary.
-    pub accepted_seq: u64,
-    /// Highest Fact sequence in the live interval when claimed.
-    pub live_seq: u64,
-    authority: TurnClaimAuthority,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TurnClaimBinding {
     executor_id: String,
     claim_id: u64,
     session_id: SessionId,
     turn_id: TurnId,
-    header_fingerprint: String,
+    header: Arc<SessionHeader>,
     accepted_at_ms: u64,
     accepted_seq: u64,
     live_seq: u64,
+    authority: TurnClaimAuthority,
+}
+
+impl TurnClaim {
+    /// Returns the registered executor identity.
+    pub fn executor_id(&self) -> &str {
+        &self.executor_id
+    }
+
+    /// Returns the Kernel-issued process-local claim generation.
+    pub const fn claim_id(&self) -> u64 {
+        self.claim_id
+    }
+
+    /// Returns the exact session identity.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Returns the exact turn identity.
+    pub const fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
+    /// Borrows the immutable session header without exposing its shared owner.
+    pub fn header(&self) -> &SessionHeader {
+        &self.header
+    }
+
+    /// Returns the durable acceptance timestamp used by elapsed budgets.
+    pub const fn accepted_at_ms(&self) -> u64 {
+        self.accepted_at_ms
+    }
+
+    /// Returns the exact Fact sequence of the acceptance boundary.
+    pub const fn accepted_seq(&self) -> u64 {
+        self.accepted_seq
+    }
+
+    /// Returns the highest live Fact sequence captured by this claim.
+    pub const fn live_seq(&self) -> u64 {
+        self.live_seq
+    }
 }
 
 #[derive(Clone)]
 struct TurnClaimAuthority {
     issuer_seal: Arc<()>,
-    binding: Arc<TurnClaimBinding>,
 }
 
 impl fmt::Debug for TurnClaimAuthority {
@@ -298,13 +331,13 @@ impl fmt::Debug for TurnClaimAuthority {
 
 impl PartialEq for TurnClaimAuthority {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.issuer_seal, &other.issuer_seal) && self.binding == other.binding
+        Arc::ptr_eq(&self.issuer_seal, &other.issuer_seal)
     }
 }
 
 impl Eq for TurnClaimAuthority {}
 
-/// Kernel-only issuer for field-bound process-local claims.
+/// Kernel-only issuer for sealed process-local claims.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct TurnClaimIssuer {
@@ -317,7 +350,7 @@ impl TurnClaimIssuer {
         Self { seal: Arc::new(()) }
     }
 
-    /// Issues one claim whose complete public representation is privately bound.
+    /// Issues one immutable claim sharing the resident session Header owner.
     #[allow(clippy::too_many_arguments)]
     pub fn issue(
         &self,
@@ -325,24 +358,12 @@ impl TurnClaimIssuer {
         claim_id: u64,
         session_id: SessionId,
         turn_id: TurnId,
-        header: SessionHeader,
+        header: Arc<SessionHeader>,
         accepted_at_ms: u64,
         accepted_seq: u64,
         live_seq: u64,
-    ) -> Result<TurnClaim> {
-        let binding = Arc::new(TurnClaimBinding {
-            executor_id: executor_id.clone(),
-            claim_id,
-            session_id: session_id.clone(),
-            turn_id: turn_id.clone(),
-            header_fingerprint: header
-                .fingerprint()
-                .map_err(|error| TurnError::Invalid(error.to_string()))?,
-            accepted_at_ms,
-            accepted_seq,
-            live_seq,
-        });
-        Ok(TurnClaim {
+    ) -> TurnClaim {
+        TurnClaim {
             executor_id,
             claim_id,
             session_id,
@@ -353,30 +374,18 @@ impl TurnClaimIssuer {
             live_seq,
             authority: TurnClaimAuthority {
                 issuer_seal: Arc::clone(&self.seal),
-                binding,
             },
-        })
+        }
     }
 
-    /// Revalidates issuer identity and every public field without live claim state.
+    /// Revalidates the private issuer identity.
     pub fn validates(&self, claim: &TurnClaim) -> bool {
-        self.validates_identity(claim)
-            && claim
-                .header
-                .fingerprint()
-                .is_ok_and(|fingerprint| claim.authority.binding.header_fingerprint == fingerprint)
+        Arc::ptr_eq(&self.seal, &claim.authority.issuer_seal)
     }
 
-    /// Revalidates issuer identity and public fields other than the Header body.
-    pub fn validates_identity(&self, claim: &TurnClaim) -> bool {
-        Arc::ptr_eq(&self.seal, &claim.authority.issuer_seal)
-            && claim.authority.binding.executor_id == claim.executor_id
-            && claim.authority.binding.claim_id == claim.claim_id
-            && claim.authority.binding.session_id == claim.session_id
-            && claim.authority.binding.turn_id == claim.turn_id
-            && claim.authority.binding.accepted_at_ms == claim.accepted_at_ms
-            && claim.authority.binding.accepted_seq == claim.accepted_seq
-            && claim.authority.binding.live_seq == claim.live_seq
+    /// Revalidates issuer identity and shared resident Header ownership.
+    pub fn validates_header(&self, claim: &TurnClaim, header: &Arc<SessionHeader>) -> bool {
+        self.validates(claim) && Arc::ptr_eq(&claim.header, header)
     }
 }
 
@@ -399,6 +408,18 @@ pub struct ClaimFactPage {
     pub facts: Vec<Arc<SessionFact>>,
     /// Highest live sequence examined, including Facts hidden by claim isolation.
     pub through_seq: u64,
+}
+
+/// Explicit result of attempting to publish one owned body batch.
+#[derive(Debug, PartialEq)]
+pub enum PublishAttempt {
+    /// The complete batch entered the live interval.
+    Published(Vec<Arc<SessionFact>>),
+    /// Capacity requires a durable flush; no body entered the live interval.
+    FlushRequired {
+        /// Canonical bodies recovered from the unpublished candidate Facts.
+        unpublished: Vec<SessionFactBody>,
+    },
 }
 
 /// Opaque Context-owned checkpoint crossing only the process-local Kernel seam.
@@ -473,7 +494,7 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         &self,
         claim: &TurnClaim,
         bodies: Vec<SessionFactBody>,
-    ) -> Result<Vec<Arc<SessionFact>>>;
+    ) -> Result<PublishAttempt>;
     /// Waits until the exact live prefix is durable or returns its flush failure.
     async fn flush(&self, claim: &TurnClaim, through_seq: u64) -> Result<u64>;
     /// Returns a cancellation token that fires after a durable cancel request.
@@ -691,6 +712,14 @@ pub enum TurnError {
         /// Turn identity.
         turn: String,
     },
+    /// A preallocated turn identity already names a different canonical submission.
+    #[error("Agent turn `{turn}` in session `{session}` conflicts with an existing submission")]
+    SubmissionConflict {
+        /// Session identity.
+        session: String,
+        /// Turn identity.
+        turn: String,
+    },
     /// The session already has its bounded number of live turns.
     #[error("Agent session live-turn capacity is exhausted")]
     Capacity,
@@ -713,9 +742,12 @@ pub enum TurnError {
     /// Exact executor or claim lease is stale.
     #[error("Agent executor claim is stale")]
     StaleClaim,
-    /// Store flush failed and execution is paused.
+    /// A requested durable flush or shutdown failed.
     #[error("Agent durable flush failed: {0}")]
     Flush(String),
+    /// Store access failed outside a requested durability barrier.
+    #[error("Agent Store access failed: {0}")]
+    Store(String),
     /// Kernel is shutting down and accepts no new work.
     #[error("Agent Kernel is shutting down")]
     ShuttingDown,
