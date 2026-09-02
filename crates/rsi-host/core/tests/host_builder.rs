@@ -182,3 +182,58 @@ fn profile_control_marker_is_reserved_for_the_bootstrap() {
     ));
     let _ = MetaError::Cancelled;
 }
+
+#[test]
+fn composition_digest_tracks_frozen_host_inputs_but_not_top_level_profile_source() {
+    fn host(revision: &str, mode: UpdateMode, define: i64) -> rsi_host::Host {
+        let mut builder = HostBuilder::new(paths());
+        builder.define("answer", Value::from(define)).unwrap();
+        builder
+            .register_linked("test.noop", revision, mode, Arc::new(Noop))
+            .unwrap();
+        builder
+            .register_fragment(ProfileFragment::new(
+                "base",
+                [ProfileEntry::new("base", "test.noop", Value::Null)],
+            ))
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    let first = host("1", UpdateMode::Replayable, 42);
+    let same = host("1", UpdateMode::Replayable, 42);
+    assert_eq!(
+        first.composition_digest().unwrap(),
+        same.composition_digest().unwrap()
+    );
+    assert_ne!(
+        first.composition_digest().unwrap(),
+        host("2", UpdateMode::Replayable, 42)
+            .composition_digest()
+            .unwrap()
+    );
+    assert_ne!(
+        first.composition_digest().unwrap(),
+        host("1", UpdateMode::RestartRequired, 42)
+            .composition_digest()
+            .unwrap()
+    );
+    assert_ne!(
+        first.composition_digest().unwrap(),
+        host("1", UpdateMode::Replayable, 43)
+            .composition_digest()
+            .unwrap()
+    );
+
+    // Previewing different top-level documents does not mutate or select the
+    // builder-owned digest.
+    let before = first.composition_digest().unwrap();
+    first
+        .preview(rsi_host::Profile::new([ProfileEntry::new(
+            "different",
+            "test.noop",
+            Value::Bool(true),
+        )]))
+        .unwrap();
+    assert_eq!(first.composition_digest().unwrap(), before);
+}

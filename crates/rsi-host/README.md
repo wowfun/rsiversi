@@ -14,6 +14,11 @@ freezes all bootstrap input. The Host supplies an immutable resolver to its
 Profile plugin, which delegates lifecycle work to the public Meta
 `Runtime -> Context -> Fiber` interface.
 
+Before startup, `Host::preview_file` can purely compile the frozen fragments,
+selected source, environment, and launch patches and resolve every enabled
+plugin. Preview performs no factory preparation, Runtime activation, credential
+resolution, or Store lease acquisition.
+
 Because limits remain mutable until build, build revalidates every previously
 registered identifier, marker, fragment, define, and launch patch against the
 final limits before creating the Runtime.

@@ -393,12 +393,14 @@ impl HostBuilder {
             self.defines.clone(),
         )?
         .validate(&self.limits.profile)?;
-        let runtime = Runtime::new(self.runtime_limits)?;
+        let runtime_limits = self.runtime_limits;
+        let runtime = Runtime::new(runtime_limits.clone())?;
         Ok(Host::new(
             self.paths,
             self.platform,
             self.defines,
             self.limits,
+            runtime_limits,
             runtime,
             LinkedCatalog {
                 linked: self.linked,
