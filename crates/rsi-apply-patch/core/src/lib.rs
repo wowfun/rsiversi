@@ -134,6 +134,11 @@ impl ApplyPatchToolFactory {
         Ok(Self { helper })
     }
 
+    /// Returns the canonical helper executable frozen into this factory.
+    pub fn executable(&self) -> &Path {
+        &self.helper
+    }
+
     fn retained_bytes(&self) -> usize {
         self.helper.as_os_str().len()
     }

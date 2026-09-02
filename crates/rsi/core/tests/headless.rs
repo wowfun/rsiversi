@@ -1,10 +1,8 @@
 use axum::{
     Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
 };
-use rsi::{
-    OutputMode, RunEvent, RunImageOptions, RunOptions, RunningRsi, SessionSelection,
-    StandardCodingTools, StandardComposition,
-};
+use futures_util::StreamExt as _;
+use rsi::{RunningRsi, StandardCodingTools, StandardComposition};
 use rsi_agent_session_protocol::{
     AgentPresetId, SessionFact, SessionFactBody, SessionId, TurnOutcome,
 };
@@ -15,6 +13,10 @@ use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
 use rsi_sandbox::SandboxMode;
+use rsi_session::{
+    CreateSession, SessionApplication as _, SessionHandle, SubmitDirectImage, SubmitText,
+    TurnReceipt,
+};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::{
@@ -24,7 +26,8 @@ use std::sync::{
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
+
+const CHILD_PROVIDER_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug)]
 struct EmptySecretStore;
@@ -72,7 +75,15 @@ fn fixture(endpoint: &str) -> Fixture {
         .unwrap(),
     )
     .unwrap();
-    let profile = config.join("profile.toml");
+    let profile = config.join("host-profiles/test/host.profile.toml");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    let application = config.join("application-profiles/test-headless/application.toml");
+    std::fs::create_dir_all(application.parent().unwrap()).unwrap();
+    std::fs::write(
+        &application,
+        "format = 1\napplication = \"headless\"\nhost_profile = \"test\"\n",
+    )
+    .unwrap();
     std::fs::write(
         &profile,
         format!(
@@ -640,20 +651,39 @@ async fn failed_server() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
-fn assert_versioned_run_events(events: &[RunEvent], observed_fact_count: usize) {
-    let decoded = events
-        .iter()
-        .map(|event| {
-            serde_json::from_str::<serde_json::Value>(&event.json_line().unwrap()).unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert!(decoded.iter().all(|line| line["version"] == 2));
-    assert_eq!(decoded.first().unwrap()["type"], "session");
-    assert_eq!(decoded.last().unwrap()["type"], "outcome");
-    assert_eq!(
-        decoded.iter().filter(|line| line["type"] == "fact").count(),
-        observed_fact_count
-    );
+async fn observe_after_acceptance(
+    handle: &Arc<dyn SessionHandle>,
+    receipt: &TurnReceipt,
+) -> (Vec<Arc<SessionFact>>, TurnOutcome, u64, bool) {
+    let mut observation = handle.subscribe(receipt.accepted_seq).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut facts = Vec::new();
+        let mut saw_live_before_durable = false;
+        loop {
+            let update = observation.next().await.unwrap().unwrap();
+            if let rsi_agent_turn_protocol::TurnUpdate::Fact { fact, durable_seq } = update {
+                assert!(
+                    fact.seq() > receipt.accepted_seq,
+                    "subscription must begin strictly after durable acceptance"
+                );
+                saw_live_before_durable |= durable_seq < fact.seq();
+                let terminal = match fact.body() {
+                    SessionFactBody::TurnTerminal { turn_id, outcome }
+                        if turn_id == &receipt.turn_id =>
+                    {
+                        Some(outcome.clone())
+                    }
+                    _ => None,
+                };
+                facts.push(fact);
+                if let Some(outcome) = terminal {
+                    return (facts, outcome, durable_seq, saw_live_before_durable);
+                }
+            }
+        }
+    })
+    .await
+    .expect("turn reached a durable terminal Fact")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -663,51 +693,30 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
-    let mut events = Vec::new();
-    let first = running
-        .run_turn_observed(
-            RunOptions {
-                task: "/status".into(),
-                session: SessionSelection::Fresh {
-                    cwd: fixture.workspace.clone(),
-                    session_id: None,
-                    agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
-                },
-                model: None,
-                sandbox: None,
-                output: OutputMode::Jsonl,
-            },
-            CancellationToken::new(),
-            |event| {
-                events.push(event.clone());
-                Ok(())
-            },
-        )
+    let application = running.session_application().unwrap();
+    let first_handle = application
+        .create(CreateSession {
+            cwd: fixture.workspace.clone(),
+            session_id: None,
+            agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
+        })
         .await
         .unwrap();
-    assert_eq!(first.outcome(), &TurnOutcome::Completed);
-    assert_eq!(first.exit_code(), 0);
-    let observed_facts = events
-        .iter()
-        .filter_map(|event| match event {
-            RunEvent::Fact { fact, .. } => Some(fact),
-            RunEvent::Session { .. } | RunEvent::Outcome { .. } => None,
+    let first = first_handle
+        .submit_text(SubmitText {
+            turn_id: rsi_agent_session_protocol::TurnId::new("turn-first").unwrap(),
+            text: "/status".into(),
+            model: None,
+            sandbox: None,
         })
-        .collect::<Vec<_>>();
-    assert!(first.durable_seq() >= observed_facts.last().unwrap().seq());
-    assert!(matches!(
-        observed_facts.first().unwrap().body(),
-        SessionFactBody::TurnAccepted { text, .. } if text == "/status"
-    ));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RunEvent::Fact {
-            fact,
-            durable_seq,
-            ..
-        } if *durable_seq < fact.seq()
-    )));
-    assert!(observed_facts.iter().any(|fact| matches!(
+        .await
+        .unwrap();
+    let (first_facts, first_outcome, first_durable_seq, saw_live_before_durable) =
+        observe_after_acceptance(&first_handle, &first).await;
+    assert_eq!(first_outcome, TurnOutcome::Completed);
+    assert!(first_durable_seq >= first_facts.last().unwrap().seq());
+    assert!(saw_live_before_durable);
+    assert!(first_facts.iter().any(|fact| matches!(
         fact.body(),
         SessionFactBody::ModelEvent {
             event: rsi_ai_protocol::LanguageEvent::ContentDelta {
@@ -717,29 +726,28 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
             ..
         } if text == "hello"
     )));
-    assert_versioned_run_events(&events, observed_facts.len());
+    let first_history = first_handle.history_before(None, 64).await.unwrap();
+    assert!(matches!(
+        first_history.facts.first().unwrap().body(),
+        SessionFactBody::TurnAccepted { text, .. } if text == "/status"
+    ));
 
-    let second = running
-        .run_turn(
-            RunOptions {
-                task: "again".into(),
-                session: SessionSelection::Resume {
-                    session_id: first.session_id().clone(),
-                    cwd: Some(fixture.workspace.clone()),
-                },
-                model: Some(ModelRef::new("fixture", "fixture-model").unwrap()),
-                sandbox: Some(SandboxMode::ReadOnly),
-                output: OutputMode::Text,
-            },
-            CancellationToken::new(),
-        )
+    let second_handle = application.attach(&first.session_id).await.unwrap();
+    let second = second_handle
+        .submit_text(SubmitText {
+            turn_id: rsi_agent_session_protocol::TurnId::new("turn-second").unwrap(),
+            text: "again".into(),
+            model: Some(ModelRef::new("fixture", "fixture-model").unwrap()),
+            sandbox: Some(SandboxMode::ReadOnly),
+        })
         .await
         .unwrap();
-    assert_eq!(second.outcome(), &TurnOutcome::Completed);
-    assert_eq!(second.text_output(), "hello");
-    assert!(second.facts().first().unwrap().seq() > first.durable_seq());
+    let (second_facts, second_outcome, _, _) =
+        observe_after_acceptance(&second_handle, &second).await;
+    assert_eq!(second_outcome, TurnOutcome::Completed);
+    assert!(second_facts.first().unwrap().seq() > first_durable_seq);
     assert!(matches!(
-        second.facts().first().unwrap().body(),
+        second_handle.history_before(None, 64).await.unwrap().facts.iter().find(|fact| fact.seq() == second.accepted_seq).unwrap().body(),
         SessionFactBody::TurnAccepted {
             model: Some(model),
             sandbox: SandboxMode::ReadOnly,
@@ -770,43 +778,38 @@ async fn resume_rejects_a_different_canonical_workspace() {
     let fixture = fixture(&endpoint);
     let other = fixture.temporary.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
-    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+    let binary = env!("CARGO_BIN_EXE_rsi");
+    let first = binary_command(binary, &fixture)
+        .args([
+            "--profile",
+            "test-headless",
+            "first",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--session-id",
+            "session-workspace-authority",
+        ])
+        .output()
         .await
         .unwrap();
-    let first = running
-        .run_turn(
-            RunOptions {
-                task: "first".into(),
-                session: SessionSelection::Fresh {
-                    cwd: fixture.workspace.clone(),
-                    session_id: None,
-                    agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
-                },
-                model: None,
-                sandbox: None,
-                output: OutputMode::Text,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let resumed = running
-        .run_turn(
-            RunOptions {
-                task: "second".into(),
-                session: SessionSelection::Resume {
-                    session_id: first.session_id().clone(),
-                    cwd: Some(other),
-                },
-                model: None,
-                sandbox: None,
-                output: OutputMode::Text,
-            },
-            CancellationToken::new(),
-        )
+    assert!(first.status.success());
+    let resumed = binary_command(binary, &fixture)
+        .args([
+            "--profile",
+            "test-headless",
+            "second",
+            "--resume",
+            "session-workspace-authority",
+            "--cwd",
+            other.to_str().unwrap(),
+        ])
+        .output()
         .await;
-    assert!(resumed.is_err());
-    assert!(running.shutdown().await.is_clean());
+    let resumed = resumed.unwrap();
+    assert_eq!(resumed.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&resumed.stderr).contains("does not match the durable Session")
+    );
     server.abort();
 }
 
@@ -815,18 +818,15 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
     let (endpoint, server) = server().await;
     let fixture = fixture(&endpoint);
     let binary = env!("CARGO_BIN_EXE_rsi");
-    let alternate_profile = fixture.paths.config().join("alternate.toml");
-    std::fs::rename(&fixture.profile, &alternate_profile).unwrap();
     let first = binary_command(binary, &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "/status",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
             "--session-id",
             "session-binary",
-            "--profile",
-            alternate_profile.to_str().unwrap(),
             "--output",
             "jsonl",
         ])
@@ -856,14 +856,13 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
 
     let second = binary_command(binary, &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "again",
             "--resume",
             session_id,
             "--cwd",
             fixture.workspace.to_str().unwrap(),
-            "--profile",
-            alternate_profile.to_str().unwrap(),
         ])
         .output()
         .await
@@ -878,12 +877,11 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
 
     let mut third = binary_command(binary, &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "--stdin",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
-            "--profile",
-            alternate_profile.to_str().unwrap(),
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -901,6 +899,32 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
     assert!(third.status.success());
     assert_eq!(third.stdout, b"hello\n");
     assert!(third.stderr.is_empty());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn built_binary_treats_help_after_separator_as_the_literal_task() {
+    let (endpoint, server) = server().await;
+    let fixture = fixture(&endpoint);
+    let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+        .args([
+            "--profile",
+            "test-headless",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--",
+            "--help",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "hello\n");
     server.abort();
 }
 
@@ -976,7 +1000,7 @@ async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_pr
         .unwrap();
     assert_eq!(extra.status.code(), Some(2));
     assert!(extra.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&extra.stderr).contains("only the `run` command"));
+    assert!(String::from_utf8_lossy(&extra.stderr).contains("unknown"));
 }
 
 #[cfg(target_os = "linux")]
@@ -986,7 +1010,8 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "exercise all coding tools",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1061,7 +1086,8 @@ async fn built_binary_blocks_success_when_background_work_was_not_collected() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "start work but forget to collect it",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1103,7 +1129,8 @@ async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "attempt a patch and handle rejection",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1157,7 +1184,7 @@ async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
 async fn built_binary_uses_fixed_failure_exit_classes() {
     let binary = env!("CARGO_BIN_EXE_rsi");
     let usage = tokio::process::Command::new(binary)
-        .args(["run", "task", "--stdin"])
+        .args(["--profile", "headless", "task", "--stdin"])
         .output()
         .await
         .unwrap();
@@ -1169,7 +1196,8 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     std::fs::write(&missing_route.profile, "format = 1\n").unwrap();
     let boot = tokio::process::Command::new(binary)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "task",
             "--cwd",
             missing_route.workspace.to_str().unwrap(),
@@ -1190,7 +1218,7 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
         .output()
         .await
         .unwrap();
-    assert_eq!(boot.status.code(), Some(2));
+    assert_eq!(boot.status.code(), Some(1));
     assert!(boot.stdout.is_empty());
     assert!(String::from_utf8_lossy(&boot.stderr).contains("not registered"));
 
@@ -1198,7 +1226,8 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     let fixture = fixture(&endpoint);
     let failed = tokio::process::Command::new(binary)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "fail",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1232,7 +1261,8 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     let fixture = fixture(&endpoint);
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "wait",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1250,7 +1280,7 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
         .spawn()
         .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        CHILD_PROVIDER_START_TIMEOUT,
         first_request_started.notified(),
     )
     .await
@@ -1333,7 +1363,8 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     let session_id = "session-sigkill-recovery";
     let child = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "first",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1348,7 +1379,7 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
         .spawn()
         .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        CHILD_PROVIDER_START_TIMEOUT,
         first_request_started.notified(),
     )
     .await
@@ -1370,7 +1401,8 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
 
     let resumed = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "run",
+            "--profile",
+            "test-headless",
             "second",
             "--resume",
             session_id,
@@ -1426,27 +1458,26 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
     let running = RunningRsi::boot(openai_composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
-    let report = running
-        .run_image(
-            RunImageOptions {
-                session: SessionSelection::Fresh {
-                    cwd: fixture.workspace.clone(),
-                    session_id: None,
-                    agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
-                },
-                model: ModelRef::new("fixture", "gpt-image-1").unwrap(),
-                request: ImageRequest::new("one pixel", 1).unwrap(),
-            },
-            CancellationToken::new(),
-        )
+    let application = running.session_application().unwrap();
+    let handle = application
+        .create(CreateSession {
+            cwd: fixture.workspace.clone(),
+            session_id: None,
+            agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
+        })
         .await
         .unwrap();
-    assert_eq!(report.outcome(), &TurnOutcome::Completed);
-    let output = report.text_output();
-    assert!(output.starts_with("media:"));
-    assert_eq!(output.lines().count(), 1);
-    let image_fact = report
-        .facts()
+    let receipt = handle
+        .submit_image(SubmitDirectImage {
+            turn_id: rsi_agent_session_protocol::TurnId::new("turn-direct-image").unwrap(),
+            model: ModelRef::new("fixture", "gpt-image-1").unwrap(),
+            request: ImageRequest::new("one pixel", 1).unwrap(),
+        })
+        .await
+        .unwrap();
+    let (facts, outcome, _, _) = observe_after_acceptance(&handle, &receipt).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let image_fact = facts
         .iter()
         .find(|fact| matches!(fact.body(), SessionFactBody::ImageOutput { .. }))
         .unwrap();

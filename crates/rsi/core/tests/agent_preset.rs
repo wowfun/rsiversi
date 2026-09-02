@@ -208,9 +208,10 @@ fn built_binary_advertises_the_complete_management_command_tree() {
     assert!(positional_copy.stdout.is_empty());
 
     for arguments in [
-        vec!["run", "task", "--agent-preset", "Upper"],
+        vec!["--profile", "headless", "task", "--agent-preset", "Upper"],
         vec![
-            "run",
+            "--profile",
+            "headless",
             "task",
             "--resume",
             "session-one",
@@ -218,7 +219,8 @@ fn built_binary_advertises_the_complete_management_command_tree() {
             "standard",
         ],
         vec![
-            "run",
+            "--profile",
+            "headless",
             "task",
             "--agent-preset",
             "standard",
@@ -287,8 +289,10 @@ impl CliFixture {
         let workspace = temporary.path().join("workspace");
         fs::create_dir_all(&config).unwrap();
         fs::create_dir(&workspace).unwrap();
+        let host_profile = config.join("host-profiles/test/host.profile.toml");
+        fs::create_dir_all(host_profile.parent().unwrap()).unwrap();
         fs::write(
-            config.join("profile.toml"),
+            host_profile,
             r#"format = 1
 
 [[steps]]
@@ -308,6 +312,13 @@ context_window_tokens = 128000
 default_output_reserve_tokens = 4096
 max_output_reserve_tokens = 16384
 "#,
+        )
+        .unwrap();
+        let application = config.join("application-profiles/test-headless/application.toml");
+        fs::create_dir_all(application.parent().unwrap()).unwrap();
+        fs::write(
+            application,
+            "format = 1\napplication = \"headless\"\nhost_profile = \"test\"\n",
         )
         .unwrap();
         write_preset(
@@ -500,6 +511,7 @@ fn built_binary_never_promotes_a_cache_sibling_to_a_system_preset() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One built-binary scenario keeps copy, default, and delete ordering visible.
 fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
     let fixture = CliFixture::new();
     fs::write(
@@ -599,7 +611,13 @@ fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
     assert_eq!(default.stdout, b"future-agent\n");
 
     for preset_arguments in [vec!["--agent-preset", "future-agent"], Vec::<&str>::new()] {
-        let mut arguments = vec!["run", "task", "--cwd", fixture.workspace.to_str().unwrap()];
+        let mut arguments = vec![
+            "--profile",
+            "test-headless",
+            "task",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+        ];
         arguments.extend(preset_arguments);
         let run = fixture.command(&arguments);
         assert_eq!(run.status.code(), Some(2));

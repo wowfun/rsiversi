@@ -1,4 +1,4 @@
-//! Standard `RSIversi` Headless application composition and one-turn runner.
+//! Standard `RSIversi` local Session application, Host, and headless adapter.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -6,7 +6,8 @@
 
 mod agent_preset;
 mod composition;
-mod run;
+mod local_host;
+mod profiles;
 mod settings;
 
 pub use agent_preset::{
@@ -14,15 +15,24 @@ pub use agent_preset::{
     USER_AGENT_PRESET_DIRECTORY, user_agent_preset_root,
 };
 pub use composition::{
-    StandardCodingTools, StandardComposition, capture_standard_environment,
+    StandardCodingTools, StandardComposition, StandardHostPreview, capture_standard_environment,
     standard_agent_preset_root,
+};
+#[cfg(target_os = "linux")]
+pub use local_host::StandardSessionDaemon;
+pub use local_host::{
+    SessionHostConnection, SessionHostConnectionMode, connect_or_embed_session_host,
+};
+pub use profiles::{
+    APPLICATION_PROFILE_DIRECTORY, APPLICATION_PROFILE_FILE, ApplicationKind, ApplicationProfile,
+    ApplicationProfileDocument, ApplicationProfileId, HOST_PROFILE_DIRECTORY, HOST_PROFILE_FILE,
+    HostLaunchKey, HostProfileDocument, HostProfileId, ProfileCatalog, ProfileCatalogError,
+    ProfileRow, ProfileSource,
 };
 pub use rsi_agent_presets::{AgentPresetSource, AgentPresetTrust};
 pub use rsi_apply_patch::maybe_run_apply_patch_helper;
+pub use rsi_session;
 pub use rsi_shell_bash::scrub_child_environment;
-pub use run::{
-    OutputMode, RunCompletion, RunEvent, RunImageOptions, RunOptions, RunReport, SessionSelection,
-};
 pub use settings::{AgentSettings, AgentSettingsContract};
 
 use rsi_host::{HostPaths, RunningHost};
@@ -48,7 +58,29 @@ impl RunningRsi {
         if host.lookup_local::<AgentSettingsContract>().is_none() {
             let _outcome = host.shutdown().await;
             return Err(RsiError::Boot(
-                "Headless Agent Settings did not become active".into(),
+                "Session Agent Settings did not become active".into(),
+            ));
+        }
+        Ok(Self { host })
+    }
+
+    /// Boots one catalog-resolved Host Profile document.
+    pub async fn boot_host_profile(
+        composition: StandardComposition,
+        profile: &HostProfileDocument,
+    ) -> Result<Self> {
+        let host = composition
+            .build()
+            .map_err(|error| RsiError::Boot(error.to_string()))?;
+        let host = match &profile.path {
+            Some(path) => host.start_file(path).await,
+            None => host.start(rsi_host::Profile::default()).await,
+        }
+        .map_err(|error| RsiError::Boot(error.to_string()))?;
+        if host.lookup_local::<AgentSettingsContract>().is_none() {
+            let _outcome = host.shutdown().await;
+            return Err(RsiError::Boot(
+                "Session Agent Settings did not become active".into(),
             ));
         }
         Ok(Self { host })
@@ -59,10 +91,86 @@ impl RunningRsi {
         self.host.paths()
     }
 
+    /// Builds the process-local adapter over this running Host generation.
+    pub fn session_application(&self) -> Result<rsi_session::LocalSessionApplication> {
+        self.session_application_with_approvals(std::sync::Arc::new(rsi_session::NoApprovalControl))
+    }
+
+    /// Builds the process-local adapter with Host-owned live approval control.
+    pub fn session_application_with_approvals(
+        &self,
+        approvals: std::sync::Arc<dyn rsi_session::SessionApprovalControl>,
+    ) -> Result<rsi_session::LocalSessionApplication> {
+        use rsi_agent_composition_protocol::AgentCompositionContract;
+        use rsi_agent_store_protocol::SessionStoreContract;
+        use rsi_agent_turn_protocol::TurnServiceContract;
+        use rsi_ai_protocol::{ImageCallContract, LanguageCallContract};
+        use rsi_workspace::WorkspaceRegistryContract;
+
+        let turns = required_local::<TurnServiceContract>(&self.host, "Agent Turn service")?;
+        let store = required_local::<SessionStoreContract>(&self.host, "Agent Store")?;
+        let composition =
+            required_local::<AgentCompositionContract>(&self.host, "Agent composition")?;
+        let workspace =
+            required_local::<WorkspaceRegistryContract>(&self.host, "Workspace registry")?;
+        let settings = required_local::<AgentSettingsContract>(&self.host, "Agent settings")?;
+        let settings: std::sync::Arc<dyn rsi_session::AgentSettingsSource> =
+            std::sync::Arc::new(SessionSettingsSource(settings));
+        let language = required_local::<LanguageCallContract>(&self.host, "Language router")?;
+        let image = required_local::<ImageCallContract>(&self.host, "Image router")?;
+        Ok(rsi_session::LocalSessionApplication::new(
+            turns,
+            store,
+            composition,
+            workspace,
+            settings,
+            language,
+            image,
+            approvals,
+        ))
+    }
+
+    /// Registers one process-generation approval answerer until its lease drops.
+    pub fn register_approval_answerer(
+        &self,
+        answerer: std::sync::Arc<dyn rsi_approval_protocol::ApprovalAnswerer>,
+    ) -> Result<rsi_approval_protocol::ApprovalLease> {
+        use rsi_approval_protocol::ApprovalAnswerersContract;
+
+        required_local::<ApprovalAnswerersContract>(&self.host, "Approval answerers")?
+            .register(answerer)
+            .map_err(|error| RsiError::Boot(error.to_string()))
+    }
+
+    /// Rebuilds the complete Host Profile source program.
+    pub async fn reload(&self) -> Result<rsi_host::ReloadOutcome> {
+        self.host
+            .reload()
+            .await
+            .map_err(|error| RsiError::Boot(error.to_string()))
+    }
+
     /// Shuts down all Profile Fibers and process-local Jobs deterministically.
     pub async fn shutdown(&self) -> rsi_meta::ShutdownOutcome {
         self.host.shutdown().await
     }
+}
+
+#[derive(Debug)]
+struct SessionSettingsSource(std::sync::Arc<dyn AgentSettings>);
+
+impl rsi_session::AgentSettingsSource for SessionSettingsSource {
+    fn current(&self) -> rsi_agent_session_protocol::FrozenAgentSettings {
+        self.0.current().clone()
+    }
+}
+
+fn required_local<C: rsi_meta::LocalContract>(
+    host: &RunningHost,
+    name: &str,
+) -> Result<std::sync::Arc<C::Service>> {
+    host.lookup_local::<C>()
+        .ok_or_else(|| RsiError::Boot(format!("{name} is unavailable")))
 }
 
 /// Resolves standard XDG-style paths without searching for a Profile.

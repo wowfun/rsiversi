@@ -1577,6 +1577,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "libc",
  "rsi-agent-composition",
  "rsi-agent-composition-protocol",
  "rsi-agent-executor",
@@ -1616,6 +1617,8 @@ dependencies = [
  "rsi-projection",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-session",
+ "rsi-session-host",
  "rsi-settings",
  "rsi-settings-local",
  "rsi-settings-protocol",
@@ -1634,6 +1637,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "toml",
 ]
 
 [[package]]
@@ -2390,6 +2394,55 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "rsi-session"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "getrandom 0.3.4",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-approval-protocol",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "rsi-workspace",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-session-host"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-approval-protocol",
+ "rsi-host",
+ "rsi-sandbox",
+ "rsi-session",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

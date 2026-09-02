@@ -1,13 +1,14 @@
 use crate::agent_preset::{
     DEFAULT_AGENT_PRESET_ID, standard_agent_profile_compiler, user_agent_preset_root,
 };
+use crate::profiles::{CodingToolsLaunchIdentity, HostLaunchKey, HostProfileDocument};
 use crate::settings::{AgentSettingsContract, AgentSettingsFactory, SETTINGS_FACTORY};
 use async_trait::async_trait;
 use rsi_agent_composition::{AgentCompositionFactory, AgentContributionCatalog};
 use rsi_agent_composition_protocol::AgentCompositionContract;
 use rsi_agent_presets::{
-    AgentPresetCatalog, AgentPresetCatalogConfig, AgentPresetId, EXECUTOR_FACTORY,
-    HeadlessAgentConfig, KERNEL_FACTORY, SQLITE_STORE_FACTORY, headless_fragment,
+    AgentPresetCatalog, AgentPresetCatalogConfig, AgentPresetId, AgentPresetLaunchIdentity,
+    EXECUTOR_FACTORY, KERNEL_FACTORY, SQLITE_STORE_FACTORY, SessionAgentConfig, session_fragment,
 };
 use rsi_agent_store_protocol::SessionStoreContract;
 use rsi_agent_turn_protocol::{
@@ -18,10 +19,7 @@ use rsi_agent_turn_protocol::{
 use rsi_ai_protocol::{ImageCallContract, LanguageCallContract};
 use rsi_ai_provider::{ImageRegistrarContract, LanguageRegistrarContract};
 use rsi_apply_patch::ApplyPatchToolFactory;
-use rsi_approval_protocol::{
-    ApprovalAnswerer, ApprovalAnswerersContract, ApprovalContract, ApprovalDecision,
-    ApprovalOutcome, ApprovalRequest,
-};
+use rsi_approval_protocol::{ApprovalAnswerersContract, ApprovalContract};
 use rsi_commands_protocol::CommandRuntimeContract;
 use rsi_credentials_local::{CredentialsLocalFactory, KeyringSecretStore, SecretStore};
 use rsi_credentials_protocol::{CredentialsAdminContract, CredentialsResolveContract, SecretValue};
@@ -57,7 +55,6 @@ use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 pub(crate) const OPENAI_FACTORY: &str = "rsi.ai.provider.openai";
 pub(crate) const OPENAI_COMPATIBLE_FACTORY: &str = "rsi.ai.provider.openai-compatible";
@@ -72,13 +69,12 @@ const CREDENTIALS_FACTORY: &str = "rsi.credentials.local";
 const MEDIA_LOCAL_FACTORY: &str = "rsi.media.local";
 const MEDIA_FACTORY: &str = "rsi.media";
 const APPROVAL_FACTORY: &str = "rsi.approval";
-const DENY_APPROVAL_FACTORY: &str = "rsi.headless.approval.deny";
 const PERMISSIONS_FACTORY: &str = "rsi.permission-presets";
 const SANDBOX_FACTORY: &str = "rsi.sandbox.local";
 const PROCESS_FACTORY: &str = "rsi.process.local";
 const COMMANDS_FACTORY: &str = "rsi.commands";
 const JOBS_FACTORY: &str = "rsi.jobs.local";
-const JOBS_FINALIZER_FACTORY: &str = "rsi.headless.jobs-finalizer";
+const JOBS_FINALIZER_FACTORY: &str = "rsi.session.jobs-finalizer";
 const PROJECTION_FACTORY: &str = "rsi.projection";
 const WORKSPACE_FACTORY: &str = "rsi.workspace";
 const TOOLS_FACTORY: &str = "rsi.tools";
@@ -128,6 +124,15 @@ pub struct StandardCodingTools {
     bash_producer: BashJobProducerFactory,
     bash_tool: BashToolFactory,
     apply_patch: ApplyPatchToolFactory,
+}
+
+/// Pure standard Host/Profile preview and the exact owner-generation identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardHostPreview {
+    /// Product launch key used by embedded and daemon owner selection.
+    pub launch_key: HostLaunchKey,
+    /// Generic Host compiler/resolver evidence.
+    pub profile: rsi_host::HostProfilePreview,
 }
 
 impl StandardCodingTools {
@@ -189,20 +194,32 @@ fn standard_agent_contributions(
 }
 
 fn materialize_standard_agent_preset(paths: &HostPaths) -> rsi_host::Result<PathBuf> {
-    let mut digest = Sha256::new();
-    digest.update(b"rsi-standard-agent-preset-v1\0");
-    for bytes in [STANDARD_AGENT_PROFILE, STANDARD_AGENT_METADATA] {
-        digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
-        digest.update(bytes);
-    }
-    let digest = hex::encode(digest.finalize());
     let cache = paths.cache().join("agent-presets").join("system");
+    let digest = standard_agent_preset_digest();
 
     #[cfg(unix)]
     let result = materialize_standard_agent_preset_unix(&cache, &digest);
     #[cfg(not(unix))]
     let result = materialize_standard_agent_preset_portable(&cache, &digest);
     result
+}
+
+fn standard_agent_preset_digest() -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"rsi-standard-agent-preset-v1\0");
+    for bytes in [STANDARD_AGENT_PROFILE, STANDARD_AGENT_METADATA] {
+        digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        digest.update(bytes);
+    }
+    hex::encode(digest.finalize())
+}
+
+pub(crate) fn standard_agent_preset_root_candidate(paths: &HostPaths) -> PathBuf {
+    paths
+        .cache()
+        .join("agent-presets")
+        .join("system")
+        .join(standard_agent_preset_digest())
 }
 
 #[cfg(not(unix))]
@@ -862,16 +879,64 @@ impl StandardComposition {
         &self.paths
     }
 
-    /// Builds the generic Host without reading a Profile or activating plugins.
+    /// Purely compiles and resolves one Host Profile and derives its owner key.
+    ///
+    /// This does not materialize bundled assets, prepare or activate a factory,
+    /// read credentials, or acquire a Store/owner lease.
+    pub fn preview_host(
+        &self,
+        profile: &HostProfileDocument,
+    ) -> crate::Result<StandardHostPreview> {
+        let (host, presets) = self
+            .build_internal(false)
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        let composition_digest = host
+            .composition_digest()
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        let launch_key = HostLaunchKey::from_components(
+            &composition_digest,
+            profile,
+            &presets,
+            self.coding_tools
+                .as_ref()
+                .map(|tools| CodingToolsLaunchIdentity {
+                    bash: tools.bash_tool.executable(),
+                    apply_patch: tools.apply_patch.executable(),
+                }),
+        )
+        .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        let profile = match &profile.path {
+            Some(path) => host.preview_file(path),
+            None => host.preview(rsi_host::Profile::default()),
+        }
+        .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        Ok(StandardHostPreview {
+            launch_key,
+            profile,
+        })
+    }
+
+    /// Builds the generic Host without reading a Host Profile or activating plugins.
     pub fn build(self) -> rsi_host::Result<Host> {
+        self.build_internal(true).map(|(host, _presets)| host)
+    }
+
+    fn build_internal(
+        &self,
+        materialize_assets: bool,
+    ) -> rsi_host::Result<(Host, AgentPresetLaunchIdentity)> {
         let linux_tools_enabled = self.coding_tools.is_some();
         let paths = self.paths.clone();
         let compiler = standard_agent_profile_compiler(&paths, linux_tools_enabled)
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
-        let presets = if let Some(presets) = self.agent_presets {
-            presets
+        let presets = if let Some(presets) = &self.agent_presets {
+            presets.clone()
         } else {
-            let system_root = materialize_standard_agent_preset(&paths)?;
+            let system_root = if materialize_assets {
+                materialize_standard_agent_preset(&paths)?
+            } else {
+                standard_agent_preset_root_candidate(&paths)
+            };
             let standard_id = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID)
                 .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
             AgentPresetCatalog::new(
@@ -882,6 +947,7 @@ impl StandardComposition {
             )
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
         };
+        let preset_identity = presets.launch_identity();
         let contributions = standard_agent_contributions(self.coding_tools.as_ref())?;
         let agent_composition = AgentCompositionFactory::new(
             presets,
@@ -893,16 +959,16 @@ impl StandardComposition {
         register_contracts(&mut builder)?;
         register_factories(
             &mut builder,
-            self.credential_store,
-            self.captured_environment,
-            self.coding_tools,
+            Arc::clone(&self.credential_store),
+            self.captured_environment.clone(),
+            self.coding_tools.clone(),
             agent_composition,
         )?;
         builder.register_fragment(base_fragment(&paths, linux_tools_enabled))?;
-        let agent = HeadlessAgentConfig::new(paths.state().join("agent"))
+        let agent = SessionAgentConfig::new(paths.state().join("agent"))
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
-        builder.register_fragment(headless_fragment(&agent))?;
-        builder.build()
+        builder.register_fragment(session_fragment(&agent))?;
+        builder.build().map(|host| (host, preset_identity))
     }
 }
 
@@ -984,12 +1050,6 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
-        DENY_APPROVAL_FACTORY,
-        UpdateMode::Replayable,
-        DenyApprovalFactory,
-    )?;
-    register(
-        builder,
         PERMISSIONS_FACTORY,
         UpdateMode::Replayable,
         rsi_permission_presets::PermissionPresetsFactory,
@@ -1022,7 +1082,7 @@ fn register_runtime_factories(
         builder,
         JOBS_FINALIZER_FACTORY,
         UpdateMode::Replayable,
-        HeadlessJobsFinalizerFactory,
+        SessionJobsFinalizerFactory,
     )?;
     register(
         builder,
@@ -1170,7 +1230,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             json!({ "path": paths.config().join("settings.json") }),
         ),
         ProfileEntry::new("rsi-settings", SETTINGS_CORE_FACTORY, Value::Null),
-        ProfileEntry::new("rsi-headless-settings", SETTINGS_FACTORY, Value::Null),
+        ProfileEntry::new("rsi-session-settings", SETTINGS_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-credentials",
             CREDENTIALS_FACTORY,
@@ -1190,7 +1250,6 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ),
         ProfileEntry::new("rsi-media", MEDIA_FACTORY, Value::Null),
         ProfileEntry::new("rsi-approval", APPROVAL_FACTORY, Value::Null),
-        ProfileEntry::new("rsi-headless-deny", DENY_APPROVAL_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-permission-presets",
             PERMISSIONS_FACTORY,
@@ -1212,7 +1271,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ProfileEntry::new("rsi-commands", COMMANDS_FACTORY, Value::Null),
         ProfileEntry::new("rsi-jobs", JOBS_FACTORY, Value::Null),
         ProfileEntry::new(
-            "rsi-headless-jobs-finalizer",
+            "rsi-session-jobs-finalizer",
             JOBS_FINALIZER_FACTORY,
             Value::Null,
         ),
@@ -1238,7 +1297,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             Value::Null,
         ));
     }
-    ProfileFragment::new("rsi.headless.base", entries)
+    ProfileFragment::new("rsi.standard.base", entries)
 }
 
 /// Captures only the standard allowlisted credential environment variables.
@@ -1266,21 +1325,15 @@ pub fn capture_standard_environment() -> crate::Result<BTreeMap<String, SecretVa
 }
 
 #[derive(Debug)]
-struct DenyApprovalFactory;
+struct SessionJobsFinalizerFactory;
 
 #[derive(Debug)]
-struct DenyAnswerer;
-
-#[derive(Debug)]
-struct HeadlessJobsFinalizerFactory;
-
-#[derive(Debug)]
-struct HeadlessJobsFinalizer {
+struct SessionJobsFinalizer {
     jobs: Arc<dyn Jobs>,
 }
 
 #[async_trait]
-impl TurnFinalizer for HeadlessJobsFinalizer {
+impl TurnFinalizer for SessionJobsFinalizer {
     async fn finalize(
         &self,
         context: &TurnFinalizationContext,
@@ -1329,11 +1382,11 @@ impl TurnFinalizer for HeadlessJobsFinalizer {
 }
 
 #[async_trait]
-impl PluginFactory for HeadlessJobsFinalizerFactory {
+impl PluginFactory for SessionJobsFinalizerFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         if !desired.is_null() {
             return Err(MetaError::InvalidInput(
-                "Headless Jobs finalizer configuration must be null".into(),
+                "Session Jobs finalizer configuration must be null".into(),
             ));
         }
         Ok(PreparedActivation::new(Value::Null)
@@ -1342,61 +1395,15 @@ impl PluginFactory for HeadlessJobsFinalizerFactory {
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let finalizer = Arc::new(HeadlessJobsFinalizer {
+        let finalizer = Arc::new(SessionJobsFinalizer {
             jobs: plan.local::<JobsContract>()?,
         });
         let lease = plan
             .local::<TurnFinalizationContract>()?
-            .register("rsi.headless.jobs".into(), finalizer)
+            .register("rsi.session.jobs".into(), finalizer)
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(
-            "withdraw Headless Jobs finalizer",
-            Box::new(move || {
-                Box::pin(async move {
-                    drop(lease);
-                    Ok(())
-                })
-            }),
-        )
-    }
-}
-
-#[async_trait]
-impl ApprovalAnswerer for DenyAnswerer {
-    async fn answer(
-        &self,
-        _request: ApprovalRequest,
-        cancellation: CancellationToken,
-    ) -> rsi_approval_protocol::Result<Option<ApprovalOutcome>> {
-        if cancellation.is_cancelled() {
-            return Err(rsi_approval_protocol::ApprovalError::Cancelled);
-        }
-        Ok(Some(ApprovalOutcome {
-            decision: ApprovalDecision::Deny,
-            answerer: "rsi.headless.deny".into(),
-            reason: Some("Headless mode never reads stdin for approval".into()),
-        }))
-    }
-}
-
-#[async_trait]
-impl PluginFactory for DenyApprovalFactory {
-    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        if !desired.is_null() {
-            return Err(rsi_meta::MetaError::InvalidInput(
-                "Headless deny answerer configuration must be null".into(),
-            ));
-        }
-        Ok(PreparedActivation::new(Value::Null).requiring_local::<ApprovalAnswerersContract>())
-    }
-
-    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let lease = plan
-            .local::<ApprovalAnswerersContract>()?
-            .register(Arc::new(DenyAnswerer))
-            .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
-        plan.defer(
-            "withdraw Headless deny answerer",
+            "withdraw Session Jobs finalizer",
             Box::new(move || {
                 Box::pin(async move {
                     drop(lease);

@@ -58,6 +58,8 @@ rsi-process = { path = "../../rsi-process/core" }
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-session = { path = "../session" }
+rsi-session-host = { path = "../session-host" }
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-settings-local = { path = "../../rsi-settings/local" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
@@ -74,12 +76,14 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+libc.workspace = true
 rustix.workspace = true
 
 [lints]

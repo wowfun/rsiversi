@@ -1,37 +1,39 @@
 # rsi
 
-This package is the standard RSIversi application composition. The library
-owns the explicit linked factory catalog, Base/Headless Profile fragments, and
-the public Language/Image Headless runner. The binary owns command-line parsing,
-standard input, signal handling, output, and the Tokio runtime.
+This package implements the standard RSIversi product described by the product
+[contract](../README.md). The library owns the explicit linked factory catalog,
+standard composition, product-owned Profile catalogs, and construction of the
+transport-independent `SessionApplication`. The binary owns command-line
+parsing, Session/headless orchestration, terminal input and rendering, process
+signals, and the Tokio runtime. There is no parallel library-owned headless
+runner.
 
 The standard catalog links providers but does not select or enable a deployment.
 A persistent Profile instantiates the intended provider, while Settings names
 the exact default deployment and model. Tests can inject a credential store at
 the public composition seam without consulting real user state.
 
-`rsi run` accepts one positional prompt or `--stdin`, creates or resumes one
-durable session, and emits text or versioned JSONL. Raw Facts are flushed as
-they are published and include the durable prefix known at publication time;
-the terminal outcome is emitted only after its Fact prefix is durable. SIGINT
-requests bounded cancellation and exits with status 130 after the terminal
-prefix is durable. A fresh session accepts `--agent-preset ID`; when omitted,
-the current `rsi.agent-presets` default is resolved before the durable header is
-created. The selected id is frozen in that header, so resume rejects
-`--agent-preset` and keeps the session's original generation identity. Fresh
-generation construction and resume generation preparation both complete before
-the runner durably registers the canonical Workspace. Resume preparation
-returns the authoritative Header and resident-or-current pin as one move-only
-token consumed by submission; generation-preparation failure cannot leave an
-unrelated Workspace row.
+`rsi --profile NAME [application arguments]` selects one named Application
+Profile. The built-in `headless` application accepts one positional task or
+`--stdin`; `session` is the line-oriented interactive application. Both drive
+the same `SessionApplication` surface, subscribe strictly after the durable
+acceptance sequence, and render the subsequent live Facts. The acceptance and
+terminal envelopes are binary-owned presentation records rather than a second
+Agent execution API.
 
-The library's direct Image turn surface persists request/intent/start, imports
-each output through Media, and renders only `media:<MediaId>` references.
-Headless maps exact Agent session/turn identities into generic Jobs owner
-scopes. Its pre-terminal finalizer cancels and boundedly joins only work owned
-by that turn; unscoped process work and concurrent turns are unaffected. A
-scope timeout becomes the sole durable failed turn outcome while the still-live
-trusted future remains tracked and that exact scope stays closed.
+Application startup keeps the Agent-preset Settings host only when it becomes
+part of an embedded Session Host. A compatible remote daemon needs the preset
+catalog only to derive its launch preview, so the client shuts that Settings
+host down before running the application command.
+
+Exit status 0 means a completed turn; an interactive Session also treats its
+user's locally cancelled turn as a successful control action. Status 1 covers
+failures after the application has resolved its Session handle and entered
+runtime work, including submission-time route or provider configuration
+rejection and a failed, partial, interrupted, or budget-exceeded terminal
+outcome. Status 2 covers command-line, profile/catalog, Host bootstrap, and
+initial Session create/attach selection failures before that handoff. Status
+130 means headless signal cancellation.
 
 `rsi agent-preset` is a management-only command family. It discovers presets
 through system roots supplied by the product, then the absolute configured
@@ -54,6 +56,3 @@ The shipped `standard` asset is materialized below a digest-addressed,
 owner-writable cache, but the catalog grants System authority only to that
 exact verified `standard` identity and directory. Other cache siblings are not
 discovered as presets and cannot inherit System source or trust.
-
-Exit status 0 means a complete turn, 1 means a runtime or terminal turn failure,
-2 means command-line or boot failure, and 130 means signal cancellation.

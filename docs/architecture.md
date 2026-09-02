@@ -36,10 +36,15 @@ generation pin retained by drafts, resident sessions, and delayed Tool work.
 Runtime-composed implementations are independent ordinary plugins; protocol
 and test-support packages are libraries.
 
-The standard [`rsi`](../crates/rsi/README.md) product owns Base composition and
-the selection and assembly of Headless composition. The library assembles
-product factories with product-owned Profile fragments; the binary owns CLI
-parsing and the Tokio runtime.
+The standard [`rsi`](../crates/rsi/README.md) product owns Base composition,
+Session applications, and the single local Session Host for one standard
+`HostPaths` identity. Its library owns product factories, product-owned Profile
+fragments, Application and Host Profile catalogs, the transport-independent
+Session interface, and local/Unix-domain-socket adapters. The binary owns CLI
+parsing, terminal interaction, explicit daemon process control, process
+signals, and construction of the Tokio runtime. The Agent Kernel remains the sole durable session state-machine
+owner; the product Host adds live multiplexing and process ownership without
+moving Agent semantics into a wire adapter.
 
 Dependencies point from the standard product through product implementations
 and protocols toward `rsi-meta`; foundation packages never depend back on a

@@ -1,0 +1,29 @@
+[package]
+name = "rsi-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+getrandom.workspace = true
+rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-workspace = { path = "../../rsi-workspace/core" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rsi-agent-testkit = { path = "../../rsi-agent/testkit" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

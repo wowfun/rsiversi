@@ -34,7 +34,7 @@ pulldown-cmark = "0.10"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rhai = { version = "1.23", features = ["serde", "sync"] }
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 same-file = "1.0"
 serde = { version = "1.0", features = ["derive"] }

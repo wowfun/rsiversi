@@ -1,0 +1,39 @@
+[package]
+name = "rsi-session-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-session = { path = "../session" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix.workspace = true
+
+[lints]
+workspace = true

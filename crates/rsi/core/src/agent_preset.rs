@@ -125,6 +125,22 @@ impl AgentPresetManager {
         .await
     }
 
+    /// Opens the standard Settings-backed catalog for a non-activating preview.
+    ///
+    /// The built-in preset contributes its deterministic final cache location
+    /// to launch identity without materializing that asset.
+    pub async fn open_standard_preview(
+        paths: HostPaths,
+        coding_tools_enabled: bool,
+    ) -> Result<Self> {
+        Self::open_standard(
+            paths.clone(),
+            crate::composition::standard_agent_preset_root_candidate(&paths),
+            coding_tools_enabled,
+        )
+        .await
+    }
+
     async fn open_with_system_sources(
         paths: HostPaths,
         system_sources: Vec<SystemPresetSource>,

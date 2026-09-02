@@ -123,6 +123,11 @@ impl BashToolFactory {
         Ok(Self { bash, environment })
     }
 
+    /// Returns the canonical executable path frozen into this factory.
+    pub fn executable(&self) -> &Path {
+        &self.bash
+    }
+
     #[cfg(target_os = "linux")]
     fn environment_with_bash_defaults(&self) -> Vec<(OsString, OsString)> {
         let mut environment = self

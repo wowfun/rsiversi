@@ -200,10 +200,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint standard rsi
-        run: cargo clippy --locked -p rsi --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p 'rsi-session*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Exercise standard rsi
-        run: cargo test --locked -p rsi --all-targets
+        run: cargo test --locked -p rsi -p 'rsi-session*' --all-targets
         timeout-minutes: 20
 
   repository-tools:
