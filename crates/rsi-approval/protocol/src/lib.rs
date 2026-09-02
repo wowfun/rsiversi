@@ -15,10 +15,89 @@ use tokio_util::sync::CancellationToken;
 /// Maximum bytes in one approval field.
 pub const MAXIMUM_APPROVAL_FIELD_BYTES: usize = 4 * 1024;
 
+/// Typed routing subject for one Agent effect approval.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)]
+pub struct ApprovalSubject {
+    session_id: String,
+    turn_id: String,
+    effect_id: String,
+}
+
+impl<'de> Deserialize<'de> for ApprovalSubject {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(clippy::struct_field_names)]
+        struct WireSubject {
+            session_id: String,
+            turn_id: String,
+            effect_id: String,
+        }
+
+        let wire = WireSubject::deserialize(deserializer)?;
+        Self::new(wire.session_id, wire.turn_id, wire.effect_id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ApprovalSubject {
+    /// Creates one bounded non-secret routing subject.
+    pub fn new(
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        effect_id: impl Into<String>,
+    ) -> Result<Self> {
+        let subject = Self {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            effect_id: effect_id.into(),
+        };
+        subject.validate()?;
+        Ok(subject)
+    }
+
+    /// Revalidates every exact routing identity.
+    pub fn validate(&self) -> Result<()> {
+        for (kind, value) in [
+            ("approval session identity", self.session_id.as_str()),
+            ("approval turn identity", self.turn_id.as_str()),
+            ("approval effect identity", self.effect_id.as_str()),
+        ] {
+            if value.is_empty() || value.len() > MAXIMUM_APPROVAL_FIELD_BYTES {
+                return Err(ApprovalError::InvalidInput(format!(
+                    "{kind} must be within 1..={MAXIMUM_APPROVAL_FIELD_BYTES} bytes"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the exact session identity.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Returns the exact turn identity.
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    /// Returns the exact effect identity.
+    pub fn effect_id(&self) -> &str {
+        &self.effect_id
+    }
+}
+
 /// Minimal live approval request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalRequest {
+    /// Exact Session, Turn, and effect routing subject.
+    pub subject: ApprovalSubject,
     /// Exact request/call identity.
     pub id: String,
     /// Short effect action.
@@ -35,6 +114,7 @@ impl<'de> Deserialize<'de> for ApprovalRequest {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct WireRequest {
+            subject: ApprovalSubject,
             id: String,
             action: String,
             reason: String,
@@ -42,6 +122,7 @@ impl<'de> Deserialize<'de> for ApprovalRequest {
 
         let wire = WireRequest::deserialize(deserializer)?;
         let request = Self {
+            subject: wire.subject,
             id: wire.id,
             action: wire.action,
             reason: wire.reason,
@@ -56,6 +137,7 @@ impl<'de> Deserialize<'de> for ApprovalRequest {
 impl ApprovalRequest {
     /// Validates closed current request bounds.
     pub fn validate(&self) -> Result<()> {
+        self.subject.validate()?;
         for (kind, value) in [
             ("approval id", self.id.as_str()),
             ("approval action", self.action.as_str()),

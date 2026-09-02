@@ -8,5 +8,4 @@ decisions, provenance, answerers, and service contracts. The ordinary
 The first answer wins. An empty or all-abstaining chain returns deterministic
 deny. This service never reads stdin itself and owns no durable log. A consumer
 that protects an external effect must own the durable asked, decided, or
-interrupted evidence; the current standard product registers no effect-bearing
-Tool and does not claim that Approval is already enforced.
+interrupted evidence.

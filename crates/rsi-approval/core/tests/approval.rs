@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use rsi_approval::ApprovalFactory;
 use rsi_approval_protocol::{
     ApprovalAnswerer, ApprovalAnswerersContract, ApprovalContract, ApprovalDecision,
-    ApprovalOutcome, ApprovalRequest, Result,
+    ApprovalOutcome, ApprovalRequest, ApprovalSubject, Result,
 };
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use serde_json::Value;
@@ -43,6 +43,7 @@ impl ApprovalAnswerer for Allow {
 
 fn request() -> ApprovalRequest {
     ApprovalRequest {
+        subject: ApprovalSubject::new("session-1", "turn-1", "effect-1").unwrap(),
         id: "approval-1".into(),
         action: "write file".into(),
         reason: "tool requested a workspace mutation".into(),
