@@ -15,15 +15,17 @@ generation. Registration leases can withdraw only from an open stage; dropping
 or retiring one after sealing cannot mutate the published catalog or its calls.
 Dropping an unsealed stage publishes nothing.
 
-Retained-result capacity and shutdown are provider-wide rather than multiplied
-by the number of immutable catalogs. A runtime generation pins exact executors
-for admitted calls; dropping the caller waiter cannot abandon their eventual
-result. Catalog lifetime is owned by its Agent generation, while provider
-shutdown cancels and joins all admitted work under one bound. Contributor
-leases do not own call cancellation or settlement after publication. Dropping
-the immutable catalog cancels its admitted calls and reclaims both settled and
-later-settling retained results for that exact catalog; provider-wide capacity
-cannot outlive the authority that could commit it.
+Invocation admission and shutdown are provider-wide rather than multiplied by
+the number of immutable catalogs. One admission remains owned by an active Tool
+body until it truly settles, then moves with its retained result until commit or
+catalog withdrawal. A runtime generation pins exact executors for admitted
+calls; dropping the caller waiter cannot abandon their eventual result.
+Catalog lifetime is owned by its Agent generation, while provider shutdown
+cancels and joins all admitted work under the same bound. Contributor leases do
+not own call cancellation or settlement after publication. Dropping the
+immutable catalog cancels its admitted calls and immediately reclaims settled
+results, but a non-cooperative active body keeps its admission until true
+settlement even though its late result is discarded.
 Policy, Approval, Jobs, Agent durable facts, and Code Mode are separate plugins
 or consumers rather than registry internals. The orchestrator may pass one
 typed, turn-scoped Jobs authority through `ToolStart`; this explicit invocation

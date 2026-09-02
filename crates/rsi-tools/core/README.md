@@ -33,6 +33,13 @@ or `wait` is materialized after the provider lock is released.
 Starting a prepared call transfers settlement to the provider-wide result
 owner while the immutable runtime pins its exact catalog generation.
 Dropping the caller's waiter does not abandon the body or its retained outcome.
+The provider admits at most 1,024 active-or-retained invocations. Admission is
+acquired before execution starts, remains with a non-cooperative body after
+timeout, cancellation, or catalog withdrawal, and moves to the settled retained
+entry only after the body has actually returned. Commit or catalog withdrawal
+releases a settled admission. Capacity exhaustion and provider shutdown have
+their own stable protocol errors rather than being reported as Tool execution
+failures.
 Retained-result waiters register their notification before querying the
 snapshot, so settlement cannot be lost between observation and suspension.
 Tool-body panics and destruction of their panic payloads use separate unwind
@@ -43,7 +50,9 @@ is committed. Dropping the catalog cancels its active calls, removes its
 settled retained entries immediately, and discards any outcome that settles
 after catalog authority has disappeared.
 
-Provider cleanup cancels active calls and joins them for
-`shutdown_timeout_ms` (default 10 seconds, maximum 5 minutes). A body that does
-not settle within that interval is reported as unresolved cleanup; safe Rust
+Provider cleanup stops new admission, releases settled results, cancels active
+calls, and joins them for `shutdown_timeout_ms` (default 10 seconds, maximum 5
+minutes). A body that does
+not settle within that interval remains recorded and retains its admission
+until its eventual settlement while unresolved cleanup is reported; safe Rust
 cannot forcibly stop arbitrary trusted Tool code.

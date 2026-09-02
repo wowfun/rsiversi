@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
-    MAXIMUM_REGISTERED_TOOLS, MAXIMUM_RETAINED_TOOL_RESULTS, MAXIMUM_TOOL_CATALOGS,
+    MAXIMUM_ADMITTED_TOOL_INVOCATIONS, MAXIMUM_REGISTERED_TOOLS, MAXIMUM_TOOL_CATALOGS,
     MAXIMUM_TOOL_TIMEOUT_MS, PreparedToolCall, Result, RetainedToolFailure,
     RetainedToolFailureKind, RetainedToolResult, ToolBatchLease, ToolCall, ToolCatalogProvider,
     ToolCatalogProviderContract, ToolCatalogStage, ToolEnforcement, ToolError, ToolExecution,
@@ -22,8 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tokio::sync::{Notify, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
@@ -69,6 +68,7 @@ struct Provider {
 #[derive(Debug)]
 struct ProviderState {
     inner: Mutex<ProviderInner>,
+    admission: Arc<Semaphore>,
     settled: Notify,
     shutdown: CancellationToken,
     shutdown_timeout: Duration,
@@ -79,10 +79,90 @@ struct ProviderInner {
     accepting: bool,
     next_catalog: u64,
     active_catalogs: usize,
-    retained: BTreeMap<ToolResultIdentity, Arc<RetainedToolResult>>,
-    active: BTreeMap<ToolResultIdentity, JoinHandle<()>>,
+    retained: BTreeMap<ToolResultIdentity, RetainedEntry>,
+    active: BTreeSet<ToolResultIdentity>,
     active_by_owner: BTreeMap<String, usize>,
     abandoned_owners: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+enum RetainedEntry {
+    Pending,
+    Settled {
+        result: Arc<RetainedToolResult>,
+        _admission: OwnedSemaphorePermit,
+    },
+}
+
+enum RetainedSnapshot {
+    Pending,
+    Settled(Arc<RetainedToolResult>),
+}
+
+struct ActiveInvocation {
+    provider: Arc<ProviderState>,
+    identity: ToolResultIdentity,
+    owner_id: String,
+    admission: Option<OwnedSemaphorePermit>,
+    finished: bool,
+}
+
+impl ActiveInvocation {
+    fn finish(&mut self, retained: Arc<RetainedToolResult>) {
+        let mut inner = lock_provider(&self.provider);
+        let abandoned = inner.abandoned_owners.contains(&self.owner_id);
+        if inner.accepting && !abandoned {
+            let admission = self
+                .admission
+                .take()
+                .expect("active Tool invocation owns admission");
+            inner.retained.insert(
+                self.identity.clone(),
+                RetainedEntry::Settled {
+                    result: retained,
+                    _admission: admission,
+                },
+            );
+        } else {
+            inner.retained.remove(&self.identity);
+        }
+        remove_active_invocation(&mut inner, &self.identity, &self.owner_id);
+        self.finished = true;
+        drop(inner);
+        self.provider.settled.notify_waiters();
+    }
+}
+
+impl Drop for ActiveInvocation {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut inner = lock_provider(&self.provider);
+        inner.retained.remove(&self.identity);
+        remove_active_invocation(&mut inner, &self.identity, &self.owner_id);
+        drop(inner);
+        self.provider.settled.notify_waiters();
+    }
+}
+
+fn remove_active_invocation(
+    inner: &mut ProviderInner,
+    identity: &ToolResultIdentity,
+    owner_id: &str,
+) {
+    inner.active.remove(identity);
+    let remove_owner = inner
+        .active_by_owner
+        .get_mut(owner_id)
+        .is_some_and(|active| {
+            *active = active.saturating_sub(1);
+            *active == 0
+        });
+    if remove_owner {
+        inner.active_by_owner.remove(owner_id);
+        inner.abandoned_owners.remove(owner_id);
+    }
 }
 
 impl Default for ProviderInner {
@@ -92,7 +172,7 @@ impl Default for ProviderInner {
             next_catalog: 0,
             active_catalogs: 0,
             retained: BTreeMap::new(),
-            active: BTreeMap::new(),
+            active: BTreeSet::new(),
             active_by_owner: BTreeMap::new(),
             abandoned_owners: BTreeSet::new(),
         }
@@ -196,14 +276,10 @@ impl ToolCatalogProvider for Provider {
         let (catalog_id, life) = {
             let mut inner = lock_provider(&self.state);
             if !inner.accepting {
-                return Err(ToolError::Execution(
-                    "Tool catalog provider is shutting down".into(),
-                ));
+                return Err(ToolError::ShuttingDown);
             }
             if inner.active_catalogs >= MAXIMUM_TOOL_CATALOGS {
-                return Err(ToolError::Execution(
-                    "Tool catalog capacity is exhausted".into(),
-                ));
+                return Err(ToolError::Capacity);
             }
             inner.next_catalog = inner
                 .next_catalog
@@ -240,9 +316,7 @@ impl ToolCatalogStage for Stage {
         let state = self.state.take().ok_or(ToolError::Sealed)?;
         if !lock_provider(&state.provider).accepting {
             abandon_stage(&state);
-            return Err(ToolError::Execution(
-                "Tool catalog provider is shutting down".into(),
-            ));
+            return Err(ToolError::ShuttingDown);
         }
         let (definitions, life) = {
             let mut inner = lock_stage(&state);
@@ -316,9 +390,7 @@ impl ToolRegistrar for Registrar {
             return Err(ToolError::Sealed);
         }
         if !lock_provider(&self.state.provider).accepting {
-            return Err(ToolError::Execution(
-                "Tool catalog provider is shutting down".into(),
-            ));
+            return Err(ToolError::ShuttingDown);
         }
         if let Some(name) = batch_names
             .iter()
@@ -431,11 +503,18 @@ impl ToolRuntime for Registry {
         self.require_owned_identity(identity)?;
         let retained = {
             let inner = lock_provider(&self.provider);
-            inner.retained.get(identity).cloned()
+            inner.retained.get(identity).map(|retained| match retained {
+                RetainedEntry::Pending => RetainedSnapshot::Pending,
+                RetainedEntry::Settled { result, .. } => {
+                    RetainedSnapshot::Settled(Arc::clone(result))
+                }
+            })
         };
-        Ok(retained.map_or(RetainedToolResult::Absent, |retained| {
-            retained.as_ref().clone()
-        }))
+        Ok(match retained {
+            None => RetainedToolResult::Absent,
+            Some(RetainedSnapshot::Pending) => RetainedToolResult::Pending,
+            Some(RetainedSnapshot::Settled(retained)) => retained.as_ref().clone(),
+        })
     }
 
     async fn wait(
@@ -462,10 +541,10 @@ impl ToolRuntime for Registry {
         self.require_owned_identity(identity)?;
         let mut inner = lock_provider(&self.provider);
         match inner.retained.get(identity) {
-            Some(retained) if retained.as_ref() == &RetainedToolResult::Pending => Err(
-                ToolError::Execution("cannot retire a pending Tool invocation".into()),
-            ),
-            Some(_) => {
+            Some(RetainedEntry::Pending) => Err(ToolError::Execution(
+                "cannot retire a pending Tool invocation".into(),
+            )),
+            Some(RetainedEntry::Settled { .. }) => {
                 inner.retained.remove(identity);
                 Ok(())
             }
@@ -510,9 +589,7 @@ impl PreparedToolCall for Prepared {
         let receiver = {
             let mut inner = lock_provider(&self.provider);
             if !inner.accepting {
-                return Err(ToolError::Execution(
-                    "Tool catalog provider is shutting down".into(),
-                ));
+                return Err(ToolError::ShuttingDown);
             }
             if self.entry.retirement.is_cancelled() {
                 return Err(ToolError::Withdrawn(self.call.name.clone()));
@@ -522,52 +599,38 @@ impl PreparedToolCall for Prepared {
                     "Tool invocation identity was already started".into(),
                 ));
             }
-            if inner.retained.len() >= MAXIMUM_RETAINED_TOOL_RESULTS {
-                return Err(ToolError::Execution(
-                    "retained Tool result capacity is exhausted".into(),
-                ));
-            }
+            let admission = Arc::clone(&self.provider.admission)
+                .try_acquire_owned()
+                .map_err(|_| ToolError::Capacity)?;
             inner
                 .retained
-                .insert(self.identity.clone(), Arc::new(RetainedToolResult::Pending));
+                .insert(self.identity.clone(), RetainedEntry::Pending);
             let (sender, receiver) = oneshot::channel();
             let provider = Arc::clone(&self.provider);
             let shutdown = self.provider.shutdown.clone();
             let identity = self.identity.clone();
             let entry = self.entry.clone();
             let call = self.call.clone();
-            let task_identity = identity.clone();
             let owner_id = identity.owner_id().to_owned();
-            let task_owner_id = owner_id.clone();
-            let task = tokio::spawn(async move {
+            let active = ActiveInvocation {
+                provider,
+                identity: identity.clone(),
+                owner_id: owner_id.clone(),
+                admission: Some(admission),
+                finished: false,
+            };
+            inner.active.insert(identity);
+            *inner.active_by_owner.entry(owner_id).or_default() += 1;
+            tokio::spawn(async move {
+                let mut active = active;
                 let result = settle(entry, call, start, shutdown).await;
                 let retained = Arc::new(match &result {
                     Ok(result) => RetainedToolResult::Returned(result.clone()),
                     Err(error) => RetainedToolResult::Failed(retained_failure(error)),
                 });
-                let mut inner = lock_provider(&provider);
-                if !inner.abandoned_owners.contains(identity.owner_id()) {
-                    inner.retained.insert(identity.clone(), retained);
-                }
-                inner.active.remove(&identity);
-                let remove_owner =
-                    inner
-                        .active_by_owner
-                        .get_mut(&task_owner_id)
-                        .is_some_and(|active| {
-                            *active = active.saturating_sub(1);
-                            *active == 0
-                        });
-                if remove_owner {
-                    inner.active_by_owner.remove(&task_owner_id);
-                    inner.abandoned_owners.remove(&task_owner_id);
-                }
-                drop(inner);
-                provider.settled.notify_waiters();
+                active.finish(retained);
                 let _ = sender.send(result);
             });
-            *inner.active_by_owner.entry(owner_id).or_default() += 1;
-            inner.active.insert(task_identity, task);
             receiver
         };
         receiver.await.unwrap_or_else(|_| {
@@ -663,20 +726,36 @@ fn lock_stage(state: &StageState) -> std::sync::MutexGuard<'_, StageInner> {
 }
 
 async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> {
-    state.shutdown.cancel();
-    let active = {
+    {
         let mut inner = lock_provider(&state);
         inner.accepting = false;
-        std::mem::take(&mut inner.active)
-    };
+        inner
+            .retained
+            .retain(|_, retained| matches!(retained, RetainedEntry::Pending));
+    }
+    state.shutdown.cancel();
+    state.settled.notify_waiters();
     let wait = async {
-        for (_, task) in active {
-            let _ = task.await;
+        loop {
+            let notified = state.settled.notified();
+            tokio::pin!(notified);
+            let _already_notified = notified.as_mut().enable();
+            if lock_provider(&state).active.is_empty() {
+                return;
+            }
+            notified.await;
         }
     };
-    tokio::time::timeout(state.shutdown_timeout, wait)
+    if tokio::time::timeout(state.shutdown_timeout, wait)
         .await
-        .map_err(|_| "Tool provider shutdown timed out with unsettled work".to_owned())
+        .is_err()
+    {
+        let unresolved = lock_provider(&state).active.len();
+        return Err(format!(
+            "Tool provider shutdown timed out with unsettled work: {unresolved} invocation(s)"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_definition(definition: &ToolRegistration) -> Result<()> {
@@ -704,6 +783,8 @@ fn retained_failure(error: &ToolError) -> RetainedToolFailure {
         | ToolError::Unknown(_)
         | ToolError::Withdrawn(_)
         | ToolError::Sealed
+        | ToolError::Capacity
+        | ToolError::ShuttingDown
         | ToolError::Sandbox(_)
         | ToolError::Execution(_) => RetainedToolFailure {
             kind: RetainedToolFailureKind::Execution,
@@ -764,6 +845,7 @@ impl PluginFactory for ToolsFactory {
         let config = plan.take_state::<ToolsConfig>()?;
         let state = Arc::new(ProviderState {
             inner: Mutex::new(ProviderInner::default()),
+            admission: Arc::new(Semaphore::new(MAXIMUM_ADMITTED_TOOL_INVOCATIONS)),
             settled: Notify::new(),
             shutdown: CancellationToken::new(),
             shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),

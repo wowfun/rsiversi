@@ -26,8 +26,12 @@ publishes no partial state. A registration lease withdraws its exact batch only
 while that stage remains open. After sealing, releasing or retiring the lease
 is a no-op: the immutable catalog owns its executors and calls until catalog or
 provider teardown. Retained identities are valid only for that catalog
-lifetime; dropping it cancels active calls and reclaims their provider-wide
-retained capacity, including outcomes that settle after the drop. Each
+lifetime. Dropping it cancels active calls and reclaims settled capacity
+immediately; an active body keeps its provider-wide invocation admission until
+true settlement, and an outcome produced after catalog withdrawal is
+discarded. Starting above the provider-wide admission bound returns
+`ToolError::Capacity`; starts after shutdown begins return
+`ToolError::ShuttingDown`. Each
 registration timeout is within
 1..=600,000 milliseconds. The current
 pre-release result shape is exactly `{ value, content, is_error }`; image

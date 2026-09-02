@@ -6,14 +6,17 @@ use rsi_sandbox::{
 };
 use rsi_tools::ToolsFactory;
 use rsi_tools_protocol::{
-    MAXIMUM_RETAINED_TOOL_RESULTS, MAXIMUM_TOOL_CATALOGS, Result, RetainedToolFailureKind,
+    MAXIMUM_ADMITTED_TOOL_INVOCATIONS, MAXIMUM_TOOL_CATALOGS, Result, RetainedToolFailureKind,
     RetainedToolResult, ToolCall, ToolCatalogProvider, ToolCatalogProviderContract, ToolDefinition,
     ToolError, ToolExecution, ToolExecutionPolicy, ToolExecutor, ToolRegistration, ToolResult,
     ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tokio::sync::Notify;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -124,6 +127,44 @@ struct StubbornTool {
     release: Arc<Notify>,
 }
 
+#[derive(Debug)]
+struct AdmissionHoldingTool {
+    entered: Arc<AtomicUsize>,
+    entered_changed: Arc<Notify>,
+    release: Arc<Semaphore>,
+}
+
+#[async_trait]
+impl ToolExecutor for AdmissionHoldingTool {
+    async fn execute(&self, arguments: Value, _execution: ToolExecution) -> Result<ToolResult> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.entered_changed.notify_waiters();
+        let permit = self
+            .release
+            .acquire()
+            .await
+            .expect("test release semaphore remains open");
+        permit.forget();
+        ToolResult::new(arguments, vec![], false)
+    }
+}
+
+async fn wait_for_entered(entered: &AtomicUsize, changed: &Notify, expected: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            let _already_notified = notified.as_mut().enable();
+            if entered.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("Tool test body did not enter within 5 seconds");
+}
+
 #[async_trait]
 impl ToolExecutor for StubbornTool {
     async fn execute(&self, arguments: Value, _execution: ToolExecution) -> Result<ToolResult> {
@@ -228,10 +269,7 @@ async fn sealing_after_provider_shutdown_fails_without_reentering_the_provider_l
     let result = receiver
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("seal must not deadlock while abandoning a stopped provider stage");
-    assert!(matches!(
-        result,
-        Err(ToolError::Execution(message)) if message.contains("shutting down")
-    ));
+    assert!(matches!(result, Err(ToolError::ShuttingDown)));
 }
 
 #[tokio::test]
@@ -443,9 +481,9 @@ async fn retained_result_capacity_is_shared_across_catalog_generations() {
     let (fiber, provider) = activated().await;
     let old = seal(&provider, vec![echo_registration("echo")]);
     let new = seal(&provider, vec![echo_registration("echo")]);
-    let mut retained = Vec::with_capacity(MAXIMUM_RETAINED_TOOL_RESULTS);
+    let mut retained = Vec::with_capacity(MAXIMUM_ADMITTED_TOOL_INVOCATIONS);
 
-    for index in 0..MAXIMUM_RETAINED_TOOL_RESULTS {
+    for index in 0..MAXIMUM_ADMITTED_TOOL_INVOCATIONS {
         let tools = if index % 2 == 0 { &old } else { &new };
         let prepared = tools
             .prepare(
@@ -477,7 +515,7 @@ async fn retained_result_capacity_is_shared_across_catalog_generations() {
         .unwrap();
     assert!(matches!(
         overflow.start(tool_start(CancellationToken::new())).await,
-        Err(ToolError::Execution(message)) if message.contains("capacity is exhausted")
+        Err(ToolError::Capacity)
     ));
 
     let (owner, identity) = retained.pop().unwrap();
@@ -508,6 +546,97 @@ async fn retained_result_capacity_is_shared_across_catalog_generations() {
 
     drop(old);
     drop(new);
+    drop(provider);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn catalog_withdrawal_cannot_recycle_admission_owned_by_active_bodies() {
+    let (fiber, provider) = activated().await;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let entered_changed = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let mut invocations = Vec::with_capacity(MAXIMUM_ADMITTED_TOOL_INVOCATIONS);
+
+    for index in 0..MAXIMUM_ADMITTED_TOOL_INVOCATIONS {
+        let tools = seal(
+            &provider,
+            vec![ToolRegistration {
+                definition: ToolDefinition::new("hold", "hold admission", true.into()).unwrap(),
+                timeout_ms: 600_000,
+                executor: Arc::new(AdmissionHoldingTool {
+                    entered: Arc::clone(&entered),
+                    entered_changed: Arc::clone(&entered_changed),
+                    release: Arc::clone(&release),
+                }),
+            }],
+        );
+        let prepared = tools
+            .prepare(
+                &format!("held-effect-{index}"),
+                ToolCall {
+                    id: format!("held-call-{index}"),
+                    name: "hold".into(),
+                    arguments: json!({"index":index}),
+                },
+            )
+            .unwrap();
+        invocations.push(tokio::spawn(
+            prepared.start(tool_start(CancellationToken::new())),
+        ));
+        wait_for_entered(&entered, &entered_changed, index + 1).await;
+        drop(tools);
+    }
+
+    let overflow_tools = seal(&provider, vec![echo_registration("echo")]);
+    let overflow = overflow_tools
+        .prepare(
+            "overflow-effect",
+            ToolCall {
+                id: "overflow-call".into(),
+                name: "echo".into(),
+                arguments: json!({}),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        overflow.start(tool_start(CancellationToken::new())).await,
+        Err(ToolError::Capacity)
+    );
+
+    release.add_permits(1);
+    invocations
+        .remove(0)
+        .await
+        .expect("first held invocation task")
+        .expect("body result remains authoritative after catalog withdrawal");
+
+    let replacement = overflow_tools
+        .prepare(
+            "replacement-effect",
+            ToolCall {
+                id: "replacement-call".into(),
+                name: "echo".into(),
+                arguments: json!({}),
+            },
+        )
+        .unwrap();
+    let replacement_identity = replacement.identity().clone();
+    replacement
+        .start(tool_start(CancellationToken::new()))
+        .await
+        .unwrap();
+    overflow_tools.commit(&replacement_identity).unwrap();
+
+    release.add_permits(invocations.len());
+    for invocation in invocations {
+        invocation
+            .await
+            .expect("held invocation task")
+            .expect("late body result");
+    }
+
+    drop(overflow_tools);
     drop(provider);
     assert!(fiber.dispose().await.is_clean());
 }
@@ -613,8 +742,8 @@ async fn dropping_a_catalog_reclaims_settled_and_late_retained_results() {
     assert!(matches!(active.await.unwrap(), Err(ToolError::Cancelled)));
 
     let current = seal(&provider, vec![echo_registration("echo")]);
-    let mut identities = Vec::with_capacity(MAXIMUM_RETAINED_TOOL_RESULTS);
-    for index in 0..MAXIMUM_RETAINED_TOOL_RESULTS {
+    let mut identities = Vec::with_capacity(MAXIMUM_ADMITTED_TOOL_INVOCATIONS);
+    for index in 0..MAXIMUM_ADMITTED_TOOL_INVOCATIONS {
         let prepared = current
             .prepare(
                 &format!("current-effect-{index}"),

@@ -35,8 +35,8 @@ pub const MAXIMUM_FREEFORM_GRAMMAR_BYTES: usize = 64 * 1024;
 pub const MAXIMUM_REGISTERED_TOOLS: usize = 64;
 /// Maximum cooperative timeout for one Tool call in milliseconds.
 pub const MAXIMUM_TOOL_TIMEOUT_MS: u64 = 600_000;
-/// Maximum settled or pending results retained across one Tool catalog provider.
-pub const MAXIMUM_RETAINED_TOOL_RESULTS: usize = 1_024;
+/// Maximum active-or-retained invocations across one Tool catalog provider.
+pub const MAXIMUM_ADMITTED_TOOL_INVOCATIONS: usize = 1_024;
 /// Maximum unpublished and sealed catalogs retained by one provider.
 pub const MAXIMUM_TOOL_CATALOGS: usize = 1_024;
 /// Maximum truthful process-enforcement records in one Tool result.
@@ -705,6 +705,12 @@ pub enum ToolError {
     /// The unpublished catalog stage was already sealed or abandoned.
     #[error("Tool catalog stage is sealed")]
     Sealed,
+    /// A provider-wide catalog or active-or-retained invocation bound is exhausted.
+    #[error("Tool capacity is exhausted")]
+    Capacity,
+    /// The Tool catalog provider has begun shutdown.
+    #[error("Tool catalog provider is shutting down")]
+    ShuttingDown,
     /// Sandbox planning rejected the process before spawn.
     #[error(transparent)]
     Sandbox(rsi_sandbox::SandboxError),
