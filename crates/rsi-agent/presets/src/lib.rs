@@ -11,6 +11,8 @@ use thiserror::Error;
 
 mod authoring;
 mod catalog;
+#[cfg(unix)]
+mod owned_root;
 mod source;
 
 fn clean_metadata_text(value: Option<String>) -> Option<String> {
@@ -27,6 +29,8 @@ pub use catalog::{
     MAX_COPY_BYTES, MAX_COPY_DEPTH, MAX_COPY_ENTRIES, MAX_METADATA_BYTES, MAX_ROOTS,
     MAX_ROSTER_ROWS, METADATA_FILE,
 };
+#[cfg(unix)]
+pub use owned_root::{OwnedPresetRoot, open_existing_preset_root, open_or_create_preset_root};
 pub use rsi_agent_session_protocol::AgentPresetId;
 pub use source::{AgentPresetProfileCompiler, MAX_PROFILE_HEALTH_REASON_BYTES};
 
@@ -51,6 +55,7 @@ pub const SESSION_EXECUTOR_INSTANCE: &str = "rsi-agent-executor";
 pub struct SessionAgentConfig {
     store_root: PathBuf,
     executor_id: String,
+    maximum_active_turns: usize,
 }
 
 impl SessionAgentConfig {
@@ -68,6 +73,7 @@ impl SessionAgentConfig {
         Ok(Self {
             store_root,
             executor_id: SESSION_EXECUTOR_INSTANCE.to_owned(),
+            maximum_active_turns: 1,
         })
     }
 
@@ -85,6 +91,15 @@ impl SessionAgentConfig {
         }
         self.executor_id = executor_id;
         Ok(self)
+    }
+
+    /// Replaces the maximum number of turns active across distinct Sessions.
+    ///
+    /// The executor factory remains the sole owner of range validation.
+    #[must_use]
+    pub const fn with_maximum_active_turns(mut self, maximum: usize) -> Self {
+        self.maximum_active_turns = maximum;
+        self
     }
 
     /// Absolute Store root frozen into the fragment.
@@ -112,7 +127,10 @@ pub fn session_fragment(config: &SessionAgentConfig) -> ProfileFragment {
             ProfileEntry::new(
                 SESSION_EXECUTOR_INSTANCE,
                 EXECUTOR_FACTORY,
-                json!({ "executor_id": config.executor_id }),
+                json!({
+                    "executor_id": config.executor_id,
+                    "maximum_active_turns": config.maximum_active_turns,
+                }),
             ),
         ],
     )

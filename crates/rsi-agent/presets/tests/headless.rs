@@ -11,7 +11,8 @@ fn session_fragment_has_fixed_order_and_explicit_authority() {
     let config = SessionAgentConfig::new(&root)
         .unwrap()
         .with_executor_id("executor-test")
-        .unwrap();
+        .unwrap()
+        .with_maximum_active_turns(4);
     let fragment = session_fragment(&config);
 
     assert_eq!(fragment.id(), SESSION_FRAGMENT_ID);
@@ -26,6 +27,7 @@ fn session_fragment_has_fixed_order_and_explicit_authority() {
     assert_eq!(entries[2].id().as_str(), SESSION_EXECUTOR_INSTANCE);
     assert_eq!(entries[2].plugin().as_str(), EXECUTOR_FACTORY);
     assert_eq!(entries[2].config()["executor_id"], "executor-test");
+    assert_eq!(entries[2].config()["maximum_active_turns"], 4);
 }
 
 #[test]

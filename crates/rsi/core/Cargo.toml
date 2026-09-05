@@ -28,6 +28,8 @@ rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-agent-store-sqlite = { path = "../../rsi-agent/store-sqlite" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-agent-tools = { path = "../../rsi-agent/tools" }
+rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-ai = { path = "../../rsi-ai/core" }
 rsi-ai-deepseek = { path = "../../rsi-ai/deepseek" }
 rsi-ai-image = { path = "../../rsi-ai/image" }

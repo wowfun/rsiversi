@@ -1,20 +1,59 @@
 # rsi-agent-turn-protocol
 
-Process-local application and executor contracts for Agent turns. Application
-callers submit Language or direct Image turns, cancel, observe, inspect
-outcomes, and read immutable session headers. Fresh submissions consume a
+Process-local application and executor contracts for Agent execution. Product
+callers admit durable mailbox messages, read their indexed pending/claimed/
+discarded state, observe independent Agent-control and Fact streams, cancel an
+unclaimed message or claimed Turn, and submit direct Image turns. Mailbox claim
+creates the Language Turn and first Step atomically; callers never speculate a
+Turn identity at message acceptance. Fresh submissions consume a
 prepared session carrying the exact Agent-composition generation selected by a
 process-local draft. Resume first obtains a move-only prepared token from the
 same Turn service; that token carries the authoritative Header and its exact
 resident or current-cold generation pin, never a caller preset override.
 Applications acquire it before durable Workspace registration, and submission
 consumes it. A token dropped after later application validation fails releases
-its pin without loading resident state.
+its pin without loading resident state. Agent wait durations are exact
+millisecond inputs within `1ms..=1h`; sub-millisecond direct API values are
+rejected instead of being rounded into a zero durable deadline.
+Mailbox submission carries no caller-declared tree root. The Kernel derives the
+root from the prepared Header and persists only that authoritative lineage.
 Executors register and claim work, obtain the claim's immutable composition
 pin, publish ordered Facts, and wait for explicit durable watermarks before
 external I/O. Delayed Tool work must retain that exact pin rather than consult
-a process-global mutable catalog. Dropping an observation is
-detach; there is no fork operation.
+a process-global mutable catalog. Every executor implementation must explicitly
+provide fork replay, next-Step admission, workspace refresh, Step closure, and
+activation settlement behavior; these durable lifecycle hooks never default to
+silent no-ops. Dropping an observation is detach.
+
+Mailbox admission, message state, dual-stream reconnectable observation, and
+the six source-authorized Agent operations share this seam. Spawn creates a
+durable continuable fork child; send/followup address only a direct parent-child
+edge. Send has a fixed next-Step horizon and remains held while the target is
+idle; followup always queues a waking next Turn, even when one is already
+running. List and wait observe descendants; interrupt cancels only the target's
+current Turn. A wait classifies a changed descendant as completion only from
+the exact changed control interval, paging through that interval when it exceeds
+one Store page. If every current descendant is already idle (or none exists),
+the call performs one revalidated observation and returns `NoProgress` or
+`Changed` without recording a park/resume pair because no live supervision wait
+began. Cancellation while a durable wait is parked records a cancel-caused
+resume and returns `TurnError::Cancelled`, rather than classifying cancellation
+as malformed Tool input. An unforgeable `AgentCallerAuthority` is derived from a live
+claim and transported to trusted Tools through the generic typed extension
+slot, so model arguments cannot invent tree authority. The legacy direct
+Language-turn method remains a lower-level test and recovery seam; the standard
+Session product enters Language work through mailbox claim. A next-Step
+completion still pending when its parent's activation Turn ends is durably
+promoted to a waking next Turn rather than being stranded. Ordinary
+fixed-horizon next-Step messages remain held. Dual-stream
+Session observation returns durable records after exact independent cursors, while the
+older Turn observation seam retains live-first delivery for an already-known
+direct Turn.
+Each message receipt also carries the durable Fact tail observed with that
+receipt. Together with the acceptance control cursor, it is a reconnectable
+starting point that lets a caller subscribe for the later claim without
+replaying old Facts or polling message status. A claimed receipt proves its
+model-visible input Fact is at or before that observed tail.
 Each claim exposes only borrowed getters and carries a private Kernel-issued
 seal plus the resident session's shared immutable Header allocation. Live
 operations require that seal, current claim identity, and the exact resident

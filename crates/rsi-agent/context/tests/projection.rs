@@ -1,11 +1,12 @@
 use rsi_agent_context::{ContextError, ContextFold, ContextLimits};
 use rsi_agent_session_protocol::{
-    AgentPresetId, EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, TurnId, TurnOutcome,
+    ActivationId, AgentMessageContent, AgentPath, AgentPresetId, EffectId, ForkOrigin,
+    ForkTurnSelection, FrozenAgentSettings, InputMessageSource, MessageId, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, TurnOutcome,
 };
 use rsi_ai_protocol::{
     AiCapability, ContentDelta, ContentStart, FinishReason, LanguageEvent, MessageContent,
-    MessageRole, ModelRef, PreparedCallSnapshot, RetryPolicy, ToolCallKind,
+    MessageRole, ModelRef, PreparedCallSnapshot, ProviderExtension, RetryPolicy, ToolCallKind,
 };
 use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
@@ -27,6 +28,31 @@ fn header(system: &str) -> SessionHeader {
         .unwrap(),
     )
     .unwrap()
+}
+
+fn fork_header(system: &str, terminal_seq: u64, effective_turns: u64) -> SessionHeader {
+    let parent = header(system);
+    let parent_id = parent.session_id().clone();
+    let parent_fingerprint = parent.fingerprint().unwrap();
+    parent
+        .forked_child(
+            SessionId::new("session-child").unwrap(),
+            2,
+            ForkOrigin {
+                parent_session_id: parent_id.clone(),
+                root_session_id: parent_id,
+                path: AgentPath::new(vec![1]).unwrap(),
+                task_name: "child".into(),
+                parent_header_fingerprint: parent_fingerprint,
+                invoking_turn_id: TurnId::new("turn-spawn").unwrap(),
+                resolved_after_seq: 0,
+                resolved_terminal_seq: terminal_seq,
+                terminal_prefix_sha256: "a".repeat(64),
+                requested_turns: ForkTurnSelection::All,
+                effective_turns,
+            },
+        )
+        .unwrap()
 }
 
 fn snapshot() -> PreparedCallSnapshot {
@@ -152,6 +178,243 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
     ));
     let encoded = serde_json::to_string(&projected.messages).unwrap();
     assert!(!encoded.contains("secret/workspace-name"));
+}
+
+#[test]
+fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
+    let previous = TurnId::new("turn-previous").unwrap();
+    let current = TurnId::new("turn-current").unwrap();
+    let effect = EffectId::new("model-replay").unwrap();
+    let replay = ProviderExtension::new(
+        "openai.responses.replay",
+        0,
+        json!({"response_id": "resp-1"}),
+    )
+    .unwrap();
+    let mut fold = ContextFold::new(header("system")).unwrap();
+    fold.apply(&facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: previous.clone(),
+            text: "previous user input".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::ModelIntent {
+            turn_id: previous.clone(),
+            effect_id: effect.clone(),
+            snapshot: snapshot(),
+        },
+        SessionFactBody::ModelStarted {
+            turn_id: previous.clone(),
+            effect_id: effect.clone(),
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: previous.clone(),
+            effect_id: effect.clone(),
+            event: LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Reasoning,
+            },
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: previous.clone(),
+            effect_id: effect.clone(),
+            event: LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Reasoning("private reasoning".into()),
+            },
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: previous.clone(),
+            effect_id: effect.clone(),
+            event: LanguageEvent::ContentFinished { index: 0 },
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: previous.clone(),
+            effect_id: effect,
+            event: LanguageEvent::Finished {
+                reason: FinishReason::Stop,
+                replay: Some(replay.clone()),
+            },
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: previous,
+            outcome: TurnOutcome::Completed,
+        },
+        SessionFactBody::TurnAccepted {
+            turn_id: current,
+            text: "current user input".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    ]))
+    .unwrap();
+
+    let request = fold.request(ContextLimits::default(), Vec::new()).unwrap();
+
+    assert!(request.extensions().is_empty());
+    assert_eq!(request.messages().len(), 3);
+    let encoded = serde_json::to_string(request.messages()).unwrap();
+    assert!(encoded.contains("current user input"));
+    assert!(encoded.contains("previous user input"));
+    assert!(!encoded.contains("private reasoning"));
+    assert!(!encoded.contains("resp-1"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // The regression keeps the complete visible inherited request while replay remains route-unscoped.
+fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
+    let parent_turn = TurnId::new("turn-fork-parent").unwrap();
+    let parent_effect = EffectId::new("model-fork-parent").unwrap();
+    let replay = ProviderExtension::new(
+        "openai.responses.replay",
+        0,
+        json!({"response_id": "resp-parent"}),
+    )
+    .unwrap();
+    let seed = facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: parent_turn.clone(),
+            text: "parent input".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::ModelIntent {
+            turn_id: parent_turn.clone(),
+            effect_id: parent_effect.clone(),
+            snapshot: snapshot(),
+        },
+        SessionFactBody::ModelStarted {
+            turn_id: parent_turn.clone(),
+            effect_id: parent_effect.clone(),
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: parent_turn.clone(),
+            effect_id: parent_effect.clone(),
+            event: LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            },
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: parent_turn.clone(),
+            effect_id: parent_effect.clone(),
+            event: LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Text("parent output".into()),
+            },
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: parent_turn.clone(),
+            effect_id: parent_effect.clone(),
+            event: LanguageEvent::ContentFinished { index: 0 },
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: parent_turn.clone(),
+            effect_id: parent_effect,
+            event: LanguageEvent::Finished {
+                reason: FinishReason::Stop,
+                replay: Some(replay.clone()),
+            },
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: parent_turn,
+            outcome: TurnOutcome::Completed,
+        },
+    ]);
+    let child_turn = TurnId::new("turn-fork-child").unwrap();
+    let child_step = StepId::new("step-fork-child").unwrap();
+    let child = facts(vec![
+        SessionFactBody::MessageTurnAccepted {
+            turn_id: child_turn.clone(),
+            activation_id: ActivationId::new("activation-fork-child").unwrap(),
+            message_ids: vec![MessageId::new("message-fork-child").unwrap()],
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::StepStarted {
+            turn_id: child_turn.clone(),
+            step_id: child_step.clone(),
+        },
+        SessionFactBody::InputMessageEntered {
+            turn_id: child_turn,
+            step_id: child_step,
+            source: InputMessageSource::Agent {
+                message_id: MessageId::new("message-fork-child").unwrap(),
+                source_session_id: SessionId::new("session-parent").unwrap(),
+            },
+            content: vec![AgentMessageContent::Text {
+                text: "child task".into(),
+            }],
+        },
+    ]);
+
+    let mut fold =
+        ContextFold::new(fork_header("system", u64::try_from(seed.len()).unwrap(), 1)).unwrap();
+    fold.apply_seed_page(&seed).unwrap();
+    fold.finish_seed().unwrap();
+    fold.apply(&child).unwrap();
+    let request = fold.request(ContextLimits::default(), Vec::new()).unwrap();
+    assert!(request.extensions().is_empty());
+    assert_eq!(request.messages().len(), 4);
+    assert!(matches!(
+        request.messages()[3].content(),
+        [MessageContent::Text { text }] if text == "child task"
+    ));
+}
+
+#[test]
+fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
+    let turn = TurnId::new("turn-seed").unwrap();
+    let seed = facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "parent".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: turn,
+            outcome: TurnOutcome::Completed,
+        },
+    ]);
+
+    let mut overlap = ContextFold::new(fork_header("", 2, 1)).unwrap();
+    overlap.apply_seed_page(&seed[..1]).unwrap();
+    assert!(matches!(
+        overlap.apply_seed_page(&seed),
+        Err(ContextError::Invalid(message)) if message.contains("expected parent Fact 2, got 1")
+    ));
+
+    let mut incomplete = ContextFold::new(fork_header("", 2, 1)).unwrap();
+    incomplete.apply_seed_page(&seed[..1]).unwrap();
+    assert!(matches!(
+        incomplete.finish_seed(),
+        Err(ContextError::Invalid(message)) if message.contains("complete inherited interval")
+    ));
+
+    let child = facts(vec![SessionFactBody::TurnAccepted {
+        turn_id: TurnId::new("turn-child-before-seed").unwrap(),
+        text: "child".into(),
+        model: None,
+        sandbox: SandboxMode::WorkspaceWrite,
+        require_approval: false,
+    }]);
+    assert!(matches!(
+        incomplete.apply(&child),
+        Err(ContextError::Invalid(message)) if message.contains("complete inherited interval")
+    ));
+    let mut incomplete_page = ContextFold::new(fork_header("", 2, 1)).unwrap();
+    incomplete_page.apply_seed_page(&seed[..1]).unwrap();
+    assert!(matches!(
+        incomplete_page.apply_page(&child, 1),
+        Err(ContextError::Invalid(message)) if message.contains("complete inherited interval")
+    ));
 }
 
 #[test]
@@ -311,6 +574,22 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
 #[test]
 fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     let limits = ContextLimits::default();
+    let mut empty_turn = ContextFold::with_limits(header("system"), limits).unwrap();
+    empty_turn
+        .apply(&facts(vec![SessionFactBody::MessageTurnAccepted {
+            turn_id: TurnId::new("turn-empty").unwrap(),
+            activation_id: ActivationId::new("activation-empty").unwrap(),
+            message_ids: vec![MessageId::new("message-empty").unwrap()],
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        }]))
+        .unwrap();
+    assert!(matches!(
+        empty_turn.checkpoint_bytes(),
+        Err(ContextError::Invalid(message)) if message.contains("empty turn")
+    ));
+
     let mut active = ContextFold::with_limits(header("system"), limits).unwrap();
     let active_turn = TurnId::new("turn-active").unwrap();
     active

@@ -13,6 +13,10 @@ deterministic memory implementation. Presets contribute bounded Profile
 sources. Composition builds immutable standing Agent generations inside the
 same Runtime, and session or draft pins keep their exact Tool catalog alive
 without exposing provider catalogs to Kernel or Executor.
+Workspace Context owns bounded trust-aware instruction and skill discovery;
+Kernel alone turns complete snapshots into durable input Facts. Agent Tools owns
+the six model-facing subagent controls as thin adapters over the process-local
+Turn service and receives caller authority only from an exact live claim.
 
 All runtime components are ordinary plugins over public `rsi-meta`
 `Runtime -> Context -> Fiber` semantics. `rsi-meta` remains unaware of Agent

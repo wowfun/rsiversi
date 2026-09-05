@@ -4,6 +4,28 @@ This package owns the exact pre-release durable Session format: immutable
 headers, bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
+Agent control records form a second append-only digest chain beside Facts.
+They own mailbox acceptance/claim/discard, activation and wait transitions,
+delivery-horizon promotion, completion reservations, and durable tree
+scheduling signals. A pending non-waking next-Step completion which survives
+its parent's activation Turn is explicitly promoted to a waking next-Turn
+message before that activation can settle; ordinary fixed-horizon next-Step
+messages remain held, and indexes never reclassify either without a canonical
+control record. Model-visible
+message entry remains a Fact: one atomic Store commit ties its control claim to
+the exact activation, Turn, Step, and Fact sequence. A session may therefore
+have a durable Header and control tail while its Fact tail is zero.
+Mailbox depth, content blocks per message, and paths per workspace-touch Fact
+have separate named 64-entry bounds. They currently share a value but are
+independent contracts and may evolve without accidental semantic coupling.
+
+Fork lineage records the parent Header fingerprint, tree path, invoking Turn,
+resolved balanced completed-turn interval, and terminal-prefix digest. Fork
+seeds retain provider replay events. The child has a new Session identity and
+never mutates or truncates its parent's log. An effective-turn count of zero is
+valid only for the exact empty interval whose cursors are both zero; every
+nonempty resolved interval retains at least one complete Turn.
+
 Every header carries one required `AgentPresetId`. Its lowercase
 `[a-z0-9][a-z0-9-]*` grammar is also safe as a preset-directory segment, and
 construction plus deserialization enforce the portable 255-byte segment bound.

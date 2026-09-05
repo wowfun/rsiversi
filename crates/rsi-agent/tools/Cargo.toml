@@ -1,0 +1,20 @@
+[package]
+name = "rsi-agent-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-agent-turn-protocol = { path = "../turn-protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

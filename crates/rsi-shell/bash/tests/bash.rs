@@ -16,8 +16,8 @@ use rsi_shell_bash::{
 };
 use rsi_tools::ToolsFactory;
 use rsi_tools_protocol::{
-    ToolCall, ToolCatalogProviderContract, ToolContent, ToolExecutionPolicy, ToolRegistrar,
-    ToolRegistrarContract, ToolRuntime, ToolStart,
+    ToolCall, ToolCatalogProviderContract, ToolContent, ToolExecutionExtensions,
+    ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract, ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
 use std::ffi::{OsStr, OsString};
@@ -209,6 +209,7 @@ impl Fixture {
                 },
                 sandbox: Arc::clone(&self.sandbox),
                 job_scope: Some(self.scope.clone()),
+                extensions: ToolExecutionExtensions::default(),
             })
             .await
     }

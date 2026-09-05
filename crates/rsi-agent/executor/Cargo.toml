@@ -31,9 +31,11 @@ tokio-util.workspace = true
 rsi-agent-kernel = { path = "../kernel" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-agent-testkit = { path = "../testkit" }
+rsi-agent-workspace-context = { path = "../workspace-context" }
 rsi-ai-testkit = { path = "../../rsi-ai/testkit" }
 rsi-jobs-local = { path = "../../rsi-jobs/local" }
 rsi-tools = { path = "../../rsi-tools/core" }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

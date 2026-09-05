@@ -6,7 +6,10 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    MAXIMUM_FACTS_PER_READ, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    ActivationId, AgentControlRecord, AgentMessage, AgentMessageSource, ForkTurnSelection,
+    InputMessageSource, MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ,
+    MAXIMUM_PENDING_AGENT_MESSAGES, MessageDiscardReason, MessageId, MessageTarget, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, validate_control_sequence,
     validate_fact_sequence,
 };
 use rsi_meta_contract::LocalContract;
@@ -17,13 +20,89 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 7;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 11;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
 pub const MAXIMUM_STORE_BATCH_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum aggregate encoded bytes returned by one Fact page.
 pub const MAXIMUM_STORE_FACT_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES;
+/// Maximum aggregate encoded bytes returned by one Agent-control page.
+pub const MAXIMUM_STORE_CONTROL_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES;
+/// Maximum aggregate encoded Agent-message bytes returned in one mailbox prefix.
+pub const MAXIMUM_STORE_MAILBOX_PAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Binds activation labels to the immutable Session Header lineage.
+pub fn validate_activation_lineage(
+    header: &SessionHeader,
+    root: &SessionId,
+    parent: Option<&SessionId>,
+    path: &rsi_agent_session_protocol::AgentPath,
+) -> Result<()> {
+    let matches = match header.fork_origin() {
+        Some(origin) => {
+            root == &origin.root_session_id
+                && parent == Some(&origin.parent_session_id)
+                && path == &origin.path
+        }
+        None => root == header.session_id() && parent.is_none() && path.depth() == 0,
+    };
+    if !matches {
+        return Err(StoreError::Invalid(
+            "activation lineage disagrees with immutable Header".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates that a mailbox claim points to its exact newly appended model-visible input Fact.
+pub fn validate_message_claim_fact(
+    message: &AgentMessage,
+    turn_id: &TurnId,
+    step_id: &StepId,
+    minimum_entered_fact_seq: u64,
+    fact: Option<&SessionFact>,
+) -> Result<()> {
+    let expected_source = match &message.source {
+        AgentMessageSource::Human => InputMessageSource::Human {
+            message_id: message.message_id.clone(),
+        },
+        AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
+            message_id: message.message_id.clone(),
+            source_session_id: source_session_id.clone(),
+        },
+        AgentMessageSource::Completion {
+            child_session_id,
+            activation_id,
+        } => InputMessageSource::Completion {
+            message_id: message.message_id.clone(),
+            child_session_id: child_session_id.clone(),
+            activation_id: activation_id.clone(),
+        },
+    };
+    let Some(fact) = fact.filter(|fact| fact.seq() >= minimum_entered_fact_seq) else {
+        return Err(StoreError::Invalid(
+            "mailbox claim must reference a newly appended input Fact".into(),
+        ));
+    };
+    match fact.body() {
+        SessionFactBody::InputMessageEntered {
+            turn_id: entered_turn_id,
+            step_id: entered_step_id,
+            source,
+            content,
+        } if entered_turn_id == turn_id
+            && entered_step_id == step_id
+            && source == &expected_source
+            && content == &message.content =>
+        {
+            Ok(())
+        }
+        _ => Err(StoreError::Invalid(
+            "mailbox claim does not match its newly appended input Fact".into(),
+        )),
+    }
+}
 /// Maximum immutable CAS object size.
 pub const MAXIMUM_STORE_CAS_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum durable session identities in one enumeration page.
@@ -57,9 +136,9 @@ impl StoreFactTurnRole {
 /// Classifies one validated Fact body for mechanical turn indexing.
 pub const fn store_fact_turn_role(body: &SessionFactBody) -> StoreFactTurnRole {
     match body {
-        SessionFactBody::TurnAccepted { .. } | SessionFactBody::ImageRequested { .. } => {
-            StoreFactTurnRole::Acceptance
-        }
+        SessionFactBody::TurnAccepted { .. }
+        | SessionFactBody::MessageTurnAccepted { .. }
+        | SessionFactBody::ImageRequested { .. } => StoreFactTurnRole::Acceptance,
         SessionFactBody::TurnTerminal { .. } => StoreFactTurnRole::Terminal,
         _ => StoreFactTurnRole::Event,
     }
@@ -189,6 +268,675 @@ impl AppendBatch {
 pub struct AppendCommit {
     /// Exact sequence now durable.
     pub durable_seq: u64,
+}
+
+/// One session suffix inside a closed multi-session Agent commit.
+#[derive(Clone, Debug)]
+pub struct AtomicSessionAppend {
+    /// Exact target session.
+    pub session_id: SessionId,
+    /// Current durable Fact sequence observed by the caller.
+    pub expected_fact_seq: u64,
+    /// Current durable control sequence observed by the caller.
+    pub expected_control_seq: u64,
+    /// Header supplied only for the single newly durable session.
+    pub header: Option<SessionHeader>,
+    /// Optional exact contiguous Fact suffix.
+    pub facts: Vec<SessionFact>,
+    /// Optional exact contiguous Agent-control suffix.
+    pub controls: Vec<AgentControlRecord>,
+}
+
+impl AtomicSessionAppend {
+    fn validate(&self) -> Result<usize> {
+        if self.facts.is_empty() && self.controls.is_empty() {
+            return Err(StoreError::Invalid(
+                "atomic Agent session append must contain Facts or control records".into(),
+            ));
+        }
+        if self.facts.len() > MAXIMUM_STORE_BATCH_FACTS
+            || self.controls.len() > MAXIMUM_STORE_BATCH_FACTS
+        {
+            return Err(StoreError::Invalid(format!(
+                "atomic Agent suffixes may contain at most {MAXIMUM_STORE_BATCH_FACTS} records"
+            )));
+        }
+        if let Some(header) = &self.header {
+            header
+                .validate()
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+            if header.session_id() != &self.session_id
+                || self.expected_fact_seq != 0
+                || self.expected_control_seq != 0
+            {
+                return Err(StoreError::Invalid(
+                    "new Agent session Header must match zero Fact/control cursors".into(),
+                ));
+            }
+        }
+        validate_fact_sequence(self.expected_fact_seq, &self.facts)
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        validate_control_sequence(self.expected_control_seq, &self.controls)
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        self.facts
+            .iter()
+            .map(SessionFact::encoded_len)
+            .chain(self.controls.iter().map(AgentControlRecord::encoded_len))
+            .try_fold(0_usize, |total, bytes| {
+                total
+                    .checked_add(bytes)
+                    .ok_or_else(|| StoreError::Invalid("atomic Agent commit size overflow".into()))
+            })
+    }
+}
+
+/// Closed atomic mutation used by Agent-control transitions.
+#[derive(Clone, Debug)]
+pub struct AtomicAgentCommit {
+    /// One source/target pair plus at most one new child session.
+    pub sessions: Vec<AtomicSessionAppend>,
+    /// Exact active activations which must still own their sessions.
+    pub required_active_activations: Vec<AgentActivationGuard>,
+    /// Sessions which must have no active activation, open Turn, or waking message.
+    pub quiescent_sessions: Vec<SessionId>,
+}
+
+impl AtomicAgentCommit {
+    /// Revalidates shape, cursor, uniqueness, and aggregate-byte bounds.
+    pub fn validate(&self) -> Result<()> {
+        if self.sessions.is_empty() || self.sessions.len() > 3 {
+            return Err(StoreError::Invalid(
+                "atomic Agent commit must touch 1..=3 sessions".into(),
+            ));
+        }
+        if self.required_active_activations.len() > MAXIMUM_SESSIONS_PER_READ
+            || self.quiescent_sessions.len() > MAXIMUM_SESSIONS_PER_READ
+        {
+            return Err(StoreError::Invalid(
+                "atomic Agent guard set exceeds its bounded session count".into(),
+            ));
+        }
+        let mut guarded = BTreeSet::new();
+        for guard in &self.required_active_activations {
+            if !guarded.insert(&guard.session_id) {
+                return Err(StoreError::Invalid(
+                    "atomic Agent commit repeats an activation guard session".into(),
+                ));
+            }
+        }
+        let mut quiescent = BTreeSet::new();
+        for session_id in &self.quiescent_sessions {
+            if !quiescent.insert(session_id) {
+                return Err(StoreError::Invalid(
+                    "atomic Agent commit repeats a quiescence guard session".into(),
+                ));
+            }
+        }
+        let mut identities = BTreeSet::new();
+        let mut headers = 0_usize;
+        let mut bytes = 0_usize;
+        for session in &self.sessions {
+            if !identities.insert(&session.session_id) {
+                return Err(StoreError::Invalid(
+                    "atomic Agent commit repeats a session".into(),
+                ));
+            }
+            headers += usize::from(session.header.is_some());
+            bytes = bytes
+                .checked_add(session.validate()?)
+                .ok_or_else(|| StoreError::Invalid("atomic Agent commit size overflow".into()))?;
+        }
+        if headers > 1 {
+            return Err(StoreError::Invalid(
+                "atomic Agent commit may create at most one session".into(),
+            ));
+        }
+        if bytes > MAXIMUM_STORE_BATCH_BYTES {
+            return Err(StoreError::Invalid(format!(
+                "atomic Agent commit exceeds {MAXIMUM_STORE_BATCH_BYTES} encoded bytes"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Exact active-activation compare guard for an Agent transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentActivationGuard {
+    /// Session which must still own the activation.
+    pub session_id: SessionId,
+    /// Exact activation identity expected by the caller.
+    pub activation_id: ActivationId,
+}
+
+/// Indexed lifecycle phase for the single active activation of one session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreActivationPhase {
+    /// Its Turn has not durably terminated.
+    Running,
+    /// Its wait Tool durably released the executor lane.
+    Parked,
+    /// Its Turn ended but descendant work still prevents settlement.
+    WaitingForDescendants,
+}
+
+/// Bounded current activation projection maintained from durable controls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreActiveActivation {
+    /// Exact active identity.
+    pub activation_id: ActivationId,
+    /// Optional direct parent session for a non-root activation.
+    pub parent_session_id: Option<SessionId>,
+    /// Turn claimed by the activation once its waking message is entered.
+    pub turn_id: Option<TurnId>,
+    /// Current indexed lifecycle phase.
+    pub phase: StoreActivationPhase,
+    /// Parent-mailbox bytes reserved for this activation's completion.
+    pub completion_reserved_bytes: Option<u64>,
+}
+
+/// One bounded lexical page of sessions waiting for descendant settlement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreWaitingActivationPage {
+    /// Exclusive session cursor supplied by the caller.
+    pub after: Option<SessionId>,
+    /// Waiting session identities in strict lexical order.
+    pub sessions: Vec<SessionId>,
+    /// Whether another waiting activation exists.
+    pub has_more: bool,
+}
+
+impl StoreWaitingActivationPage {
+    /// Revalidates bounded strict lexical ordering.
+    pub fn validate(&self) -> Result<()> {
+        if self.sessions.len() > MAXIMUM_SESSIONS_PER_READ
+            || (self.sessions.is_empty() && self.has_more)
+        {
+            return Err(StoreError::Corrupt(
+                "waiting-activation page has invalid bounds".into(),
+            ));
+        }
+        let mut previous = self.after.as_ref();
+        for session_id in &self.sessions {
+            if previous.is_some_and(|previous| previous >= session_id) {
+                return Err(StoreError::Corrupt(
+                    "waiting-activation page is not strictly ordered".into(),
+                ));
+            }
+            previous = Some(session_id);
+        }
+        Ok(())
+    }
+}
+
+/// Durable Fact/control watermarks for one touched session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentCommitWatermark {
+    /// Exact touched session.
+    pub session_id: SessionId,
+    /// Fact watermark after commit.
+    pub durable_fact_seq: u64,
+    /// Agent-control watermark after commit.
+    pub durable_control_seq: u64,
+}
+
+/// Result of one successful atomic Agent commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtomicAgentCommitResult {
+    /// Watermarks in request order.
+    pub sessions: Vec<AgentCommitWatermark>,
+}
+
+/// One bounded contiguous durable Agent-control page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreControlPage {
+    /// Cursor supplied by the caller.
+    pub after_seq: u64,
+    /// Ordered contiguous records after the cursor.
+    pub records: Vec<AgentControlRecord>,
+    /// Exact durable control tail at read time.
+    pub durable_seq: u64,
+}
+
+impl StoreControlPage {
+    /// Returns whether this page reaches the read-time durable tail.
+    pub fn caught_up(&self) -> bool {
+        self.records
+            .last()
+            .map_or(self.after_seq, AgentControlRecord::seq)
+            == self.durable_seq
+    }
+
+    /// Revalidates the contiguous bounded page.
+    pub fn validate(&self) -> Result<()> {
+        validate_control_sequence(self.after_seq, &self.records)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let encoded_bytes = self.records.iter().try_fold(0_usize, |total, record| {
+            total
+                .checked_add(record.encoded_len())
+                .ok_or_else(|| StoreError::Corrupt("control page size overflow".into()))
+        })?;
+        if encoded_bytes > MAXIMUM_STORE_CONTROL_PAGE_BYTES {
+            return Err(StoreError::Corrupt(format!(
+                "control page exceeds {MAXIMUM_STORE_CONTROL_PAGE_BYTES} encoded bytes"
+            )));
+        }
+        let last = self
+            .records
+            .last()
+            .map_or(self.after_seq, AgentControlRecord::seq);
+        if self.after_seq > self.durable_seq || last > self.durable_seq {
+            return Err(StoreError::Corrupt(
+                "control page cursor exceeds its durable watermark".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Stable cursor for one root's globally ordered ready messages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreReadyMessageCursor {
+    /// Timestamp at which the message became waking input.
+    pub timestamp_ms: u64,
+    /// Target session tie-breaker.
+    pub session_id: SessionId,
+    /// Per-session control-sequence tie-breaker.
+    pub control_seq: u64,
+}
+
+/// One unclaimed waking message selected from the durable ready index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreReadyMessage {
+    /// Target session.
+    pub session_id: SessionId,
+    /// Accepted message identity.
+    pub message_id: MessageId,
+    /// Durable control sequence at which the message became waking input.
+    pub control_seq: u64,
+    /// Timestamp at which the message became waking input.
+    pub timestamp_ms: u64,
+    /// Current delivery horizon.
+    pub target: MessageTarget,
+}
+
+impl StoreReadyMessage {
+    /// Returns the exclusive cursor after this entry.
+    pub fn cursor(&self) -> StoreReadyMessageCursor {
+        StoreReadyMessageCursor {
+            timestamp_ms: self.timestamp_ms,
+            session_id: self.session_id.clone(),
+            control_seq: self.control_seq,
+        }
+    }
+}
+
+/// One bounded page for a single Agent-tree root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreReadyMessagePage {
+    /// Exclusive cursor supplied by the caller.
+    pub after: Option<StoreReadyMessageCursor>,
+    /// Strictly ordered unclaimed waking messages.
+    pub messages: Vec<StoreReadyMessage>,
+    /// Whether another message exists for this root.
+    pub has_more: bool,
+}
+
+/// Indexed durable lifecycle of one accepted mailbox message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreAgentMessageState {
+    /// Accepted and not yet claimed or discarded.
+    Pending,
+    /// Atomically entered one activation Turn and Step.
+    Claimed {
+        /// Owning activation.
+        activation_id: ActivationId,
+        /// Turn which accepted the message.
+        turn_id: TurnId,
+        /// Step into which the message entered.
+        step_id: StepId,
+        /// Exact durable input Fact sequence.
+        entered_fact_seq: u64,
+    },
+    /// Accepted input which will never be claimed.
+    Discarded {
+        /// Stable discard reason.
+        reason: MessageDiscardReason,
+        /// Exact control record which discarded it.
+        control_seq: u64,
+    },
+}
+
+/// One bounded mailbox entry projected by the Store-owned message index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreAgentMessage {
+    /// Exact accepted message payload.
+    pub message: AgentMessage,
+    /// Exact compact JSON byte length computed at the Store-owned payload boundary.
+    pub encoded_message_bytes: usize,
+    /// Root which owns the target Agent tree.
+    pub root_session_id: SessionId,
+    /// Current delivery horizon.
+    pub target: MessageTarget,
+    /// Whether pending input belongs in the waking ready index.
+    pub wake_required: bool,
+    /// Exact acceptance control sequence.
+    pub accepted_control_seq: u64,
+    /// Current indexed lifecycle.
+    pub state: StoreAgentMessageState,
+}
+
+impl StoreAgentMessage {
+    /// Revalidates one indexed projection independently of its table encoding.
+    pub fn validate(&self, durable_control_seq: u64) -> Result<()> {
+        self.message
+            .validate()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if self.encoded_message_bytes == 0 {
+            return Err(StoreError::Corrupt(
+                "mailbox message has no encoded-byte length".into(),
+            ));
+        }
+        if self.accepted_control_seq == 0 || self.accepted_control_seq > durable_control_seq {
+            return Err(StoreError::Corrupt(
+                "mailbox acceptance exceeds the durable control watermark".into(),
+            ));
+        }
+        match &self.state {
+            StoreAgentMessageState::Claimed {
+                entered_fact_seq, ..
+            } if *entered_fact_seq == 0 => {
+                return Err(StoreError::Corrupt(
+                    "claimed mailbox message has no entered Fact".into(),
+                ));
+            }
+            StoreAgentMessageState::Discarded { control_seq, .. }
+                if *control_seq <= self.accepted_control_seq
+                    || *control_seq > durable_control_seq =>
+            {
+                return Err(StoreError::Corrupt(
+                    "mailbox discard sequence is outside its durable interval".into(),
+                ));
+            }
+            StoreAgentMessageState::Pending
+            | StoreAgentMessageState::Claimed { .. }
+            | StoreAgentMessageState::Discarded { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+/// Atomic bounded view of one session mailbox at one control watermark.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreAgentMailbox {
+    /// Optional exact message requested by identity, including terminal states.
+    pub selected: Option<StoreAgentMessage>,
+    /// Every pending message in acceptance order.
+    pub pending: Vec<StoreAgentMessage>,
+    /// Complete pending count at the same Store snapshot, including omitted suffix entries.
+    pub pending_count: usize,
+    /// Exact durable control tail at read time.
+    pub durable_control_seq: u64,
+    /// Exact durable Fact tail captured in the same Store snapshot.
+    pub durable_fact_seq: u64,
+}
+
+/// Atomic metadata-only view of one session mailbox.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreAgentMailboxSummary {
+    /// Complete pending-message count at the Store snapshot.
+    pub pending_count: usize,
+    /// Pending next-Step completion identities in acceptance order at the same snapshot.
+    pub pending_next_step_completion_message_ids: Vec<MessageId>,
+    /// Exact durable control tail at the same Store snapshot.
+    pub durable_control_seq: u64,
+    /// Exact durable Fact tail at the same Store snapshot.
+    pub durable_fact_seq: u64,
+}
+
+/// Latest workspace-context digests derived from canonical durable Facts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StoreWorkspaceContextState {
+    /// Latest complete instruction-baseline digest, when one was published.
+    pub instructions_sha256: Option<String>,
+    /// Latest complete skill-catalog digest, when one was published.
+    pub skill_catalog_sha256: Option<String>,
+    /// Exact durable Fact tail captured in the same Store snapshot.
+    pub durable_fact_seq: u64,
+}
+
+impl StoreWorkspaceContextState {
+    /// Revalidates optional lowercase SHA-256 values returned by a Store.
+    pub fn validate(&self) -> Result<()> {
+        for (name, digest) in [
+            ("workspace instruction", &self.instructions_sha256),
+            ("workspace skill catalog", &self.skill_catalog_sha256),
+        ] {
+            if digest.as_ref().is_some_and(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            }) {
+                return Err(StoreError::Corrupt(format!(
+                    "{name} digest is not lowercase SHA-256"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl StoreAgentMailboxSummary {
+    /// Revalidates the protocol-owned pending-message bound.
+    pub fn validate(&self) -> Result<()> {
+        let identities = self
+            .pending_next_step_completion_message_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
+            || self.pending_next_step_completion_message_ids.len() > self.pending_count
+            || identities.len() != self.pending_next_step_completion_message_ids.len()
+        {
+            return Err(StoreError::Corrupt(
+                "mailbox summary exceeds its bound or repeats a next-Step identity".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl StoreAgentMailbox {
+    /// Revalidates bounds, ordering, identities, and indexed state.
+    pub fn validate(&self) -> Result<()> {
+        if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
+            || self.pending.len() > self.pending_count
+            || (self.pending_count > 0 && self.pending.is_empty())
+        {
+            return Err(StoreError::Corrupt(
+                "indexed mailbox exceeds its pending-message bound".into(),
+            ));
+        }
+        let mut previous = 0_u64;
+        let mut identities = BTreeSet::new();
+        let mut encoded_bytes = 0_usize;
+        for entry in &self.pending {
+            entry.validate(self.durable_control_seq)?;
+            encoded_bytes = encoded_bytes
+                .checked_add(entry.encoded_message_bytes)
+                .ok_or_else(|| StoreError::Corrupt("mailbox byte count overflowed".into()))?;
+            if !matches!(entry.state, StoreAgentMessageState::Pending)
+                || entry.accepted_control_seq <= previous
+                || !identities.insert(&entry.message.message_id)
+            {
+                return Err(StoreError::Corrupt(
+                    "indexed pending mailbox is not strictly ordered and unique".into(),
+                ));
+            }
+            previous = entry.accepted_control_seq;
+        }
+        if encoded_bytes > MAXIMUM_STORE_MAILBOX_PAGE_BYTES {
+            return Err(StoreError::Corrupt(
+                "indexed mailbox page exceeds its encoded-byte bound".into(),
+            ));
+        }
+        if let Some(selected) = &self.selected {
+            selected.validate(self.durable_control_seq)?;
+        }
+        Ok(())
+    }
+}
+
+/// One bounded lexical page of Agent-tree roots with waking messages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreReadyRootPage {
+    /// Exclusive root cursor supplied by the caller.
+    pub after: Option<SessionId>,
+    /// Distinct roots with at least one waking message.
+    pub roots: Vec<SessionId>,
+    /// Whether another ready root exists.
+    pub has_more: bool,
+}
+
+impl StoreReadyRootPage {
+    /// Revalidates bounded strict lexical ordering.
+    pub fn validate(&self) -> Result<()> {
+        if self.roots.len() > MAXIMUM_SESSIONS_PER_READ || (self.roots.is_empty() && self.has_more)
+        {
+            return Err(StoreError::Corrupt(
+                "ready-root page has invalid bounds".into(),
+            ));
+        }
+        let mut previous = self.after.as_ref();
+        for root in &self.roots {
+            if previous.is_some_and(|previous| previous >= root) {
+                return Err(StoreError::Corrupt(
+                    "ready-root page is not strictly ordered".into(),
+                ));
+            }
+            previous = Some(root);
+        }
+        Ok(())
+    }
+}
+
+/// One durable direct-child descriptor from immutable Header lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreAgentChild {
+    /// Exact child session identity.
+    pub session_id: SessionId,
+    /// Stable path within the shared Agent tree.
+    pub path: rsi_agent_session_protocol::AgentPath,
+    /// Stable parent-allocated task name.
+    pub task_name: String,
+}
+
+/// One bounded lexical page of direct Agent children.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreAgentChildPage {
+    /// Exclusive child-session cursor supplied by the caller.
+    pub after: Option<SessionId>,
+    /// Direct children ordered by session identity.
+    pub children: Vec<StoreAgentChild>,
+    /// Whether another direct child exists.
+    pub has_more: bool,
+}
+
+impl StoreAgentChildPage {
+    /// Revalidates page bounds, direct-child paths, and lexical ordering.
+    pub fn validate(&self) -> Result<()> {
+        if self.children.len() > MAXIMUM_SESSIONS_PER_READ
+            || (self.children.is_empty() && self.has_more)
+        {
+            return Err(StoreError::Corrupt(
+                "Agent-child page has invalid bounds".into(),
+            ));
+        }
+        let mut previous = self.after.as_ref();
+        for child in &self.children {
+            if previous.is_some_and(|previous| previous >= &child.session_id)
+                || child.path.depth() == 0
+            {
+                return Err(StoreError::Corrupt(
+                    "Agent-child page is not strictly ordered or names a root".into(),
+                ));
+            }
+            previous = Some(&child.session_id);
+        }
+        Ok(())
+    }
+}
+
+/// One descendant's durable Agent-control watermark captured in a subtree snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreDescendantControlWatermark {
+    /// Exact descendant Session identity.
+    pub session_id: SessionId,
+    /// Exact durable Agent-control tail captured with subtree membership.
+    pub durable_control_seq: u64,
+}
+
+/// Atomic bounded view of one Session's complete durable descendant set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreDescendantControlSnapshot {
+    /// Descendants in strict lexical Session order.
+    pub descendants: Vec<StoreDescendantControlWatermark>,
+}
+
+impl StoreDescendantControlSnapshot {
+    /// Revalidates the tree-size bound and strict lexical identity ordering.
+    pub fn validate(&self) -> Result<()> {
+        if self.descendants.len() >= MAXIMUM_DURABLE_AGENT_TREE_NODES {
+            return Err(StoreError::Corrupt(
+                "descendant control snapshot exceeds the durable tree bound".into(),
+            ));
+        }
+        let mut previous = None;
+        for descendant in &self.descendants {
+            if previous.is_some_and(|previous| previous >= &descendant.session_id) {
+                return Err(StoreError::Corrupt(
+                    "descendant control snapshot is not strictly ordered".into(),
+                ));
+            }
+            previous = Some(&descendant.session_id);
+        }
+        Ok(())
+    }
+}
+
+impl StoreReadyMessagePage {
+    /// Revalidates ordering, count, and cursor semantics.
+    pub fn validate(&self) -> Result<()> {
+        if self.messages.len() > MAXIMUM_SESSIONS_PER_READ
+            || (self.messages.is_empty() && self.has_more)
+        {
+            return Err(StoreError::Corrupt(
+                "ready-message page has invalid bounds".into(),
+            ));
+        }
+        let mut previous = self.after.clone();
+        for message in &self.messages {
+            let current = message.cursor();
+            if previous.as_ref().is_some_and(|previous| {
+                (
+                    current.timestamp_ms,
+                    &current.session_id,
+                    current.control_seq,
+                ) <= (
+                    previous.timestamp_ms,
+                    &previous.session_id,
+                    previous.control_seq,
+                )
+            }) {
+                return Err(StoreError::Corrupt(
+                    "ready-message page is not strictly ordered".into(),
+                ));
+            }
+            previous = Some(current);
+        }
+        Ok(())
+    }
 }
 
 /// One bounded contiguous durable Fact page.
@@ -356,6 +1104,19 @@ pub struct StoreTurnBoundary {
     durable_seq: u64,
 }
 
+/// Immutable completed-parent boundary resolved for one fork request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreForkBoundary {
+    /// Exclusive Fact cursor before the first selected completed Turn.
+    pub resolved_after_seq: u64,
+    /// Latest inherited terminal sequence, or zero for no inherited turns.
+    pub resolved_terminal_seq: u64,
+    /// Fact-prefix digest at `resolved_terminal_seq`.
+    pub terminal_prefix_sha256: String,
+    /// Completed turns selected by the request.
+    pub effective_turns: u64,
+}
+
 impl StoreTurnBoundary {
     /// Validates indexed boundary Facts and constructs one narrow Store result.
     pub fn new(
@@ -371,7 +1132,9 @@ impl StoreTurnBoundary {
             || accepted.body().turn_id() != &turn_id
             || !matches!(
                 accepted.body(),
-                SessionFactBody::TurnAccepted { .. } | SessionFactBody::ImageRequested { .. }
+                SessionFactBody::TurnAccepted { .. }
+                    | SessionFactBody::MessageTurnAccepted { .. }
+                    | SessionFactBody::ImageRequested { .. }
             )
         {
             return Err(StoreError::Corrupt(
@@ -638,6 +1401,13 @@ impl CasObjectRef {
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Atomically creates a session if needed and appends one exact suffix.
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit>;
+    /// Applies one closed Agent-control commit across up to three sessions.
+    async fn commit_agent(&self, commit: AtomicAgentCommit) -> Result<AtomicAgentCommitResult> {
+        commit.validate()?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support Agent-control commits".into(),
+        ))
+    }
     /// Reads the immutable header or returns not found.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
     /// Reads at most `limit` contiguous Facts after one cursor.
@@ -647,6 +1417,19 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after_seq: u64,
         limit: usize,
     ) -> Result<StoreFactPage>;
+    /// Reads at most `limit` contiguous Agent-control records after one cursor.
+    async fn read_controls(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<StoreControlPage> {
+        let _ = (session_id, after_seq);
+        validate_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support Agent-control reads".into(),
+        ))
+    }
     /// Reads at most `limit` contiguous Facts immediately before one exclusive cursor.
     ///
     /// Cursor zero selects one past the read-time durable tail. Results are
@@ -671,6 +1454,18 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         session_id: &SessionId,
         turn_id: &TurnId,
     ) -> Result<StoreTurnBoundary>;
+    /// Resolves the tamper-evident completed-turn prefix before one invoking Turn.
+    async fn resolve_fork_boundary(
+        &self,
+        session_id: &SessionId,
+        invoking_turn_id: &TurnId,
+        selection: ForkTurnSelection,
+    ) -> Result<StoreForkBoundary> {
+        let _ = (session_id, invoking_turn_id, selection);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support fork boundaries".into(),
+        ))
+    }
     /// Lists at most `limit` accepted turns without a terminal Fact.
     async fn list_open_turns(
         &self,
@@ -697,6 +1492,114 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after: Option<&SessionId>,
         limit: usize,
     ) -> Result<StoreSessionPage>;
+    /// Lists unclaimed waking messages for one exact Agent-tree root.
+    async fn list_ready_messages(
+        &self,
+        root_session_id: &SessionId,
+        after: Option<&StoreReadyMessageCursor>,
+        limit: usize,
+    ) -> Result<StoreReadyMessagePage> {
+        let _ = (root_session_id, after);
+        validate_session_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support durable ready messages".into(),
+        ))
+    }
+    /// Reads the complete bounded pending mailbox and one optional message status atomically.
+    async fn read_agent_mailbox(
+        &self,
+        session_id: &SessionId,
+        selected_message_id: Option<&MessageId>,
+    ) -> Result<StoreAgentMailbox> {
+        let _ = (session_id, selected_message_id);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support indexed mailbox reads".into(),
+        ))
+    }
+    /// Reads only the complete pending count and exact durable tails atomically.
+    async fn read_agent_mailbox_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StoreAgentMailboxSummary> {
+        let _ = session_id;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support mailbox summaries".into(),
+        ))
+    }
+    /// Reads the latest workspace-context digests derived from canonical Facts.
+    async fn read_workspace_context_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StoreWorkspaceContextState> {
+        let _ = session_id;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support workspace-context state".into(),
+        ))
+    }
+    /// Lists distinct Agent-tree roots which currently contain waking input.
+    async fn list_ready_roots(
+        &self,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<StoreReadyRootPage> {
+        let _ = after;
+        validate_session_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support durable ready-root listing".into(),
+        ))
+    }
+    /// Lists bounded direct children recorded by immutable fork lineage.
+    async fn list_agent_children(
+        &self,
+        parent_session_id: &SessionId,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<StoreAgentChildPage> {
+        let _ = (parent_session_id, after);
+        validate_session_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support durable child listing".into(),
+        ))
+    }
+    /// Atomically snapshots complete descendant membership and control watermarks.
+    async fn read_descendant_control_snapshot(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<StoreDescendantControlSnapshot> {
+        let _ = parent_session_id;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support descendant control snapshots".into(),
+        ))
+    }
+    /// Reads the single currently active activation projection for one session.
+    async fn active_activation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<StoreActiveActivation>> {
+        let _ = session_id;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support active-activation indexing".into(),
+        ))
+    }
+    /// Counts active child activations reserving completion capacity in a parent mailbox.
+    async fn completion_reservation_count(&self, parent_session_id: &SessionId) -> Result<usize> {
+        let _ = parent_session_id;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support completion-reservation indexing".into(),
+        ))
+    }
+    /// Lists sessions whose terminal Turn still waits for descendants.
+    async fn list_waiting_activations(
+        &self,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<StoreWaitingActivationPage> {
+        let _ = after;
+        validate_session_read_limit(limit)?;
+        Err(StoreError::Invalid(
+            "this Agent Store does not support waiting-activation listing".into(),
+        ))
+    }
     /// Reads one optional opaque Context checkpoint.
     async fn read_context_checkpoint(
         &self,
@@ -752,6 +1655,30 @@ pub enum StoreError {
         /// Current durable sequence.
         actual: u64,
     },
+    /// Agent-control compare-and-append observed a different durable tail.
+    #[error(
+        "Agent Store control conflict for session `{session}`: expected sequence {expected}, actual {actual}"
+    )]
+    ControlConflict {
+        /// Exact target session.
+        session: String,
+        /// Caller-observed control sequence.
+        expected: u64,
+        /// Current durable control sequence.
+        actual: u64,
+    },
+    /// A required activation no longer owns its session.
+    #[error("Agent Store activation guard failed for session `{session}`")]
+    ActivationGuardConflict {
+        /// Exact guarded session.
+        session: String,
+    },
+    /// A guarded session still has work that prevents settlement.
+    #[error("Agent Store session `{session}` is not quiescent")]
+    SessionNotQuiescent {
+        /// Exact guarded session.
+        session: String,
+    },
     /// On-disk schema is not the exact supported schema.
     #[error("Agent Store schema mismatch: expected {expected}, actual {actual}")]
     SchemaMismatch {
@@ -797,6 +1724,9 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsi_agent_session_protocol::{
+        AgentControlRecordBody, AgentMessageContent, AgentMessageSource, MessageOptions,
+    };
 
     fn cancellation_fact(sequence: u64) -> SessionFact {
         SessionFact::new(
@@ -849,6 +1779,44 @@ mod tests {
         assert!(matches!(
             impossible_empty_page.validate(),
             Err(StoreError::Corrupt(message)) if message.contains("cursor")
+        ));
+    }
+
+    #[test]
+    fn control_page_rejects_an_aggregate_larger_than_the_read_budget() {
+        let records = (1_u64..=65)
+            .map(|sequence| {
+                AgentControlRecord::new(
+                    sequence,
+                    sequence,
+                    AgentControlRecordBody::MessageAccepted {
+                        message: AgentMessage {
+                            message_id: MessageId::new(format!("large-control-{sequence}"))
+                                .unwrap(),
+                            source: AgentMessageSource::Human,
+                            content: vec![AgentMessageContent::Text {
+                                text: "x"
+                                    .repeat(rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES),
+                            }],
+                            options: MessageOptions::default(),
+                        },
+                        root_session_id: SessionId::new("large-control-root").unwrap(),
+                        target: MessageTarget::NextStep,
+                        wake_required: false,
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        let page = StoreControlPage {
+            after_seq: 0,
+            records,
+            durable_seq: 65,
+        };
+
+        assert!(matches!(
+            page.validate(),
+            Err(StoreError::Corrupt(message)) if message.contains("control page exceeds")
         ));
     }
 }

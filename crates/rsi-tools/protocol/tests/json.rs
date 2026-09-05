@@ -1,8 +1,21 @@
 use rsi_tools_protocol::{
     MAXIMUM_TOOL_IDENTIFIER_BYTES, MAXIMUM_TOOL_JSON_DEPTH, MAXIMUM_TOOL_JSON_NODES, ToolCall,
-    ToolDefinition, ToolExecutionPolicy, ToolResult, parse_tool_arguments,
+    ToolDefinition, ToolExecutionPolicy, ToolResult, ToolScheduling, parse_tool_arguments,
 };
 use serde_json::json;
+
+#[test]
+fn tool_scheduling_is_process_local_and_defaults_exclusive_on_decode() {
+    for scheduling in [ToolScheduling::ParallelSafe, ToolScheduling::ExclusiveFinal] {
+        let definition = ToolDefinition::new("read", "read", true.into())
+            .unwrap()
+            .with_scheduling(scheduling);
+        let value = serde_json::to_value(&definition).unwrap();
+        assert!(value.get("scheduling").is_none());
+        let decoded: ToolDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.scheduling(), ToolScheduling::Exclusive);
+    }
+}
 
 #[test]
 fn strict_tool_arguments_reject_duplicate_keys_at_every_depth() {

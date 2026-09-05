@@ -14,7 +14,8 @@ use rsi_sandbox::{ConfinedProcess, ProcessRequest, Sandbox, SandboxError, Sandbo
 use rsi_tools::ToolsFactory;
 use rsi_tools_protocol::{
     RetainedToolFailureKind, RetainedToolResult, ToolCall, ToolCatalogProviderContract, ToolError,
-    ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract, ToolRuntime, ToolStart,
+    ToolExecutionExtensions, ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract,
+    ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -279,6 +280,7 @@ impl Fixture {
                 },
                 sandbox: Arc::new(UnusedSandbox),
                 job_scope: with_scope.then(|| self.scope.clone()),
+                extensions: ToolExecutionExtensions::default(),
             })
             .await
     }
@@ -309,6 +311,7 @@ impl Fixture {
             },
             sandbox: Arc::new(UnusedSandbox),
             job_scope: Some(self.scope.clone()),
+            extensions: ToolExecutionExtensions::default(),
         }
     }
 

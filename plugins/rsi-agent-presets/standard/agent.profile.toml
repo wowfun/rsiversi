@@ -13,6 +13,11 @@ plugin = "rsi.jobs.tools"
 
 [[steps]]
 kind = "plugin"
+id = "agents"
+plugin = "rsi.agent.tools"
+
+[[steps]]
+kind = "plugin"
 id = "apply-patch"
 plugin = "rsi.apply-patch"
 enabled_rhai = "defines.standard_linux_coding_tools"

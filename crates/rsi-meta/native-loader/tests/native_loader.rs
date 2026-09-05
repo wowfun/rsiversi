@@ -71,6 +71,7 @@ fn wait_for_callback_quiescence(catalog: &NativeCatalog) {
     assert_eq!(catalog.snapshot().active_callbacks, 0);
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_staging_release_async(catalog: &NativeCatalog) {
     tokio::time::timeout(Duration::from_secs(2), async {
         while catalog.snapshot().staging_bytes != 0 {

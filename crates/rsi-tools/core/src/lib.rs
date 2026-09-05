@@ -660,6 +660,7 @@ async fn settle(
         policy: start.policy,
         sandbox: start.sandbox,
         job_scope: start.job_scope,
+        extensions: start.extensions,
     };
     let (execution, enforcement) = ToolExecution::from_start(call.id, execution_start)?;
     let future = AssertUnwindSafe(entry.definition.executor.execute(call.arguments, execution))

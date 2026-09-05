@@ -8,6 +8,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+static OVERLAPPING_ADMISSION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn chunks(parts: &[&str]) -> ByteStream {
     let chunks = parts
         .iter()
@@ -170,6 +172,7 @@ async fn empty_transport_item_preserves_pending_crlf_state() {
 
 #[tokio::test]
 async fn overlapping_large_claims_do_not_serialize_small_frames() {
+    let _exclusive = OVERLAPPING_ADMISSION_TEST_LOCK.lock().await;
     let overlapping_limit = MAX_PROVIDER_SSE_FRAME_BYTES / 2 + 1;
     let mut first = decode_sse(
         chunks(&["data: first\n\n"]),
@@ -189,16 +192,13 @@ async fn overlapping_large_claims_do_not_serialize_small_frames() {
         );
         stream.next().await
     });
-    for _ in 0..128 {
-        if observed.load(Ordering::SeqCst) {
-            break;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !observed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        observed.load(Ordering::SeqCst),
-        "declared maxima must not prevent the second stream from polling its body"
-    );
+    })
+    .await
+    .expect("declared maxima must not prevent the second stream from polling its body");
     let second_value = second
         .await
         .expect("second task")
@@ -209,6 +209,7 @@ async fn overlapping_large_claims_do_not_serialize_small_frames() {
 
 #[tokio::test]
 async fn overlapping_claims_can_both_grow_past_the_initial_unit() {
+    let _exclusive = OVERLAPPING_ADMISSION_TEST_LOCK.lock().await;
     let overlapping_limit = MAX_PROVIDER_SSE_FRAME_BYTES / 2 + 1;
     let payload = "x".repeat(DEFAULT_SSE_FRAME_BYTES + 1);
     let frame = format!("data: {payload}\n\n");

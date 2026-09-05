@@ -4,18 +4,20 @@ use axum::{
 use futures_util::StreamExt as _;
 use rsi::{RunningRsi, StandardCodingTools, StandardComposition};
 use rsi_agent_session_protocol::{
-    AgentPresetId, SessionFact, SessionFactBody, SessionId, TurnOutcome,
+    AgentControlRecordBody, AgentMessageContent, AgentPresetId, MessageId, SessionFact,
+    SessionFactBody, SessionId, TurnId, TurnOutcome, WorkspaceTrust,
 };
 use rsi_agent_store_protocol::SessionStore as _;
 use rsi_agent_store_sqlite::SqliteStore;
+use rsi_agent_turn_protocol::{MessageReceipt, ObservationCursor, SessionObservation};
 use rsi_ai_protocol::{ImageRequest, ModelRef};
 use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
 use rsi_sandbox::SandboxMode;
 use rsi_session::{
-    CreateSession, SessionApplication as _, SessionHandle, SubmitDirectImage, SubmitText,
-    TurnReceipt,
+    CreateSession, SessionApplication as _, SessionHandle, SessionInput, SubmitDirectImage,
+    SubmitInput, TurnReceipt,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -654,30 +656,73 @@ async fn failed_server() -> (String, tokio::task::JoinHandle<()>) {
 async fn observe_after_acceptance(
     handle: &Arc<dyn SessionHandle>,
     receipt: &TurnReceipt,
-) -> (Vec<Arc<SessionFact>>, TurnOutcome, u64, bool) {
-    let mut observation = handle.subscribe(receipt.accepted_seq).await.unwrap();
+) -> (Vec<Arc<SessionFact>>, TurnOutcome, u64) {
+    observe_turn_after(handle, &receipt.turn_id, receipt.accepted_seq).await
+}
+
+async fn claim_message(handle: &Arc<dyn SessionHandle>, receipt: &MessageReceipt) -> (TurnId, u64) {
+    let mut observation = handle
+        .observe(ObservationCursor {
+            control_seq: receipt.accepted_control_seq,
+            fact_seq: receipt.observed_fact_seq,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let SessionObservation::Control { record, .. } =
+                observation.next().await.unwrap().unwrap()
+                && let AgentControlRecordBody::MessageClaimed {
+                    message_id,
+                    turn_id,
+                    entered_fact_seq,
+                    ..
+                } = record.body()
+                && message_id == &receipt.message_id
+            {
+                return (turn_id.clone(), *entered_fact_seq);
+            }
+        }
+    })
+    .await
+    .expect("message reached its durable claim boundary")
+}
+
+async fn observe_turn_after(
+    handle: &Arc<dyn SessionHandle>,
+    turn_id: &TurnId,
+    after_fact_seq: u64,
+) -> (Vec<Arc<SessionFact>>, TurnOutcome, u64) {
+    let mut observation = handle
+        .observe(ObservationCursor {
+            control_seq: 0,
+            fact_seq: after_fact_seq,
+        })
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut facts = Vec::new();
-        let mut saw_live_before_durable = false;
         loop {
             let update = observation.next().await.unwrap().unwrap();
-            if let rsi_agent_turn_protocol::TurnUpdate::Fact { fact, durable_seq } = update {
+            if let SessionObservation::Fact {
+                fact,
+                durable_fact_seq,
+            } = update
+            {
                 assert!(
-                    fact.seq() > receipt.accepted_seq,
+                    fact.seq() > after_fact_seq,
                     "subscription must begin strictly after durable acceptance"
                 );
-                saw_live_before_durable |= durable_seq < fact.seq();
                 let terminal = match fact.body() {
-                    SessionFactBody::TurnTerminal { turn_id, outcome }
-                        if turn_id == &receipt.turn_id =>
-                    {
-                        Some(outcome.clone())
-                    }
+                    SessionFactBody::TurnTerminal {
+                        turn_id: observed,
+                        outcome,
+                    } if observed == turn_id => Some(outcome.clone()),
                     _ => None,
                 };
                 facts.push(fact);
                 if let Some(outcome) = terminal {
-                    return (facts, outcome, durable_seq, saw_live_before_durable);
+                    return (facts, outcome, durable_fact_seq);
                 }
             }
         }
@@ -699,23 +744,26 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
             cwd: fixture.workspace.clone(),
             session_id: None,
             agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
+            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
     let first = first_handle
-        .submit_text(SubmitText {
-            turn_id: rsi_agent_session_protocol::TurnId::new("turn-first").unwrap(),
-            text: "/status".into(),
+        .submit(SubmitInput {
+            message_id: MessageId::new("message-first").unwrap(),
+            content: vec![SessionInput::Text {
+                text: "/status".into(),
+            }],
             model: None,
             sandbox: None,
         })
         .await
         .unwrap();
-    let (first_facts, first_outcome, first_durable_seq, saw_live_before_durable) =
-        observe_after_acceptance(&first_handle, &first).await;
+    let (first_turn_id, first_entered_fact_seq) = claim_message(&first_handle, &first).await;
+    let (first_facts, first_outcome, first_durable_seq) =
+        observe_turn_after(&first_handle, &first_turn_id, first_entered_fact_seq).await;
     assert_eq!(first_outcome, TurnOutcome::Completed);
     assert!(first_durable_seq >= first_facts.last().unwrap().seq());
-    assert!(saw_live_before_durable);
     assert!(first_facts.iter().any(|fact| matches!(
         fact.body(),
         SessionFactBody::ModelEvent {
@@ -727,28 +775,32 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         } if text == "hello"
     )));
     let first_history = first_handle.history_before(None, 64).await.unwrap();
-    assert!(matches!(
-        first_history.facts.first().unwrap().body(),
-        SessionFactBody::TurnAccepted { text, .. } if text == "/status"
-    ));
+    assert!(first_history.facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::InputMessageEntered { content, .. }
+            if content == &[AgentMessageContent::Text { text: "/status".into() }]
+    )));
 
     let second_handle = application.attach(&first.session_id).await.unwrap();
     let second = second_handle
-        .submit_text(SubmitText {
-            turn_id: rsi_agent_session_protocol::TurnId::new("turn-second").unwrap(),
-            text: "again".into(),
+        .submit(SubmitInput {
+            message_id: MessageId::new("message-second").unwrap(),
+            content: vec![SessionInput::Text {
+                text: "again".into(),
+            }],
             model: Some(ModelRef::new("fixture", "fixture-model").unwrap()),
             sandbox: Some(SandboxMode::ReadOnly),
         })
         .await
         .unwrap();
-    let (second_facts, second_outcome, _, _) =
-        observe_after_acceptance(&second_handle, &second).await;
+    let (second_turn_id, second_entered_fact_seq) = claim_message(&second_handle, &second).await;
+    let (second_facts, second_outcome, _) =
+        observe_turn_after(&second_handle, &second_turn_id, second_entered_fact_seq).await;
     assert_eq!(second_outcome, TurnOutcome::Completed);
     assert!(second_facts.first().unwrap().seq() > first_durable_seq);
     assert!(matches!(
-        second_handle.history_before(None, 64).await.unwrap().facts.iter().find(|fact| fact.seq() == second.accepted_seq).unwrap().body(),
-        SessionFactBody::TurnAccepted {
+        second_handle.history_before(None, 64).await.unwrap().facts.iter().find(|fact| matches!(fact.body(), SessionFactBody::MessageTurnAccepted { turn_id, .. } if turn_id == &second_turn_id)).unwrap().body(),
+        SessionFactBody::MessageTurnAccepted {
             model: Some(model),
             sandbox: SandboxMode::ReadOnly,
             ..
@@ -845,12 +897,14 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lines.first().unwrap()["type"], "session");
+    assert_eq!(lines.first().unwrap()["type"], "message");
+    assert_eq!(lines.first().unwrap()["version"], 3);
     assert_eq!(lines.first().unwrap()["session_id"], "session-binary");
+    assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert_eq!(lines.last().unwrap()["type"], "outcome");
     assert!(lines.iter().any(|line| {
         line["type"] == "fact"
-            && line["durable_seq"].as_u64().unwrap() < line["fact"]["seq"].as_u64().unwrap()
+            && line["durable_seq"].as_u64().unwrap() >= line["fact"]["seq"].as_u64().unwrap()
     }));
     let session_id = lines.first().unwrap()["session_id"].as_str().unwrap();
 
@@ -1046,7 +1100,19 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
     tool_names.sort_unstable();
     assert_eq!(
         tool_names,
-        ["apply_patch", "bash", "job_kill", "job_list", "job_output"]
+        [
+            "apply_patch",
+            "bash",
+            "followup_task",
+            "interrupt_agent",
+            "job_kill",
+            "job_list",
+            "job_output",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent",
+        ]
     );
     assert_eq!(
         tool_message(&requests[1], "call-foreground-bash")["content"],
@@ -1305,7 +1371,8 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lines.first().unwrap()["type"], "session");
+    assert_eq!(lines.first().unwrap()["type"], "message");
+    assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert!(
         lines
             .iter()
@@ -1320,7 +1387,7 @@ fn assert_sigkill_recovery_order(facts: &[SessionFact]) {
     assert_eq!(
         facts
             .iter()
-            .filter(|fact| matches!(fact.body(), SessionFactBody::TurnAccepted { .. }))
+            .filter(|fact| matches!(fact.body(), SessionFactBody::MessageTurnAccepted { .. }))
             .count(),
         2
     );
@@ -1464,18 +1531,19 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
             cwd: fixture.workspace.clone(),
             session_id: None,
             agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
+            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
     let receipt = handle
-        .submit_image(SubmitDirectImage {
+        .generate_image(SubmitDirectImage {
             turn_id: rsi_agent_session_protocol::TurnId::new("turn-direct-image").unwrap(),
             model: ModelRef::new("fixture", "gpt-image-1").unwrap(),
             request: ImageRequest::new("one pixel", 1).unwrap(),
         })
         .await
         .unwrap();
-    let (facts, outcome, _, _) = observe_after_acceptance(&handle, &receipt).await;
+    let (facts, outcome, _) = observe_after_acceptance(&handle, &receipt).await;
     assert_eq!(outcome, TurnOutcome::Completed);
     let image_fact = facts
         .iter()

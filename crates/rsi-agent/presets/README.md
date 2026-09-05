@@ -62,6 +62,14 @@ default cannot be deleted because clearing an override cannot replace that base.
 Existing Agent generations are outside this package and therefore remain
 unaffected.
 
+On Unix, opening the explicit user root accepts only an operating-system alias
+in the first path component directly below `/`. That component is canonicalized
+once, the untouched suffix is then traversed from `/` with directory-relative
+`O_NOFOLLOW`, and every deeper symbolic link is rejected. Opening errors report
+the caller's logical path, while all mutations use the opened directory
+authority. The same owned-root interface is used by copy and delete and by the
+standard product's built-in preset cache.
+
 The fixed limits are 32 roots, 256 roster rows, 16 KiB metadata, copy depth 32,
 256 traversed filesystem entries, and 16 MiB copied bytes. The injected Profile
 compiler owns its source, include, expression, and candidate bounds. Catalog
@@ -72,5 +80,10 @@ Generation compilation and resolution remain authoritative because roster
 health is only a point-in-time discovery result.
 
 The Session Profile fragment binds one absolute Store root, then starts Kernel
-and one executor generation. The standard product registers those factories
-and composes the fragment into its one shared local Host.
+and one executor generation. The fragment serializes `maximum_active_turns` and
+defaults it to one for deterministic embedding; the executor factory is the
+sole owner of its accepted bound. The standard product explicitly composes
+four.
+Host Profile patching replaces the complete executor configuration and is the
+standard product's user-facing override. The standard product registers those
+factories and composes the fragment into its one shared local Host.

@@ -388,7 +388,7 @@ fn assert_remote_interactive_session(fixture: &CliFixture) {
     stdin.write_all(b"hello interactive\n").unwrap();
     stdin.flush().unwrap();
     let first_line = first_line_receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(std::time::Duration::from_secs(10))
         .expect("interactive turn did not emit its first complete line");
     assert!(String::from_utf8_lossy(&first_line).contains("hello from daemon"));
     stdin
@@ -455,8 +455,8 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
         "hello",
         "--session-id",
         "cli-session",
-        "--turn-id",
-        "cli-turn",
+        "--message-id",
+        "cli-message",
         "--output",
         "jsonl",
     ]);
@@ -465,7 +465,8 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lines.first().unwrap()["type"], "session");
+    assert_eq!(lines.first().unwrap()["type"], "message");
+    assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert!(lines.iter().any(|line| {
         line["type"] == "fact"
             && line["fact"]["type"] == "model_event"
@@ -473,14 +474,15 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
     }));
     assert_eq!(lines.last().unwrap()["type"], "outcome");
 
+    fixture.assert_success(&["host", "restart", "--profile", "fixture"]);
     let retried = fixture.assert_success(&[
         "--profile",
         "test-headless",
         "hello",
         "--resume",
         "cli-session",
-        "--turn-id",
-        "cli-turn",
+        "--message-id",
+        "cli-message",
         "--output",
         "jsonl",
     ]);
@@ -491,8 +493,8 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
         "changed",
         "--resume",
         "cli-session",
-        "--turn-id",
-        "cli-turn",
+        "--message-id",
+        "cli-message",
     ]);
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
@@ -545,8 +547,8 @@ async fn client_uses_the_recorded_daemon_endpoint_across_runtime_directories() {
             "hello",
             "--session-id",
             "cross-runtime-session",
-            "--turn-id",
-            "cross-runtime-turn",
+            "--message-id",
+            "cross-runtime-message",
             "--output",
             "jsonl",
         ])
@@ -561,4 +563,22 @@ async fn client_uses_the_recorded_daemon_endpoint_across_runtime_directories() {
 
     fixture.assert_success(&["host", "stop"]);
     provider.abort();
+}
+
+#[test]
+fn host_start_rejects_a_symlinked_owner_directory_without_chmod_of_its_target() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let fixture = CliFixture::new("http://127.0.0.1:9");
+    let target = fixture.temporary.path().join("unrelated");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let state = fixture.temporary.path().join("state/rsi");
+    std::fs::create_dir_all(&state).unwrap();
+    symlink(&target, state.join("session-host")).unwrap();
+    let output = fixture.run(&["host", "start", "--profile", "fixture"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::metadata(target).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
 }

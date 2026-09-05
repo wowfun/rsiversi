@@ -273,3 +273,29 @@ fn a_missing_process_is_not_detected_by_localized_io_error_text() {
     };
     assert!(!owner_process_is_current(&metadata).unwrap());
 }
+
+#[test]
+fn startup_file_transfer_preserves_the_lease_and_rejects_a_different_inode() {
+    let root = TempDir::new().unwrap();
+    let paths = paths(&root);
+    let lease = HostOwnerLease::try_acquire(paths.clone()).unwrap();
+    let file = lease.into_startup_file().unwrap();
+    assert_eq!(
+        HostOwnerLease::try_acquire(paths.clone()).unwrap_err(),
+        SessionHostError::OwnerActive
+    );
+    let inherited = file.try_clone().unwrap();
+    drop(file);
+    let adopted = HostOwnerLease::adopt_startup_file(paths.clone(), inherited).unwrap();
+    assert_eq!(
+        HostOwnerLease::try_acquire(paths.clone()).unwrap_err(),
+        SessionHostError::OwnerActive
+    );
+    let unrelated = std::fs::File::create(root.path().join("unrelated")).unwrap();
+    assert!(matches!(
+        HostOwnerLease::adopt_startup_file(paths.clone(), unrelated),
+        Err(SessionHostError::Invalid(_))
+    ));
+    drop(adopted);
+    HostOwnerLease::try_acquire(paths).unwrap();
+}

@@ -20,6 +20,13 @@ use the current healthy source generation. The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
+Durable waking-message selection rotates a bounded ready-root cursor so a full
+or unclaimable early page cannot hide later trees. Eligibility and the following
+atomic message claim remain serialized as one local scheduler decision to
+preserve the per-tree running limit. Failure in one root's bounded Store scan is
+isolated from later roots and from the executor lease; an otherwise idle claim
+loop retries skipped roots every five seconds as well as on commit notification.
+
 The live scheduler is a bounded working set, not a mirror of durable history.
 Recovery streams lexical pages of sessions selected by the Store's open-turn
 index, retains only nonterminal control, repairs it, and releases the idle
@@ -40,14 +47,24 @@ Facts require their matching intent to have crossed the durable watermark.
 bounds: total speculative Fact bytes, conservative maximum-page Store-read
 materialization, and attached observers. Defaults are 64 MiB, 64 MiB, and
 1,024 respectively and configuration may only tighten them. Because the Store
-read contract bounds a page at 64 MiB but does not accept a caller byte limit,
-a tightened read budget admits one maximum-sized Fact per page; multi-Fact
-reads require the complete page bound. A budget below the maximum checkpoint
+read contract bounds Fact and control pages at 64 MiB, while the indexed
+mailbox has its own 32 MiB pending-prefix bound plus one selected message; the
+Kernel reserves those bounds before Store I/O. A tightened read budget admits
+one maximum-sized Fact per page; multi-Fact reads require the complete page
+bound. A budget below the maximum checkpoint
 blob bound disables checkpoint reads, maintenance rebuilds, and writes as one
 feature rather than rebuilding a cache that the Kernel cannot later admit.
 Indexed turn-boundary and cold Header reads use the same admission. Retry checks
 read and compare the small Header before materializing the acceptance, then
 consume that acceptance without cloning it across another Store round trip.
+Capacity and completion paths use the Store's metadata-only mailbox summary,
+so reading an exact count and Fact/control tails does not reserve or decode the
+payload prefix. Identity-only Agent-tree scheduling and settlement reuse the
+Store's one-call recursive descendant snapshot.
+Waiting activation settlement is retried by the Kernel worker after an
+in-process settlement failure and by a bounded five-second fallback scan, so a
+durable descendant terminal does not require process restart to settle its
+ancestors.
 Resident capacity
 counts both installed sessions and distinct in-flight hydration leaders before
 Store I/O; followers for the same session share the leader's reservation.
@@ -58,6 +75,15 @@ capacity is acquired only by the current owner of a Session key, so queued
 same-Session retries do not consume unrelated active slots. Slot and
 same-Session admission waits share the one-minute durability deadline, and
 shutdown closes both wait paths before the final flush.
+Activation terminal preparation acquires the child and optional parent
+submission admissions before taking and flushing its final live-tail snapshot;
+a Turn accepted during earlier descendant preparation therefore becomes part of
+that terminal's durable prefix instead of producing a contradictory-state error.
+A write-behind append may already be in flight when submission admission is
+acquired. A controls-only Agent commit that loses its Fact-tail compare to that
+exact resident suffix waits for the suffix to become durable, refreshes only
+the affected Fact-less append cursor, and retries once. Other Store conflicts
+retain their ordinary failure meaning.
 Fresh-session reservations use that same capacity before checking durable
 identity, so fresh/resume races cannot overbook the process through header I/O.
 Both fresh reservations and hydration leadership are cancellation-safe: owner
@@ -80,10 +106,12 @@ payloads nor leaves partial live state.
 Observation consumes
 watch watermarks with `borrow_and_update`, preserving durability advances that
 arrive while the stream is not being polled. Durable observation reads bounded
-pages and emits their Facts incrementally; speculative lookup is direct within
-the contiguous pending suffix. Flush selection snapshots only `Arc` Fact
-handles while holding the global Kernel lock; materializing the Store-owned
-batch occurs after that lock is released.
+pages and emits their Facts incrementally. In-process commits wake idle durable
+observers through the shared Kernel generation; a bounded five-second poll is
+only the fallback for writers outside this Kernel process. Speculative lookup
+is direct within the contiguous pending suffix. Flush selection snapshots only
+`Arc` Fact handles while holding the global Kernel lock; materializing the
+Store-owned batch occurs after that lock is released.
 
 Shutdown closes admission before its final flush, settles any in-flight cold
 hydration as shutting down, and releases all resident sessions after the worker

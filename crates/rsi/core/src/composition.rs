@@ -11,11 +11,13 @@ use rsi_agent_presets::{
     EXECUTOR_FACTORY, KERNEL_FACTORY, SQLITE_STORE_FACTORY, SessionAgentConfig, session_fragment,
 };
 use rsi_agent_store_protocol::SessionStoreContract;
+use rsi_agent_tools::AgentToolsFactory;
 use rsi_agent_turn_protocol::{
     TurnCompletionBlocker, TurnExecutionContract, TurnFinalizationContext,
     TurnFinalizationContract, TurnFinalizationError, TurnFinalizationReport, TurnFinalizer,
     TurnServiceContract,
 };
+use rsi_agent_workspace_context::{WorkspaceContextContract, WorkspaceContextFactory};
 use rsi_ai_protocol::{ImageCallContract, LanguageCallContract};
 use rsi_ai_provider::{ImageRegistrarContract, LanguageRegistrarContract};
 use rsi_apply_patch::ApplyPatchToolFactory;
@@ -81,10 +83,17 @@ const TOOLS_FACTORY: &str = "rsi.tools";
 const BASH_PRODUCER_FACTORY: &str = "rsi.shell.bash.producer";
 const BASH_TOOL_FACTORY: &str = "rsi.shell.bash.tool";
 const JOBS_TOOLS_FACTORY: &str = "rsi.jobs.tools";
+const AGENT_TOOLS_FACTORY: &str = "rsi.agent.tools";
+const WORKSPACE_CONTEXT_FACTORY: &str = "rsi.agent.workspace-context.local";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
-const STANDARD_AGENT_CONTRIBUTION_IDS: &[&str] =
-    &[BASH_TOOL_FACTORY, JOBS_TOOLS_FACTORY, APPLY_PATCH_FACTORY];
-const PORTABLE_AGENT_CONTRIBUTION_IDS: &[&str] = &[JOBS_TOOLS_FACTORY];
+const STANDARD_AGENT_CONTRIBUTION_IDS: &[&str] = &[
+    BASH_TOOL_FACTORY,
+    JOBS_TOOLS_FACTORY,
+    AGENT_TOOLS_FACTORY,
+    APPLY_PATCH_FACTORY,
+];
+const PORTABLE_AGENT_CONTRIBUTION_IDS: &[&str] = &[JOBS_TOOLS_FACTORY, AGENT_TOOLS_FACTORY];
+const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
 const AGENT_COMPOSITION_FACTORY: &str = "rsi.agent.composition";
 const LANGUAGE_FACTORY: &str = "rsi.ai.language";
 const IMAGE_FACTORY: &str = "rsi.ai.image";
@@ -167,12 +176,20 @@ impl StandardCodingTools {
 fn standard_agent_contributions(
     coding_tools: Option<&StandardCodingTools>,
 ) -> rsi_host::Result<AgentContributionCatalog> {
-    let mut factories = vec![ResolvedFactory::linked(
-        JOBS_TOOLS_FACTORY,
-        env!("CARGO_PKG_VERSION"),
-        UpdateMode::RestartRequired,
-        Arc::new(JobsToolsFactory),
-    )];
+    let mut factories = vec![
+        ResolvedFactory::linked(
+            JOBS_TOOLS_FACTORY,
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(JobsToolsFactory),
+        ),
+        ResolvedFactory::linked(
+            AGENT_TOOLS_FACTORY,
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(AgentToolsFactory),
+        ),
+    ];
     if let Some(coding) = coding_tools {
         factories.extend([
             ResolvedFactory::linked(
@@ -363,53 +380,9 @@ fn materialize_standard_agent_preset_unix(cache: &Path, digest: &str) -> rsi_hos
 
 #[cfg(unix)]
 fn open_or_create_asset_cache_unix(cache: &Path) -> rsi_host::Result<File> {
-    use rustix::fs::{Mode, OFlags};
-    use std::path::Component;
-
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut directory = rustix::fs::open("/", flags, Mode::empty())
-        .map(File::from)
-        .map_err(|error| no_follow_asset_directory(Path::new("/"), error))?;
-    let mut current = PathBuf::from("/");
-    for component in cache.components() {
-        let name = match component {
-            Component::RootDir => continue,
-            Component::Normal(name) => name,
-            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
-                return Err(rsi_host::HostError::Bootstrap(format!(
-                    "standard Agent preset cache path is not normalized: {}",
-                    cache.display()
-                )));
-            }
-        };
-        current.push(name);
-        let (opened, created) = match rustix::fs::openat(&directory, name, flags, Mode::empty()) {
-            Ok(opened) => (opened, false),
-            Err(rustix::io::Errno::NOENT) => {
-                let created = match rustix::fs::mkdirat(
-                    &directory,
-                    name,
-                    Mode::RUSR | Mode::WUSR | Mode::XUSR,
-                ) {
-                    Ok(()) => true,
-                    Err(rustix::io::Errno::EXIST) => false,
-                    Err(error) => {
-                        return Err(asset_errno("create cache component", &current, error));
-                    }
-                };
-                let opened = rustix::fs::openat(&directory, name, flags, Mode::empty())
-                    .map_err(|error| no_follow_asset_directory(&current, error))?;
-                (opened, created)
-            }
-            Err(error) => return Err(no_follow_asset_directory(&current, error)),
-        };
-        directory = File::from(opened);
-        if created {
-            rustix::fs::fchmod(&directory, Mode::RUSR | Mode::WUSR | Mode::XUSR)
-                .map_err(|error| asset_errno("set cache component mode", &current, error))?;
-        }
-    }
-    Ok(directory)
+    rsi_agent_presets::open_or_create_preset_root(cache)
+        .map(rsi_agent_presets::OwnedPresetRoot::into_directory)
+        .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -966,7 +939,8 @@ impl StandardComposition {
         )?;
         builder.register_fragment(base_fragment(&paths, linux_tools_enabled))?;
         let agent = SessionAgentConfig::new(paths.state().join("agent"))
-            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
+            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
+            .with_maximum_active_turns(STANDARD_MAXIMUM_ACTIVE_TURNS);
         builder.register_fragment(session_fragment(&agent))?;
         builder.build().map(|host| (host, preset_identity))
     }
@@ -1030,6 +1004,11 @@ fn register_runtime_factories(
     coding_tools: Option<StandardCodingTools>,
     agent_composition: AgentCompositionFactory,
 ) -> rsi_host::Result<()> {
+    let sandbox_factory = if coding_tools.is_some() {
+        rsi_sandbox_local::SandboxLocalFactory::default().require_restricted_backend()
+    } else {
+        rsi_sandbox_local::SandboxLocalFactory::default()
+    };
     register(
         builder,
         MEDIA_LOCAL_FACTORY,
@@ -1058,7 +1037,7 @@ fn register_runtime_factories(
         builder,
         SANDBOX_FACTORY,
         UpdateMode::RestartRequired,
-        rsi_sandbox_local::SandboxLocalFactory::default(),
+        sandbox_factory,
     )?;
     register(
         builder,
@@ -1115,6 +1094,12 @@ fn register_runtime_factories(
         AGENT_COMPOSITION_FACTORY,
         UpdateMode::RestartRequired,
         agent_composition,
+    )?;
+    register(
+        builder,
+        WORKSPACE_CONTEXT_FACTORY,
+        UpdateMode::RestartRequired,
+        WorkspaceContextFactory,
     )?;
     Ok(())
 }
@@ -1204,6 +1189,7 @@ fn register_contracts(builder: &mut HostBuilder) -> rsi_host::Result<()> {
     builder.register_local_contract::<ToolCatalogProviderContract>()?;
     builder.register_local_contract::<ToolRegistrarContract>()?;
     builder.register_local_contract::<AgentCompositionContract>()?;
+    builder.register_local_contract::<WorkspaceContextContract>()?;
     builder.register_local_contract::<LanguageCallContract>()?;
     builder.register_local_contract::<ImageCallContract>()?;
     builder.register_local_contract::<LanguageRegistrarContract>()?;
@@ -1282,6 +1268,14 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             json!({ "backend": "base" }),
         ),
         ProfileEntry::new("rsi-tools", TOOLS_FACTORY, Value::Null),
+        ProfileEntry::new(
+            "rsi-agent-workspace-context",
+            WORKSPACE_CONTEXT_FACTORY,
+            json!({
+                "user_instruction_file": paths.config().join("AGENTS.md"),
+                "user_skill_roots": [paths.config().join("skills")]
+            }),
+        ),
         ProfileEntry::new(
             "rsi-agent-composition",
             AGENT_COMPOSITION_FACTORY,
@@ -1502,7 +1496,12 @@ mod tests {
                 .iter()
                 .map(|leaf| leaf.plugin().as_str())
                 .collect::<Vec<_>>(),
-            [BASH_TOOL_FACTORY, JOBS_TOOLS_FACTORY, APPLY_PATCH_FACTORY]
+            [
+                BASH_TOOL_FACTORY,
+                JOBS_TOOLS_FACTORY,
+                AGENT_TOOLS_FACTORY,
+                APPLY_PATCH_FACTORY,
+            ]
         );
         assert_eq!(
             compiler(false)
@@ -1512,7 +1511,7 @@ mod tests {
                 .iter()
                 .map(|leaf| leaf.plugin().as_str())
                 .collect::<Vec<_>>(),
-            [JOBS_TOOLS_FACTORY]
+            [JOBS_TOOLS_FACTORY, AGENT_TOOLS_FACTORY]
         );
 
         let portable = standard_agent_contributions(None).unwrap();

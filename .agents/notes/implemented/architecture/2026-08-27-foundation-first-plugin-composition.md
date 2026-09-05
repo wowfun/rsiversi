@@ -71,6 +71,14 @@ place the decision and truthful enforcement stamp at the Agent durability
 boundary. Merely registering these services does not claim that enforcement
 already exists.
 
+Factory construction may impose a product-owned readiness invariant that
+cannot be weakened by Profile replacement. The standard composition constructs
+the local Sandbox factory in required mode whenever it links coding Tools; the
+factory must select a behaviorally verified restricted backend before it
+publishes Sandbox. Generic optional composition retains the explicit
+unconfined-only case. Readiness remains a provider activation property inside
+the sole Meta lifecycle graph rather than a second global readiness graph.
+
 Native support is split into `rsi-meta-native` and
 `rsi-meta-native-loader`. ABI v3 accepts only explicit trusted artifact paths,
 supplies exact Portable contracts, and has no Loader service, package

@@ -18,7 +18,7 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 4;
+pub const SESSION_FORMAT_VERSION: u32 = 6;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -51,7 +51,24 @@ pub const MAXIMUM_TURN_GENERATED_FACTS: u64 = 65_536;
 pub const MAXIMUM_TURN_GENERATED_FACT_BYTES: u64 = 64 * 1024 * 1024;
 /// Empty predecessor for the canonical durable Fact-prefix digest chain.
 pub const EMPTY_FACT_PREFIX_DIGEST: [u8; 32] = [0; 32];
+/// Empty predecessor for the canonical Agent-control digest chain.
+pub const EMPTY_CONTROL_PREFIX_DIGEST: [u8; 32] = [0; 32];
 const FACT_PREFIX_DOMAIN: &[u8] = b"rsi-agent-context-fact-prefix-v2\0";
+const CONTROL_PREFIX_DOMAIN: &[u8] = b"rsi-agent-control-prefix-v1\0";
+/// Maximum queued messages retained for one durable session.
+pub const MAXIMUM_PENDING_AGENT_MESSAGES: usize = 64;
+/// Maximum ordered content blocks retained by one Agent message.
+pub const MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS: usize = 64;
+/// Maximum canonical paths retained by one workspace-touch Fact.
+pub const MAXIMUM_WORKSPACE_TOUCH_PATHS: usize = 64;
+/// Maximum UTF-8 bytes in one Agent-to-Agent message.
+pub const MAXIMUM_AGENT_MESSAGE_BYTES: usize = 64 * 1024;
+/// Maximum child edges below one Agent-tree root.
+pub const MAXIMUM_AGENT_TREE_DEPTH: usize = 3;
+/// Maximum durable sessions retained by one Agent tree.
+pub const MAXIMUM_DURABLE_AGENT_TREE_NODES: usize = 256;
+/// Maximum simultaneously running Turns below one Agent-tree scheduler.
+pub const MAXIMUM_RUNNING_AGENT_TREE_NODES: usize = 3;
 
 macro_rules! string_identity {
     ($name:ident, $kind:literal) => {
@@ -101,6 +118,631 @@ macro_rules! string_identity {
 string_identity!(SessionId, "session");
 string_identity!(TurnId, "turn");
 string_identity!(EffectId, "effect");
+string_identity!(MessageId, "message");
+string_identity!(ActivationId, "activation");
+string_identity!(StepId, "step");
+
+/// Stable path from an Agent-tree root to one descendant.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct AgentPath(Vec<u16>);
+
+impl<'de> Deserialize<'de> for AgentPath {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(Vec::<u16>::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl AgentPath {
+    /// Creates a root or bounded descendant path.
+    pub fn new(segments: Vec<u16>) -> Result<Self> {
+        if segments.len() > MAXIMUM_AGENT_TREE_DEPTH || segments.contains(&0) {
+            return Err(SessionError::Invalid(format!(
+                "Agent path must contain at most {MAXIMUM_AGENT_TREE_DEPTH} nonzero segments"
+            )));
+        }
+        Ok(Self(segments))
+    }
+
+    /// Returns the root path.
+    pub const fn root() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Returns the ordered child segments.
+    pub fn segments(&self) -> &[u16] {
+        &self.0
+    }
+
+    /// Returns the number of child edges below the root.
+    pub fn depth(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// Requested completed-turn selection for one subagent fork.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkTurnSelection {
+    /// Start without parent turns.
+    None,
+    /// Retain every available completed parent turn.
+    All,
+    /// Retain at most the newest positive number of completed turns.
+    Last(u64),
+}
+
+impl<'de> Deserialize<'de> for ForkTurnSelection {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum WireSelection {
+            None,
+            All,
+            Last(u64),
+        }
+
+        match WireSelection::deserialize(deserializer)? {
+            WireSelection::None => Ok(Self::None),
+            WireSelection::All => Ok(Self::All),
+            WireSelection::Last(count) if count > 0 => Ok(Self::Last(count)),
+            WireSelection::Last(_) => Err(serde::de::Error::custom(
+                "fork last-turn selection must be positive",
+            )),
+        }
+    }
+}
+
+impl ForkTurnSelection {
+    /// Revalidates a programmatically constructed selection.
+    pub fn validate(&self) -> Result<()> {
+        if matches!(self, Self::Last(0)) {
+            return Err(SessionError::Invalid(
+                "fork last-turn selection must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Parses the model-facing `fork_turns` value; omission is represented by [`Self::All`].
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "all" => Ok(Self::All),
+            _ if value.is_empty()
+                || value.len() > 20
+                || !value.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                Err(SessionError::Invalid(
+                    "fork_turns must be `none`, `all`, or a positive decimal u64".into(),
+                ))
+            }
+            _ => value
+                .parse::<u64>()
+                .ok()
+                .filter(|count| *count > 0)
+                .map(Self::Last)
+                .ok_or_else(|| {
+                    SessionError::Invalid(
+                        "fork_turns must be `none`, `all`, or a positive decimal u64".into(),
+                    )
+                }),
+        }
+    }
+}
+
+/// Immutable parent-history boundary retained by a forked session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkOrigin {
+    /// Exact parent session.
+    pub parent_session_id: SessionId,
+    /// Exact Agent-tree root shared by every descendant.
+    pub root_session_id: SessionId,
+    /// Stable bounded path of this child below the root.
+    pub path: AgentPath,
+    /// Model-facing stable task name allocated by the parent.
+    pub task_name: String,
+    /// Fingerprint of the immutable parent Header.
+    pub parent_header_fingerprint: String,
+    /// Turn containing the spawn request and excluded from inherited history.
+    pub invoking_turn_id: TurnId,
+    /// Exclusive parent Fact cursor before the first inherited completed Turn.
+    pub resolved_after_seq: u64,
+    /// Last inherited terminal session sequence, or zero for `none`.
+    pub resolved_terminal_seq: u64,
+    /// Canonical Fact-prefix digest at the resolved terminal sequence.
+    pub terminal_prefix_sha256: String,
+    /// Caller-requested selection.
+    pub requested_turns: ForkTurnSelection,
+    /// Number of completed turns actually retained.
+    pub effective_turns: u64,
+}
+
+impl ForkOrigin {
+    /// Revalidates the immutable lineage boundary.
+    pub fn validate(&self) -> Result<()> {
+        self.requested_turns.validate()?;
+        validate_sha256("parent header fingerprint", &self.parent_header_fingerprint)?;
+        validate_sha256("fork terminal prefix", &self.terminal_prefix_sha256)?;
+        validate_identifier("subagent task name", &self.task_name)?;
+        if self.path.depth() == 0 {
+            return Err(SessionError::Invalid(
+                "fork lineage must describe a non-root child".into(),
+            ));
+        }
+        let cursors_empty = self.resolved_after_seq == 0 && self.resolved_terminal_seq == 0;
+        if (self.effective_turns == 0) != cursors_empty {
+            return Err(SessionError::Invalid(
+                "fork interval emptiness must match the effective turn count".into(),
+            ));
+        }
+        let empty = cursors_empty && self.effective_turns == 0;
+        if matches!(self.requested_turns, ForkTurnSelection::None) && !empty {
+            return Err(SessionError::Invalid(
+                "fork `none` selection must resolve to an empty parent prefix".into(),
+            ));
+        }
+        if self.resolved_terminal_seq == 0 && !empty {
+            return Err(SessionError::Invalid(
+                "fork effective turn count requires a terminal boundary".into(),
+            ));
+        }
+        if self.resolved_after_seq >= self.resolved_terminal_seq && self.resolved_terminal_seq != 0
+        {
+            return Err(SessionError::Invalid(
+                "fork inherited Fact interval must be nonempty and ordered".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Model-visible durable content in one accepted mailbox message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(missing_docs)] // Variant prose defines these transparent payload fields as one contract.
+pub enum AgentMessageContent {
+    /// Safe UTF-8 text.
+    Text { text: String },
+    /// Immutable imported image reference.
+    Image { media: MediaRef },
+}
+
+/// Authority-neutral origin of one queued message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
+pub enum AgentMessageSource {
+    /// Direct application/user input.
+    Human,
+    /// Another Agent activation.
+    Agent { source_session_id: SessionId },
+    /// Child-settlement notification.
+    Completion {
+        child_session_id: SessionId,
+        activation_id: ActivationId,
+    },
+}
+
+/// Delivery horizon for one accepted message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageTarget {
+    /// Enter a newly claimed Turn.
+    NextTurn,
+    /// Enter the next model Step of an already-running Turn.
+    NextStep,
+}
+
+/// Optional execution controls which can only enter a newly claimed Turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MessageOptions {
+    /// Optional exact invocation route.
+    pub model: Option<ModelRef>,
+    /// Optional sandbox override.
+    pub sandbox: Option<SandboxMode>,
+}
+
+/// One validated message retained by the Agent control plane.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMessage {
+    /// Caller-preallocated durable identity.
+    pub message_id: MessageId,
+    /// Authority-neutral source classification.
+    pub source: AgentMessageSource,
+    /// Nonempty ordered mixed content.
+    pub content: Vec<AgentMessageContent>,
+    /// Invocation controls applied only on a new Turn.
+    pub options: MessageOptions,
+}
+
+impl AgentMessage {
+    /// Revalidates content, route, and byte bounds at admission.
+    pub fn validate(&self) -> Result<()> {
+        let text_limit = if matches!(self.source, AgentMessageSource::Human) {
+            MAXIMUM_TURN_TEXT_BYTES
+        } else {
+            MAXIMUM_AGENT_MESSAGE_BYTES
+        };
+        validate_message_content(&self.content, text_limit)?;
+        if let Some(model) = &self.options.model {
+            model
+                .validate()
+                .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) -> Result<()> {
+    if content.is_empty() || content.len() > MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS {
+        return Err(SessionError::Invalid(format!(
+            "Agent message must contain 1..={MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS} content blocks"
+        )));
+    }
+    let mut text_bytes = 0_usize;
+    for block in content {
+        match block {
+            AgentMessageContent::Text { text } => {
+                validate_safe_text("Agent message text", text, text_limit, false)?;
+                text_bytes = text_bytes.checked_add(text.len()).ok_or_else(|| {
+                    SessionError::Invalid("Agent message text size overflowed".into())
+                })?;
+            }
+            AgentMessageContent::Image { media } => media
+                .validate()
+                .map_err(|error| SessionError::Invalid(error.to_string()))?,
+        }
+    }
+    if text_bytes > text_limit {
+        return Err(SessionError::TooLarge {
+            kind: "Agent message text",
+            maximum: text_limit,
+            actual: text_bytes,
+        });
+    }
+    Ok(())
+}
+
+/// Durable reason an accepted mailbox message will never be claimed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDiscardReason {
+    /// Caller cancelled the message before claim.
+    Cancelled,
+}
+
+/// Model-visible durable source of one entered input message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
+pub enum InputMessageSource {
+    /// Direct user/application input.
+    Human { message_id: MessageId },
+    /// Input sent by another Agent session.
+    Agent {
+        message_id: MessageId,
+        source_session_id: SessionId,
+    },
+    /// Child-activation completion notice.
+    Completion {
+        message_id: MessageId,
+        child_session_id: SessionId,
+        activation_id: ActivationId,
+    },
+    /// Initial or refreshed Agent instruction text.
+    AgentInstructions {
+        source: String,
+        sha256: String,
+        replacement: bool,
+        tombstone: bool,
+    },
+    /// Complete selected skill catalog replacement.
+    SkillCatalog { sha256: String },
+    /// Direct user invocation of one selected skill.
+    UserSkillInvocation { name: String, source: String },
+}
+
+impl InputMessageSource {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::AgentInstructions { source, sha256, .. } => {
+                validate_safe_text("input source", source, MAXIMUM_WORKSPACE_PATH_BYTES, false)?;
+                validate_sha256("instruction digest", sha256)
+            }
+            Self::UserSkillInvocation { name, source } => {
+                validate_identifier("skill name", name)?;
+                validate_safe_text("input source", source, MAXIMUM_WORKSPACE_PATH_BYTES, false)
+            }
+            Self::SkillCatalog { sha256 } => validate_sha256("skill catalog digest", sha256),
+            Self::Human { .. } | Self::Agent { .. } | Self::Completion { .. } => Ok(()),
+        }
+    }
+}
+
+/// Frozen authority for loading project-controlled instructions and skills.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTrust {
+    /// Project-controlled context is ignored; user-owned context remains eligible.
+    #[default]
+    Untrusted,
+    /// Project-controlled context may enter the model under bounded discovery rules.
+    Trusted,
+}
+
+/// Terminal result of one model Step within a Turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(missing_docs)] // Variant prose defines each outcome payload.
+pub enum StepOutcome {
+    /// The Step produced a complete model result or tool request.
+    Completed,
+    /// The Step stopped because its Turn ended.
+    Stopped { reason: String },
+}
+
+impl StepOutcome {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Completed => Ok(()),
+            Self::Stopped { reason } => validate_safe_diagnostic("Step stop reason", reason),
+        }
+    }
+}
+
+/// Final state of one complete Agent activation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(missing_docs)] // Variant prose defines each closed outcome payload.
+pub enum ActivationOutcome {
+    /// The activation and every descendant settled successfully.
+    Completed,
+    /// A bounded failure ended the activation.
+    Failed { code: String, message: String },
+    /// Explicit close-tree cancellation ended the activation.
+    Cancelled,
+}
+
+/// Winning cause which resumed one parked wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitResumeCause {
+    /// A mailbox message became visible.
+    Message,
+    /// A child completion became visible.
+    Completion,
+    /// The requested wait deadline elapsed.
+    Timeout,
+    /// The current Turn was durably cancelled.
+    Cancel,
+}
+
+/// Append-only non-Fact Agent control transition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
+pub enum AgentControlRecordBody {
+    /// A bounded message entered the durable mailbox.
+    MessageAccepted {
+        message: AgentMessage,
+        /// Durable Agent-tree root used by fair ready selection.
+        root_session_id: SessionId,
+        target: MessageTarget,
+        wake_required: bool,
+    },
+    /// One message entered an exact activation/turn/step Fact boundary.
+    MessageClaimed {
+        message_id: MessageId,
+        activation_id: ActivationId,
+        turn_id: TurnId,
+        step_id: StepId,
+        entered_fact_seq: u64,
+    },
+    /// A pending next-Step completion became waking next-Turn input at activation end.
+    MessagePromoted { message_id: MessageId },
+    /// An accepted message was durably discarded before claim.
+    MessageDiscarded {
+        message_id: MessageId,
+        reason: MessageDiscardReason,
+    },
+    /// One activation acquired its first waking message.
+    ActivationStarted {
+        activation_id: ActivationId,
+        root_session_id: SessionId,
+        parent_session_id: Option<SessionId>,
+        path: AgentPath,
+    },
+    /// An activation has no active Turn but still owns descendants.
+    ActivationWaitingForDescendants { activation_id: ActivationId },
+    /// One activation truly settled after all descendants.
+    ActivationSettled {
+        activation_id: ActivationId,
+        outcome: ActivationOutcome,
+    },
+    /// A wait Tool parked its executor lane.
+    WaitParked {
+        activation_id: ActivationId,
+        turn_id: TurnId,
+        step_id: StepId,
+        deadline_ms: u64,
+    },
+    /// Exactly one contender resumed a parked wait.
+    WaitResumed {
+        activation_id: ActivationId,
+        turn_id: TurnId,
+        step_id: StepId,
+        cause: WaitResumeCause,
+    },
+    /// Parent mailbox capacity is reserved for an eventual child completion.
+    CompletionReserved {
+        activation_id: ActivationId,
+        parent_session_id: SessionId,
+        maximum_bytes: u64,
+    },
+}
+
+impl AgentControlRecordBody {
+    /// Revalidates bounded values independent of Store state.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::MessageAccepted {
+                message,
+                root_session_id: _,
+                target,
+                wake_required,
+            } => {
+                message.validate()?;
+                if *wake_required != (*target == MessageTarget::NextTurn) {
+                    return Err(SessionError::Invalid(
+                        "message wake requirement disagrees with its delivery target".into(),
+                    ));
+                }
+                if *target == MessageTarget::NextStep
+                    && message.options != MessageOptions::default()
+                {
+                    return Err(SessionError::Invalid(
+                        "NextStep messages cannot carry new-Turn options".into(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::MessageClaimed {
+                entered_fact_seq, ..
+            } if *entered_fact_seq == 0 => Err(SessionError::Invalid(
+                "message claim must reference a nonzero Fact sequence".into(),
+            )),
+            Self::ActivationStarted {
+                root_session_id,
+                parent_session_id,
+                path,
+                ..
+            } => {
+                if path.depth() == 0 && parent_session_id.is_some()
+                    || path.depth() > 0 && parent_session_id.is_none()
+                {
+                    return Err(SessionError::Invalid(
+                        "Agent path and parent session relationship disagree".into(),
+                    ));
+                }
+                let _ = root_session_id;
+                Ok(())
+            }
+            Self::ActivationSettled {
+                outcome: ActivationOutcome::Failed { code, message },
+                ..
+            } => {
+                validate_identifier("activation failure code", code)?;
+                validate_safe_diagnostic("activation failure message", message)
+            }
+            Self::WaitParked { deadline_ms: 0, .. } => Err(SessionError::Invalid(
+                "parked wait deadline must be nonzero".into(),
+            )),
+            Self::CompletionReserved { maximum_bytes, .. }
+                if *maximum_bytes == 0
+                    || *maximum_bytes
+                        > u64::try_from(MAXIMUM_AGENT_MESSAGE_BYTES).unwrap_or(u64::MAX) =>
+            {
+                Err(SessionError::Invalid(format!(
+                    "completion reservation must be within 1..={MAXIMUM_AGENT_MESSAGE_BYTES} bytes"
+                )))
+            }
+            Self::MessageClaimed { .. }
+            | Self::MessagePromoted { .. }
+            | Self::MessageDiscarded { .. }
+            | Self::ActivationWaitingForDescendants { .. }
+            | Self::ActivationSettled { .. }
+            | Self::WaitParked { .. }
+            | Self::WaitResumed { .. }
+            | Self::CompletionReserved { .. } => Ok(()),
+        }
+    }
+}
+
+/// One sequenced durable Agent-control record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentControlRecord {
+    seq: u64,
+    timestamp_ms: u64,
+    #[serde(flatten)]
+    body: AgentControlRecordBody,
+    #[serde(skip)]
+    encoded_len: usize,
+}
+
+impl<'de> Deserialize<'de> for AgentControlRecord {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireRecord {
+            seq: u64,
+            timestamp_ms: u64,
+            #[serde(flatten)]
+            body: AgentControlRecordBody,
+        }
+        let wire = WireRecord::deserialize(deserializer)?;
+        Self::new(wire.seq, wire.timestamp_ms, wire.body).map_err(serde::de::Error::custom)
+    }
+}
+
+impl AgentControlRecord {
+    /// Creates one bounded record.
+    pub fn new(seq: u64, timestamp_ms: u64, body: AgentControlRecordBody) -> Result<Self> {
+        if seq == 0 || timestamp_ms == 0 {
+            return Err(SessionError::Invalid(
+                "control sequence and timestamp must be nonzero".into(),
+            ));
+        }
+        body.validate()?;
+        let mut record = Self {
+            seq,
+            timestamp_ms,
+            body,
+            encoded_len: 0,
+        };
+        record.encoded_len = compact_json_len(&record)?;
+        if record.encoded_len > MAXIMUM_SESSION_FACT_BYTES {
+            return Err(SessionError::TooLarge {
+                kind: "Agent control record",
+                maximum: MAXIMUM_SESSION_FACT_BYTES,
+                actual: record.encoded_len,
+            });
+        }
+        Ok(record)
+    }
+
+    /// Returns the per-session control sequence.
+    pub const fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the creation timestamp in Unix milliseconds.
+    pub const fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    /// Returns the validated control body.
+    pub const fn body(&self) -> &AgentControlRecordBody {
+        &self.body
+    }
+
+    /// Returns exact compact JSON bytes counted at construction.
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+}
 
 /// Validated durable Agent preset identity.
 ///
@@ -464,7 +1106,7 @@ impl FrozenAgentSettings {
     }
 }
 
-/// Immutable durable session header written with the first accepted turn.
+/// Immutable durable session header written with the first durable admission.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHeader {
@@ -472,8 +1114,10 @@ pub struct SessionHeader {
     session_id: SessionId,
     created_at_ms: u64,
     canonical_cwd: String,
+    workspace_trust: WorkspaceTrust,
     agent_preset_id: AgentPresetId,
     settings: FrozenAgentSettings,
+    fork_origin: Option<ForkOrigin>,
 }
 
 impl<'de> Deserialize<'de> for SessionHeader {
@@ -488,8 +1132,10 @@ impl<'de> Deserialize<'de> for SessionHeader {
             session_id: Option<serde_json::Value>,
             created_at_ms: Option<serde_json::Value>,
             canonical_cwd: Option<serde_json::Value>,
+            workspace_trust: Option<serde_json::Value>,
             agent_preset_id: Option<serde_json::Value>,
             settings: Option<serde_json::Value>,
+            fork_origin: Option<ForkOrigin>,
         }
 
         let wire = WireHeader::deserialize(deserializer)?;
@@ -503,8 +1149,10 @@ impl<'de> Deserialize<'de> for SessionHeader {
             session_id: decode_header_field(wire.session_id, "session_id")?,
             created_at_ms: decode_header_field(wire.created_at_ms, "created_at_ms")?,
             canonical_cwd: decode_header_field(wire.canonical_cwd, "canonical_cwd")?,
+            workspace_trust: decode_header_field(wire.workspace_trust, "workspace_trust")?,
             agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
             settings: decode_header_field(wire.settings, "settings")?,
+            fork_origin: wire.fork_origin,
         };
         header
             .validate()
@@ -539,8 +1187,10 @@ impl SessionHeader {
             session_id,
             created_at_ms,
             canonical_cwd: canonical_cwd.into(),
+            workspace_trust: WorkspaceTrust::Untrusted,
             agent_preset_id,
             settings,
+            fork_origin: None,
         };
         header.validate()?;
         Ok(header)
@@ -558,6 +1208,14 @@ impl SessionHeader {
         }
         validate_canonical_path(&self.canonical_cwd)?;
         self.settings.validate()?;
+        if let Some(origin) = &self.fork_origin {
+            origin.validate()?;
+            if origin.parent_session_id == self.session_id {
+                return Err(SessionError::Invalid(
+                    "forked session cannot name itself as its parent".into(),
+                ));
+            }
+        }
         let encoded_len = compact_json_len(self)?;
         if encoded_len > MAXIMUM_SESSION_HEADER_BYTES {
             return Err(SessionError::TooLarge {
@@ -589,6 +1247,18 @@ impl SessionHeader {
         &self.canonical_cwd
     }
 
+    /// Returns the immutable creation-time workspace trust decision.
+    pub const fn workspace_trust(&self) -> WorkspaceTrust {
+        self.workspace_trust
+    }
+
+    /// Selects the explicit creation-time workspace trust decision.
+    pub fn with_workspace_trust(mut self, workspace_trust: WorkspaceTrust) -> Result<Self> {
+        self.workspace_trust = workspace_trust;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Returns the durable Agent preset identity selected for this session.
     pub const fn agent_preset_id(&self) -> &AgentPresetId {
         &self.agent_preset_id
@@ -597,7 +1267,7 @@ impl SessionHeader {
     /// Rebinds a process-local draft to a different validated preset identity.
     ///
     /// This does not persist a header. The caller must still submit the final
-    /// header atomically with its first accepted turn.
+    /// header atomically with its first accepted Message or direct Turn.
     pub fn with_agent_preset_id(mut self, agent_preset_id: AgentPresetId) -> Result<Self> {
         self.agent_preset_id = agent_preset_id;
         self.validate()?;
@@ -607,6 +1277,46 @@ impl SessionHeader {
     /// Returns the frozen creation-time Agent settings.
     pub const fn settings(&self) -> &FrozenAgentSettings {
         &self.settings
+    }
+
+    /// Adds one immutable fork lineage to a not-yet-durable child Header.
+    pub fn with_fork_origin(mut self, origin: ForkOrigin) -> Result<Self> {
+        if self.fork_origin.is_some() {
+            return Err(SessionError::Invalid(
+                "session Header already contains fork lineage".into(),
+            ));
+        }
+        self.fork_origin = Some(origin);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Derives a fresh child Header while preserving the parent's exact route and policy.
+    pub fn forked_child(
+        &self,
+        session_id: SessionId,
+        created_at_ms: u64,
+        origin: ForkOrigin,
+    ) -> Result<Self> {
+        if origin.parent_session_id != self.session_id {
+            return Err(SessionError::Invalid(
+                "fork origin parent does not match the source Header".into(),
+            ));
+        }
+        Self::new(
+            session_id,
+            created_at_ms,
+            self.canonical_cwd.clone(),
+            self.agent_preset_id.clone(),
+            self.settings.clone(),
+        )?
+        .with_workspace_trust(self.workspace_trust)?
+        .with_fork_origin(origin)
+    }
+
+    /// Returns the optional immutable fork lineage.
+    pub const fn fork_origin(&self) -> Option<&ForkOrigin> {
+        self.fork_origin.as_ref()
     }
 
     /// Returns lowercase SHA-256 of the exact canonical immutable header.
@@ -740,6 +1450,59 @@ pub enum SessionFactBody {
         /// Whether every Tool effect requires a live one-shot approval.
         require_approval: bool,
     },
+    /// One or more durable mailbox messages were atomically claimed into a Turn.
+    MessageTurnAccepted {
+        /// Exact turn identity.
+        turn_id: TurnId,
+        /// Owning Agent activation.
+        activation_id: ActivationId,
+        /// Nonempty ordered claimed message identities.
+        message_ids: Vec<MessageId>,
+        /// Invocation-scoped model override, if present.
+        model: Option<ModelRef>,
+        /// Exact resolved sandbox mode for this Turn.
+        sandbox: SandboxMode,
+        /// Whether every Tool effect requires a live one-shot approval.
+        require_approval: bool,
+    },
+    /// One model Step began within an accepted Turn.
+    StepStarted {
+        /// Exact target Turn.
+        turn_id: TurnId,
+        /// Exact Step identity.
+        step_id: StepId,
+    },
+    /// One accepted message or instruction entered model-visible context.
+    InputMessageEntered {
+        /// Exact target Turn.
+        turn_id: TurnId,
+        /// Exact target Step.
+        step_id: StepId,
+        /// Durable source classification.
+        source: InputMessageSource,
+        /// Nonempty ordered content.
+        content: Vec<AgentMessageContent>,
+    },
+    /// One model Step ended before another Step or the Turn terminal.
+    StepEnded {
+        /// Exact target Turn.
+        turn_id: TurnId,
+        /// Exact Step identity.
+        step_id: StepId,
+        /// Closed Step outcome.
+        outcome: StepOutcome,
+    },
+    /// Explicit workspace paths were touched by one effect.
+    WorkspaceTouched {
+        /// Exact target Turn.
+        turn_id: TurnId,
+        /// Exact target Step.
+        step_id: StepId,
+        /// Effect which caused the change.
+        effect_id: EffectId,
+        /// Nonempty bounded canonical paths.
+        paths: Vec<String>,
+    },
     /// One direct Image request entered the session log.
     ImageRequested {
         /// Exact turn identity.
@@ -833,6 +1596,8 @@ pub enum SessionFactBody {
         arguments: serde_json::Value,
         /// One-shot live approval evidence when required by the resolved turn policy.
         approval: Option<ApprovalOutcome>,
+        /// Tool-owner scheduling proof copied from the sealed definition.
+        parallel_safe: bool,
     },
     /// The prepared Tool call was authorized to start after intent durability.
     ToolStarted {
@@ -873,20 +1638,36 @@ impl SessionFactBody {
                 turn_id: _,
                 sandbox,
                 require_approval,
+            } => validate_turn_acceptance(text, model.as_ref(), *sandbox, *require_approval),
+            Self::MessageTurnAccepted {
+                message_ids,
+                model,
+                sandbox,
+                require_approval,
+                ..
+            } => validate_message_turn_acceptance(
+                message_ids,
+                model.as_ref(),
+                *sandbox,
+                *require_approval,
+            ),
+            Self::StepStarted { .. } => Ok(()),
+            Self::InputMessageEntered {
+                source, content, ..
             } => {
-                validate_turn_text(text)?;
-                if let Some(model) = model {
-                    model
-                        .validate()
-                        .map_err(|error| SessionError::Invalid(error.to_string()))?;
-                }
-                if *sandbox == SandboxMode::DangerFullAccess && !require_approval {
-                    return Err(SessionError::Invalid(
-                        "danger-full-access turn requires live approval".into(),
-                    ));
-                }
-                Ok(())
+                source.validate()?;
+                let text_limit = if matches!(
+                    source,
+                    InputMessageSource::Agent { .. } | InputMessageSource::Completion { .. }
+                ) {
+                    MAXIMUM_AGENT_MESSAGE_BYTES
+                } else {
+                    MAXIMUM_TURN_TEXT_BYTES
+                };
+                validate_message_content(content, text_limit)
             }
+            Self::StepEnded { outcome, .. } => outcome.validate(),
+            Self::WorkspaceTouched { paths, .. } => validate_workspace_touch(paths),
             Self::ImageRequested { model, request, .. } => {
                 model
                     .validate()
@@ -956,6 +1737,11 @@ impl SessionFactBody {
     pub const fn turn_id(&self) -> &TurnId {
         match self {
             Self::TurnAccepted { turn_id, .. }
+            | Self::MessageTurnAccepted { turn_id, .. }
+            | Self::StepStarted { turn_id, .. }
+            | Self::InputMessageEntered { turn_id, .. }
+            | Self::StepEnded { turn_id, .. }
+            | Self::WorkspaceTouched { turn_id, .. }
             | Self::ImageRequested { turn_id, .. }
             | Self::CancelRequested { turn_id, .. }
             | Self::BudgetExhausted { turn_id, .. }
@@ -971,6 +1757,67 @@ impl SessionFactBody {
             | Self::TurnTerminal { turn_id, .. } => turn_id,
         }
     }
+}
+
+fn validate_turn_acceptance(
+    text: &str,
+    model: Option<&ModelRef>,
+    sandbox: SandboxMode,
+    require_approval: bool,
+) -> Result<()> {
+    validate_turn_text(text)?;
+    validate_resolved_turn_policy(model, sandbox, require_approval)
+}
+
+fn validate_message_turn_acceptance(
+    message_ids: &[MessageId],
+    model: Option<&ModelRef>,
+    sandbox: SandboxMode,
+    require_approval: bool,
+) -> Result<()> {
+    if message_ids.is_empty()
+        || message_ids.len() > MAXIMUM_PENDING_AGENT_MESSAGES
+        || message_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != message_ids.len()
+    {
+        return Err(SessionError::Invalid(format!(
+            "message Turn must claim 1..={MAXIMUM_PENDING_AGENT_MESSAGES} unique messages"
+        )));
+    }
+    validate_resolved_turn_policy(model, sandbox, require_approval)
+}
+
+fn validate_resolved_turn_policy(
+    model: Option<&ModelRef>,
+    sandbox: SandboxMode,
+    require_approval: bool,
+) -> Result<()> {
+    if let Some(model) = model {
+        model
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+    }
+    if sandbox == SandboxMode::DangerFullAccess && !require_approval {
+        return Err(SessionError::Invalid(
+            "danger-full-access turn requires live approval".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_touch(paths: &[String]) -> Result<()> {
+    if paths.is_empty() || paths.len() > MAXIMUM_WORKSPACE_TOUCH_PATHS {
+        return Err(SessionError::Invalid(format!(
+            "workspace touch must contain 1..={MAXIMUM_WORKSPACE_TOUCH_PATHS} paths"
+        )));
+    }
+    for path in paths {
+        validate_canonical_path(path)?;
+    }
+    Ok(())
 }
 
 fn validate_budget_exhaustion(dimension: BudgetDimension, consumed: u64, limit: u64) -> Result<()> {
@@ -1150,6 +1997,43 @@ pub fn fact_prefix_sha256<'a>(facts: impl IntoIterator<Item = &'a SessionFact>) 
     Ok(hex::encode(digest))
 }
 
+/// Advances the canonical digest chain by one validated Agent-control record.
+pub fn advance_control_prefix_digest(
+    previous: [u8; 32],
+    record: &AgentControlRecord,
+) -> Result<[u8; 32]> {
+    struct DigestWriter<'a>(&'a mut Sha256);
+
+    impl std::io::Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(CONTROL_PREFIX_DOMAIN);
+    digest.update(previous);
+    serde_json::to_writer(DigestWriter(&mut digest), record)
+        .map_err(|error| SessionError::Encoding(error.to_string()))?;
+    Ok(digest.finalize().into())
+}
+
+/// Computes lowercase SHA-256 for one exact Agent-control prefix.
+pub fn control_prefix_sha256<'a>(
+    records: impl IntoIterator<Item = &'a AgentControlRecord>,
+) -> Result<String> {
+    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
+    for record in records {
+        digest = advance_control_prefix_digest(digest, record)?;
+    }
+    Ok(hex::encode(digest))
+}
+
 fn compact_json_len(value: &(impl Serialize + ?Sized)) -> Result<usize> {
     struct Counter(usize);
 
@@ -1200,6 +2084,32 @@ pub fn validate_fact_sequence(after_seq: u64, facts: &[SessionFact]) -> Result<(
     Ok(())
 }
 
+/// Validates one contiguous Agent-control sequence after an explicit cursor.
+pub fn validate_control_sequence(after_seq: u64, records: &[AgentControlRecord]) -> Result<()> {
+    if records.len() > MAXIMUM_FACTS_PER_READ {
+        return Err(SessionError::TooLarge {
+            kind: "Agent control page",
+            maximum: MAXIMUM_FACTS_PER_READ,
+            actual: records.len(),
+        });
+    }
+    let mut expected = after_seq
+        .checked_add(1)
+        .ok_or_else(|| SessionError::Invalid("control sequence exhausted".into()))?;
+    for record in records {
+        if record.seq() != expected {
+            return Err(SessionError::Invalid(format!(
+                "control sequence is not contiguous: expected {expected}, got {}",
+                record.seq()
+            )));
+        }
+        expected = expected
+            .checked_add(1)
+            .ok_or_else(|| SessionError::Invalid("control sequence exhausted".into()))?;
+    }
+    Ok(())
+}
+
 /// Closed durable-session contract failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
@@ -1237,6 +2147,19 @@ pub fn validate_identifier(kind: &str, value: &str) -> Result<()> {
     {
         return Err(SessionError::Invalid(format!(
             "{kind} identity must be bounded nonempty ASCII"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sha256(kind: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(SessionError::Invalid(format!(
+            "{kind} must be lowercase SHA-256"
         )));
     }
     Ok(())

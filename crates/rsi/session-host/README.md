@@ -17,14 +17,36 @@ the package version plus SHA-256 of the running executable, so separately built
 artifacts cannot silently share compatibility identity merely because both
 declare version `0.0.1`. Each connection performs one handshake and carries
 exactly one request; request IDs correlate that exchange and do not imply
-connection multiplexing. The client adapter canonicalizes draft workspace paths
-before transport, and the server rejects a non-absolute wire path rather than
-resolving it against the daemon's working directory. Submit-text bytes are
-checked against the durable
-turn-text contract before the in-process application is called. Subscription events
-carry one Fact per frame. History Facts and subscription events carry the
-requested Session identity, which the client verifies before exposing them.
-History, recent sessions, and pending approvals use a
+connection multiplexing. A readiness connection sends a side-effect-free
+`Probe` request and requires `Ready` on that same stream under the control-plane
+deadline; a successful handshake alone is not readiness. The client adapter
+canonicalizes draft workspace paths before transport, and the server rejects a
+non-absolute wire path rather than resolving it against the daemon's working
+directory. Message text is checked against the durable message contract before
+the in-process application is called. Every locally defined tagged frame,
+operation, response, item, update, and error rejects unknown fields recursively
+rather than silently accepting a shape from another protocol epoch. The server rejects an empty or oversized
+content-block list before reading any declared upload body. Multimodal message
+uploads remain strict JSON: the request declares each image length and SHA-256,
+followed by ordered bounded base64 chunk frames. The server admits aggregate
+decoded bytes before retention and verifies length and digest before calling
+the Session module. No raw frame subtype or partially imported message is
+exposed. A connect or handshake failure before message transmission remains an
+ordinary backend failure. A read failure after a complete request can be
+applied, or a matching response envelope that cannot prove exactly one result,
+is reported as an unknown message outcome. Rejected upload framing is returned
+as a typed response before application execution. Subscription
+events carry one control record or Fact per frame. Message receipts carry both
+the acceptance control cursor and their observed durable Fact tail, allowing a
+claim wait to use one subscription instead of opening a handshake connection
+for each status poll. One absolute one-minute
+deadline covers the complete upload stream, so frame progress cannot renew an
+upload reservation indefinitely. The decoded request keeps its raw-frame
+admission until dispatch and response complete. History Facts and subscription
+events carry the requested Session identity, which the client verifies before
+exposing them; receipt sequences, per-stream cursor continuity, monotonic
+durable watermarks, and recent-session ordering are revalidated at the client
+adapter boundary. History, recent sessions, and tree-wide pending approvals use a
 start frame, one typed item per frame, and an end frame. Each item has the
 single-frame byte ceiling and clients reject more than 1,024 items in one
 sequence, including from a malformed same-user server. Clients additionally
@@ -36,10 +58,19 @@ subscription may remain idle until an event or shutdown, but after its next
 frame length arrives, decoder-ledger admission and the remaining body read have
 a 30-second deadline. Unpublished drafts have a one-hour idle
 lease on their exact composition pin; each operation renews that lease, and a
-one-minute server sweep reclaims expired pins and bounded draft slots. Draft
-capacity is reserved before application creation and released whenever submit
+targeted lookup removes only that draft when its deadline already elapsed. A
+one-minute server sweep performs the global reclamation of expired pins and
+bounded draft slots. Existing-session operations never scan all drafts;
+creation also performs a bounded expiry pass before and after the potentially
+long application call so expired drafts cannot consume capacity or be retained
+across that call. Draft capacity is reserved before application creation and released whenever submit
 establishes durable identity, including a submission conflict. Completed
-connection tasks are reaped while the accept loop remains live. The
+connection tasks are reaped while the accept loop remains live. A cloneable
+diagnostics handle exposes monotonic, saturating event and connection counters
+for accept, peer identity, capacity, handshake, request, response, task-panic,
+and forced-drain failures. The transport does not print or retain wire payloads;
+the standard daemon periodically emits only nonzero counter deltas and a final
+delta through its owner log. The
 owner alone may recover a stale socket after a failed liveness probe. Published
 sockets and their directories are owner-only, peer credentials must match the
 effective user, and cleanup rechecks the bound device/inode.

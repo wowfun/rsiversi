@@ -15,6 +15,21 @@ allowlist. A source cannot name Store, Process, Jobs, Kernel, provider, Host, or
 other global factories. Unknown or unsupported contribution identities fail
 before a Tool stage is sealed or any session capacity is reserved.
 
+Workspace trust is an immutable Header decision. Configured user instruction
+and skill roots remain trusted inputs; project `AGENTS.md` and project skills
+are eligible only for a trusted Session. Project discovery acquires one owned
+root directory capability, then keeps enumeration, metadata, and source reads
+relative to it. Project symlinks are omissions, not alternate authorities, and
+an incomplete observation cannot replace the last-good durable context.
+
+Subagent control authority is process-local and claim-scoped. The executor
+derives `AgentCallerAuthority` from the exact live claim and injects it as a
+typed Tool extension; model arguments carry only requested targets and cannot
+name a root, claim seal, or approval authority. Kernel lineage checks constrain
+spawn, message, list, wait, and interrupt operations. The standard Session
+adapter routes an approval answer only after resolving one unambiguous pending
+approval identity within the caller's durable Agent tree.
+
 The session header records redacted configuration facts only. It may contain a
 credential reference but never a resolved secret. Provider error summaries and
 Tool failures are bounded before persistence. Media content remains owned by

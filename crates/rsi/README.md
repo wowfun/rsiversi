@@ -10,6 +10,10 @@ and construction of the Tokio runtime.
 The standard catalog links OpenAI, OpenAI-compatible, and DeepSeek factories
 without implicitly enabling a deployment. A persistent Profile instantiates
 the chosen provider and Settings names an exact default deployment/model.
+The standard Host explicitly configures four maximum active Agent turns. The
+Kernel still serializes turns within one Session; the four lanes permit bounded
+progress across independent Sessions. A copied Host Profile may replace the
+complete executor configuration to select another value from `1..=256`.
 
 `rsi --profile NAME [application arguments]` selects one Application Profile.
 The built-in, non-shadowable `session` and `headless` profiles both select the
@@ -34,8 +38,12 @@ drains it, and `restart` composes stop and start. `stop --force` and `restart
 --force` open a pidfd and validate the recorded process start token before
 sending `SIGKILL` to that exact process descriptor. If the runtime's SIGHUP
 source closes, the daemon disables only the reload branch after one diagnostic;
-it does not spin on an always-ready closed stream.
-The child of `host start` creates a new Unix session before Host bootstrap, so
+it does not spin on an always-ready closed stream. SIGTERM/SIGINT closes reload
+admission and aborts any in-flight SIGHUP waiter before daemon shutdown, so a
+stalled reload cannot retain the Profile lifecycle lock ahead of stop.
+The `host start` launcher reserves the owner lease before spawning and passes
+it to the child without releasing ownership. The child creates a new Unix
+session before Host bootstrap, so
 terminal process-group signals and hangup ownership do not remain shared with
 the launcher. Foreground `host serve` deliberately keeps its caller's session.
 
@@ -57,23 +65,30 @@ signals are fenced by a pidfd plus Linux process start identity; other
 platforms support embedded mode only.
 
 The Session interface creates, attaches, and lists sessions, then exposes one
-handle for durable text or Image submission, cancellation, live observation,
-bounded backward history, and live approvals. Callers allocate each `TurnId`;
-acceptance returns only after the exact header and canonical request
-fingerprint are durable. Retrying the same identity and fingerprint returns
-the original receipt across reconnect or restart, while a changed request is a
-conflict. Durable Facts remain historical truth; live approvals and
-subscriptions are bounded process state and are never replayed as effects.
+handle for ordered text-and-image mailbox submission, direct Image generation,
+cancellation, reconnectable observation, bounded backward history, and live
+approvals. Callers allocate a `MessageId` for Language or multimodal input.
+Acceptance atomically persists the immutable Header when needed and a canonical
+mailbox record, but it does not invent a `TurnId`; the later durable claim
+creates the Turn and first Step. Retrying the same identity and body returns the
+indexed message state across reconnect or restart, while a changed body is a
+typed conflict. Agent-control records and Facts are independent durable streams.
+Approval waiters remain bounded live Host state and are never replayed as
+effects.
 
 The interactive `session` application is line-oriented. Ordinary lines are
-accepted FIFO through a 16-turn application queue and a one-line reader
+accepted FIFO through a 16-message application queue and a one-line reader
 handoff; the blocking stdin producer stops reading while both are full.
 `:queue`, `:cancel`, `:approvals`, `:allow`, `:deny`, `:exit`,
 and `:help` are local commands, while `::` escapes a leading colon. Ctrl-C
-cancels only this client's tracked active turn and detach never cancels work.
-The `headless` application accepts one turn and has no approval capability; an
+cancels only this client's tracked message or its claimed Turn, and detach never
+cancels work. The `headless` application accepts one message, may attach
+repeatable `--image` inputs before admission, and has no approval capability; an
 unanswered approval remains pending until cancellation or Host shutdown rather
 than being denied merely because the submitter is headless.
+On Unix, each image path is opened no-follow and nonblocking before its handle is
+verified as a regular file, so a FIFO, device, or final symlink cannot occupy a
+blocking worker while waiting to be classified.
 
 Application exit status 0 means a completed turn; an interactive Session also
 treats its user's locally cancelled turn as a successful control action. Status
@@ -83,15 +98,17 @@ failed, partial, interrupted, or budget-exceeded terminal outcome. Status 2
 covers command-line, Profile/catalog, and Host bootstrap failures before that
 handoff. Status 130 means headless signal cancellation.
 
-The Rust Session interface additionally exposes direct Image submissions. A
-direct Image turn validates its exact Image route and does not require the
-session's default Language deployment to be available. Image results remain
-Media references.
+The Rust Session interface additionally exposes direct Image generation. Its
+caller allocates the `TurnId`; the operation validates its exact Image route and
+does not require the session's default Language deployment to be available.
+Image results remain Media references.
 
 The product materializes its built-in `standard` Agent preset as a verified,
 digest-addressed cache asset and prepends it before configured and writable
 user roots. Unix materialization creates, verifies, and publishes through
-no-follow directory descriptors; the portable fallback rejects observed link
+no-follow directory descriptors. It accepts an operating-system alias only in
+the first component below `/`, then rejects symbolic links throughout the
+owned suffix. The portable fallback rejects observed link
 or reparse-point components before publishing. Each fresh session retains a
 process-local draft carrying the current preset generation until its first
 submission is durably accepted; a failed pre-durability attempt can therefore
@@ -105,7 +122,10 @@ generation-preparation failure therefore cannot create a Workspace row.
 Dropping an unsubmitted resume token has no Store or resident-capacity side
 effect.
 
-On Linux, the binary resolves its own canonical executable and `/bin/bash`,
+On Linux, linking the standard coding Tools makes a successfully probed
+restricted sandbox backend a Host activation requirement. The Host does not
+begin serving and defer an unavailable enforcement backend until the first
+Tool call. On Linux, the binary resolves its own canonical executable and `/bin/bash`,
 freezes the scrubbed child environment before Host construction, and passes
 those values explicitly into the standard composition. The Bash Job producer
 is global because Jobs identities outlive Agent generations. The model-facing

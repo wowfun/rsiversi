@@ -14,10 +14,24 @@ It contains no registry implementation, policy, approval, durable logging,
 provider wire, or plugin lifecycle. Tool start carries the exact sandbox
 planner and an optional typed Jobs scope supplied by the orchestrator; these
 are invocation authorities, not registry-owned services or ambient lookups.
+Its opaque typed extension map may also carry a Tool-layer lane-parking
+authority. A blocking orchestration Tool explicitly parks before waiting and
+must reacquire the same bounded executor admission before returning a result.
+Reacquisition observes the Tool execution's cooperative cancellation: a
+cancelled wait may return `Cancelled` without admission, while no successful or
+model-visible error result may cross the parking boundary until admission is
+held again. Model arguments cannot forge or discover that authority.
 
 The caller supplies one bounded invocation identity when preparing a call.
 Durable orchestrators use their own effect identity; the Tool layer does not
 guess session or turn structure from a model-produced call ID.
+Every definition also carries process-local scheduling metadata. `exclusive`
+is the default; only a Tool whose owner explicitly marks `parallel_safe` may
+overlap adjacent calls from one model response. This metadata is not serialized
+to providers and therefore cannot be asserted by model output. An
+`exclusive_final` Tool is also an ordering barrier and additionally requires
+the call to be last in provider source order; this is the scheduling contract
+for a Tool that may park its executor lane while it waits.
 
 A catalog stage admits at most 64 Tool registrations. `ToolRegistrar` is the
 write-only staging interface; `ToolRuntime` is the immutable execution

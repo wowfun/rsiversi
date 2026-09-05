@@ -11,7 +11,9 @@ use rsi_sandbox::{ConfinedProcess, EnforcementStamp, ProcessRequest, Sandbox, Sa
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
+use std::any::{Any, TypeId};
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +57,8 @@ pub struct ToolDefinition {
     input_schema: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     freeform: Option<FreeformToolDefinition>,
+    #[serde(skip)]
+    scheduling: ToolScheduling,
 }
 
 impl<'de> Deserialize<'de> for ToolDefinition {
@@ -78,6 +82,7 @@ impl<'de> Deserialize<'de> for ToolDefinition {
             description: wire.description,
             input_schema: wire.input_schema,
             freeform: wire.freeform,
+            scheduling: ToolScheduling::Exclusive,
         };
         definition
             .validate()
@@ -98,6 +103,7 @@ impl ToolDefinition {
             description: description.into(),
             input_schema,
             freeform: None,
+            scheduling: ToolScheduling::Exclusive,
         };
         definition.validate()?;
         Ok(definition)
@@ -130,6 +136,18 @@ impl ToolDefinition {
         self.freeform.as_ref()
     }
 
+    /// Selects explicit process-local execution scheduling for this Tool.
+    #[must_use]
+    pub const fn with_scheduling(mut self, scheduling: ToolScheduling) -> Self {
+        self.scheduling = scheduling;
+        self
+    }
+
+    /// Returns the owner-declared execution scheduling contract.
+    pub const fn scheduling(&self) -> ToolScheduling {
+        self.scheduling
+    }
+
     /// Revalidates a definition decoded from a durable or external boundary.
     pub fn validate(&self) -> Result<()> {
         validate_model_tool_name(&self.name)?;
@@ -150,6 +168,18 @@ impl ToolDefinition {
         }
         Ok(())
     }
+}
+
+/// Process-local overlap contract declared by the Tool owner.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolScheduling {
+    /// The call is an ordering barrier and runs alone.
+    #[default]
+    Exclusive,
+    /// The call runs alone and must be last in provider source order.
+    ExclusiveFinal,
+    /// Adjacent calls with the same declaration may overlap safely.
+    ParallelSafe,
 }
 
 /// Bounded provider-neutral freeform grammar attached to one tool.
@@ -278,6 +308,104 @@ pub struct ToolStart {
     pub sandbox: Arc<dyn Sandbox>,
     /// Exact optional Jobs scope authority for this Agent invocation.
     pub job_scope: Option<rsi_jobs::JobScopeAuthority>,
+    /// Orchestrator-owned typed capabilities unavailable to model arguments.
+    pub extensions: ToolExecutionExtensions,
+}
+
+/// Opaque, typed process-local capabilities injected at Tool start.
+#[derive(Clone, Default)]
+pub struct ToolExecutionExtensions {
+    values: Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl fmt::Debug for ToolExecutionExtensions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolExecutionExtensions")
+            .field("count", &self.values.len())
+            .finish()
+    }
+}
+
+impl ToolExecutionExtensions {
+    /// Adds one exact typed capability, rejecting duplicate types.
+    pub fn with<T>(mut self, value: Arc<T>) -> Result<Self>
+    where
+        T: Any + Send + Sync,
+    {
+        let values = Arc::make_mut(&mut self.values);
+        if values.insert(TypeId::of::<T>(), value).is_some() {
+            return Err(ToolError::InvalidInput(
+                "Tool execution extension type was supplied more than once".into(),
+            ));
+        }
+        Ok(self)
+    }
+
+    /// Resolves one exact typed capability without exposing the registry.
+    pub fn get<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync,
+    {
+        self.values
+            .get(&TypeId::of::<T>())
+            .cloned()
+            .and_then(|value| value.downcast::<T>().ok())
+    }
+}
+
+/// Process-local service which transfers one executor lane around a blocking Tool wait.
+#[async_trait]
+pub trait ToolLaneParkingService: fmt::Debug + Send + Sync + 'static {
+    /// Releases the calling Turn's exact executor admission.
+    async fn park(&self) -> Result<()>;
+    /// Reacquires bounded executor admission before Tool execution continues.
+    async fn resume(&self, cancellation: CancellationToken) -> Result<()>;
+}
+
+/// Opaque orchestrator-issued lane-parking authority carried as a typed Tool extension.
+#[derive(Clone)]
+pub struct ToolLaneParkingAuthority {
+    service: Arc<dyn ToolLaneParkingService>,
+}
+
+impl fmt::Debug for ToolLaneParkingAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ToolLaneParkingAuthority(..)")
+    }
+}
+
+impl ToolLaneParkingAuthority {
+    /// Wraps one exact executor-owned parking service.
+    pub fn new(service: Arc<dyn ToolLaneParkingService>) -> Self {
+        Self { service }
+    }
+
+    /// Releases the current executor lane and returns a single-use resume guard.
+    pub async fn park(&self) -> Result<ParkedToolLane> {
+        self.service.park().await?;
+        Ok(ParkedToolLane {
+            service: Arc::clone(&self.service),
+        })
+    }
+}
+
+/// Single-use proof that a Tool wait released its executor admission.
+pub struct ParkedToolLane {
+    service: Arc<dyn ToolLaneParkingService>,
+}
+
+impl fmt::Debug for ParkedToolLane {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ParkedToolLane(..)")
+    }
+}
+
+impl ParkedToolLane {
+    /// Reacquires bounded executor admission and consumes the parked proof.
+    pub async fn resume(self, cancellation: CancellationToken) -> Result<()> {
+        self.service.resume(cancellation).await
+    }
 }
 
 /// Execution supplied to one trusted tool body.
@@ -290,6 +418,7 @@ pub struct ToolExecution {
     policy: ToolExecutionPolicy,
     sandbox: Arc<dyn Sandbox>,
     job_scope: Option<rsi_jobs::JobScopeAuthority>,
+    extensions: ToolExecutionExtensions,
     enforcement: Arc<Mutex<Vec<EnforcementStamp>>>,
 }
 
@@ -302,6 +431,14 @@ impl ToolExecution {
     /// Returns the exact optional Jobs scope authority pinned at Tool start.
     pub const fn job_scope(&self) -> Option<&rsi_jobs::JobScopeAuthority> {
         self.job_scope.as_ref()
+    }
+
+    /// Resolves one orchestrator-owned typed capability.
+    pub fn extension<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync,
+    {
+        self.extensions.get::<T>()
     }
 
     /// Confines one process using the pinned mode and workspace authority.
@@ -345,6 +482,7 @@ impl ToolExecution {
                 policy: start.policy,
                 sandbox: start.sandbox,
                 job_scope: start.job_scope,
+                extensions: start.extensions,
                 enforcement: Arc::clone(&enforcement),
             },
             ToolEnforcement { enforcement },

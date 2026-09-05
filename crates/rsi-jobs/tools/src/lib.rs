@@ -12,7 +12,7 @@ use rsi_jobs::{
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult,
+    ToolRegistration, ToolResult, ToolScheduling,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -87,7 +87,8 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                 "job_list",
                 "List background jobs in the current turn scope. Terminal jobs with reported=false still require job_output or job_kill before successful turn completion.",
                 json!({"type":"object","properties":{},"additionalProperties":false}),
-            )?,
+            )?
+            .with_scheduling(ToolScheduling::ParallelSafe),
             timeout_ms: 30_000,
             executor: Arc::new(JobListTool {
                 jobs: Arc::clone(&jobs),

@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use thiserror::Error;
 
 /// Session Host wire protocol epoch.
-pub const SESSION_HOST_PROTOCOL_EPOCH: u32 = 1;
+pub const SESSION_HOST_PROTOCOL_EPOCH: u32 = 4;
 static SESSION_HOST_PRODUCT_BUILD: LazyLock<Result<String, String>> =
     LazyLock::new(executable_product_build);
 
@@ -128,10 +128,14 @@ impl HostOwnerMetadata {
         host_epoch: HostEpoch,
         socket_path: Option<PathBuf>,
     ) -> Result<Self, SessionHostError> {
+        #[cfg(target_os = "linux")]
+        let process_start_token = current_process_start_token()?;
+        #[cfg(not(target_os = "linux"))]
+        let process_start_token = current_process_start_token();
         let metadata = Self {
             format: 1,
             pid: std::process::id(),
-            process_start_token: current_process_start_token()?,
+            process_start_token,
             mode,
             launch_key: launch_key.into(),
             protocol_epoch: SESSION_HOST_PROTOCOL_EPOCH,
@@ -394,7 +398,7 @@ impl SessionHostPaths {
 /// Exclusive owner lease shared by embedded and daemon execution.
 #[derive(Debug)]
 pub struct HostOwnerLease {
-    file: File,
+    file: Option<File>,
     paths: SessionHostPaths,
     published_epoch: Option<HostEpoch>,
 }
@@ -424,7 +428,45 @@ impl HostOwnerLease {
         }
         validate_open_regular_file(paths.owner_lock(), &file, "owner lease")?;
         Ok(Self {
-            file,
+            file: Some(file),
+            paths,
+            published_epoch: None,
+        })
+    }
+
+    /// Returns the exact paths protected by this owner lease.
+    pub fn paths(&self) -> &SessionHostPaths {
+        &self.paths
+    }
+
+    /// Moves an unpublished Linux lease into a file suitable for child inheritance.
+    /// Closing the last inherited file releases ownership; this move never unlocks it.
+    #[cfg(target_os = "linux")]
+    pub fn into_startup_file(mut self) -> Result<File, SessionHostError> {
+        if self.published_epoch.is_some() {
+            return Err(SessionHostError::Invalid(
+                "a published owner lease cannot be transferred".into(),
+            ));
+        }
+        self.file.take().ok_or_else(|| {
+            SessionHostError::Invalid("owner lease has no startup file to transfer".into())
+        })
+    }
+
+    /// Adopts an inherited Linux owner file after checking its exact path and lock.
+    #[cfg(target_os = "linux")]
+    pub fn adopt_startup_file(
+        paths: SessionHostPaths,
+        file: File,
+    ) -> Result<Self, SessionHostError> {
+        validate_open_regular_file(paths.owner_lock(), &file, "inherited owner lease")?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(SessionHostError::OwnerActive),
+            Err(std::fs::TryLockError::Error(error)) => return Err(io_error(error)),
+        }
+        Ok(Self {
+            file: Some(file),
             paths,
             published_epoch: None,
         })
@@ -459,7 +501,9 @@ impl Drop for HostOwnerLease {
         {
             let _ = fs::remove_file(self.paths.owner_metadata());
         }
-        let _ = self.file.unlock();
+        if let Some(file) = &self.file {
+            let _ = file.unlock();
+        }
     }
 }
 
@@ -480,17 +524,16 @@ pub enum SessionHostError {
     Unsupported,
 }
 
+#[cfg(target_os = "linux")]
 fn current_process_start_token() -> Result<String, SessionHostError> {
-    #[cfg(target_os = "linux")]
-    {
-        process_start_token(std::process::id())?.ok_or_else(|| {
-            SessionHostError::Io("current process disappeared while reading its start token".into())
-        })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(format!("process-{}", std::process::id()))
-    }
+    process_start_token(std::process::id())?.ok_or_else(|| {
+        SessionHostError::Io("current process disappeared while reading its start token".into())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_process_start_token() -> String {
+    format!("process-{}", std::process::id())
 }
 
 #[cfg(target_os = "linux")]

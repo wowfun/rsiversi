@@ -5,7 +5,9 @@ use rsi_session_host::{
     SessionHostPaths,
 };
 #[cfg(target_os = "linux")]
-use rsi_session_host::{UdsSessionApplication, UdsSessionServer, owner_process_is_current};
+use rsi_session_host::{
+    SessionHostDiagnostics, UdsSessionApplication, UdsSessionServer, owner_process_is_current,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -122,21 +124,30 @@ pub async fn connect_or_embed_session_host(
                         let socket = metadata.socket_path.as_deref().ok_or_else(|| {
                             RsiError::Boot("active daemon metadata has no endpoint".into())
                         })?;
-                        let remote = UdsSessionApplication::connect(
-                            socket,
-                            &launch_key,
-                            metadata.host_epoch,
+                        let remote = tokio::time::timeout_at(
+                            deadline,
+                            UdsSessionApplication::connect(
+                                socket,
+                                &launch_key,
+                                metadata.host_epoch,
+                            ),
                         )
                         .await;
                         let remote = match remote {
-                            Ok(remote) => remote,
-                            Err(_) if tokio::time::Instant::now() < deadline => {
+                            Ok(Ok(remote)) => remote,
+                            Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
                                 tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
                                 continue;
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 return Err(RsiError::Boot(format!(
                                     "the active compatible Session Host did not become responsive within {} seconds: {error}",
+                                    OWNER_DISCOVERY_TIMEOUT.as_secs()
+                                )));
+                            }
+                            Err(_) => {
+                                return Err(RsiError::Boot(format!(
+                                    "the active compatible Session Host did not become responsive within {} seconds",
                                     OWNER_DISCOVERY_TIMEOUT.as_secs()
                                 )));
                             }
@@ -284,15 +295,20 @@ impl std::fmt::Debug for StandardSessionDaemon {
 
 #[cfg(target_os = "linux")]
 impl StandardSessionDaemon {
-    /// Acquires the shared owner lease, boots the Host, stages its endpoint, then publishes metadata.
+    /// Consumes the preacquired owner lease, boots the Host, and publishes its endpoint.
     pub async fn start(
         composition: StandardComposition,
         host_profile: &HostProfileDocument,
+        mut owner_lease: HostOwnerLease,
     ) -> crate::Result<Self> {
         let preview = composition.preview_host(host_profile)?;
         let launch_key = preview.launch_key.as_str().to_owned();
         let paths = SessionHostPaths::from_host_paths(composition.paths()).map_err(host_error)?;
-        let mut owner_lease = HostOwnerLease::try_acquire(paths.clone()).map_err(host_error)?;
+        if owner_lease.paths() != &paths {
+            return Err(RsiError::Boot(
+                "daemon owner lease does not protect the selected Host paths".into(),
+            ));
+        }
         let booted = boot_session_application(composition, host_profile).await?;
         let epoch = match HostEpoch::generate() {
             Ok(epoch) => epoch,
@@ -341,6 +357,11 @@ impl StandardSessionDaemon {
     /// Shares the running Host for signal-driven reloads during serving.
     pub fn running(&self) -> Arc<RunningRsi> {
         Arc::clone(&self.running)
+    }
+
+    /// Shares monotonic transport diagnostics for this daemon generation.
+    pub fn diagnostics(&self) -> SessionHostDiagnostics {
+        self.server.diagnostics()
     }
 
     /// Serves until cancellation, drains clients, then shuts down all Host resources.

@@ -5,11 +5,13 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod approval;
+mod diagnostics;
 mod owner;
 #[cfg(unix)]
 mod transport;
 
 pub use approval::ApprovalBroker;
+pub use diagnostics::{SessionHostDiagnostics, SessionHostDiagnosticsSnapshot};
 pub use owner::{
     HostEpoch, HostOwnerLease, HostOwnerMetadata, HostOwnerMode, HostSignal,
     SESSION_HOST_PROTOCOL_EPOCH, SessionHostError, SessionHostPaths, owner_process_is_current,

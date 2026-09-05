@@ -1,0 +1,33 @@
+[package]
+name = "rsi-agent-workspace-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+cap-std.workspace = true
+hex.workspace = true
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+yaml_serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

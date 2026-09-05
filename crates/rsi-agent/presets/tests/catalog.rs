@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use rsi_agent_presets::open_or_create_preset_root;
 use rsi_agent_presets::{
     AgentPresetCatalog as PresetCatalog, AgentPresetCatalogConfig, AgentPresetDefaultStore,
     AgentPresetHealth, AgentPresetId, AgentPresetProfileCompiler, AgentPresetRoot,
@@ -963,6 +965,36 @@ async fn copy_creates_only_the_absent_user_root_with_owner_only_mode() {
         );
     }
     assert!(user.join("mine").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_preset_root_rejects_a_symlink_below_the_root_alias_boundary() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = temporary.path().join("outside");
+    let alias = temporary.path().join("alias");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, &alias).unwrap();
+
+    let logical = alias.join("owned");
+    let error = open_or_create_preset_root(&logical).unwrap_err();
+    assert!(matches!(error, PresetError::UnsafeEntry { path, .. } if path == logical));
+    assert!(!outside.join("owned").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn owned_preset_root_accepts_the_platform_var_alias() {
+    let temporary = tempfile::Builder::new()
+        .prefix("rsi-preset-root-")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let logical = temporary.path().join("nested/presets");
+
+    let _root = open_or_create_preset_root(&logical).unwrap();
+    assert!(logical.is_dir());
 }
 
 #[cfg(unix)]

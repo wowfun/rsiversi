@@ -1,23 +1,32 @@
 #![cfg(target_os = "linux")]
 
-use axum::{Router, body::Body, http::StatusCode, response::Response, routing::post};
+use axum::{
+    Json, Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
+};
 use futures_util::StreamExt as _;
 use rsi::{
     HostProfileDocument, HostProfileId, ProfileCatalog, ProfileSource, RunningRsi,
     SessionHostConnectionMode, StandardCodingTools, StandardComposition, StandardSessionDaemon,
     connect_or_embed_session_host,
 };
-use rsi_agent_session_protocol::{SessionFactBody, SessionId, TurnId};
+use rsi_agent_session_protocol::{
+    AgentControlRecordBody, MessageId, SessionFactBody, SessionId, TurnId, WorkspaceTrust,
+};
+use rsi_agent_turn_protocol::{
+    MessageReceipt, MessageState, ObservationCursor, SessionObservation, SessionObservationStream,
+};
 use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
-use rsi_session::{CreateSession, SessionApplication, SessionApplicationError, SubmitText};
+use rsi_session::{
+    CreateSession, SessionApplication, SessionApplicationError, SessionInput, SubmitInput,
+};
 use rsi_session_host::{
     HostEpoch, HostOwnerLease, HostOwnerMetadata, HostOwnerMode, SessionHostPaths,
     UdsSessionApplication, UdsSessionServer,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -155,6 +164,105 @@ async fn provider() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+async fn capturing_chat(
+    State(requests): State<Arc<Mutex<Vec<serde_json::Value>>>>,
+    Json(request): Json<serde_json::Value>,
+) -> Response {
+    requests.lock().unwrap().push(request);
+    chat().await
+}
+
+async fn capturing_provider() -> (
+    String,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let task = tokio::spawn({
+        let requests = Arc::clone(&requests);
+        async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/v1/chat/completions", post(capturing_chat))
+                    .with_state(requests),
+            )
+            .await
+            .unwrap();
+        }
+    });
+    (format!("http://{address}"), requests, task)
+}
+
+async fn observe_message_claim(
+    handle: &Arc<dyn rsi_session::SessionHandle>,
+    receipt: &MessageReceipt,
+) -> (TurnId, u64) {
+    let mut observation: SessionObservationStream = handle
+        .observe(ObservationCursor {
+            control_seq: receipt.accepted_control_seq,
+            fact_seq: receipt.observed_fact_seq,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let SessionObservation::Control { record, .. } =
+                observation.next().await.unwrap().unwrap()
+                && let AgentControlRecordBody::MessageClaimed {
+                    message_id,
+                    turn_id,
+                    entered_fact_seq,
+                    ..
+                } = record.body()
+                && message_id == &receipt.message_id
+            {
+                return (turn_id.clone(), *entered_fact_seq);
+            }
+        }
+    })
+    .await
+    .expect("message reached its durable claim boundary")
+}
+
+async fn run_message_to_terminal(handle: &Arc<dyn rsi_session::SessionHandle>, message_id: &str) {
+    let message_id = MessageId::new(message_id).unwrap();
+    let receipt = handle
+        .submit(SubmitInput {
+            message_id: message_id.clone(),
+            content: vec![SessionInput::Text {
+                text: "inspect workspace context".into(),
+            }],
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let (turn_id, entered_fact_seq) = observe_message_claim(handle, &receipt).await;
+    let mut observation = handle
+        .observe(ObservationCursor {
+            control_seq: receipt.accepted_control_seq,
+            fact_seq: entered_fact_seq,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                observation.next().await.unwrap().unwrap(),
+                SessionObservation::Fact { fact, .. }
+                    if matches!(fact.body(), SessionFactBody::TurnTerminal { turn_id: observed, .. } if observed == &turn_id)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn built_in_standard_host_profile_boots_the_real_product_composition() {
     let (endpoint, provider) = provider().await;
@@ -171,6 +279,60 @@ async fn built_in_standard_host_profile_boots_the_real_product_composition() {
     provider.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standard_product_applies_project_instructions_only_with_durable_workspace_trust() {
+    let (endpoint, requests, provider) = capturing_provider().await;
+    let fixture = fixture(&endpoint);
+    std::fs::create_dir(fixture.workspace.join(".git")).unwrap();
+    std::fs::write(
+        fixture.workspace.join("AGENTS.md"),
+        "TRUSTED_PROJECT_INSTRUCTION_MARKER",
+    )
+    .unwrap();
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let application = running.session_application().unwrap();
+    let trusted = application
+        .create(CreateSession {
+            cwd: fixture.workspace.clone(),
+            session_id: Some(SessionId::new("trusted-workspace-context").unwrap()),
+            agent_preset_id: None,
+            workspace_trust: WorkspaceTrust::Trusted,
+        })
+        .await
+        .unwrap();
+    run_message_to_terminal(&trusted, "trusted-workspace-message").await;
+    let untrusted = application
+        .create(CreateSession {
+            cwd: fixture.workspace.clone(),
+            session_id: Some(SessionId::new("untrusted-workspace-context").unwrap()),
+            agent_preset_id: None,
+            workspace_trust: WorkspaceTrust::Untrusted,
+        })
+        .await
+        .unwrap();
+    run_message_to_terminal(&untrusted, "untrusted-workspace-message").await;
+
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .to_string()
+                .contains("TRUSTED_PROJECT_INSTRUCTION_MARKER")
+        );
+        assert!(
+            !requests[1]
+                .to_string()
+                .contains("TRUSTED_PROJECT_INSTRUCTION_MARKER")
+        );
+    }
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[allow(clippy::too_many_lines)] // One shared contract exercises the complete local and UDS session flow.
 async fn assert_session_application_contract(
     application: Arc<dyn SessionApplication>,
     workspace: &std::path::Path,
@@ -182,6 +344,7 @@ async fn assert_session_application_contract(
             cwd: workspace.to_owned(),
             session_id: Some(session_id.clone()),
             agent_preset_id: None,
+            workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
@@ -204,35 +367,69 @@ async fn assert_session_application_contract(
         Err(SessionApplicationError::Invalid(_))
     ));
 
-    let turn_id = TurnId::new(format!("{session}-turn")).unwrap();
-    let submission = SubmitText {
-        turn_id: turn_id.clone(),
-        text: "hello contract".into(),
+    let message_id = MessageId::new(format!("{session}-message")).unwrap();
+    let submission = SubmitInput {
+        message_id: message_id.clone(),
+        content: vec![SessionInput::Text {
+            text: "hello contract".into(),
+        }],
         model: None,
         sandbox: None,
     };
-    let first = handle.submit_text(submission.clone()).await.unwrap();
-    let mut observation = handle.subscribe(first.accepted_seq).await.unwrap();
-    let retried = handle.submit_text(submission).await.unwrap();
-    assert_eq!(first, retried);
+    let first = handle.submit(submission.clone()).await.unwrap();
+    let retried = handle.submit(submission.clone()).await.unwrap();
+    assert_eq!(first.session_id, retried.session_id);
+    assert_eq!(first.message_id, retried.message_id);
+    assert_eq!(first.accepted_control_seq, retried.accepted_control_seq);
+    assert!(retried.observed_fact_seq >= first.observed_fact_seq);
+    if first.state != MessageState::Pending {
+        assert_eq!(first.state, retried.state);
+    }
     assert!(matches!(
         handle
-            .submit_text(SubmitText {
-                turn_id: turn_id.clone(),
-                text: "changed body".into(),
+            .submit(SubmitInput {
+                message_id: message_id.clone(),
+                content: vec![SessionInput::Text {
+                    text: "changed body".into(),
+                }],
                 model: None,
                 sandbox: None,
             })
             .await,
-        Err(SessionApplicationError::Conflict { .. })
+        Err(SessionApplicationError::MessageConflict { .. })
     ));
+
+    let (turn_id, entered_fact_seq) = observe_message_claim(&handle, &first).await;
+    let claimed = handle.message_status(&message_id).await.unwrap();
+    assert_eq!(claimed.session_id, first.session_id);
+    assert_eq!(claimed.message_id, first.message_id);
+    assert_eq!(claimed.accepted_control_seq, first.accepted_control_seq);
+    assert!(matches!(
+        &claimed.state,
+        MessageState::Claimed { turn_id: observed, entered_fact_seq: seq, .. }
+            if observed == &turn_id && *seq == entered_fact_seq
+    ));
+    let claimed_retry = handle.submit(submission).await.unwrap();
+    assert_eq!(claimed_retry.state, claimed.state);
+    assert_eq!(
+        claimed_retry.accepted_control_seq,
+        claimed.accepted_control_seq
+    );
+    assert!(claimed_retry.observed_fact_seq >= claimed.observed_fact_seq);
+    let mut observation = handle
+        .observe(ObservationCursor {
+            control_seq: first.accepted_control_seq,
+            fact_seq: entered_fact_seq,
+        })
+        .await
+        .unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let update = observation.next().await.unwrap().unwrap();
             if matches!(
                 update,
-                rsi_agent_turn_protocol::TurnUpdate::Fact { ref fact, .. }
+                SessionObservation::Fact { ref fact, .. }
                     if matches!(fact.body(), SessionFactBody::TurnTerminal { turn_id: observed, .. } if observed == &turn_id)
             ) {
                 break;
@@ -243,7 +440,7 @@ async fn assert_session_application_contract(
     .expect("turn reached a durable terminal Fact");
 
     let history = handle.history_before(None, 64).await.unwrap();
-    assert!(history.durable_seq >= first.accepted_seq);
+    assert!(history.durable_seq >= entered_fact_seq);
     assert!(history.facts.iter().any(|fact| matches!(
         fact.body(),
         SessionFactBody::TurnTerminal { turn_id: observed, .. } if observed == &turn_id
@@ -271,6 +468,7 @@ async fn assert_session_application_contract(
                 cwd: workspace.to_owned(),
                 session_id: Some(session_id),
                 agent_preset_id: None,
+                workspace_trust: WorkspaceTrust::Untrusted,
             })
             .await,
         Err(SessionApplicationError::Invalid(message))
@@ -354,7 +552,11 @@ async fn application_selection_uses_a_compatible_daemon_and_embeds_only_without_
     assert_eq!(embedded.mode(), SessionHostConnectionMode::Embedded);
     embedded.shutdown().await.unwrap();
 
-    let daemon = StandardSessionDaemon::start(composition(fixture.paths.clone()), &profile)
+    let owner = rsi_session_host::HostOwnerLease::try_acquire(
+        rsi_session_host::SessionHostPaths::from_host_paths(&fixture.paths).unwrap(),
+    )
+    .unwrap();
+    let daemon = StandardSessionDaemon::start(composition(fixture.paths.clone()), &profile, owner)
         .await
         .unwrap();
     let cancellation = CancellationToken::new();

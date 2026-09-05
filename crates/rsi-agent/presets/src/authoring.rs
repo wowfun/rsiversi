@@ -2,6 +2,8 @@ use crate::{
     AgentPresetId, MAX_COPY_BYTES, MAX_COPY_DEPTH, MAX_COPY_ENTRIES, MAX_METADATA_BYTES,
     METADATA_FILE, PresetError, Result, clean_metadata_text,
 };
+#[cfg(unix)]
+use crate::{open_existing_preset_root, open_or_create_preset_root};
 use serde::{Deserialize, Serialize};
 #[cfg(not(unix))]
 use std::fs;
@@ -150,7 +152,7 @@ fn copy_preset_platform(
     )
     .map(File::from)
     .map_err(|error| unsafe_entry(source, "source is not a no-follow directory", error))?;
-    let user_directory = open_or_create_user_root_unix(user_root)?;
+    let user_directory = open_or_create_preset_root(user_root)?.into_directory();
     let mut stage = UnixStage::create(user_directory, user_root)?;
     let mut budget = CopyBudget::default();
     UnixCopy::new(&source_directory, &mut budget, source, name_override)?.copy_directory(
@@ -183,82 +185,12 @@ fn copy_preset_platform(
 }
 
 #[cfg(unix)]
-fn open_or_create_user_root_unix(user_root: &Path) -> Result<File> {
-    use rustix::fs::{Mode, OFlags};
-    use std::path::Component;
-
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut directory = rustix::fs::open("/", flags, Mode::empty())
-        .map(File::from)
-        .map_err(|error| unsafe_entry(user_root, "filesystem root is unavailable", error))?;
-    let mut current_path = PathBuf::from("/");
-    for component in user_root.components() {
-        let name = match component {
-            Component::RootDir => continue,
-            Component::Normal(name) => name,
-            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
-                return Err(PresetError::InvalidRoot(format!(
-                    "user root is not a normalized absolute path: {}",
-                    user_root.display()
-                )));
-            }
-        };
-        current_path.push(name);
-        let (opened, created) = match rustix::fs::openat(&directory, name, flags, Mode::empty()) {
-            Ok(opened) => (opened, false),
-            Err(rustix::io::Errno::NOENT) => {
-                let created = match rustix::fs::mkdirat(
-                    &directory,
-                    name,
-                    Mode::RUSR | Mode::WUSR | Mode::XUSR,
-                ) {
-                    Ok(()) => true,
-                    Err(rustix::io::Errno::EXIST) => false,
-                    Err(error) => {
-                        return Err(io_error("create user-root directory", &current_path, error));
-                    }
-                };
-                let opened = rustix::fs::openat(&directory, name, flags, Mode::empty()).map_err(
-                    |error| {
-                        unsafe_entry(
-                            &current_path,
-                            "created user-root component is not a no-follow directory",
-                            error,
-                        )
-                    },
-                )?;
-                (opened, created)
-            }
-            Err(error) => {
-                return Err(unsafe_entry(
-                    &current_path,
-                    "user-root component is not a no-follow directory",
-                    error,
-                ));
-            }
-        };
-        directory = File::from(opened);
-        if created {
-            rustix::fs::fchmod(&directory, Mode::RUSR | Mode::WUSR | Mode::XUSR)
-                .map_err(|error| io_error("set user-root directory mode", &current_path, error))?;
-        }
-    }
-    Ok(directory)
-}
-
-#[cfg(unix)]
 fn delete_preset_platform(user_root: &Path, target: &AgentPresetId) -> Result<()> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_QUARANTINE: AtomicU64 = AtomicU64::new(0);
-    let user_directory = rustix::fs::open(
-        user_root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|error| unsafe_entry(user_root, "user root is not a no-follow directory", error))?;
+    let user_directory = open_existing_preset_root(user_root)?.into_directory();
     let target_path = user_root.join(target.as_str());
     let target_directory = rustix::fs::openat(
         &user_directory,

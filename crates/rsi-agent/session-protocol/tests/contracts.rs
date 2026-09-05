@@ -487,3 +487,235 @@ fn terminal_diagnostics_are_finite_and_unknown_fields_are_rejected() {
     });
     assert!(serde_json::from_value::<SessionFact>(value).is_err());
 }
+
+#[test]
+fn entered_agent_and_completion_messages_keep_the_agent_text_bound() {
+    let turn_id = TurnId::new("turn-entered-bound").unwrap();
+    let step_id = StepId::new("step-entered-bound").unwrap();
+    let message_id = MessageId::new("message-entered-bound").unwrap();
+    let oversized = vec![AgentMessageContent::Text {
+        text: "x".repeat(MAXIMUM_AGENT_MESSAGE_BYTES + 1),
+    }];
+    let body = |source| SessionFactBody::InputMessageEntered {
+        turn_id: turn_id.clone(),
+        step_id: step_id.clone(),
+        source,
+        content: oversized.clone(),
+    };
+
+    assert!(matches!(
+        body(InputMessageSource::Agent {
+            message_id: message_id.clone(),
+            source_session_id: SessionId::new("source-agent").unwrap(),
+        })
+        .validate(),
+        Err(SessionError::Invalid(message))
+            if message.contains(&MAXIMUM_AGENT_MESSAGE_BYTES.to_string())
+    ));
+    assert!(matches!(
+        body(InputMessageSource::Completion {
+            message_id: message_id.clone(),
+            child_session_id: SessionId::new("source-child").unwrap(),
+            activation_id: ActivationId::new("source-activation").unwrap(),
+        })
+        .validate(),
+        Err(SessionError::Invalid(message))
+            if message.contains(&MAXIMUM_AGENT_MESSAGE_BYTES.to_string())
+    ));
+    body(InputMessageSource::Human { message_id })
+        .validate()
+        .expect("the Human input bound remains the larger direct-turn bound");
+}
+
+#[test]
+fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
+    assert_eq!(
+        ForkTurnSelection::parse("none").unwrap(),
+        ForkTurnSelection::None
+    );
+    assert_eq!(
+        ForkTurnSelection::parse("all").unwrap(),
+        ForkTurnSelection::All
+    );
+    assert_eq!(
+        ForkTurnSelection::parse("18446744073709551615").unwrap(),
+        ForkTurnSelection::Last(u64::MAX)
+    );
+    for invalid in ["", "0", "01x", "18446744073709551616"] {
+        assert!(
+            ForkTurnSelection::parse(invalid).is_err(),
+            "accepted {invalid:?}"
+        );
+    }
+    assert!(ForkTurnSelection::Last(0).validate().is_err());
+
+    ForkOrigin {
+        parent_session_id: SessionId::new("session-parent").unwrap(),
+        root_session_id: SessionId::new("session-root").unwrap(),
+        path: AgentPath::new(vec![1]).unwrap(),
+        task_name: "first-turn-child".into(),
+        parent_header_fingerprint: "a".repeat(64),
+        invoking_turn_id: TurnId::new("turn-first").unwrap(),
+        resolved_after_seq: 0,
+        resolved_terminal_seq: 0,
+        terminal_prefix_sha256: "b".repeat(64),
+        requested_turns: ForkTurnSelection::All,
+        effective_turns: 0,
+    }
+    .validate()
+    .expect("all completed turns may resolve to an empty first-turn prefix");
+
+    let child = SessionHeader::new(
+        SessionId::new("session-child").unwrap(),
+        2,
+        "/workspace",
+        AgentPresetId::new("test-agent").unwrap(),
+        settings(),
+    )
+    .unwrap()
+    .with_fork_origin(ForkOrigin {
+        parent_session_id: SessionId::new("session-parent").unwrap(),
+        root_session_id: SessionId::new("session-root").unwrap(),
+        path: AgentPath::new(vec![1]).unwrap(),
+        task_name: "reviewer".into(),
+        parent_header_fingerprint: "a".repeat(64),
+        invoking_turn_id: TurnId::new("turn-spawn").unwrap(),
+        resolved_after_seq: 0,
+        resolved_terminal_seq: 7,
+        terminal_prefix_sha256: "b".repeat(64),
+        requested_turns: ForkTurnSelection::All,
+        effective_turns: 2,
+    })
+    .unwrap();
+    assert_eq!(child.format_version(), SESSION_FORMAT_VERSION);
+    assert_eq!(child.fork_origin().unwrap().resolved_terminal_seq, 7);
+    let mut encoded = serde_json::to_value(&child).unwrap();
+    encoded["fork_origin"]["terminal_prefix_sha256"] = json!("not-a-digest");
+    assert!(serde_json::from_value::<SessionHeader>(encoded).is_err());
+}
+
+#[test]
+fn fork_lineage_rejects_nonempty_intervals_with_zero_effective_turns() {
+    let malformed = ForkOrigin {
+        parent_session_id: SessionId::new("parent").unwrap(),
+        root_session_id: SessionId::new("parent").unwrap(),
+        path: AgentPath::new(vec![1]).unwrap(),
+        task_name: "child".into(),
+        parent_header_fingerprint: "00".repeat(32),
+        invoking_turn_id: TurnId::new("turn-1").unwrap(),
+        resolved_after_seq: 0,
+        resolved_terminal_seq: 7,
+        terminal_prefix_sha256: "11".repeat(32),
+        requested_turns: ForkTurnSelection::All,
+        effective_turns: 0,
+    };
+
+    assert!(malformed.validate().is_err());
+}
+
+#[test]
+fn durable_agent_tree_values_revalidate_nested_bounds() {
+    assert!(serde_json::from_value::<AgentPath>(json!([0])).is_err());
+    assert!(serde_json::from_value::<AgentPath>(json!([1, 2, 3, 4])).is_err());
+    assert!(serde_json::from_value::<ForkTurnSelection>(json!({"last": 0})).is_err());
+
+    assert!(
+        AgentControlRecord::new(
+            1,
+            1,
+            AgentControlRecordBody::CompletionReserved {
+                activation_id: ActivationId::new("activation-1").unwrap(),
+                parent_session_id: SessionId::new("session-parent").unwrap(),
+                maximum_bytes: u64::try_from(MAXIMUM_AGENT_MESSAGE_BYTES).unwrap() + 1,
+            },
+        )
+        .is_err()
+    );
+    for (target, wake_required) in [
+        (MessageTarget::NextTurn, false),
+        (MessageTarget::NextStep, true),
+    ] {
+        assert!(
+            AgentControlRecord::new(
+                3,
+                3,
+                AgentControlRecordBody::MessageAccepted {
+                    message: AgentMessage {
+                        message_id: MessageId::new("message-invalid-wake-target").unwrap(),
+                        source: AgentMessageSource::Human,
+                        content: vec![AgentMessageContent::Text {
+                            text: "invalid scheduling tuple".into(),
+                        }],
+                        options: MessageOptions::default(),
+                    },
+                    root_session_id: SessionId::new("session-root").unwrap(),
+                    target,
+                    wake_required,
+                },
+            )
+            .is_err(),
+            "accepted an inconsistent target/wake tuple"
+        );
+    }
+}
+
+#[test]
+fn control_records_bound_message_authority_and_form_a_digest_chain() {
+    let message = AgentMessage {
+        message_id: MessageId::new("message-1").unwrap(),
+        source: AgentMessageSource::Agent {
+            source_session_id: SessionId::new("session-source").unwrap(),
+        },
+        content: vec![AgentMessageContent::Text {
+            text: "hello".into(),
+        }],
+        options: MessageOptions::default(),
+    };
+    let first = AgentControlRecord::new(
+        1,
+        1,
+        AgentControlRecordBody::MessageAccepted {
+            message: message.clone(),
+            root_session_id: SessionId::new("session-root").unwrap(),
+            target: MessageTarget::NextTurn,
+            wake_required: true,
+        },
+    )
+    .unwrap();
+    let second = AgentControlRecord::new(
+        2,
+        2,
+        AgentControlRecordBody::MessageDiscarded {
+            message_id: message.message_id.clone(),
+            reason: MessageDiscardReason::Cancelled,
+        },
+    )
+    .unwrap();
+    validate_control_sequence(0, &[first.clone(), second.clone()]).unwrap();
+    assert!(validate_control_sequence(0, std::slice::from_ref(&second)).is_err());
+    assert_ne!(
+        control_prefix_sha256([&first]).unwrap(),
+        control_prefix_sha256([&first, &second]).unwrap()
+    );
+
+    let with_options = AgentMessage {
+        options: MessageOptions {
+            model: Some(ModelRef::new("openai", "gpt-test").unwrap()),
+            sandbox: None,
+        },
+        ..message
+    };
+    assert!(
+        AgentControlRecord::new(
+            3,
+            3,
+            AgentControlRecordBody::MessageAccepted {
+                message: with_options,
+                root_session_id: SessionId::new("session-root").unwrap(),
+                target: MessageTarget::NextStep,
+                wake_required: true,
+            },
+        )
+        .is_err()
+    );
+}

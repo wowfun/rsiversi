@@ -105,6 +105,7 @@ impl RunningRsi {
         use rsi_agent_store_protocol::SessionStoreContract;
         use rsi_agent_turn_protocol::TurnServiceContract;
         use rsi_ai_protocol::{ImageCallContract, LanguageCallContract};
+        use rsi_media_protocol::MediaContract;
         use rsi_workspace::WorkspaceRegistryContract;
 
         let turns = required_local::<TurnServiceContract>(&self.host, "Agent Turn service")?;
@@ -118,6 +119,7 @@ impl RunningRsi {
             std::sync::Arc::new(SessionSettingsSource(settings));
         let language = required_local::<LanguageCallContract>(&self.host, "Language router")?;
         let image = required_local::<ImageCallContract>(&self.host, "Image router")?;
+        let media = required_local::<MediaContract>(&self.host, "Media")?;
         Ok(rsi_session::LocalSessionApplication::new(
             turns,
             store,
@@ -126,6 +128,7 @@ impl RunningRsi {
             settings,
             language,
             image,
+            media,
             approvals,
         ))
     }

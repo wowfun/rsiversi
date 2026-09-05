@@ -8,8 +8,8 @@ use rsi_tools::ToolsFactory;
 use rsi_tools_protocol::{
     MAXIMUM_ADMITTED_TOOL_INVOCATIONS, MAXIMUM_TOOL_CATALOGS, Result, RetainedToolFailureKind,
     RetainedToolResult, ToolCall, ToolCatalogProvider, ToolCatalogProviderContract, ToolDefinition,
-    ToolError, ToolExecution, ToolExecutionPolicy, ToolExecutor, ToolRegistration, ToolResult,
-    ToolRuntime, ToolStart,
+    ToolError, ToolExecution, ToolExecutionExtensions, ToolExecutionPolicy, ToolExecutor,
+    ToolRegistration, ToolResult, ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -61,6 +61,7 @@ fn tool_start(cancellation: CancellationToken) -> ToolStart {
         },
         sandbox: Arc::new(TestSandbox),
         job_scope: None,
+        extensions: ToolExecutionExtensions::default(),
     }
 }
 

@@ -28,6 +28,12 @@ job rather than being charged to every platform-specific foundation
 conformance run. Repository `code-check` is an optional diagnostic and does not
 run in CI.
 
+Linux user-namespace policy is relaxed only for native Sandbox enforcement and
+standard-product tests that activate the required backend. Compilation and
+linting run first under the runner policy; each test step restores every
+changed sysctl on exit. The deterministic required-backend failure test also
+runs without relaxing policy.
+
 The always-running `ci-required` job depends on every independent contract and
 fails unless each result is `success`. A repository-tool test derives the set
 of top-level workflow jobs and proves that the aggregate names every other job,

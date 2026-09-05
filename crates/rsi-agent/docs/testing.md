@@ -42,6 +42,15 @@ budget proves checkpoint maintenance declines both unfiltered rebuild reads and
 writes instead of producing an unreadable cache. Cold outcome lookup and
 recovery prove they do not read unrelated session Fact pages, while concurrent
 resumes prove that one session has at most one in-flight control-state load.
+Agent-control regressions exercise the complete running/parked/resumed/waiting
+Store vocabulary, recovery from shutdown during a durable park, Fresh mailbox
+admission racing a write-behind Header, exact idempotent claim receipts with
+workspace background Facts, serialized cancellation against direct commits,
+post-activation claim handoff, and idle-session capacity reclamation.
+The shared Store contract also proves typed activation/quiescence guard failures
+and backend-equivalent rejection of duplicate task, message, and activation
+identities. SQLite verification separately rejects a fabricated claimed state
+for a message whose canonical control stream never claimed it.
 Draft and composition tests cover default and explicit selection, failed
 replacement preserving the prior pin, drop without Store state, single-flight
 generation construction, source-digest replacement, resident old-generation
@@ -54,9 +63,12 @@ registration for both fresh and resumed sessions.
 
 Context tests fold real Facts and prove deterministic compaction, complete-turn
 removal, tool call/result adjacency, Media references, and hard byte/message
-bounds. Executor tests cross actual Local contracts and inject provider/Tool
+bounds. Fork tests reject child Facts until the complete balanced seed interval
+has arrived, and checkpoint tests reject an accepted mailbox turn before its
+first model-visible message has entered. Executor tests cross actual Local contracts and inject provider/Tool
 implementations to prove intent/start durability before I/O, successful and
-failed Tool-result retirement, interleaved same-session submission, retry
+failed Tool-result retirement, publication of successful parallel siblings
+before propagating a failed sibling, interleaved same-session submission, retry
 admission, Approval plus Sandbox policy propagation, retained Tool settlement
 without a shorter recovery timeout, and shutdown release only after an aborted
 worker has joined. Direct Image
@@ -69,6 +81,14 @@ elapsed-budget cleanup never cross their claim generation.
 The deadline selector has a deterministic simultaneous-readiness regression:
 an already-terminal drive result wins over elapsed cancellation in the same
 scheduler poll.
+Pool tests use controllable provider gates to prove different Sessions progress
+concurrently, one Session remains ordered, the configured peak is respected,
+and a lane failure cannot run shared cleanup while another lane is settling.
+Checkpoint scheduler tests hold one request in flight and prove per-Session
+latest-value coalescing, cross-Session FIFO, capacity behavior, non-starvation,
+and bounded shutdown. Closing admission rejects later requests but drains every
+request accepted before closure, including an in-flight Session's coalesced
+successor, without treating the optional cache as durable truth.
 
 Plugin lifecycle tests use `rsi-meta` Contexts. They verify every ordinary
 factory's exact hard dependencies, publication and withdrawal behavior, and
