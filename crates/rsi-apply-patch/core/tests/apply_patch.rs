@@ -18,8 +18,8 @@ use rsi_sandbox_local::SandboxLocalFactory;
 use rsi_tools::ToolsFactory;
 use rsi_tools_protocol::{
     PreparedToolCall, RetainedToolResult, ToolCall, ToolCatalogProviderContract,
-    ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract, ToolResultIdentity, ToolRuntime,
-    ToolStart,
+    ToolExecutionExtensions, ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract,
+    ToolResultIdentity, ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -359,6 +359,7 @@ printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,
             },
             sandbox: Arc::clone(&self.sandbox),
             job_scope: None,
+            extensions: ToolExecutionExtensions::default(),
         }
     }
 

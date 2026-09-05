@@ -465,6 +465,26 @@ mod linux {
             line.push(b'\n');
             assert!(parse_helper_response(&line).is_err());
         }
+
+        #[test]
+        fn helper_response_parser_rejects_unknown_effect_kinds() {
+            let unknown_effect = serde_json::json!({
+                "status":"applied",
+                "delta_exact":true,
+                "effects":[{
+                    "operation":0,
+                    "kind":"overwrite",
+                    "path":"target.txt",
+                    "bytes_before":0,
+                    "bytes_after":1
+                }],
+                "fuzzy_matches":[],
+                "failure":null
+            });
+            let mut line = serde_json::to_vec(&unknown_effect).unwrap();
+            line.push(b'\n');
+            assert!(parse_helper_response(&line).is_err());
+        }
     }
 }
 
@@ -555,6 +575,11 @@ mod tests {
 
         assert_eq!(response.status, patch_engine::PatchStatus::Applied);
         assert_eq!(response.effects.len(), 130);
-        assert!(response.effects.iter().all(|effect| effect.kind == "add"));
+        assert!(
+            response
+                .effects
+                .iter()
+                .all(|effect| effect.kind == patch_engine::PatchEffectKind::Add)
+        );
     }
 }
