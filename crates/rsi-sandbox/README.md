@@ -6,6 +6,13 @@ that behaviorally probes explicit Linux Bubblewrap candidates first and
 explicit Landlock runner candidates second. Standard composition supplies no
 Landlock candidate.
 
+The local factory has optional and required activation policies. Optional
+activation may publish an unconfined service for holders that use only
+`danger-full-access`; required activation fails before publication when no
+restricted backend passes its behavior probe. The standard product selects the
+required policy whenever it links effect-bearing coding Tools, so those Tools
+cannot become ready with enforcement deferred until their first call.
+
 Restricted calls fail closed without a selected backend. The
 `danger-full-access` mode is an explicit holder bypass and is stamped as
 unconfined. This family builds process plans; the process owner remains
@@ -21,8 +28,16 @@ cannot block or fill staging storage.
 policy. Durable stamps identify the staged backend bytes by SHA-256 rather than
 an ephemeral staging path and separately record filesystem, scratch, and
 network evidence. Bubblewrap restricted plans use a private tmpfs `/tmp`; a
-workspace exactly equal to `/tmp` is rejected in either restricted mode because
-its later bind would erase that boundary. Bubblewrap also rejects `/` because a
-later root rebind would erase its private `/tmp`, `/proc`, and `/dev` mounts,
+workspace whose live canonical path names the system temporary root is rejected
+in either restricted mode because its later bind
+would erase that boundary. Bubblewrap also rejects the logical or canonical
+filesystem root because a later root rebind would erase its private `/tmp`, `/proc`, and `/dev` mounts,
 while a workspace below `/tmp` is rebound after tmpfs creation. Current plans retain host network access and never claim filesystem
 confidentiality or network restriction.
+
+Restricted plans do not impose memory, CPU, process-count, or scratch-size
+quotas. Scratch tmpfs mounts use the backend's host-dependent defaults, and
+processes inherit the process owner's environment. These modes protect the
+stated file-write boundary; they do not protect host availability from resource
+exhaustion or conceal inherited secrets. Resource isolation requires a separate
+process/container policy at the deployment boundary.

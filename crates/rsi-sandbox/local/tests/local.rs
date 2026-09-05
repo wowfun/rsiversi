@@ -9,6 +9,7 @@ use rsi_sandbox::{
 use rsi_sandbox_local::{SandboxLocalFactory, SandboxProbe};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -20,6 +21,35 @@ struct Probe {
 #[derive(Debug)]
 struct FailingThenAvailableProbe {
     calls: Mutex<Vec<Vec<u8>>>,
+}
+
+#[derive(Debug)]
+struct SlowUnavailableProbe {
+    calls: AtomicUsize,
+    completed: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct NeverCompletingProbe {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl SandboxProbe for NeverCompletingProbe {
+    async fn available(&self, _path: &Path, _arguments: &[&str]) -> rsi_sandbox::Result<bool> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+#[async_trait]
+impl SandboxProbe for SlowUnavailableProbe {
+    async fn available(&self, _path: &Path, _arguments: &[&str]) -> rsi_sandbox::Result<bool> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -185,7 +215,7 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
                     workspace: PathBuf::from("/tmp"),
                 })
                 .await,
-            Err(SandboxError::InvalidInput(message)) if message.contains("exactly /tmp")
+            Err(SandboxError::InvalidInput(message)) if message.contains("system temporary root")
         ));
         assert!(matches!(
             sandbox
@@ -456,6 +486,138 @@ async fn missing_backend_fails_restricted_mode_but_explicit_bypass_is_truthful()
     assert!(fiber.dispose().await.is_clean());
 }
 
+#[tokio::test]
+async fn required_backend_rejects_activation_before_publishing_sandbox() {
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "required-test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::default().require_restricted_backend()),
+            ),
+            json!({"bubblewrap":[],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        fiber.snapshot().state,
+        rsi_meta::FiberState::Failed(message)
+            if message.contains("restricted sandbox backend is required")
+    ));
+    assert!(runtime.root().lookup_local::<SandboxContract>().is_none());
+}
+
+#[tokio::test]
+async fn required_backend_publishes_after_a_valid_probe() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bwrap = temporary.path().join("bwrap");
+    std::fs::write(&bwrap, b"probe").unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "required-test",
+                UpdateMode::Replayable,
+                Arc::new(
+                    SandboxLocalFactory::with_probe(Arc::new(Probe {
+                        replace_during_probe: None,
+                        calls: Mutex::new(vec![]),
+                    }))
+                    .require_restricted_backend(),
+                ),
+            ),
+            json!({"bubblewrap":[bwrap],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+
+    assert!(runtime.root().lookup_local::<SandboxContract>().is_some());
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test(start_paused = true)]
+async fn all_behavior_probes_share_one_activation_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let first = temporary.path().join("first");
+    let second = temporary.path().join("second");
+    std::fs::write(&first, b"first").unwrap();
+    std::fs::write(&second, b"second").unwrap();
+    let probe = Arc::new(SlowUnavailableProbe {
+        calls: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+    });
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "shared-probe-budget-test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::with_probe(probe.clone())),
+            ),
+            json!({"bubblewrap":[first, second],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        probe.completed.load(Ordering::SeqCst),
+        1,
+        "the second probe must be cancelled at the shared deadline"
+    );
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test(start_paused = true)]
+async fn required_activation_reports_shared_probe_budget_exhaustion() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bubblewrap = temporary.path().join("bubblewrap");
+    let landlock = temporary.path().join("landlock");
+    std::fs::write(&bubblewrap, b"bubblewrap").unwrap();
+    std::fs::write(&landlock, b"landlock").unwrap();
+    let probe = Arc::new(NeverCompletingProbe {
+        calls: AtomicUsize::new(0),
+    });
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "exhausted-probe-budget-test",
+                UpdateMode::Replayable,
+                Arc::new(
+                    SandboxLocalFactory::with_probe(probe.clone()).require_restricted_backend(),
+                ),
+            ),
+            json!({"bubblewrap":[bubblewrap],"landlock":[landlock]}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        probe.calls.load(Ordering::SeqCst),
+        1,
+        "the later tier must remain unprobed after the shared budget expires"
+    );
+    assert!(matches!(
+        fiber.snapshot().state,
+        rsi_meta::FiberState::Failed(message)
+            if message.contains(
+                "shared behavior-probe budget was exhausted during candidate probing; 1 later configured candidate was skipped"
+            )
+    ));
+    assert!(runtime.root().lookup_local::<SandboxContract>().is_none());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn version_only_executable_is_not_accepted_as_a_working_bubblewrap() {
@@ -551,6 +713,9 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
         std::process::id()
     ));
     std::fs::write(&host_tmp_marker, b"host").unwrap();
+    let outside = tempfile::tempdir_in("/var/tmp").unwrap();
+    let outside_marker = outside.path().join("host-only");
+    std::fs::write(&outside_marker, b"unchanged").unwrap();
     let setsid = PathBuf::from("/usr/bin/setsid");
     assert!(setsid.is_file(), "native setsid is unavailable");
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
@@ -597,8 +762,26 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
         .confine(request(
             SandboxMode::WorkspaceWrite,
             &format!(
-                "test ! -e '{}' && test -r /proc/self/status && printf allowed > allowed && /usr/bin/setsid /bin/sh -c 'printf nested > nested'",
-                host_tmp_marker.display()
+                r#"set -eu
+                test ! -e '{}'
+                test -r /proc/self/status
+                test ! -e /proc/{}
+                capabilities=missing
+                while read -r field value rest; do
+                    if [ "$field" = CapEff: ]; then capabilities=$value; fi
+                done < /proc/self/status
+                test "$capabilities" = 0000000000000000
+                test -c /dev/null
+                for device in /dev/*; do
+                    case "$device" in
+                        /dev/core|/dev/fd|/dev/full|/dev/null|/dev/ptmx|/dev/pts|/dev/random|/dev/shm|/dev/stderr|/dev/stdin|/dev/stdout|/dev/tty|/dev/urandom|/dev/zero) ;;
+                        *) exit 41 ;;
+                    esac
+                done
+                if printf changed > '{}'; then exit 42; fi
+                printf allowed > allowed
+                /usr/bin/setsid /bin/sh -c 'printf nested > nested'"#,
+                host_tmp_marker.display(), std::process::id(), outside_marker.display()
             ),
         ))
         .await
@@ -623,6 +806,7 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
         "nested"
     );
 
+    assert_eq!(std::fs::read(&outside_marker).unwrap(), b"unchanged");
     std::fs::remove_file(host_tmp_marker).unwrap();
     drop(sandbox);
     assert!(fiber.dispose().await.is_clean());

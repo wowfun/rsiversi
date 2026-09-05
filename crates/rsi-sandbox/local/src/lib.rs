@@ -128,6 +128,45 @@ struct SelectedBackend {
     sha256: String,
 }
 
+#[derive(Debug)]
+struct ProbeBudget {
+    remaining: Duration,
+}
+
+impl ProbeBudget {
+    fn new() -> Self {
+        Self {
+            remaining: PROBE_TIMEOUT,
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining.is_zero()
+    }
+
+    async fn available(
+        &mut self,
+        probe: &dyn SandboxProbe,
+        path: &Path,
+        arguments: &[&str],
+    ) -> bool {
+        if self.exhausted() {
+            return false;
+        }
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(self.remaining, probe.available(path, arguments)).await;
+        self.remaining = self.remaining.saturating_sub(started.elapsed());
+        match result {
+            Ok(Ok(true)) => true,
+            Ok(Ok(false) | Err(_)) => false,
+            Err(_) => {
+                self.remaining = Duration::ZERO;
+                false
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Sandbox for Service {
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
@@ -206,12 +245,14 @@ impl Sandbox for Service {
 #[derive(Clone, Debug)]
 pub struct SandboxLocalFactory {
     probe: Arc<dyn SandboxProbe>,
+    require_restricted_backend: bool,
 }
 
 impl Default for SandboxLocalFactory {
     fn default() -> Self {
         Self {
             probe: Arc::new(SystemSandboxProbe),
+            require_restricted_backend: false,
         }
     }
 }
@@ -219,7 +260,17 @@ impl Default for SandboxLocalFactory {
 impl SandboxLocalFactory {
     /// Creates a factory with an injected feature probe.
     pub fn with_probe(probe: Arc<dyn SandboxProbe>) -> Self {
-        Self { probe }
+        Self {
+            probe,
+            require_restricted_backend: false,
+        }
+    }
+
+    /// Requires a verified restricted backend before activation can publish.
+    #[must_use]
+    pub fn require_restricted_backend(mut self) -> Self {
+        self.require_restricted_backend = true;
+        self
     }
 
     async fn stage_available(
@@ -227,17 +278,21 @@ impl SandboxLocalFactory {
         kind: BackendKind,
         path: PathBuf,
         arguments: &'static [&'static str],
+        probe_budget: &mut ProbeBudget,
     ) -> rsi_meta::Result<Option<(SelectedBackend, tempfile::TempDir)>> {
+        if probe_budget.exhausted() {
+            return Ok(None);
+        }
         let staged = tokio::task::spawn_blocking(move || stage_backend(kind, &path))
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let Ok((backend, directory)) = staged else {
             return Ok(None);
         };
-        if matches!(
-            self.probe.available(&backend.path, arguments).await,
-            Ok(true)
-        ) {
+        if probe_budget
+            .available(self.probe.as_ref(), &backend.path, arguments)
+            .await
+        {
             Ok(Some((backend, directory)))
         } else {
             Ok(None)
@@ -268,10 +323,22 @@ impl PluginFactory for SandboxLocalFactory {
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<SandboxLocalConfig>()?;
+        let configured_candidates = config.bubblewrap.len() + config.landlock.len();
+        let mut considered_candidates = 0_usize;
+        let mut probe_budget = ProbeBudget::new();
         let mut selected = None;
         for path in config.bubblewrap {
+            if probe_budget.exhausted() {
+                break;
+            }
+            considered_candidates += 1;
             if let Some(staged) = self
-                .stage_available(BackendKind::Bubblewrap, path, BUBBLEWRAP_PROBE_ARGUMENTS)
+                .stage_available(
+                    BackendKind::Bubblewrap,
+                    path,
+                    BUBBLEWRAP_PROBE_ARGUMENTS,
+                    &mut probe_budget,
+                )
                 .await?
             {
                 selected = Some(staged);
@@ -280,14 +347,42 @@ impl PluginFactory for SandboxLocalFactory {
         }
         if selected.is_none() {
             for path in config.landlock {
+                if probe_budget.exhausted() {
+                    break;
+                }
+                considered_candidates += 1;
                 if let Some(staged) = self
-                    .stage_available(BackendKind::Landlock, path, LANDLOCK_PROBE_ARGUMENTS)
+                    .stage_available(
+                        BackendKind::Landlock,
+                        path,
+                        LANDLOCK_PROBE_ARGUMENTS,
+                        &mut probe_budget,
+                    )
                     .await?
                 {
                     selected = Some(staged);
                     break;
                 }
             }
+        }
+        if self.require_restricted_backend && selected.is_none() {
+            let reason = if probe_budget.exhausted() {
+                let skipped = configured_candidates.saturating_sub(considered_candidates);
+                match skipped {
+                    0 => "the shared behavior-probe budget was exhausted during candidate probing"
+                        .to_owned(),
+                    1 => "the shared behavior-probe budget was exhausted during candidate probing; 1 later configured candidate was skipped"
+                        .to_owned(),
+                    _ => format!(
+                        "the shared behavior-probe budget was exhausted during candidate probing; {skipped} later configured candidates were skipped"
+                    ),
+                }
+            } else {
+                "no configured candidate passed its behavior probe".to_owned()
+            };
+            return Err(MetaError::Activation(format!(
+                "restricted sandbox backend is required but {reason}"
+            )));
         }
         let (backend, staged) = match selected {
             Some((backend, staged)) => (Some(backend), Some(staged)),
@@ -333,14 +428,18 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
     let cwd = canonical_directory(&request.cwd, "cwd")?;
     let workspace = canonical_directory(&request.workspace, "workspace")?;
     if request.mode != SandboxMode::DangerFullAccess {
-        if workspace == Path::new("/") {
+        let canonical_root = canonical_directory(Path::new("/"), "filesystem root")?;
+        if workspace == canonical_root {
             return Err(SandboxError::InvalidInput(
                 "restricted workspace cannot be the filesystem root".into(),
             ));
         }
-        if workspace == Path::new("/tmp") {
+        #[cfg(unix)]
+        if canonical_optional_directory(Path::new("/tmp"), "system temporary root")?
+            .is_some_and(|system_temporary_root| workspace == system_temporary_root)
+        {
             return Err(SandboxError::InvalidInput(
-                "restricted workspace cannot be exactly /tmp".into(),
+                "restricted workspace cannot be the system temporary root".into(),
             ));
         }
     }
@@ -358,6 +457,25 @@ fn canonical_directory(path: &Path, kind: &str) -> Result<PathBuf> {
         )));
     }
     Ok(canonical)
+}
+
+#[cfg(unix)]
+fn canonical_optional_directory(path: &Path, kind: &str) -> Result<Option<PathBuf>> {
+    let canonical = match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(SandboxError::InvalidInput(format!(
+                "{kind} is unavailable: {error}"
+            )));
+        }
+    };
+    if !canonical.is_dir() {
+        return Err(SandboxError::InvalidInput(format!(
+            "{kind} is not a directory"
+        )));
+    }
+    Ok(Some(canonical))
 }
 
 fn validate_plan<T: AsRef<OsStr>>(
@@ -538,5 +656,52 @@ const fn mode_name(mode: SandboxMode) -> &'static str {
         SandboxMode::ReadOnly => "read-only",
         SandboxMode::WorkspaceWrite => "workspace-write",
         SandboxMode::DangerFullAccess => "danger-full-access",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct AvailableProbe {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SandboxProbe for AvailableProbe {
+        async fn available(&self, _path: &Path, _arguments: &[&str]) -> Result<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn elapsed_staging_time_does_not_consume_behavior_probe_budget() {
+        let mut budget = ProbeBudget::new();
+        tokio::time::advance(PROBE_TIMEOUT + Duration::from_secs(1)).await;
+        let probe = AvailableProbe {
+            calls: AtomicUsize::new(0),
+        };
+
+        assert!(
+            budget
+                .available(&probe, Path::new("/staged/backend"), &[])
+                .await
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_optional_protected_directory_is_not_a_request_failure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let missing = temporary.path().join("missing");
+
+        assert!(matches!(
+            canonical_optional_directory(&missing, "optional protected directory"),
+            Ok(None)
+        ));
     }
 }
