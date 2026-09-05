@@ -1,6 +1,6 @@
 ---
 name: Optional repository code check
-comment: One extensible command with non-blocking line-count diagnostics
+comment: One extensible command with non-blocking source-structure diagnostics
 ---
 
 ## Problem
@@ -15,28 +15,39 @@ more important than file size.
 
 Repository tooling owns one `cargo xtask code-check` interface and its adjacent
 configuration. Checks remain private implementations behind that interface;
-the first check measures effective lines in every repository Rust file and
-reports files above the configured threshold as warnings. Warning findings do
-not fail the command, while configuration, discovery, read, and tokenization
-errors do.
+the current check parses every repository Rust file and measures effective
+lines. Files above the configured threshold are reported with their largest
+direct top-level items, largest named function or method, and deepest named
+function or method control flow. Warning findings do not fail the command,
+while configuration, discovery, read, and syntax errors do. Independent source
+errors are collected before failure so an incomplete scan never emits partial
+findings or a success summary. The private implementation uses
+rust-analyzer's lossless single-file syntax tree so one parse owns both line
+accounting and structure without requiring the repository to build.
 
 Code check is explicitly invoked and is not part of CI, product conformance,
-documentation verification, or another required gate. Additional checks may
-add their own configuration and implementation without adding a registry or
-changing the command interface before a second varying implementation exists.
+documentation verification, or another required gate. It analyzes source as
+written, including inactive `cfg` branches, without macro expansion, name
+resolution, or a Cargo semantic model. Additional checks may add their own
+configuration and implementation without adding a registry or changing the
+command interface before a second varying implementation exists.
 
 ## Alternatives considered
 
 Keeping the command under `rsi-meta` was rejected because the signal applies to
 all repository code. Retaining hard limits or region baselines was rejected
 because code size is a review prompt rather than sufficient evidence of an
-ownership defect. A configurable adapter registry was rejected because one
-current check does not justify a public extension seam.
+ownership defect. Repeating Clippy's item-size policies was rejected in favor
+of explaining why a file is large. Loading rust-analyzer's Cargo and semantic
+model was rejected until a concrete architecture rule needs resolution across
+files. A configurable adapter registry was rejected because one current check
+does not justify an extension seam.
 
 ## Consequences
 
 Contributors can inspect large files across products, tools, tests, and
-fixtures with one command without turning current size into a release blocker.
-The repository receives no automatic enforcement of these warnings, so callers
-must opt in when the signal is useful. The single command and configuration can
-gain deeper implementation over time without widening their interface.
+fixtures and see their structural hotspots without turning current size into a
+release blocker. The repository receives no automatic enforcement of these
+warnings, so callers must opt in when the signal is useful. The single command
+and configuration can gain deeper implementation over time without widening
+their interface.

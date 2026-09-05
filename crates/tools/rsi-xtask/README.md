@@ -17,11 +17,20 @@
 It is not part of CI, conformance, documentation verification, or another
 required gate.
 
-The current line-count check scans every tracked or non-ignored untracked
-regular Rust source file, including tests and standalone fixtures. Blank and
-comment-only lines do not count. Files above the configured threshold produce
-stably ordered warnings without failing the command; invalid configuration,
-source enumeration, reads, or tokenization remain execution errors.
+The current source-structure check parses every tracked or non-ignored
+untracked regular Rust source file, including tests and standalone fixtures.
+Blank and comment-only lines do not count. Files above the configured line
+threshold produce warnings in descending effective-line-count order, with
+repository-relative paths ascending as the deterministic tie-breaker. Each
+warning identifies up to three largest direct top-level items, the largest
+named function or method, and the named function or method with the deepest
+control flow. These findings do not fail the command.
+
+Analysis covers source as written, including inactive `cfg` branches, without
+expanding macros or resolving names. Invalid configuration, source enumeration,
+reads, or Rust syntax remain execution errors. Source errors are collected in
+stable path, line, column, and message order, and prevent partial findings or a
+success summary from being printed.
 
 ## rsi-meta verification
 

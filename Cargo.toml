@@ -19,6 +19,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["http1", "json", "tokio"] }
 base64 = "0.22"
 bytes = "1.10"
+cap-std = "4.0.3"
 futures-util = "0.3"
 getrandom = "0.3"
 hex = "0.4"
@@ -31,7 +32,7 @@ libloading = "0.8"
 memchr = "2.7"
 percent-encoding = "2.3"
 pulldown-cmark = "0.10"
-proc-macro2 = { version = "1.0", features = ["span-locations"] }
+ra_ap_syntax = "=0.0.349"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rhai = { version = "1.23", features = ["serde", "sync"] }
 rustix = { version = "1.1", features = ["fs", "process"] }

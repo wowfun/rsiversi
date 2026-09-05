@@ -62,7 +62,19 @@ fn code_check_repository(config: &str, source: &str) -> tempfile::TempDir {
 fn code_check_warns_without_failing() {
     let repository = code_check_repository(
         "version = 1\n[line_count]\nwarning_threshold = 1\n",
+        "pub fn one() {}\npub fn two() {}\npub fn three() {}\n",
+    );
+    write(
+        &repository.path().join("src/a_tie.rs"),
         "pub fn one() {}\npub fn two() {}\n",
+    );
+    write(
+        &repository.path().join("src/z_tie.rs"),
+        "pub fn one() {}\npub fn two() {}\n",
+    );
+    write(
+        &repository.path().join("src/at_threshold.rs"),
+        "pub fn one() {}\n",
     );
 
     let output = run(repository.path(), &["code-check"]);
@@ -71,12 +83,30 @@ fn code_check_warns_without_failing() {
         "unexpected error: {}",
         stderr(&output)
     );
-    assert!(stderr(&output).contains(
-        "warning: code-check line-count: src/lib.rs: 2 effective Rust lines exceed soft warning threshold 1"
-    ));
+    assert_eq!(
+        stderr(&output),
+        concat!(
+            "warning: code-check line-count: src/lib.rs: 3 effective Rust lines exceed soft warning threshold 1\n",
+            "  top-level item: src/lib.rs:1: fn one: 1 effective Rust lines\n",
+            "  top-level item: src/lib.rs:2: fn two: 1 effective Rust lines\n",
+            "  top-level item: src/lib.rs:3: fn three: 1 effective Rust lines\n",
+            "  largest callable: src/lib.rs:1: fn one: 1 effective Rust lines\n",
+            "  deepest control flow: src/lib.rs:1: fn one: depth 0\n",
+            "warning: code-check line-count: src/a_tie.rs: 2 effective Rust lines exceed soft warning threshold 1\n",
+            "  top-level item: src/a_tie.rs:1: fn one: 1 effective Rust lines\n",
+            "  top-level item: src/a_tie.rs:2: fn two: 1 effective Rust lines\n",
+            "  largest callable: src/a_tie.rs:1: fn one: 1 effective Rust lines\n",
+            "  deepest control flow: src/a_tie.rs:1: fn one: depth 0\n",
+            "warning: code-check line-count: src/z_tie.rs: 2 effective Rust lines exceed soft warning threshold 1\n",
+            "  top-level item: src/z_tie.rs:1: fn one: 1 effective Rust lines\n",
+            "  top-level item: src/z_tie.rs:2: fn two: 1 effective Rust lines\n",
+            "  largest callable: src/z_tie.rs:1: fn one: 1 effective Rust lines\n",
+            "  deepest control flow: src/z_tie.rs:1: fn one: depth 0\n",
+        )
+    );
     assert_eq!(
         stdout(&output),
-        "code-check line-count: scanned 1 Rust files; 1 exceeded warning threshold 1\n"
+        "code-check line-count: scanned 4 Rust files; 3 exceeded warning threshold 1\n"
     );
 }
 
@@ -91,12 +121,24 @@ fn code_check_configuration_and_source_errors_fail() {
     assert!(stderr(&output).contains("parse"));
 
     let bad_source = code_check_repository(
-        "version = 1\n[line_count]\nwarning_threshold = 1200\n",
+        "version = 1\n[line_count]\nwarning_threshold = 1\n",
+        "pub fn one() {}\npub fn two() {}\n",
+    );
+    write(
+        &bad_source.path().join("src/a_bad.rs"),
         "pub fn invalid( {\n",
+    );
+    write(
+        &bad_source.path().join("src/z_bad.rs"),
+        "pub fn also_invalid( {\n",
     );
     let output = run(bad_source.path(), &["code-check"]);
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("tokenize Rust source"));
+    let errors = stderr(&output);
+    assert!(errors.contains("analyze Rust sources:"));
+    assert!(errors.find("src/a_bad.rs:").unwrap() < errors.find("src/z_bad.rs:").unwrap());
+    assert!(!errors.contains("warning: code-check"));
+    assert_eq!(stdout(&output), "");
 }
 
 #[test]
