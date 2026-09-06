@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
@@ -79,13 +79,20 @@ struct SqliteBackend {
 }
 
 impl SqliteBackend {
-    fn open(path: &PathBuf) -> Result<Self, StorageError> {
-        if let Some(parent) = path.parent() {
-            create_private_directories(parent)?;
-        }
-        ensure_private_database_file(path)?;
+    fn open(path: &Path) -> Result<Self, StorageError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| StorageError::Io("database has no parent".into()))?;
+        create_private_directories(parent)?;
+        let parent =
+            std::fs::canonicalize(parent).map_err(|error| StorageError::Io(error.to_string()))?;
+        let path = parent.join(
+            path.file_name()
+                .ok_or_else(|| StorageError::Io("database has no file name".into()))?,
+        );
+        ensure_private_database_file(&path)?;
         let connection = Connection::open_with_flags(
-            path,
+            &path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(|error| sqlite_io(&error))?;
@@ -99,7 +106,7 @@ impl SqliteBackend {
         connection
             .execute_batch("PRAGMA journal_mode = WAL")
             .map_err(|error| sqlite_io(&error))?;
-        set_sqlite_sidecar_permissions(path)?;
+        set_sqlite_sidecar_permissions(&path)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             operation: AsyncMutex::new(()),

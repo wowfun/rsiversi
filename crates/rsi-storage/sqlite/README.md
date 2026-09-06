@@ -8,6 +8,8 @@ is created, bounding work queued against the single connection.
 Newly created path components and the database are private on Unix; existing
 caller-supplied parent directories retain their permissions. The database and
 SQLite sidecars must be real regular files rather than symbolic links.
+Opening creates and canonicalizes the parent once, then uses that fixed parent
+for the database and every sidecar; ancestor aliases are permitted.
 
 The connection waits for a bounded busy interval when another SQLite writer
 temporarily owns the database. Loads reject an oversized durable BLOB from its
