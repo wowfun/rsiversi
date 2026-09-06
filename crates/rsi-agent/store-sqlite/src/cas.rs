@@ -338,8 +338,22 @@ pub(super) const fn fact_index_kind(body: &SessionFactBody) -> &'static str {
 
 pub(super) fn sql_error(error: rusqlite::Error) -> StoreError {
     let message = error.to_string();
+    let mapped = match &error {
+        rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
+            StoreError::Corrupt(format!("SQLite row: {message}"))
+        }
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            ) =>
+        {
+            StoreError::Corrupt(format!("SQLite: {message}"))
+        }
+        _ => StoreError::Io(format!("SQLite: {message}")),
+    };
     drop(error);
-    StoreError::Io(format!("SQLite: {message}"))
+    mapped
 }
 
 pub(super) fn io_error(error: std::io::Error) -> StoreError {

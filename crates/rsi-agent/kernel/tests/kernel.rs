@@ -75,6 +75,13 @@ impl Clock for FixedClock {
 }
 
 #[derive(Debug)]
+enum WaitResumeFault {
+    MissingActivation,
+    Read(StoreError),
+    Commit(StoreError),
+}
+
+#[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
     block_header_reads: AtomicBool,
@@ -112,6 +119,18 @@ struct FactReadRaceStore {
     fail_checkpoint_write: AtomicBool,
     corrupt_next_ready_target: AtomicBool,
     fail_ready_roots: AtomicBool,
+    fail_later_ready_pages: AtomicBool,
+    later_ready_page_reads: AtomicUsize,
+    ready_page_limit: AtomicUsize,
+    fail_wait_resumes: AtomicUsize,
+    wait_resume_fault: Mutex<Option<WaitResumeFault>>,
+    wait_resume_attempts: AtomicUsize,
+    fail_wait_resume_after_apply: AtomicBool,
+    fail_wait_park_after_apply: AtomicBool,
+    fail_waiting_pages: AtomicBool,
+    waiting_page_reads: AtomicUsize,
+    failed_subtree: Mutex<Option<SessionId>>,
+    failed_validation: Mutex<Option<SessionId>>,
     active_recheck_mismatches: Mutex<Option<(SessionId, usize, bool)>>,
 }
 
@@ -154,6 +173,18 @@ impl FactReadRaceStore {
             fail_checkpoint_write: AtomicBool::new(false),
             corrupt_next_ready_target: AtomicBool::new(false),
             fail_ready_roots: AtomicBool::new(false),
+            fail_later_ready_pages: AtomicBool::new(false),
+            later_ready_page_reads: AtomicUsize::new(0),
+            ready_page_limit: AtomicUsize::new(usize::MAX),
+            fail_wait_resumes: AtomicUsize::new(0),
+            wait_resume_fault: Mutex::new(None),
+            wait_resume_attempts: AtomicUsize::new(0),
+            fail_wait_resume_after_apply: AtomicBool::new(false),
+            fail_wait_park_after_apply: AtomicBool::new(false),
+            fail_waiting_pages: AtomicBool::new(false),
+            waiting_page_reads: AtomicUsize::new(0),
+            failed_subtree: Mutex::new(None),
+            failed_validation: Mutex::new(None),
             active_recheck_mismatches: Mutex::new(None),
         }
     }
@@ -373,6 +404,31 @@ impl SessionStore for FactReadRaceStore {
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
+        let parks_wait = commit
+            .sessions
+            .iter()
+            .flat_map(|session| &session.controls)
+            .any(|control| matches!(control.body(), AgentControlRecordBody::WaitParked { .. }));
+        let resumes_wait = commit
+            .sessions
+            .iter()
+            .flat_map(|session| &session.controls)
+            .any(|control| matches!(control.body(), AgentControlRecordBody::WaitResumed { .. }));
+        if resumes_wait {
+            self.wait_resume_attempts.fetch_add(1, Ordering::AcqRel);
+            if let Some(WaitResumeFault::Commit(error)) = &*self.wait_resume_fault.lock().unwrap() {
+                return Err(error.clone());
+            }
+            if self
+                .fail_wait_resumes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(StoreError::Io("injected wait resume failure".into()));
+            }
+        }
         if self
             .pause_agent_commit_before_apply
             .swap(false, Ordering::AcqRel)
@@ -382,6 +438,26 @@ impl SessionStore for FactReadRaceStore {
         }
         let result = self.inner.commit_agent(commit).await;
         if result.is_ok()
+            && parks_wait
+            && self
+                .fail_wait_park_after_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected lost wait park acknowledgement".into(),
+            ));
+        }
+        if result.is_ok()
+            && resumes_wait
+            && self
+                .fail_wait_resume_after_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected lost wait resume acknowledgement".into(),
+            ));
+        }
+        if result.is_ok()
             && self
                 .pause_agent_commit_after_apply
                 .swap(false, Ordering::AcqRel)
@@ -390,6 +466,18 @@ impl SessionStore for FactReadRaceStore {
             self.release_agent_commit.notified().await;
         }
         result
+    }
+
+    async fn validate_session(
+        &self,
+        session_id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<()> {
+        if self.failed_validation.lock().unwrap().as_ref() == Some(session_id) {
+            return Err(StoreError::Corrupt(
+                "injected mechanical validation failure".into(),
+            ));
+        }
+        self.inner.validate_session(session_id).await
     }
 
     async fn header(
@@ -583,10 +671,21 @@ impl SessionStore for FactReadRaceStore {
         after: Option<&SessionId>,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreReadyRootPage> {
+        if after.is_some() {
+            self.later_ready_page_reads.fetch_add(1, Ordering::AcqRel);
+            if self.fail_later_ready_pages.load(Ordering::Acquire) {
+                return Err(StoreError::Io("persistent later ready-page failure".into()));
+            }
+        }
         if self.fail_ready_roots.swap(false, Ordering::AcqRel) {
             return Err(StoreError::Io("transient ready-root scan failure".into()));
         }
-        self.inner.list_ready_roots(after, limit).await
+        self.inner
+            .list_ready_roots(
+                after,
+                limit.min(self.ready_page_limit.load(Ordering::Acquire)),
+            )
+            .await
     }
 
     async fn list_agent_children(
@@ -600,11 +699,13 @@ impl SessionStore for FactReadRaceStore {
             .await
     }
 
-    async fn read_descendant_control_snapshot(
+    async fn read_agent_subtree_snapshot(
         &self,
         parent_session_id: &SessionId,
-    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDescendantControlSnapshot>
-    {
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentSubtreeSnapshot> {
+        if self.failed_subtree.lock().unwrap().as_ref() == Some(parent_session_id) {
+            return Err(StoreError::Io("persistent subtree failure".into()));
+        }
         let attempt = self
             .descendant_snapshot_reads
             .fetch_add(1, Ordering::AcqRel)
@@ -614,7 +715,7 @@ impl SessionStore for FactReadRaceStore {
             self.release_descendant_snapshot.notified().await;
         }
         self.inner
-            .read_descendant_control_snapshot(parent_session_id)
+            .read_agent_subtree_snapshot(parent_session_id)
             .await
     }
 
@@ -624,6 +725,16 @@ impl SessionStore for FactReadRaceStore {
     ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreActiveActivation>>
     {
         let active = self.inner.active_activation(session_id).await?;
+        if active
+            .as_ref()
+            .is_some_and(|active| active.phase == StoreActivationPhase::Parked)
+        {
+            match &*self.wait_resume_fault.lock().unwrap() {
+                Some(WaitResumeFault::MissingActivation) => return Ok(None),
+                Some(WaitResumeFault::Read(error)) => return Err(error.clone()),
+                _ => {}
+            }
+        }
         let mut mismatches = self
             .active_recheck_mismatches
             .lock()
@@ -659,6 +770,12 @@ impl SessionStore for FactReadRaceStore {
         after: Option<&SessionId>,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<StoreWaitingActivationPage> {
+        self.waiting_page_reads.fetch_add(1, Ordering::AcqRel);
+        if self.fail_waiting_pages.load(Ordering::Acquire) {
+            return Err(StoreError::Io(
+                "persistent waiting enumeration failure".into(),
+            ));
+        }
         self.inner.list_waiting_activations(after, limit).await
     }
 
@@ -1205,3 +1322,27 @@ mod settlement;
 mod submission;
 #[path = "kernel/workspace_and_mailbox.rs"]
 mod workspace_and_mailbox;
+
+async fn wait_for_settlement(store: &dyn SessionStore, session_id: &SessionId) {
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        while store
+            .read_agent_subtree_snapshot(session_id)
+            .await
+            .unwrap()
+            .session
+            .has_active_activation
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("runtime settlement did not converge");
+}
+
+#[path = "kernel/mutations.rs"]
+mod mutations;
+#[path = "kernel/steering.rs"]
+mod steering;
+
+#[path = "kernel/human_wait.rs"]
+mod human_wait;

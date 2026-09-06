@@ -240,6 +240,19 @@ struct FailingClaimFixture {
 
 #[async_trait]
 impl TurnExecution for FailingClaimFixture {
+    async fn park_human_wait(
+        &self,
+        _claim: &TurnClaim,
+        _executor: rsi_tools_protocol::ToolLaneParkingAuthority,
+    ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
+        unreachable!("this fixture never waits for a human")
+    }
+    fn elapsed_budget(
+        &self,
+        _claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
+        unreachable!("this fixture never drives a claimed turn")
+    }
     fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
         let lease_dropped = Arc::clone(&self.lease_dropped);
         Ok(ExecutorLease::new(move || {
@@ -801,6 +814,7 @@ struct UnevenParallelResultTool;
 
 #[derive(Debug)]
 struct ParkingTool {
+    turns: Option<Arc<dyn TurnExecution>>,
     parked: Arc<Notify>,
     release: Arc<Notify>,
 }
@@ -931,6 +945,22 @@ impl ToolExecutor for ParkingTool {
             .ok_or_else(|| {
                 ToolError::Execution("executor supplied no lane-parking authority".into())
             })?;
+        if let Some(turns) = &self.turns {
+            let caller = execution
+                .extension::<rsi_agent_turn_protocol::AgentCallerAuthority>()
+                .expect("Agent caller");
+            let parked = turns
+                .park_human_wait(caller.claim(), (*parking).clone())
+                .await
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            self.parked.notify_one();
+            self.release.notified().await;
+            parked
+                .resume(execution.cancellation.clone())
+                .await
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            return ToolResult::new(arguments, vec![], false);
+        }
         let parked = parking.park().await?;
         self.parked.notify_one();
         self.release.notified().await;

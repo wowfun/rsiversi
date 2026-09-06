@@ -58,6 +58,7 @@ fn next_step_message_claim_selects_an_ordered_byte_bounded_prefix() {
             options: MessageOptions::default(),
         };
         DurableMessageEntry {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
             encoded_message_bytes: serde_json::to_vec(&message).unwrap().len(),
             message,
             root_session_id: SessionId::new("message-prefix-root").unwrap(),
@@ -140,7 +141,12 @@ async fn closing_submission_admission_releases_same_session_waiters() {
         waiter.await.unwrap(),
         Err(TurnError::ShuttingDown)
     ));
-    assert!(admission.slots.is_closed());
+    assert!(matches!(
+        admission
+            .acquire(&SessionId::new("new-after-close").unwrap())
+            .await,
+        Err(TurnError::ShuttingDown)
+    ));
     drop(lease);
 }
 

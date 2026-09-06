@@ -13,10 +13,16 @@ scaled with unrelated dormant history.
 
 ## Decision
 
+The metadata-first-access portion of this decision is superseded by
+[explicit validation and bounded metadata snapshots](2026-09-05-agent-metadata-and-admitted-work.md).
+The mechanical proof, cache, WAL snapshot, and offline-audit rationale below
+continues to apply to execution and history access.
+
 Open retains the exclusive writer lease, owned-root checks, and exact schema
 validation but does not scan session contents. First access to an existing
-session validates its bounded Header, watermark, digest shape, and Fact/turn
-relationships in one deferred read transaction. One async single-flight gate
+session validates its bounded Header, watermark, digest shape, Fact/turn
+relationships, and canonical Agent-control projections in one deferred read
+transaction. One async single-flight gate
 and a 256-entry recency cache reuse that proof; new sessions enter the cache
 only after their creation transaction commits.
 

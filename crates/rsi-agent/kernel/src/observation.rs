@@ -47,7 +47,7 @@ pub(super) async fn read_fork_page_from_header(
         ));
     }
     if after_parent_seq == origin.resolved_after_seq {
-        let parent_header = read_header_bounded(inner, &origin.parent_session_id)
+        let parent_header = read_validated_header_bounded(inner, &origin.parent_session_id)
             .await
             .map_err(turn_store_error)?;
         if parent_header
@@ -113,13 +113,13 @@ pub(super) async fn read_fork_page_from_header(
 pub(super) async fn observe_agent_wait_change(
     kernel: &SessionKernel,
     caller: &AgentCallerAuthority,
-    baseline: &StoreDescendantControlSnapshot,
+    baseline: &StoreAgentSubtreeSnapshot,
 ) -> TurnResult<Option<WaitResumeCause>> {
     kernel.validate_agent_caller(caller)?;
     let current = kernel
         .inner
         .store
-        .read_descendant_control_snapshot(caller.session_id())
+        .read_agent_subtree_snapshot(caller.session_id())
         .await
         .map_err(turn_store_error)?;
     current.validate().map_err(turn_store_error)?;
@@ -128,25 +128,25 @@ pub(super) async fn observe_agent_wait_change(
             .descendants
             .iter()
             .zip(&baseline.descendants)
-            .any(|(current, previous)| current.session_id != previous.session_id)
+            .any(|(current, previous)| current.status.session_id != previous.status.session_id)
     {
         kernel.validate_agent_caller(caller)?;
         return Ok(Some(WaitResumeCause::Message));
     }
     for (current, previous) in current.descendants.iter().zip(&baseline.descendants) {
-        if current.durable_control_seq < previous.durable_control_seq {
+        if current.status.durable_control_seq < previous.status.durable_control_seq {
             return Err(TurnError::Invariant(format!(
                 "descendant control watermark regressed for `{}`",
-                current.session_id
+                current.status.session_id
             )));
         }
-        if current.durable_control_seq > previous.durable_control_seq {
-            let mut cursor = previous.durable_control_seq;
+        if current.status.durable_control_seq > previous.status.durable_control_seq {
+            let mut cursor = previous.status.durable_control_seq;
             let mut settled = false;
-            while cursor < current.durable_control_seq {
+            while cursor < current.status.durable_control_seq {
                 let controls = read_controls_bounded(
                     &kernel.inner,
-                    &current.session_id,
+                    &current.status.session_id,
                     cursor,
                     MAXIMUM_FACTS_PER_READ,
                 )
@@ -156,7 +156,7 @@ pub(super) async fn observe_agent_wait_change(
                 for record in controls
                     .records
                     .iter()
-                    .take_while(|record| record.seq() <= current.durable_control_seq)
+                    .take_while(|record| record.seq() <= current.status.durable_control_seq)
                 {
                     through = record.seq();
                     settled |= matches!(
@@ -170,7 +170,7 @@ pub(super) async fn observe_agent_wait_change(
                 if through == cursor {
                     return Err(TurnError::Invariant(format!(
                         "descendant control scan made no progress for `{}`",
-                        current.session_id
+                        current.status.session_id
                     )));
                 }
                 cursor = through;
@@ -276,6 +276,7 @@ pub(super) fn durable_message_entry(entry: StoreAgentMessage) -> DurableMessageE
         },
     };
     DurableMessageEntry {
+        delivery: entry.delivery,
         message: entry.message,
         encoded_message_bytes: entry.encoded_message_bytes,
         root_session_id: entry.root_session_id,
@@ -421,14 +422,10 @@ pub(super) fn activation_terminal_controls(
     expected_control_seq: u64,
     timestamp_ms: u64,
     terminal: AgentControlRecordBody,
-    pending_next_step_completion_message_ids: &[MessageId],
+    pending_promotable_message_ids: &[MessageId],
 ) -> TurnResult<Vec<AgentControlRecord>> {
-    let mut controls = Vec::with_capacity(
-        pending_next_step_completion_message_ids
-            .len()
-            .saturating_add(1),
-    );
-    for message_id in pending_next_step_completion_message_ids {
+    let mut controls = Vec::with_capacity(pending_promotable_message_ids.len().saturating_add(1));
+    for message_id in pending_promotable_message_ids {
         let seq = expected_control_seq
             .checked_add(
                 u64::try_from(controls.len())
@@ -579,65 +576,15 @@ pub(super) async fn descendant_session_ids(
     parent_session_id: &SessionId,
 ) -> TurnResult<Vec<SessionId>> {
     let snapshot = store
-        .read_descendant_control_snapshot(parent_session_id)
+        .read_agent_subtree_snapshot(parent_session_id)
         .await
         .map_err(turn_store_error)?;
     snapshot.validate().map_err(turn_store_error)?;
     Ok(snapshot
         .descendants
         .into_iter()
-        .map(|descendant| descendant.session_id)
+        .map(|descendant| descendant.status.session_id)
         .collect())
-}
-
-pub(super) async fn ready_sessions_for_root(
-    store: &Arc<dyn SessionStore>,
-    root_session_id: &SessionId,
-) -> TurnResult<BTreeSet<SessionId>> {
-    let mut after = None;
-    let mut sessions = BTreeSet::new();
-    loop {
-        let page = store
-            .list_ready_messages(root_session_id, after.as_ref(), MAXIMUM_SESSIONS_PER_READ)
-            .await
-            .map_err(turn_store_error)?;
-        page.validate().map_err(turn_store_error)?;
-        sessions.extend(
-            page.messages
-                .iter()
-                .map(|message| message.session_id.clone()),
-        );
-        if !page.has_more {
-            return Ok(sessions);
-        }
-        after = page
-            .messages
-            .last()
-            .map(rsi_agent_store_protocol::StoreReadyMessage::cursor);
-        if after.is_none() {
-            return Err(TurnError::Invariant(
-                "ready-message enumeration made no progress".into(),
-            ));
-        }
-    }
-}
-
-pub(super) async fn durable_agent_node_state(
-    store: &Arc<dyn SessionStore>,
-    session_id: &SessionId,
-    ready_sessions: &BTreeSet<SessionId>,
-) -> TurnResult<AgentNodeState> {
-    let open = store
-        .list_open_turns(session_id, 0, 1)
-        .await
-        .map_err(turn_store_error)?;
-    if !open.turns.is_empty() {
-        Ok(AgentNodeState::Running)
-    } else if ready_sessions.contains(session_id) {
-        Ok(AgentNodeState::Ready)
-    } else {
-        Ok(AgentNodeState::Idle)
-    }
 }
 
 pub(super) async fn control_tail(
@@ -677,11 +624,12 @@ pub(super) async fn read_turn_boundary_bounded(
     result
 }
 
-pub(super) async fn read_header_bounded(
+pub(super) async fn read_validated_header_bounded(
     inner: &KernelInner,
     session_id: &SessionId,
 ) -> std::result::Result<SessionHeader, StoreError> {
     let permit = acquire_store_read_bytes(inner, MAXIMUM_SESSION_HEADER_BYTES).await?;
+    inner.store.validate_session(session_id).await?;
     let result = inner.store.header(session_id).await;
     drop(permit);
     result
@@ -918,4 +866,12 @@ pub(super) fn observation_flush_result(
 ) -> TurnResult<TurnUpdate> {
     state.ended = true;
     Err(TurnError::Flush(error))
+}
+
+pub(super) async fn read_header_bounded(
+    inner: &KernelInner,
+    session_id: &SessionId,
+) -> std::result::Result<SessionHeader, StoreError> {
+    let _permit = acquire_store_read_bytes(inner, MAXIMUM_SESSION_HEADER_BYTES).await?;
+    inner.store.header(session_id).await
 }

@@ -48,7 +48,7 @@ async fn elapsed_budget_retires_an_admitted_tool_after_it_settles() {
     let tool_lease = tools
         .register(ToolRegistration {
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout_ms: 2_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(NonCooperativeTool {
                 entered: Arc::clone(&entered),
                 release: release.clone(),
@@ -165,7 +165,7 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_elapsed_retirem
     let tool_lease = tools
         .register(ToolRegistration {
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout_ms: 2_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(NonCooperativeTool {
                 entered: Arc::clone(&entered),
                 release: release.clone(),
@@ -276,7 +276,7 @@ async fn successfully_recovered_tool_releases_its_tracking_pin_after_commit() {
     let tool_lease = tools
         .register(ToolRegistration {
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout_ms: 2_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(NonCooperativeTool {
                 entered: Arc::clone(&entered),
                 release: release.clone(),
@@ -358,7 +358,7 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
     let tool_lease = tools
         .register(ToolRegistration {
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout_ms: 60_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 60_000 },
             executor: Arc::new(NonCooperativeTool {
                 entered: Arc::clone(&entered),
                 release: release.clone(),

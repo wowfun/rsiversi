@@ -4,7 +4,7 @@ use super::*;
 async fn durable_cancellation_fires_even_after_the_requesting_future_detaches() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-cancel-detached", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
@@ -47,7 +47,7 @@ async fn durable_cancellation_fires_even_after_the_requesting_future_detaches() 
 async fn persistent_store_failure_eventually_latches_a_flush_error() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-cancel-persistent-io", "hello").await;
     let mut observation = kernel
         .observe(&submitted.session_id, submitted.accepted_seq)
@@ -104,7 +104,7 @@ async fn persistent_store_failure_eventually_latches_a_flush_error() {
 async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let first = submit(&kernel, "session-cancel-full", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
@@ -188,10 +188,10 @@ async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn shutdown_timeout_stops_the_worker_and_releases_its_store_owner() {
+async fn shutdown_timeout_retains_the_store_until_background_drain_finishes() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-shutdown-failure", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
@@ -222,18 +222,25 @@ async fn shutdown_timeout_stops_the_worker_and_releases_its_store_owner() {
     tokio::task::yield_now().await;
     assert!(shutdown.await.unwrap().is_err());
     drop(kernel);
-    assert_eq!(
-        Arc::strong_count(&store),
-        1,
-        "failed shutdown must not leave the Store owned by a detached worker"
+    assert!(
+        Arc::strong_count(&store) > 1,
+        "timed out drain must retain its Store owner"
     );
+    store.fail_next_appends(0);
+    tokio::time::timeout(std::time::Duration::from_secs(70), async {
+        while Arc::strong_count(&store) > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("completed background drain retained its Store owner");
 }
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_snapshots_flush_waiters_before_terminal_sessions_can_be_evicted() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let first = submit(&kernel, "session-shutdown-a", "first").await;
     let second = submit(&kernel, "session-shutdown-b", "second").await;
     let _lease = kernel.register("executor".into()).unwrap();
@@ -281,7 +288,7 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
         SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-shutdown-publish", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
@@ -350,7 +357,7 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     store.pause_next_open_turn_read();
 
     let leader = tokio::spawn({
@@ -412,7 +419,7 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
 async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let first = submit(&kernel, "session-queue", "first").await;
     let second = kernel
         .submit(SubmitTurn {
@@ -464,7 +471,7 @@ async fn next_turn_is_not_claimable_until_the_previous_terminal_is_durable() {
 async fn one_executor_registration_can_hold_claims_for_two_distinct_sessions() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let first = submit(&kernel, "session-shared-executor-a", "first").await;
     let second = submit(&kernel, "session-shared-executor-b", "second").await;
     let _lease = kernel.register("shared-executor".into()).unwrap();
@@ -490,7 +497,7 @@ async fn one_executor_registration_can_hold_claims_for_two_distinct_sessions() {
 async fn conflicting_retry_does_not_replace_the_original_turn_control_state() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let turn_id = TurnId::new("caller-stable-turn").unwrap();
     let first = kernel
         .submit(SubmitTurn {
@@ -596,7 +603,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let _submitted = kernel
         .submit(SubmitTurn {
             turn_id: turn_id.clone(),
@@ -705,7 +712,7 @@ async fn publication_larger_than_an_empty_process_budget_is_invalid() {
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
             turn_id: turn_id.clone(),
@@ -734,7 +741,7 @@ async fn publication_larger_than_an_empty_process_budget_is_invalid() {
 async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure() {
     let memory = Arc::new(MemoryStore::new());
     let kernel = kernel(memory.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-cancel-pending-capacity", "hello").await;
     let _lease = kernel
         .register("executor-capacity-taxonomy".into())
@@ -892,7 +899,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let first = kernel
         .submit(SubmitTurn {
             turn_id: first_turn,
@@ -1013,7 +1020,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
             turn_id: target_turn.clone(),
@@ -1114,7 +1121,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
 async fn live_session_working_set_has_an_exact_global_bound() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         submit(&kernel, &format!("session-bound-{index}"), "queued").await;
     }
@@ -1145,7 +1152,7 @@ async fn active_observer_capacity_is_exact_and_released_on_drop() {
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-observer-bound", "queued").await;
     let mut observers = Vec::with_capacity(DEFAULT_MAXIMUM_ACTIVE_OBSERVERS);
     for _ in 0..DEFAULT_MAXIMUM_ACTIVE_OBSERVERS {
@@ -1165,7 +1172,7 @@ async fn active_observer_capacity_is_exact_and_released_on_drop() {
 async fn observation_reports_durability_that_advanced_while_unpolled() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-durable-update", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
@@ -1252,7 +1259,7 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
         terminal_turns.push((session_id, turn_id));
     }
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     for (session_id, turn_id) in terminal_turns {
         assert!(
             kernel
@@ -1333,7 +1340,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
         ));
     }
 
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
             turn_id: client_turn_id(),
@@ -1496,7 +1503,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
         SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     store.reset_read_attempts();
     store.reset_open_turn_read_attempts();
     store.pause_next_open_turn_read();
@@ -1562,7 +1569,7 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     store.pause_next_open_turn_read();
 
     let first = tokio::spawn({
@@ -1661,7 +1668,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
     let _ = first.await;
     assert_eq!(drops.load(Ordering::Acquire), 1);
     store.release_blocked_header_reads();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
 
     kernel
         .submit(SubmitTurn {
@@ -1775,7 +1782,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
             .is_err()
     );
 
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     kernel
         .submit(SubmitTurn {
             turn_id: client_turn_id(),
@@ -1803,7 +1810,7 @@ async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
         SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         submit(&kernel, &format!("session-resident-{index}"), "queued").await;
     }

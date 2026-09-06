@@ -97,6 +97,16 @@ replacement Facts determine what the model actually received.
 
 ## Consequences
 
+All source generations share four blocking jobs with a conservative 16 MiB
+aggregate envelope per job. The existing per-source, metadata, catalog and render
+bounds remain in force. The new aggregate bound rejects excess invocation output
+as Capacity instead of publishing a partial success. Four lanes and 64 MiB total
+admission are explicit capacity policy rather than benchmark-derived tuning.
+The actual blocking job and any unclaimed result own their permits; source
+withdrawal closes admission, requests cooperative cancellation and waits for real
+jobs. An operating-system filesystem call already running cannot be forcibly
+cancelled, so it occupies capacity until it returns.
+
 Opening an existing Session in a newly trusted checkout does not upgrade it; a
 new Session is required. A trusted Session observes later project edits before
 the next provider request and records replacements or tombstones, so its context

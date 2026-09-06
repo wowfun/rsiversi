@@ -9,8 +9,8 @@ use futures_util::Stream;
 use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, ForkTurnSelection,
-    MessageDiscardReason, MessageId, MessageTarget, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, StepId, TurnId, TurnOutcome, validate_identifier, validate_safe_diagnostic,
+    MessageDiscardReason, MessageId, SessionFact, SessionFactBody, SessionHeader, SessionId,
+    StepId, TurnId, TurnOutcome, validate_identifier, validate_safe_diagnostic,
 };
 use rsi_meta_contract::LocalContract;
 use std::fmt;
@@ -273,10 +273,8 @@ pub struct SubmitMessage {
     pub session: SubmitSession,
     /// Validated mixed-content message.
     pub message: AgentMessage,
-    /// Delivery horizon.
-    pub target: MessageTarget,
-    /// Whether an idle activation must be made ready.
-    pub wake_required: bool,
+    /// Immutable delivery intent; the Kernel resolves Human steering atomically.
+    pub delivery: rsi_agent_session_protocol::MessageDelivery,
 }
 
 /// Exact durable boundary which claims one pending next-Turn message.
@@ -297,8 +295,11 @@ pub struct ClaimMessage {
 }
 
 /// One source-authorized durable child creation request.
+/// Exact retries recover the original child and initial message without another write.
 #[derive(Clone, Debug)]
 pub struct SpawnAgentRequest {
+    /// Execution cancellation checked before final source admission.
+    pub cancellation: CancellationToken,
     /// Exact live calling Agent authority.
     pub caller: AgentCallerAuthority,
     /// Deterministic preallocated child session identity.
@@ -327,6 +328,8 @@ pub struct SpawnedAgent {
 /// One source-authorized Agent-to-Agent message.
 #[derive(Clone, Debug)]
 pub struct SendAgentMessage {
+    /// Execution cancellation checked before final source admission.
+    pub cancellation: CancellationToken,
     /// Exact live calling Agent authority.
     pub caller: AgentCallerAuthority,
     /// Adjacent target session.
@@ -337,6 +340,35 @@ pub struct SendAgentMessage {
     pub message: String,
     /// `true` queues a waking next Turn; `false` injects at the next Step and stays held while idle.
     pub start_new_turn: bool,
+}
+
+/// Bounded runtime settlement diagnostics, independent of startup recovery.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SettlementHealth {
+    /// Most recent enumerator or global invariant failure; clears after a complete healthy scan.
+    pub global_error: Option<String>,
+    /// Cumulative failure count, saturating at `u64::MAX`.
+    pub failures: u64,
+    /// At most 64 unresolved Session failures, oldest first.
+    pub recent_errors: Vec<SettlementSessionError>,
+}
+
+/// Read-only evidence of ready-scheduler failures, including recovered failures.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReadySchedulerHealth {
+    /// Cumulative failure count, saturating at `u64::MAX`.
+    pub failures: u64,
+    /// Most recent diagnostic, bounded to the Agent diagnostic byte limit.
+    pub last_error: Option<String>,
+}
+
+/// One bounded session-local settlement diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementSessionError {
+    /// Exact failing Session.
+    pub session_id: SessionId,
+    /// UTF-8 diagnostic bounded to 4 KiB.
+    pub diagnostic: String,
 }
 
 /// Agent roster traversal scope.
@@ -459,6 +491,14 @@ pub type TurnObservation = Pin<Box<dyn Stream<Item = Result<TurnUpdate>> + Send 
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Reads bounded settlement health without triggering Store I/O.
+    fn settlement_health(&self) -> SettlementHealth {
+        SettlementHealth::default()
+    }
+    /// Reads ready-scheduler failure evidence without triggering Store I/O.
+    fn ready_health(&self) -> ReadySchedulerHealth {
+        ReadySchedulerHealth::default()
+    }
     /// Pins the authoritative resident or current-cold generation for resume.
     ///
     /// Preparation does not reserve resident capacity or materialize Facts.
@@ -513,8 +553,9 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         &self,
         caller: &AgentCallerAuthority,
         target_session_id: &SessionId,
+        cancellation: CancellationToken,
     ) -> Result<CancelResult> {
-        let _ = (caller, target_session_id);
+        let _ = (caller, target_session_id, cancellation);
         Err(TurnError::Invalid(
             "this Turn service does not support Agent interruption".into(),
         ))
@@ -828,9 +869,35 @@ pub struct ContextCheckpoint {
     pub bytes: Arc<[u8]>,
 }
 
+/// Read-only Kernel-owned execution elapsed budget.
+#[async_trait]
+pub trait ElapsedBudget: fmt::Debug + Send + Sync + 'static {
+    /// Consumed execution milliseconds, excluding Kernel-authorized human waits.
+    fn consumed_ms(&self) -> u64;
+    /// Waits until the shared elapsed budget is irreversibly exhausted.
+    async fn exhausted(&self) -> u64;
+}
+
+/// Single-use human wait ownership, including both released execution permits.
+#[async_trait]
+pub trait HumanWait: fmt::Debug + Send + 'static {
+    /// Reacquires permits and resumes the shared clock; cancellation closes the wait.
+    /// A one-minute durability timeout stops this waiter; owned cleanup continues
+    /// until the parked activation's durable resume is confirmed.
+    async fn resume(self: Box<Self>, cancellation: CancellationToken) -> Result<()>;
+}
+
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Returns the Kernel-owned read-only elapsed-budget watch for this exact claim.
+    fn elapsed_budget(&self, claim: &TurnClaim) -> Result<Arc<dyn ElapsedBudget>>;
+    /// Parks both execution permits and pauses elapsed time around a human interaction.
+    async fn park_human_wait(
+        &self,
+        claim: &TurnClaim,
+        executor: rsi_tools_protocol::ToolLaneParkingAuthority,
+    ) -> Result<Box<dyn HumanWait>>;
     /// Registers executor availability until the returned lease drops.
     fn register(&self, executor_id: String) -> Result<ExecutorLease>;
     /// Waits for and claims one oldest available nonterminal turn.
@@ -928,6 +995,8 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         Ok(false)
     }
     /// Publishes validated bodies as the next live Facts without claiming durability.
+    /// Activation terminals must use `finish_activation_turn`; only direct Turns
+    /// may publish a raw `TurnTerminal` body.
     async fn publish(
         &self,
         claim: &TurnClaim,
@@ -937,7 +1006,7 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     async fn flush(&self, claim: &TurnClaim, through_seq: u64) -> Result<u64>;
     /// Returns a cancellation token that fires after a durable cancel request.
     fn cancellation(&self, claim: &TurnClaim) -> Result<CancellationToken>;
-    /// Releases one exact nonterminal claim for another registered executor.
+    /// Retires one exact claim, requeuing only nonterminal work after admitted mutations drain.
     fn release(&self, claim: &TurnClaim) -> Result<()>;
 }
 
@@ -1136,6 +1205,14 @@ impl Drop for ExecutorLease {
 /// Closed Turn runtime failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TurnError {
+    /// An exact mailbox identity does not exist in its Session.
+    #[error("Agent message `{message}` does not exist in Session `{session}`")]
+    MessageNotFound {
+        /// Exact requested Session.
+        session: String,
+        /// Exact requested message.
+        message: String,
+    },
     /// Malformed, oversized, or state-incompatible request.
     #[error("invalid Agent turn operation: {0}")]
     Invalid(String),

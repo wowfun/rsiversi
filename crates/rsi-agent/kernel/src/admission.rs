@@ -73,9 +73,10 @@ impl SessionKernel {
         let Some(activation_id) = activation_id else {
             return Ok(None);
         };
+        let drain = self.drain_agent_mutations(claim).await?;
         self.close_current_step(claim, proposed_outcome).await?;
-        let descendants = descendant_session_ids(&self.inner.store, claim.session_id()).await?;
         if !matches!(proposed_outcome, TurnOutcome::Completed) {
+            let descendants = descendant_session_ids(&self.inner.store, claim.session_id()).await?;
             let cancellations = descendants.iter().map(|child_session_id| async move {
                 let result = self.cancel_open_descendant_turns(child_session_id).await;
                 (child_session_id.clone(), result)
@@ -180,13 +181,12 @@ impl SessionKernel {
         let budget_original = clone_turn_control(&original);
         let mut staged = original;
         apply_executor_body(&mut staged, terminal.body())?;
-        staged.budget_usage = enforce_turn_budget(
+        enforce_turn_budget(
             claim.header().settings().turn_budget(),
             &budget_original,
             std::slice::from_ref(&terminal),
             terminal.timestamp_ms(),
         )?;
-        staged.terminal_seq = Some(terminal.seq());
 
         let mailbox = self
             .inner
@@ -200,7 +200,7 @@ impl SessionKernel {
             ));
         }
         let expected_control_seq = mailbox.durable_control_seq;
-        let quiescent_sessions = descendants;
+
         let activation_outcome = activation_outcome(&outcome);
         let settled_controls = activation_terminal_controls(
             expected_control_seq,
@@ -209,7 +209,7 @@ impl SessionKernel {
                 activation_id: activation_id.clone(),
                 outcome: activation_outcome,
             },
-            &mailbox.pending_next_step_completion_message_ids,
+            &mailbox.pending_promotable_message_ids,
         )?;
         let mut sessions = vec![AtomicSessionAppend {
             session_id: claim.session_id().clone(),
@@ -231,61 +231,70 @@ impl SessionKernel {
                 .await?,
             );
         }
-        let settlement = self
-            .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
-                sessions,
-                required_active_activations: vec![AgentActivationGuard {
-                    session_id: claim.session_id().clone(),
-                    activation_id: activation_id.clone(),
-                }],
-                quiescent_sessions,
-            })
-            .await?;
-        let settled = match settlement {
-            Ok(_) => true,
-            Err(StoreError::SessionNotQuiescent { .. }) => {
-                let waiting = activation_terminal_controls(
-                    expected_control_seq,
-                    terminal.timestamp_ms(),
-                    AgentControlRecordBody::ActivationWaitingForDescendants {
+        let terminal_lease = self.retain_terminal_mutation(claim)?;
+        let kernel = self.clone();
+        let claim = claim.clone();
+        self.owned_commit(async move {
+            drain.admit();
+            let _terminal_lease = terminal_lease;
+            let settlement = kernel
+                .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
+                    sessions,
+                    required_active_activations: vec![AgentActivationGuard {
+                        session_id: claim.session_id().clone(),
                         activation_id: activation_id.clone(),
-                    },
-                    &mailbox.pending_next_step_completion_message_ids,
-                )?;
-                self.inner
-                    .store
-                    .commit_agent(AtomicAgentCommit {
-                        sessions: vec![AtomicSessionAppend {
-                            session_id: claim.session_id().clone(),
-                            expected_fact_seq,
-                            expected_control_seq,
-                            header: None,
-                            facts: vec![terminal.clone()],
-                            controls: waiting,
-                        }],
-                        required_active_activations: vec![AgentActivationGuard {
-                            session_id: claim.session_id().clone(),
+                    }],
+                    quiescent_descendants_of: Some(claim.session_id().clone()),
+                })
+                .await?;
+            let settled = match settlement {
+                Ok(_) => true,
+                Err(StoreError::SessionNotQuiescent { .. }) => {
+                    let waiting = activation_terminal_controls(
+                        expected_control_seq,
+                        terminal.timestamp_ms(),
+                        AgentControlRecordBody::ActivationWaitingForDescendants {
                             activation_id: activation_id.clone(),
-                        }],
-                        quiescent_sessions: Vec::new(),
-                    })
-                    .await
-                    .map_err(turn_store_error)?;
-                false
+                        },
+                        &mailbox.pending_promotable_message_ids,
+                    )?;
+                    kernel
+                        .inner
+                        .store
+                        .commit_agent(AtomicAgentCommit {
+                            sessions: vec![AtomicSessionAppend {
+                                session_id: claim.session_id().clone(),
+                                expected_fact_seq,
+                                expected_control_seq,
+                                header: None,
+                                facts: vec![terminal.clone()],
+                                controls: waiting,
+                            }],
+                            required_active_activations: vec![AgentActivationGuard {
+                                session_id: claim.session_id().clone(),
+                                activation_id: activation_id.clone(),
+                            }],
+                            quiescent_descendants_of: None,
+                        })
+                        .await
+                        .map_err(turn_store_error)?;
+                    false
+                }
+                Err(error) => return Err(turn_store_error(error)),
+            };
+            kernel.install_committed_activation_terminal(
+                &claim,
+                expected_fact_seq,
+                terminal.seq(),
+            )?;
+            drop(admissions);
+            kernel.request_ready_scan();
+            if settled {
+                kernel.inner.settlement_requested.notify_one();
             }
-            Err(error) => return Err(turn_store_error(error)),
-        };
-        self.install_committed_activation_terminal(claim, expected_fact_seq, terminal.seq())?;
-        drop(admissions);
-        self.inner.claim_changed.notify_waiters();
-        if settled
-            && let Some(parent_session_id) = parent_session_id
-            && let Err(error) = self.settle_waiting_ancestors(parent_session_id).await
-        {
-            self.inner.settlement_requested.notify_one();
-            return Err(error);
-        }
-        Ok(Some(Arc::new(terminal)))
+            Ok(Some(Arc::new(terminal)))
+        })
+        .await
     }
 
     pub(super) async fn completion_append(
@@ -330,7 +339,7 @@ impl SessionKernel {
         } else {
             false
         };
-        let parent_header = read_header_bounded(&self.inner, parent_session_id)
+        let parent_header = read_validated_header_bounded(&self.inner, parent_session_id)
             .await
             .map_err(turn_store_error)?;
         let message_id = completion_message_id(child_session_id, activation_id)?;
@@ -341,6 +350,12 @@ impl SessionKernel {
                 .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
             timestamp_ms,
             AgentControlRecordBody::MessageAccepted {
+                delivery: if parent_has_step {
+                    rsi_agent_session_protocol::MessageDelivery::NextStep
+                } else {
+                    rsi_agent_session_protocol::MessageDelivery::NextTurn
+                },
+                bound_turn_id: None,
                 message: AgentMessage {
                     message_id,
                     source: AgentMessageSource::Completion {
@@ -379,7 +394,18 @@ impl SessionKernel {
         terminal_seq: u64,
     ) -> TurnResult<()> {
         let mut state = lock_state(&self.inner);
-        self.validate_claim(&state, claim)?;
+        self.validate_issued_claim(claim)?;
+        if !state
+            .sessions
+            .get(claim.session_id())
+            .and_then(|session| session.turns.get(claim.turn_id()))
+            .and_then(|turn| turn.claim.as_ref())
+            .is_some_and(|owner| {
+                owner.claim == claim.claim_id() && owner.live_seq == claim.live_seq()
+            })
+        {
+            return Err(TurnError::StaleClaim);
+        }
         let (next, evict_session) = {
             let session = state
                 .sessions
@@ -393,7 +419,7 @@ impl SessionKernel {
             session.durable_seq = terminal_seq;
             session.flush_status.send_replace(FlushStatus {
                 durable_seq: terminal_seq,
-                permanent_error: None,
+                permanent_error: session.permanent_flush_error.clone(),
             });
             session.turns.remove(claim.turn_id());
             session
@@ -427,7 +453,7 @@ impl SessionKernel {
         mut session_id: SessionId,
     ) -> TurnResult<()> {
         for _ in 0..=rsi_agent_session_protocol::MAXIMUM_AGENT_TREE_DEPTH {
-            loop {
+            {
                 let Some(active) = self
                     .inner
                     .store
@@ -438,6 +464,20 @@ impl SessionKernel {
                     return Ok(());
                 };
                 if active.phase != StoreActivationPhase::WaitingForDescendants {
+                    return Ok(());
+                }
+                let subtree = self
+                    .inner
+                    .store
+                    .read_agent_subtree_snapshot(&session_id)
+                    .await
+                    .map_err(turn_store_error)?;
+                subtree.validate().map_err(turn_store_error)?;
+                if subtree.descendants.iter().any(|child| {
+                    child.status.has_open_turn
+                        || child.status.has_active_activation
+                        || child.status.has_waking_message
+                }) {
                     return Ok(());
                 }
                 let turn_id = active.turn_id.clone().ok_or_else(|| {
@@ -456,7 +496,7 @@ impl SessionKernel {
                     SessionFactBody::TurnTerminal { outcome, .. } => outcome.clone(),
                     _ => unreachable!("Store boundary validates terminal Fact kind"),
                 };
-                let header = read_header_bounded(&self.inner, &session_id)
+                let header = read_validated_header_bounded(&self.inner, &session_id)
                     .await
                     .map_err(turn_store_error)?;
                 let parent_session_id = header
@@ -477,7 +517,7 @@ impl SessionKernel {
                     .await
                     .map_err(turn_store_error)?;
                 if current.as_ref() != Some(&active) {
-                    continue;
+                    return Ok(());
                 }
                 let mailbox = self
                     .inner
@@ -486,7 +526,7 @@ impl SessionKernel {
                     .await
                     .map_err(turn_store_error)?;
                 if mailbox.durable_fact_seq != boundary.durable_seq() {
-                    continue;
+                    return Ok(());
                 }
                 let expected_fact_seq = mailbox.durable_fact_seq;
                 let expected_control_seq = mailbox.durable_control_seq;
@@ -498,7 +538,7 @@ impl SessionKernel {
                         activation_id: active.activation_id.clone(),
                         outcome: activation_outcome(&outcome),
                     },
-                    &mailbox.pending_next_step_completion_message_ids,
+                    &mailbox.pending_promotable_message_ids,
                 )?;
                 let mut sessions = vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
@@ -520,7 +560,7 @@ impl SessionKernel {
                         .await?,
                     );
                 }
-                let descendants = descendant_session_ids(&self.inner.store, &session_id).await?;
+
                 let result = self
                     .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                         sessions,
@@ -528,19 +568,23 @@ impl SessionKernel {
                             session_id: session_id.clone(),
                             activation_id: active.activation_id,
                         }],
-                        quiescent_sessions: descendants,
+                        quiescent_descendants_of: Some(session_id.clone()),
                     })
                     .await?;
                 match result {
                     Ok(_) => {
-                        self.inner.claim_changed.notify_waiters();
+                        self.request_ready_scan();
                         let Some(parent_session_id) = parent_session_id else {
                             return Ok(());
                         };
                         session_id = parent_session_id;
-                        break;
                     }
-                    Err(StoreError::SessionNotQuiescent { .. }) => return Ok(()),
+                    Err(
+                        StoreError::SessionNotQuiescent { .. }
+                        | StoreError::ActivationGuardConflict { .. }
+                        | StoreError::Conflict { .. }
+                        | StoreError::ControlConflict { .. },
+                    ) => return Ok(()),
                     Err(error) => return Err(turn_store_error(error)),
                 }
             }
@@ -548,5 +592,113 @@ impl SessionKernel {
         Err(TurnError::Invariant(
             "waiting-activation settlement exceeded the Agent tree depth".into(),
         ))
+    }
+}
+
+impl SessionKernel {
+    pub(super) async fn settlement_loop(self) {
+        let mut cursor = None;
+        let mut scan_failed = false;
+        let mut next = Instant::now() + WAITING_SETTLEMENT_FALLBACK_INTERVAL;
+        let mut backoff = Duration::from_millis(100);
+        loop {
+            tokio::select! {
+                biased;
+                () = self.inner.stop_settlement.cancelled() => break,
+                () = tokio::time::sleep_until(next) => {},
+                () = self.inner.settlement_requested.notified() => {},
+            }
+            let page = tokio::select! {
+                biased;
+                () = self.inner.stop_settlement.cancelled() => break,
+                page = self.inner.store.list_waiting_activations(cursor.as_ref(), 16) => page.and_then(|page| { page.validate()?; Ok(page) }),
+            };
+            let page = match page {
+                Ok(page) => {
+                    backoff = Duration::from_millis(100);
+                    page
+                }
+                Err(error) => {
+                    scan_failed = true;
+                    self.record_settlement_error(None, &error.to_string());
+                    next = Instant::now() + backoff;
+                    backoff = (backoff * 2).min(WAITING_SETTLEMENT_FALLBACK_INTERVAL);
+                    // Notifications cannot defeat an enumerator's backoff.
+                    tokio::select! {
+                        () = self.inner.stop_settlement.cancelled() => break,
+                        () = tokio::time::sleep_until(next) => {},
+                    }
+                    continue;
+                }
+            };
+            for session_id in &page.sessions {
+                if self.inner.stop_settlement.is_cancelled() {
+                    break;
+                }
+                let kernel = self.clone();
+                let target = session_id.clone();
+                let result = self
+                    .owned_commit(async move { kernel.settle_waiting_ancestors(target).await })
+                    .await;
+                match result {
+                    Ok(()) => self
+                        .inner
+                        .settlement_health
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recent_errors
+                        .retain(|error| &error.session_id != session_id),
+                    Err(TurnError::ShuttingDown) => break,
+                    Err(TurnError::Invariant(error)) => {
+                        scan_failed = true;
+                        self.record_settlement_error(None, &error);
+                    }
+                    Err(error) => {
+                        scan_failed = true;
+                        self.record_settlement_error(Some(session_id.clone()), &error.to_string());
+                    }
+                }
+                cursor = Some(session_id.clone());
+            }
+            if page.has_more {
+                next = Instant::now();
+                tokio::task::yield_now().await;
+            } else {
+                if !scan_failed {
+                    self.inner
+                        .settlement_health
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .global_error = None;
+                }
+                scan_failed = false;
+                cursor = None;
+                next = Instant::now() + WAITING_SETTLEMENT_FALLBACK_INTERVAL;
+            }
+        }
+    }
+
+    fn record_settlement_error(&self, session_id: Option<SessionId>, message: &str) {
+        let diagnostic = bounded_diagnostic(message);
+        let mut health = self
+            .inner
+            .settlement_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        health.failures = health.failures.saturating_add(1);
+        if let Some(session_id) = session_id {
+            health
+                .recent_errors
+                .retain(|error| error.session_id != session_id);
+            if health.recent_errors.len() == 64 {
+                health.recent_errors.remove(0);
+            }
+            health.recent_errors.push(SettlementSessionError {
+                session_id,
+                diagnostic,
+            });
+        } else {
+            health.global_error = Some(diagnostic);
+        }
     }
 }

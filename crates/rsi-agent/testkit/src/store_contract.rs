@@ -4,9 +4,8 @@ use super::{
     AppendBatch, Arc, AtomicAgentCommit, AtomicSessionAppend, EMPTY_FACT_PREFIX_DIGEST, ForkOrigin,
     ForkTurnSelection, InputMessageSource, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageId,
     MessageOptions, MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId,
-    SessionStore, StepId, StoreAgentMailboxSummary, StoreDescendantControlSnapshot,
-    StoreDescendantControlWatermark, StoreError, StoredContextCheckpoint, TurnId, TurnOutcome,
-    WriteContextCheckpoint, fact_prefix_sha256,
+    SessionStore, StepId, StoreAgentMailboxSummary, StoreError, StoredContextCheckpoint, TurnId,
+    TurnOutcome, WriteContextCheckpoint, fact_prefix_sha256,
 };
 
 /// Exercises the backend-independent observable Store contract against one
@@ -32,6 +31,10 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(event.body().turn_id(), &turn_id);
     assert_eq!(terminal.body().turn_id(), &turn_id);
     assert_missing_session_atomic_append_is_not_found(store).await;
+    assert!(matches!(
+        store.validate_session(&session_id).await,
+        Err(StoreError::NotFound(_))
+    ));
 
     let commit = store
         .append(AppendBatch {
@@ -44,6 +47,17 @@ pub async fn assert_mechanical_store_contract(
         .expect("create session");
     assert_eq!(commit.durable_seq, 1);
     assert_eq!(store.header(&session_id).await.unwrap(), header);
+    store
+        .validate_session(&session_id)
+        .await
+        .expect("validate an open session");
+    let inspected = store.inspect_session(&session_id).await.unwrap();
+    inspected.validate().unwrap();
+    assert_eq!(inspected.header, header);
+    assert_eq!(inspected.durable_fact_seq, 1);
+    assert_eq!(inspected.durable_control_seq, 0);
+    assert_eq!(inspected.active_turn_id.as_ref(), Some(&turn_id));
+    assert!(inspected.pending.is_empty());
     assert!(matches!(
         store
             .append(AppendBatch {
@@ -222,6 +236,10 @@ pub async fn assert_mechanical_store_contract(
     let closed_sessions = store.list_open_sessions(None, 8).await.unwrap();
     assert!(closed_sessions.sessions.is_empty());
     assert!(!closed_sessions.has_more);
+    store
+        .validate_session(&session_id)
+        .await
+        .expect("validate a closed session");
 
     let message_id = MessageId::new("message-control-contract").unwrap();
     let accepted_control = AgentControlRecord::new(
@@ -237,6 +255,8 @@ pub async fn assert_mechanical_store_contract(
                 options: MessageOptions::default(),
             },
             root_session_id: session_id.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            bound_turn_id: None,
             target: MessageTarget::NextTurn,
             wake_required: true,
         },
@@ -257,7 +277,7 @@ pub async fn assert_mechanical_store_contract(
                     session_id: session_id.clone(),
                     activation_id: ActivationId::new("missing-activation").unwrap(),
                 }],
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::ActivationGuardConflict { session })
@@ -274,7 +294,7 @@ pub async fn assert_mechanical_store_contract(
                 controls: vec![accepted_control.clone()],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("append a ready Agent message");
@@ -297,42 +317,6 @@ pub async fn assert_mechanical_store_contract(
             .message_id,
         message_id
     );
-    let guarded_message = MessageId::new("message-quiescence-guard").unwrap();
-    assert!(matches!(
-        store
-            .commit_agent(AtomicAgentCommit {
-                sessions: vec![AtomicSessionAppend {
-                    session_id: session_id.clone(),
-                    expected_fact_seq: 3,
-                    expected_control_seq: 1,
-                    header: None,
-                    facts: Vec::new(),
-                    controls: vec![AgentControlRecord::new(
-                        2,
-                        10,
-                        AgentControlRecordBody::MessageAccepted {
-                            message: AgentMessage {
-                                message_id: guarded_message,
-                                source: AgentMessageSource::Human,
-                                content: vec![AgentMessageContent::Text {
-                                    text: "must not commit".into(),
-                                }],
-                                options: MessageOptions::default(),
-                            },
-                            root_session_id: session_id.clone(),
-                            target: MessageTarget::NextTurn,
-                            wake_required: true,
-                        },
-                    )
-                    .unwrap()],
-                }],
-                required_active_activations: Vec::new(),
-                quiescent_sessions: vec![session_id.clone()],
-            })
-            .await,
-        Err(StoreError::SessionNotQuiescent { session })
-            if session == session_id.as_str()
-    ));
     for (root, parent, path) in [
         (
             SessionId::new("wrong-root").unwrap(),
@@ -353,7 +337,7 @@ pub async fn assert_mechanical_store_contract(
                     activation_id: ActivationId::new("wrong-lineage").unwrap(),
                     root_session_id: root, parent_session_id: parent, path,
                 }).unwrap()],
-            }], required_active_activations: Vec::new(), quiescent_sessions: Vec::new(),
+            }], required_active_activations: Vec::new(), quiescent_descendants_of: None,
         }).await, Err(StoreError::Invalid(message)) if message.contains("lineage")));
     }
     let activation_id = ActivationId::new("activation-contract").unwrap();
@@ -396,7 +380,7 @@ pub async fn assert_mechanical_store_contract(
                     ],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("newly appended input Fact")
@@ -494,6 +478,8 @@ pub async fn assert_mechanical_store_contract(
                                 options: MessageOptions::default(),
                             },
                             root_session_id: session_id.clone(),
+                            delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                            bound_turn_id: None,
                             target: MessageTarget::NextStep,
                             wake_required: false,
                         },
@@ -515,14 +501,15 @@ pub async fn assert_mechanical_store_contract(
                             activation_id: activation_id.clone(),
                             turn_id: message_turn_id.clone(),
                             step_id: message_step_id.clone(),
-                            deadline_ms: 100,
+                            kind: rsi_agent_session_protocol::WaitKind::Agent,
+                            deadline_ms: Some(100),
                         },
                     )
                     .unwrap(),
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("claim the ready Agent message");
@@ -545,7 +532,7 @@ pub async fn assert_mechanical_store_contract(
                     .unwrap()],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Corrupt(message)) if message.contains("running activation")
@@ -582,7 +569,7 @@ pub async fn assert_mechanical_store_contract(
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("resume the parked wait before settling its Activation");
@@ -682,12 +669,45 @@ pub async fn assert_mechanical_store_contract(
                     options: MessageOptions::default(),
                 },
                 root_session_id: session_id.clone(),
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                bound_turn_id: None,
                 target: MessageTarget::NextTurn,
                 wake_required: true,
             },
         )
         .unwrap()
     };
+    let busy_child_commit = AtomicAgentCommit {
+        sessions: vec![AtomicSessionAppend {
+            session_id: first_child_id.clone(),
+            expected_fact_seq: 0,
+            expected_control_seq: 0,
+            header: Some(first_child_header.clone()),
+            facts: Vec::new(),
+            controls: vec![child_control(&session_id, "first-child-message")],
+        }],
+        required_active_activations: Vec::new(),
+        quiescent_descendants_of: Some(session_id.clone()),
+    };
+    assert!(
+        matches!(
+            store.commit_agent(busy_child_commit).await,
+            Err(StoreError::SessionNotQuiescent { session }) if session == first_child_id.as_str()
+        ),
+        "a guarded transaction cannot introduce its own busy descendant"
+    );
+    assert!(matches!(
+        store.header(&first_child_id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(
+        store
+            .read_agent_subtree_snapshot(&session_id)
+            .await
+            .unwrap()
+            .descendants
+            .is_empty()
+    );
     store
         .commit_agent(AtomicAgentCommit {
             sessions: vec![AtomicSessionAppend {
@@ -699,10 +719,15 @@ pub async fn assert_mechanical_store_contract(
                 controls: vec![child_control(&session_id, "first-child-message")],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: Some(first_child_id.clone()),
         })
         .await
-        .expect("create the first child path");
+        .expect("create a new guard root with no strict descendants");
+    let before_new_child = store
+        .read_agent_subtree_snapshot(&first_child_id)
+        .await
+        .unwrap();
+    assert!(before_new_child.descendants.is_empty());
     let grandchild_id = SessionId::new("shared-contract-grandchild").unwrap();
     let grandchild_header = first_child_header
         .forked_child(
@@ -747,6 +772,8 @@ pub async fn assert_mechanical_store_contract(
                                 options: MessageOptions::default(),
                             },
                             root_session_id: session_id.clone(),
+                            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                            bound_turn_id: None,
                             target: MessageTarget::NextTurn,
                             wake_required: true,
                         },
@@ -755,40 +782,70 @@ pub async fn assert_mechanical_store_contract(
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("create a grandchild path");
+    let snapshot = store
+        .read_agent_subtree_snapshot(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.session.session_id, session_id);
     assert_eq!(
-        store
-            .read_descendant_control_snapshot(&session_id)
-            .await
-            .expect("snapshot the root descendants atomically"),
-        StoreDescendantControlSnapshot {
-            descendants: vec![
-                StoreDescendantControlWatermark {
-                    session_id: first_child_id.clone(),
-                    durable_control_seq: 1,
-                },
-                StoreDescendantControlWatermark {
-                    session_id: grandchild_id.clone(),
-                    durable_control_seq: 1,
-                },
-            ],
-        }
+        snapshot
+            .descendants
+            .iter()
+            .map(|child| (&child.status.session_id, child.status.durable_control_seq))
+            .collect::<Vec<_>>(),
+        vec![(&first_child_id, 1), (&grandchild_id, 1)]
     );
+    assert!(
+        snapshot
+            .descendants
+            .iter()
+            .all(|child| child.status.has_waking_message
+                && !child.status.has_open_turn
+                && !child.status.has_active_activation)
+    );
+    assert_eq!(snapshot.descendants[0].parent_session_id, session_id);
+    assert_eq!(snapshot.descendants[1].parent_session_id, first_child_id);
+    let child_snapshot = store
+        .read_agent_subtree_snapshot(&first_child_id)
+        .await
+        .unwrap();
+    assert_eq!(child_snapshot.descendants.len(), 1);
     assert_eq!(
-        store
-            .read_descendant_control_snapshot(&first_child_id)
-            .await
-            .expect("a child snapshot includes its grandchild"),
-        StoreDescendantControlSnapshot {
-            descendants: vec![StoreDescendantControlWatermark {
-                session_id: grandchild_id,
-                durable_control_seq: 1,
+        child_snapshot.descendants[0].status.session_id,
+        grandchild_id
+    );
+    assert!(matches!(store.commit_agent(AtomicAgentCommit {
+        sessions: vec![AtomicSessionAppend { session_id: first_child_id.clone(), expected_fact_seq: 0, expected_control_seq: 1, header: None, facts: Vec::new(), controls: vec![AgentControlRecord::new(2, 32, child_control(&session_id, "guarded-message").body().clone()).unwrap()] }],
+        required_active_activations: Vec::new(), quiescent_descendants_of: Some(first_child_id.clone()),
+    }).await, Err(StoreError::SessionNotQuiescent { session }) if session == grandchild_id.as_str()));
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: grandchild_id.clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 1,
+                header: None,
+                facts: Vec::new(),
+                controls: vec![
+                    AgentControlRecord::new(
+                        2,
+                        33,
+                        child_control(&session_id, "quiescent-root-excluded")
+                            .body()
+                            .clone(),
+                    )
+                    .unwrap(),
+                ],
             }],
-        }
-    );
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: Some(grandchild_id.clone()),
+        })
+        .await
+        .expect("a busy root is excluded from its strict-descendant guard");
     let second_child_id = SessionId::new("shared-contract-child-two").unwrap();
     let second_child_header = header
         .forked_child(second_child_id.clone(), 31, child_origin("second-child"))
@@ -805,7 +862,7 @@ pub async fn assert_mechanical_store_contract(
                     controls: vec![child_control(&session_id, "second-child-message")],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("tree path")
@@ -832,7 +889,7 @@ pub async fn assert_mechanical_store_contract(
                     controls: vec![child_control(&session_id, "duplicate-task-message")],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("task name")
@@ -864,7 +921,7 @@ pub async fn assert_mechanical_store_contract(
                 controls: vec![child_control(&unrelated_root_id, "unrelated-root-message")],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("create an unrelated root for lineage rejection");
@@ -891,7 +948,7 @@ pub async fn assert_mechanical_store_contract(
                     )],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("root")
@@ -914,6 +971,8 @@ pub async fn assert_mechanical_store_contract(
                 options: MessageOptions::default(),
             },
             root_session_id: unrelated_root_id,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            bound_turn_id: None,
             target: MessageTarget::NextTurn,
             wake_required: true,
         },
@@ -931,7 +990,7 @@ pub async fn assert_mechanical_store_contract(
                     controls: vec![wrong_root_control],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("root")
@@ -950,6 +1009,8 @@ pub async fn assert_mechanical_store_contract(
                 options: MessageOptions::default(),
             },
             root_session_id: session_id.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            bound_turn_id: None,
             target: MessageTarget::NextTurn,
             wake_required: true,
         },
@@ -967,7 +1028,7 @@ pub async fn assert_mechanical_store_contract(
                     controls: vec![duplicate_control],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Corrupt(message)) if message.contains("message identity")
@@ -1000,7 +1061,7 @@ pub async fn assert_mechanical_store_contract(
                     ],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Corrupt(message)) if message.contains("unsettled activation")
@@ -1043,7 +1104,7 @@ pub async fn assert_mechanical_store_contract(
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("reserve one exact parent mailbox slot for child completion");
@@ -1077,6 +1138,8 @@ pub async fn assert_mechanical_store_contract(
                         options: MessageOptions::default(),
                     },
                     root_session_id: session_id.clone(),
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                    bound_turn_id: None,
                     target: MessageTarget::NextStep,
                     wake_required: false,
                 },
@@ -1095,7 +1158,7 @@ pub async fn assert_mechanical_store_contract(
                 controls: bounded_controls,
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("fill every parent mailbox slot not reserved for child completion");
@@ -1124,6 +1187,8 @@ pub async fn assert_mechanical_store_contract(
                                 options: MessageOptions::default(),
                             },
                             root_session_id: session_id.clone(),
+                            delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                            bound_turn_id: None,
                             target: MessageTarget::NextStep,
                             wake_required: false,
                         },
@@ -1131,7 +1196,7 @@ pub async fn assert_mechanical_store_contract(
                     .unwrap()],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("pending-message bound")
@@ -1157,7 +1222,7 @@ pub async fn assert_mechanical_store_contract(
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("release the exact completion reservation");
@@ -1190,6 +1255,8 @@ pub async fn assert_mechanical_store_contract(
                             options: MessageOptions::default(),
                         },
                         root_session_id: session_id.clone(),
+                        delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                        bound_turn_id: None,
                         target: MessageTarget::NextStep,
                         wake_required: false,
                     },
@@ -1197,7 +1264,7 @@ pub async fn assert_mechanical_store_contract(
                 .unwrap()],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("use the released mailbox slot");
@@ -1224,6 +1291,8 @@ pub async fn assert_mechanical_store_contract(
                                 options: MessageOptions::default(),
                             },
                             root_session_id: session_id.clone(),
+                            delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                            bound_turn_id: None,
                             target: MessageTarget::NextStep,
                             wake_required: false,
                         },
@@ -1231,7 +1300,7 @@ pub async fn assert_mechanical_store_contract(
                     .unwrap()],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("pending-message bound")
@@ -1249,9 +1318,7 @@ pub async fn assert_mechanical_store_contract(
         store.read_agent_mailbox_summary(&session_id).await.unwrap(),
         StoreAgentMailboxSummary {
             pending_count: rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES,
-            pending_next_step_completion_message_ids: vec![
-                MessageId::new("bounded-message-0").unwrap(),
-            ],
+            pending_promotable_message_ids: vec![MessageId::new("bounded-message-0").unwrap(),],
             durable_control_seq: full_control_seq,
             durable_fact_seq: 8,
         }
@@ -1276,10 +1343,10 @@ pub async fn assert_mechanical_store_contract(
                     .unwrap()],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
-        Err(StoreError::Corrupt(message)) if message.contains("next-Step completion")
+        Err(StoreError::Corrupt(message)) if message.contains("next-Step input")
     ));
     let promoted_message_id = MessageId::new("bounded-message-0").unwrap();
     store
@@ -1302,7 +1369,7 @@ pub async fn assert_mechanical_store_contract(
                 ],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .expect("promote a pending next-Step completion into the ready index");
@@ -1314,6 +1381,15 @@ pub async fn assert_mechanical_store_contract(
         .unwrap();
     assert_eq!(promoted.target, MessageTarget::NextTurn);
     assert!(promoted.wake_required);
+    let inspection = store.inspect_session(&session_id).await.unwrap();
+    inspection.validate().unwrap();
+    assert!(
+        inspection
+            .pending
+            .iter()
+            .any(|entry| entry.message_id == promoted_message_id
+                && entry.target == MessageTarget::NextTurn)
+    );
     let ready = store
         .list_ready_messages(&session_id, None, 8)
         .await
@@ -1328,6 +1404,73 @@ pub async fn assert_mechanical_store_contract(
     let object = store.put_cas(Arc::clone(&bytes)).await.unwrap();
     assert_eq!(store.put_cas(Arc::clone(&bytes)).await.unwrap(), object);
     assert_eq!(store.read_cas(&object).await.unwrap(), bytes);
+    assert_unbound_steer_inspection(store, &header).await;
+}
+
+async fn assert_unbound_steer_inspection(store: &dyn SessionStore, template: &SessionHeader) {
+    let mut value = serde_json::to_value(template).unwrap();
+    value["session_id"] = serde_json::json!("unbound-steer-inspection");
+    let header: SessionHeader = serde_json::from_value(value).unwrap();
+    let session_id = header.session_id().clone();
+    let message_id = MessageId::new("unbound-steer").unwrap();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session_id.clone(),
+                header: Some(header),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                facts: Vec::new(),
+                controls: vec![
+                    AgentControlRecord::new(
+                        1,
+                        1,
+                        AgentControlRecordBody::MessageAccepted {
+                            message: AgentMessage {
+                                message_id: message_id.clone(),
+                                source: AgentMessageSource::Human,
+                                content: vec![AgentMessageContent::Text {
+                                    text: "idle steering".into(),
+                                }],
+                                options: MessageOptions::default(),
+                            },
+                            root_session_id: session_id.clone(),
+                            delivery: rsi_agent_session_protocol::MessageDelivery::Steer,
+                            bound_turn_id: None,
+                            target: MessageTarget::NextTurn,
+                            wake_required: true,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    let entry = store
+        .read_agent_mailbox(&session_id, Some(&message_id))
+        .await
+        .unwrap()
+        .selected
+        .unwrap();
+    let inspection = store.inspect_session(&session_id).await.unwrap();
+    assert_eq!(inspection.pending.len(), 1);
+    assert!(!entry.permits_promotion());
+    assert_eq!(
+        inspection.pending[0].permits_promotion,
+        entry.permits_promotion(),
+        "inspection must use the typed promotion rule for an unbound steer"
+    );
+    assert!(
+        store
+            .read_agent_mailbox_summary(&session_id)
+            .await
+            .unwrap()
+            .pending_promotable_message_ids
+            .is_empty()
+    );
 }
 
 async fn assert_missing_session_atomic_append_is_not_found(store: &dyn SessionStore) {
@@ -1351,7 +1494,7 @@ async fn assert_missing_session_atomic_append_is_not_found(store: &dyn SessionSt
                     .unwrap()],
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::NotFound(missing)) if missing == session_id.as_str()

@@ -4,6 +4,25 @@ This package owns bounded filesystem discovery for model-visible workspace
 instructions and skills. It exposes one process-local snapshot service; the
 Agent Kernel owns durable Fact insertion and digest comparison.
 
+All instances and generations share four process-wide blocking lanes. Each job
+reserves a conservative 16 MiB aggregate envelope, including configuration,
+paths, invocation names, selected metadata, source/render scratch and results;
+aggregate process admission is therefore 64 MiB. This is a capacity policy, not
+a measured optimum. Scratch reservations are conservative and can reject a
+snapshot before its returned text alone reaches 16 MiB. Exhaustion returns
+`Capacity`, never an incomplete or silently truncated invocation set. Instruction
+source buffers retain capacity equal to their admitted byte length; reads
+grow with observed data and compact before collection, so many tiny instruction
+files do not retain one maximum-size allocation each. Inputs
+contain at most 64 messages with 64 content blocks each; invocation extraction
+examines all 4,096 possible tokens before matching at most 256 selected skills.
+
+Cancellation of an async waiter does not release a running job's lane. The
+blocking job and any unclaimed result own that lane until dropped. Withdrawal
+closes the instance, requests cooperative cancellation between reads and read
+chunks, and drains actual jobs. A filesystem call already executing cannot be
+forcibly stopped; it continues to occupy process capacity until it returns.
+
 The configured user instruction file and user skill roots are trusted inputs.
 Project inputs are eligible only when the immutable Session Header says
 `trusted`. Project instructions are ordered from the nearest Git root to the

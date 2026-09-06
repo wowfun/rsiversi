@@ -451,6 +451,7 @@ pub(super) fn fatal(error: impl fmt::Display) -> DriveFailure {
 pub(super) fn turn_failure(error: TurnError) -> DriveFailure {
     match error {
         TurnError::ShuttingDown => DriveFailure::Stopped,
+        TurnError::Cancelled => DriveFailure::Turn(TurnOutcome::Cancelled),
         TurnError::BudgetExceeded {
             dimension,
             consumed,
@@ -501,14 +502,6 @@ pub(super) fn bounded(value: &str) -> String {
         output.push_str("Agent executor failed");
     }
     output
-}
-
-pub(super) fn unix_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 #[derive(Debug)]

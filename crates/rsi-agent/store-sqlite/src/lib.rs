@@ -18,9 +18,9 @@ use rsi_agent_store_protocol::{
     MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
     StoreActivationPhase, StoreActiveActivation, StoreAgentChild, StoreAgentChildPage,
-    StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState,
-    StoreBackwardFactPage, StoreControlPage, StoreDescendantControlSnapshot,
-    StoreDescendantControlWatermark, StoreError, StoreFactPage, StoreFactTurnRole,
+    StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage,
+    StoreAgentMessageState, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
+    StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreTurnBoundary, StoreTurnFactPage,
@@ -133,6 +133,9 @@ const EXPECTED_TABLES: [(&str, &str); 10] = [
             session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
             message_id TEXT NOT NULL,
             accepted_control_seq INTEGER NOT NULL CHECK (accepted_control_seq > 0),
+            delivery TEXT NOT NULL CHECK (delivery IN ('next_turn', 'next_step', 'steer')),
+            bound_turn_id TEXT,
+            accepted_timestamp_ms INTEGER NOT NULL CHECK (accepted_timestamp_ms > 0),
             root_session_id TEXT NOT NULL,
             message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion')),
             message_json TEXT NOT NULL,
@@ -243,21 +246,27 @@ impl SqliteStoreConfig {
     }
 }
 
-/// Open Store holding the exact root writer lease until its last clone drops.
+/// Open Store retaining the root writer lease through all clones and dispatched operations.
 #[derive(Clone)]
 pub struct SqliteStore {
-    connections: Arc<DatabaseConnections>,
+    inner: Arc<StoreInner>,
+}
+
+struct StoreInner {
+    connections: DatabaseConnections,
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
     validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
     validation_gates: Arc<Mutex<BTreeMap<SessionId, Weak<AsyncMutex<()>>>>>,
     #[cfg(test)]
     validation_runs: Arc<AtomicU64>,
+    #[cfg(test)]
+    fact_materializations: Arc<AtomicU64>,
     cas_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
     cas_staging_dir: Arc<PathBuf>,
-    _writer_lock: Arc<File>,
+    _writer_lock: filesystem::WriterLease,
 }
 
 struct DatabaseConnections {
@@ -305,8 +314,8 @@ impl std::fmt::Debug for SqliteStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SqliteStore")
-            .field("root", &self.root)
-            .field("cas_dir", &self.cas_dir)
+            .field("root", &self.inner.root)
+            .field("cas_dir", &self.inner.cas_dir)
             .finish_non_exhaustive()
     }
 }
@@ -316,13 +325,13 @@ impl SqliteStore {
     ///
     /// Opening validates the exact schema, owned paths, and writer exclusivity.
     /// First access validates the selected session's bounded Header, mechanical
-    /// watermark, stored digest shape, and Fact/turn index relationships, then
-    /// caches that proof with bounded recency. It does not decode every Fact or
+    /// watermark, stored digest shape, Fact/turn relationships, and canonical
+    /// Agent-control index projections, then caches that proof with bounded recency. It does not decode every Fact or
     /// recompute the canonical prefix digest; use [`Self::verify`] for that
     /// explicit full audit.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = prepare_root(root.as_ref())?;
-        let writer_lock = Arc::new(acquire_writer_lock(&root)?);
+        let writer_lock = acquire_writer_lock(&root)?;
         let cas_dir = root.join("cas");
         prepare_owned_directory(&cas_dir, "CAS directory")?;
         let cas_staging_dir = cas_dir.join("staging");
@@ -348,21 +357,25 @@ impl SqliteStore {
         .map_err(sql_error)?;
         configure_reader(&reader_connection)?;
         Ok(Self {
-            connections: Arc::new(DatabaseConnections {
-                reader: Mutex::new(reader_connection),
-                writer: Mutex::new(writer_connection),
+            inner: Arc::new(StoreInner {
+                connections: DatabaseConnections {
+                    reader: Mutex::new(reader_connection),
+                    writer: Mutex::new(writer_connection),
+                },
+                writer_admission: Arc::new(Semaphore::new(1)),
+                reader_admission: Arc::new(Semaphore::new(1)),
+                validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
+                validation_gates: Arc::new(Mutex::new(BTreeMap::new())),
+                #[cfg(test)]
+                validation_runs: Arc::new(AtomicU64::new(0)),
+                #[cfg(test)]
+                fact_materializations: Arc::new(AtomicU64::new(0)),
+                cas_admission: Arc::new(Semaphore::new(1)),
+                root: Arc::new(root),
+                cas_dir: Arc::new(cas_dir),
+                cas_staging_dir: Arc::new(cas_staging_dir),
+                _writer_lock: writer_lock,
             }),
-            writer_admission: Arc::new(Semaphore::new(1)),
-            reader_admission: Arc::new(Semaphore::new(1)),
-            validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
-            validation_gates: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(test)]
-            validation_runs: Arc::new(AtomicU64::new(0)),
-            cas_admission: Arc::new(Semaphore::new(1)),
-            root: Arc::new(root),
-            cas_dir: Arc::new(cas_dir),
-            cas_staging_dir: Arc::new(cas_staging_dir),
-            _writer_lock: writer_lock,
         })
     }
 
@@ -428,12 +441,12 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let connections = Arc::clone(&self.connections);
+        let owner = Arc::clone(&self.inner);
         Self::with_database(
-            Arc::clone(&self.writer_admission),
+            Arc::clone(&self.inner.writer_admission),
             "SQLite writer admission closed",
             move || {
-                let mut connection = connections.writer.lock().map_err(|_| {
+                let mut connection = owner.connections.writer.lock().map_err(|_| {
                     StoreError::Io("SQLite writer connection mutex was poisoned".into())
                 })?;
                 operation(&mut connection)
@@ -447,12 +460,12 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let connections = Arc::clone(&self.connections);
+        let owner = Arc::clone(&self.inner);
         Self::with_database(
-            Arc::clone(&self.reader_admission),
+            Arc::clone(&self.inner.reader_admission),
             "SQLite reader admission closed",
             move || {
-                let mut connection = connections.reader.lock().map_err(|_| {
+                let mut connection = owner.connections.reader.lock().map_err(|_| {
                     StoreError::Io("SQLite reader connection mutex was poisoned".into())
                 })?;
                 operation(&mut connection)
@@ -461,24 +474,19 @@ impl SqliteStore {
         .await
     }
 
-    fn mark_session_validated(&self, session_id: SessionId) -> Result<()> {
-        self.validated_sessions
-            .lock()
-            .map_err(|_| StoreError::Io("validated-session cache mutex was poisoned".into()))?
-            .insert(session_id);
-        Ok(())
+    fn mark_session_validated(&self, session_id: SessionId) {
+        if let Ok(mut cache) = self.inner.validated_sessions.lock() {
+            cache.insert(session_id);
+        }
     }
 
-    fn touch_validated_session(&self, session_id: &SessionId) -> Result<bool> {
-        Ok(self
-            .validated_sessions
-            .lock()
-            .map_err(|_| StoreError::Io("validated-session cache mutex was poisoned".into()))?
-            .touch(session_id))
+    fn touch_validated_session(&self, session_id: &SessionId) -> bool {
+        self.inner.touch_validated_session(session_id)
     }
 
     fn validation_gate(&self, session_id: &SessionId) -> Result<Arc<AsyncMutex<()>>> {
         let mut gates = self
+            .inner
             .validation_gates
             .lock()
             .map_err(|_| StoreError::Io("session-validation gate mutex was poisoned".into()))?;
@@ -492,17 +500,17 @@ impl SqliteStore {
     }
 
     async fn ensure_session_validated(&self, session_id: &SessionId) -> Result<()> {
-        if self.touch_validated_session(session_id)? {
+        if self.touch_validated_session(session_id) {
             return Ok(());
         }
         let gate = self.validation_gate(session_id)?;
         let _gate = gate.lock().await;
-        if self.touch_validated_session(session_id)? {
+        if self.touch_validated_session(session_id) {
             return Ok(());
         }
         let candidate = session_id.clone();
         #[cfg(test)]
-        self.validation_runs.fetch_add(1, Ordering::Relaxed);
+        self.inner.validation_runs.fetch_add(1, Ordering::Relaxed);
         self.with_reader(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -511,7 +519,8 @@ impl SqliteStore {
             transaction.commit().map_err(sql_error)
         })
         .await?;
-        self.mark_session_validated(session_id.clone())
+        self.mark_session_validated(session_id.clone());
+        Ok(())
     }
 
     async fn session_exists(&self, session_id: &SessionId) -> Result<bool> {
@@ -533,11 +542,13 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
-        let permit = Arc::clone(&self.cas_admission)
+        let permit = Arc::clone(&self.inner.cas_admission)
             .acquire_owned()
             .await
             .map_err(|_| StoreError::Io("CAS file admission closed".into()))?;
+        let owner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
+            let _owner = owner;
             let _permit = permit;
             operation()
         })
@@ -555,7 +566,7 @@ mod validation;
 use append::{
     admit_append, advance_watermark, apply_atomic_sqlite_append, decode_indexed_message,
     decode_ready_message, derived_session_root, indexed_message_row, insert_fact,
-    message_target_name, validate_sqlite_agent_guards,
+    message_target_name, validate_sqlite_activation_guards, validate_sqlite_quiescence_guard,
 };
 use cas::{
     decode_context_checkpoint, decode_json, decode_projected_json, decode_sha256, decode_u64,

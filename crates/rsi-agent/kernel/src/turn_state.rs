@@ -347,7 +347,7 @@ pub(super) fn enforce_turn_budget(
         )
     });
     if admits_work {
-        let elapsed = now_ms.saturating_sub(turn.accepted_at_ms);
+        let elapsed = turn.elapsed.consumed(turn.accepted_at_ms, now_ms);
         if elapsed >= budget.maximum_elapsed_ms() {
             return Err(TurnError::BudgetExceeded {
                 dimension: BudgetDimension::Elapsed,
@@ -489,6 +489,7 @@ pub(super) fn record_budget_usage(
 
 pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
+        elapsed: Arc::clone(&turn.elapsed),
         accepted_at_ms: turn.accepted_at_ms,
         accepted_seq: turn.accepted_seq,
         activation_id: turn.activation_id.clone(),
@@ -498,6 +499,7 @@ pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
         cancel_requested: turn.cancel_requested,
         cancellation: turn.cancellation.clone(),
         claim: turn.claim.clone(),
+        prepared_lane: turn.prepared_lane.clone(),
         effects: turn.effects.clone(),
         budget_usage: turn.budget_usage,
         budget_exhausted: turn.budget_exhausted,
@@ -624,9 +626,8 @@ pub(super) fn deregister_executor(
         for (turn_id, turn) in &mut session.turns {
             if turn.claim.as_ref().is_some_and(|owner| {
                 owner.executor == executor_id && owner.registration == registration_id
-            }) && turn.terminal.is_none()
+            }) && retire_claim(turn)
             {
-                turn.claim = None;
                 released.push((session_id.clone(), turn_id.clone()));
             }
         }
@@ -636,6 +637,19 @@ pub(super) fn deregister_executor(
     }
     drop(state);
     inner.claim_changed.notify_waiters();
+}
+
+/// Closes one current claim; returns whether nonterminal work can be requeued now.
+pub(super) fn retire_claim(turn: &mut TurnControl) -> bool {
+    let gate = &turn.claim.as_ref().expect("current claim owner").mutations;
+    gate.closed.store(true, Ordering::Release);
+    gate.retiring.store(true, Ordering::Release);
+    gate.stopping.cancel();
+    if gate.active.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    turn.claim = None;
+    turn.terminal.is_none()
 }
 
 pub(super) fn lock_state(inner: &KernelInner) -> std::sync::MutexGuard<'_, KernelState> {
@@ -648,6 +662,9 @@ pub(super) fn lock_state(inner: &KernelInner) -> std::sync::MutexGuard<'_, Kerne
 pub(super) fn turn_store_error(error: StoreError) -> TurnError {
     match error {
         StoreError::Invalid(message) => TurnError::Invalid(bounded_diagnostic(&message)),
+        error @ StoreError::SchemaMismatch { .. } => {
+            TurnError::Invariant(bounded_diagnostic(&error.to_string()))
+        }
         StoreError::NotFound(session) => TurnError::SessionNotFound(session),
         StoreError::TurnNotFound { session, turn } => TurnError::TurnNotFound { session, turn },
         other => TurnError::Store(bounded_diagnostic(&other.to_string())),
@@ -712,4 +729,14 @@ pub(super) fn turn_kernel_error(error: KernelError) -> TurnError {
 #[allow(clippy::needless_pass_by_value)] // This is a direct `map_err` adapter over an owned error.
 pub(super) fn kernel_turn_error(error: TurnError) -> KernelError {
     KernelError::Invariant(bounded_diagnostic(&error.to_string()))
+}
+
+pub(super) fn turn_workspace_error(
+    error: rsi_agent_workspace_context::WorkspaceContextError,
+) -> TurnError {
+    match error {
+        rsi_agent_workspace_context::WorkspaceContextError::Capacity => TurnError::Capacity,
+        rsi_agent_workspace_context::WorkspaceContextError::Closed => TurnError::ShuttingDown,
+        other => TurnError::Invalid(bounded_diagnostic(&other.to_string())),
+    }
 }

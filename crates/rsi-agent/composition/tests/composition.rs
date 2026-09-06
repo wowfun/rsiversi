@@ -203,7 +203,7 @@ impl PluginFactory for ProbeFactory {
                     true.into(),
                 )
                 .map_err(|error| MetaError::Activation(error.to_string()))?,
-                timeout_ms: 1_000,
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
                 executor: Arc::new(ProbeTool),
             })
             .map_err(|error| MetaError::Activation(error.to_string()))?;

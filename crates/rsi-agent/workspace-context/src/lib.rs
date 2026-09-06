@@ -22,6 +22,9 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
+mod budget;
+use budget::{SnapshotBudget, SnapshotOwner};
 
 /// Maximum bytes read from one instruction or skill source.
 pub const MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES: usize = 256 * 1024;
@@ -32,6 +35,7 @@ pub const MAXIMUM_WORKSPACE_INSTRUCTION_FILES: usize = 64;
 /// Maximum entries inspected across all skill roots.
 pub const MAXIMUM_WORKSPACE_SKILL_ENTRIES: usize = 256;
 const MAXIMUM_SKILL_METADATA_PREFIX_BYTES: usize = 16 * 1024;
+const INSTRUCTIONS_PREAMBLE: &str = "The following workspace instructions apply. More specific entries take precedence and none override system or direct user instructions.\n";
 
 /// One fully selected direct-user skill invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +68,12 @@ pub struct WorkspaceContextSnapshot {
 /// Snapshot failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum WorkspaceContextError {
+    /// Snapshot exceeds its aggregate retained-byte admission.
+    #[error("workspace context capacity exhausted")]
+    Capacity,
+    /// Source withdrawal closed snapshot admission.
+    #[error("workspace context source is closed")]
+    Closed,
     /// The caller supplied an invalid durable or configured boundary.
     #[error("invalid workspace context: {0}")]
     Invalid(String),
@@ -129,14 +139,19 @@ impl WorkspaceContextConfig {
 /// Ordinary filesystem-backed source.
 #[derive(Clone, Debug)]
 pub struct LocalWorkspaceContext {
-    config: WorkspaceContextConfig,
+    config: Arc<WorkspaceContextConfig>,
+    owner: Arc<SnapshotOwner>,
 }
 
 impl LocalWorkspaceContext {
     /// Creates a validated source.
     pub fn new(config: WorkspaceContextConfig) -> Result<Self, WorkspaceContextError> {
         config.validate()?;
-        Ok(Self { config })
+        budget::config_retained_bytes(&config)?;
+        Ok(Self {
+            config: Arc::new(config),
+            owner: Arc::new(SnapshotOwner::default()),
+        })
     }
 }
 
@@ -354,23 +369,47 @@ impl WorkspaceContext for LocalWorkspaceContext {
         header: &SessionHeader,
         messages: &[&AgentMessage],
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        let config = self.config.clone();
+        if messages.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
+            || messages.iter().any(|message| {
+                message.content.len()
+                    > rsi_agent_session_protocol::MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS
+            })
+        {
+            return Err(WorkspaceContextError::Capacity);
+        }
+        let lease = self.owner.acquire().await?;
+        let config = Arc::clone(&self.config);
+        let budget = SnapshotBudget::new(
+            &config,
+            Path::new(header.canonical_cwd()),
+            self.owner.cancellation.clone(),
+        )?;
         let cwd = PathBuf::from(header.canonical_cwd());
         let workspace_trust = header.workspace_trust();
         let invocations = invoked_names(messages);
-        tokio::task::spawn_blocking(move || {
-            snapshot_blocking(&config, &cwd, workspace_trust, &invocations)
-        })
-        .await
-        .map_err(|error| WorkspaceContextError::Failed(error.to_string()))?
+        lease
+            .run(move || snapshot_with_budget(&config, &cwd, workspace_trust, &invocations, budget))
+            .await
     }
 }
 
+#[cfg(test)]
 fn snapshot_blocking(
     config: &WorkspaceContextConfig,
     cwd: &Path,
     workspace_trust: WorkspaceTrust,
     invoked_names: &[String],
+) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
+    let budget = SnapshotBudget::new(config, cwd, CancellationToken::new())?;
+    snapshot_with_budget(config, cwd, workspace_trust, invoked_names, budget)
+}
+
+fn snapshot_with_budget(
+    config: &WorkspaceContextConfig,
+    cwd: &Path,
+    workspace_trust: WorkspaceTrust,
+    invoked_names: &[String],
+    mut budget: SnapshotBudget,
 ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
     let mut complete = true;
     let project_root = if workspace_trust == WorkspaceTrust::Trusted {
@@ -387,28 +426,25 @@ fn snapshot_blocking(
             |authority| Some(Arc::new(authority)),
         )
     });
-    let mut user_instruction_sections = Vec::new();
-    if let Some(path) = &config.user_instruction_file
-        && let Some(text) = read_bounded_utf8(path, None, &mut complete)
-    {
-        user_instruction_sections.push((display_path(path), text));
-    }
-    let mut project_instruction_sections = Vec::new();
-    if let (Some(root), Some(authority)) = (&project_root, &project_authority) {
-        for directory in directories_between(root, cwd)? {
-            let path = directory.join("AGENTS.md");
-            if let Some(text) = read_bounded_utf8(&path, Some(authority), &mut complete) {
-                project_instruction_sections.push((display_project_path(root, &path), text));
-            }
-        }
-    }
-    let instructions =
-        render_instructions(&user_instruction_sections, &project_instruction_sections);
-
+    let instructions = read_instructions(
+        config,
+        cwd,
+        project_root.as_deref(),
+        project_authority.as_deref(),
+        &budget,
+        &mut complete,
+    )?;
     let mut skills = BTreeMap::new();
     let mut inspected = 0_usize;
     for root in &config.user_skill_roots {
-        discover_skills(root, None, &mut skills, &mut inspected, &mut complete);
+        discover_skills(
+            root,
+            None,
+            &mut skills,
+            &mut inspected,
+            &mut complete,
+            &mut budget,
+        )?;
     }
     if let (Some(root), Some(authority)) = (&project_root, &project_authority) {
         discover_skills(
@@ -417,26 +453,48 @@ fn snapshot_blocking(
             &mut skills,
             &mut inspected,
             &mut complete,
-        );
+            &mut budget,
+        )?;
     }
     let selected = skills.into_values().collect::<Vec<_>>();
     let skill_catalog = render_skill_catalog(&selected);
-    let invocations = invoked_names
-        .iter()
-        .filter_map(|name| {
-            selected
-                .iter()
-                .find(|skill| skill.name == name.as_str() && skill.user_invocable)
-                .and_then(|skill| {
-                    let raw = read_bounded_utf8(
-                        &skill.path,
-                        skill.project_authority.as_deref(),
-                        &mut complete,
-                    )?;
-                    selected_skill_invocation(skill, &raw, &mut complete)
-                })
-        })
-        .collect();
+    let mut invocations = Vec::new();
+    for name in invoked_names {
+        budget.check()?;
+        let Some(skill) = selected
+            .iter()
+            .find(|skill| skill.name == *name && skill.user_invocable)
+        else {
+            continue;
+        };
+        let reservation = MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
+            .checked_add(skill.name.len())
+            .and_then(|bytes| bytes.checked_add(skill.source.len()))
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<WorkspaceSkillInvocation>()))
+            .ok_or(WorkspaceContextError::Capacity)?;
+        budget.reserve(reservation)?;
+        let invocation = read_bounded_utf8(
+            &skill.path,
+            skill.project_authority.as_deref(),
+            &mut complete,
+            &budget.cancellation,
+        )
+        .and_then(|raw| selected_skill_invocation(skill, &raw, &mut complete));
+        let retained = invocation.as_ref().map_or(0, |invocation| {
+            invocation.text.capacity()
+                + invocation.name.capacity()
+                + invocation.source.capacity()
+                + std::mem::size_of::<WorkspaceSkillInvocation>()
+        });
+        if retained > reservation {
+            return Err(WorkspaceContextError::Capacity);
+        }
+        budget.release(reservation - retained);
+        if let Some(invocation) = invocation {
+            invocations.push(invocation);
+        }
+    }
+    budget.check()?;
     Ok(WorkspaceContextSnapshot {
         complete,
         instructions_sha256: digest(instructions.as_deref().unwrap_or("")),
@@ -481,7 +539,11 @@ fn read_bounded_utf8(
     path: &Path,
     project_authority: Option<&ProjectAuthority>,
     complete: &mut bool,
+    cancellation: &CancellationToken,
 ) -> Option<String> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
     let mut file = match open_contained_regular_file(path, project_authority) {
         Ok(Some(file)) => file,
         Ok(None) => return None,
@@ -490,16 +552,12 @@ fn read_bounded_utf8(
             return None;
         }
     };
-    let mut bytes = Vec::new();
-    if file
-        .by_ref()
-        .take(u64::try_from(MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES).ok()? + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        *complete = false;
-        return None;
-    }
+    let bytes = read_source_chunks(
+        &mut file,
+        MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES + 1,
+        cancellation,
+        complete,
+    )?;
     if bytes.len() > MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES {
         return None;
     }
@@ -511,7 +569,11 @@ fn read_skill_metadata_prefix(
     path: &Path,
     project_authority: Option<&ProjectAuthority>,
     complete: &mut bool,
+    cancellation: &CancellationToken,
 ) -> Option<String> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
     let mut file = match open_contained_regular_file(path, project_authority) {
         Ok(Some(file)) => file,
         Ok(None) => return None,
@@ -530,16 +592,12 @@ fn read_skill_metadata_prefix(
             return None;
         }
     }
-    let mut bytes = Vec::new();
-    if file
-        .by_ref()
-        .take(u64::try_from(MAXIMUM_SKILL_METADATA_PREFIX_BYTES).ok()?)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        *complete = false;
-        return None;
-    }
+    let mut bytes = read_source_chunks(
+        &mut file,
+        MAXIMUM_SKILL_METADATA_PREFIX_BYTES,
+        cancellation,
+        complete,
+    )?;
     let valid_len = match std::str::from_utf8(&bytes) {
         Ok(_) => bytes.len(),
         Err(error) if error.error_len().is_none() => error.valid_up_to(),
@@ -548,6 +606,33 @@ fn read_skill_metadata_prefix(
     bytes.truncate(valid_len);
     let text = String::from_utf8(bytes).ok()?;
     session_safe_text(&text).then_some(text)
+}
+
+fn read_source_chunks(
+    file: &mut File,
+    maximum: usize,
+    cancellation: &CancellationToken,
+    complete: &mut bool,
+) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    while bytes.len() < maximum {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let remaining = chunk.len().min(maximum - bytes.len());
+        match file.read(&mut chunk[..remaining]) {
+            Ok(0) => break,
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+            Err(_) => {
+                *complete = false;
+                return None;
+            }
+        }
+    }
+    // The collector accounts for retained source length within its scratch
+    // envelope, so read capacity must not escape with each selected file.
+    Some(bytes.into_boxed_slice().into_vec())
 }
 
 fn open_contained_regular_file(
@@ -607,9 +692,7 @@ fn render_instructions(
     if user_sections.is_empty() && project_sections.is_empty() {
         return None;
     }
-    let mut rendered = String::from(
-        "The following workspace instructions apply. More specific entries take precedence and none override system or direct user instructions.\n",
-    );
+    let mut rendered = String::from(INSTRUCTIONS_PREAMBLE);
     for (source, text) in user_sections {
         let section = format!("\nInstructions from: {source}\n\n{text}\n");
         if rendered.len().saturating_add(section.len()) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
@@ -640,74 +723,101 @@ fn discover_skills(
     selected: &mut BTreeMap<String, SelectedSkill>,
     inspected: &mut usize,
     complete: &mut bool,
-) {
-    let remaining = MAXIMUM_WORKSPACE_SKILL_ENTRIES.saturating_sub(*inspected);
-    let (mut entries, overflow) = if let Some(authority) = project_authority {
-        match authority.skill_entries(root, remaining) {
-            Ok(Some(entries)) => entries,
-            Ok(None) => return,
-            Err(_) => {
-                *complete = false;
-                return;
+    budget: &mut SnapshotBudget,
+) -> Result<(), WorkspaceContextError> {
+    budget.check()?;
+    let path_bytes = root
+        .as_os_str()
+        .len()
+        .checked_add(512)
+        .and_then(|bytes| bytes.checked_mul((MAXIMUM_WORKSPACE_SKILL_ENTRIES + 1) * 4))
+        .ok_or(WorkspaceContextError::Capacity)?;
+    budget.reserve(path_bytes)?;
+    let result = (|| {
+        let remaining = MAXIMUM_WORKSPACE_SKILL_ENTRIES.saturating_sub(*inspected);
+        let (mut entries, overflow) = if let Some(authority) = project_authority {
+            match authority.skill_entries(root, remaining) {
+                Ok(Some(entries)) => entries,
+                Ok(None) => return Ok(()),
+                Err(_) => {
+                    *complete = false;
+                    return Ok(());
+                }
             }
-        }
-    } else {
-        let entries = match fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Err(_) => {
-                *complete = false;
-                return;
-            }
-        };
-        let mut retained = Vec::new();
-        for entry in entries.take(remaining.saturating_add(1)) {
-            let Ok(entry) = entry else {
-                *complete = false;
-                continue;
-            };
-            let Ok(file_type) = entry.file_type() else {
-                *complete = false;
-                continue;
-            };
-            let kind = if file_type.is_dir() {
-                SkillEntryKind::Directory
-            } else if file_type.is_file() {
-                SkillEntryKind::File
-            } else {
-                SkillEntryKind::Other
-            };
-            retained.push((entry.path(), kind));
-        }
-        let overflow = retained.len() > remaining;
-        retained.truncate(remaining);
-        (retained, overflow)
-    };
-    if overflow {
-        *complete = false;
-    }
-    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    for (path, kind) in entries {
-        *inspected += 1;
-        let skill_path = if matches!(kind, SkillEntryKind::Directory) {
-            path.join("SKILL.md")
-        } else if matches!(kind, SkillEntryKind::File)
-            && path.extension().is_some_and(|extension| extension == "md")
-        {
-            path
         } else {
-            continue;
+            let entries = match fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(_) => {
+                    *complete = false;
+                    return Ok(());
+                }
+            };
+            let mut retained = Vec::new();
+            for entry in entries.take(remaining.saturating_add(1)) {
+                let Ok(entry) = entry else {
+                    *complete = false;
+                    continue;
+                };
+                let Ok(file_type) = entry.file_type() else {
+                    *complete = false;
+                    continue;
+                };
+                let kind = if file_type.is_dir() {
+                    SkillEntryKind::Directory
+                } else if file_type.is_file() {
+                    SkillEntryKind::File
+                } else {
+                    SkillEntryKind::Other
+                };
+                retained.push((entry.path(), kind));
+            }
+            let overflow = retained.len() > remaining;
+            retained.truncate(remaining);
+            (retained, overflow)
         };
-        let Some(raw) =
-            read_skill_metadata_prefix(&skill_path, project_authority.map(AsRef::as_ref), complete)
-        else {
-            continue;
-        };
-        let Some(skill) = parse_skill(&skill_path, project_authority, &raw) else {
-            continue;
-        };
-        selected.entry(skill.name.clone()).or_insert(skill);
-    }
+        if overflow {
+            *complete = false;
+        }
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        for (path, kind) in entries {
+            budget.check()?;
+            *inspected += 1;
+            let skill_path = if matches!(kind, SkillEntryKind::Directory) {
+                path.join("SKILL.md")
+            } else if matches!(kind, SkillEntryKind::File)
+                && path.extension().is_some_and(|extension| extension == "md")
+            {
+                path
+            } else {
+                continue;
+            };
+            let Some(raw) = read_skill_metadata_prefix(
+                &skill_path,
+                project_authority.map(AsRef::as_ref),
+                complete,
+                &budget.cancellation,
+            ) else {
+                continue;
+            };
+            let Some(skill) = parse_skill(&skill_path, project_authority, &raw) else {
+                continue;
+            };
+            if !selected.contains_key(&skill.name) {
+                budget.reserve(
+                    skill.name.capacity() * 2
+                        + skill.description.capacity()
+                        + skill.source.capacity()
+                        + skill.path.capacity()
+                        + std::mem::size_of::<SelectedSkill>() * 2,
+                )?;
+                selected.insert(skill.name.clone(), skill);
+            }
+        }
+        Ok(())
+    })();
+    budget.release(path_bytes);
+    result
 }
 
 fn parse_skill(
@@ -810,16 +920,18 @@ fn render_skill_catalog(skills: &[SelectedSkill]) -> Option<String> {
 }
 
 fn render_skill_body(skill: &SelectedSkill, body: &str) -> String {
-    let mut text = format!(
+    let prefix = format!(
         "<skill_content name=\"{}\">\nSource: {}\n\n<skill_instructions>\n",
         skill.name, skill.source
     );
-    let remaining = MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES.saturating_sub(
-        text.len()
-            .saturating_add("\n</skill_instructions>\n</skill_content>".len()),
-    );
-    text.push_str(utf8_prefix(body, remaining));
-    text.push_str("\n</skill_instructions>\n</skill_content>");
+    let suffix = "\n</skill_instructions>\n</skill_content>";
+    let remaining = MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES
+        .saturating_sub(prefix.len().saturating_add(suffix.len()));
+    let body = utf8_prefix(body, remaining);
+    let mut text = String::with_capacity(prefix.len() + body.len() + suffix.len());
+    text.push_str(&prefix);
+    text.push_str(body);
+    text.push_str(suffix);
     text
 }
 
@@ -879,20 +991,8 @@ pub struct WorkspaceContextFactory;
 fn workspace_context_config_retained_bytes(
     config: &WorkspaceContextConfig,
 ) -> rsi_meta::Result<usize> {
-    config
-        .user_instruction_file
-        .iter()
-        .chain(&config.user_skill_roots)
-        .try_fold(
-            std::mem::size_of::<WorkspaceContextConfig>(),
-            |total, path| {
-                total.checked_add(path.as_os_str().len()).ok_or_else(|| {
-                    MetaError::InvalidInput(
-                        "workspace-context retained byte count overflowed".into(),
-                    )
-                })
-            },
-        )
+    budget::config_retained_bytes(config)
+        .map_err(|error| MetaError::InvalidInput(error.to_string()))
 }
 
 #[async_trait]
@@ -913,18 +1013,19 @@ impl PluginFactory for WorkspaceContextFactory {
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<WorkspaceContextConfig>()?;
-        let service: Arc<dyn WorkspaceContext> = Arc::new(
+        let service = Arc::new(
             LocalWorkspaceContext::new(config)
                 .map_err(|error| MetaError::Activation(error.to_string()))?,
         );
         let supply = plan
             .context()
-            .provide_local::<WorkspaceContextContract>(service)?;
+            .provide_local::<WorkspaceContextContract>(service.clone())?;
         plan.defer(
             "withdraw Agent workspace context",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    service.owner.close().await;
                     Ok(())
                 })
             }),
@@ -936,13 +1037,34 @@ impl PluginFactory for WorkspaceContextFactory {
 mod tests {
     use super::*;
 
+    #[test]
+    fn retained_tiny_instruction_buffers_fit_the_snapshot_scratch_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancellation = CancellationToken::new();
+        let mut complete = true;
+        let mut texts = Vec::new();
+        for index in 0..MAXIMUM_WORKSPACE_INSTRUCTION_FILES {
+            let path = directory.path().join(format!("AGENTS-{index}.md"));
+            fs::write(&path, "tiny instruction\n").unwrap();
+            texts.push(read_bounded_utf8(&path, None, &mut complete, &cancellation).unwrap());
+        }
+        assert!(complete);
+        assert!(texts.iter().all(|text| text == "tiny instruction\n"));
+        let retained: usize = texts.iter().map(String::capacity).sum();
+        assert!(
+            retained <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES,
+            "tiny instruction capacities exceed the entire instruction render allowance: {retained}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn project_authority_never_reopens_a_replaced_ambient_root() {
         use std::os::unix::fs::symlink;
 
         let temporary = tempfile::tempdir().unwrap();
-        let project = temporary.path().join("project");
+        let canonical_root = temporary.path().canonicalize().unwrap();
+        let project = canonical_root.join("project");
         let held_project = temporary.path().join("held-project");
         let outside = temporary.path().join("outside");
         fs::create_dir_all(&project).unwrap();
@@ -956,8 +1078,13 @@ mod tests {
 
         let mut complete = true;
         assert_eq!(
-            read_bounded_utf8(&project.join("AGENTS.md"), Some(&authority), &mut complete,)
-                .as_deref(),
+            read_bounded_utf8(
+                &project.join("AGENTS.md"),
+                Some(&authority),
+                &mut complete,
+                &CancellationToken::new()
+            )
+            .as_deref(),
             Some("PINNED INSTRUCTION")
         );
         assert!(complete);
@@ -1071,7 +1198,147 @@ mod tests {
             .sum::<usize>();
         assert_eq!(
             workspace_context_config_retained_bytes(&config).unwrap(),
-            std::mem::size_of::<WorkspaceContextConfig>() + path_bytes
+            std::mem::size_of::<WorkspaceContextConfig>()
+                + path_bytes
+                + 3 * std::mem::size_of::<PathBuf>()
         );
     }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use rsi_agent_session_protocol::{MessageId, MessageOptions};
+
+    #[test]
+    fn all_message_tokens_are_matched_before_selecting_invoked_skills() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("real.md"),
+            "---\nname: real\ndescription: Selected skill\n---\nACTUAL INSTRUCTIONS",
+        )
+        .unwrap();
+        let messages = (0..64)
+            .map(|message| AgentMessage {
+                message_id: MessageId::new(format!("message-{message}")).unwrap(),
+                source: AgentMessageSource::Human,
+                content: (0..64)
+                    .map(|block| AgentMessageContent::Text {
+                        text: if message == 63 && block == 63 {
+                            "/real".into()
+                        } else {
+                            format!("/missing-{message}-{block}")
+                        },
+                    })
+                    .collect(),
+                options: MessageOptions::default(),
+            })
+            .collect::<Vec<_>>();
+        let names = invoked_names(&messages.iter().collect::<Vec<_>>());
+        assert_eq!(names.len(), 4096);
+        let snapshot = snapshot_blocking(
+            &WorkspaceContextConfig {
+                user_instruction_file: None,
+                user_skill_roots: vec![root.path().to_owned()],
+            },
+            root.path(),
+            WorkspaceTrust::Untrusted,
+            &names,
+        )
+        .unwrap();
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.invocations.len(), 1);
+        assert_eq!(snapshot.invocations[0].name, "real");
+    }
+
+    #[test]
+    fn aggregate_invocation_overflow_is_capacity_instead_of_partial_success() {
+        let root = tempfile::tempdir().unwrap();
+        let names = (0..64)
+            .map(|index| format!("skill-{index:03}"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            let source = format!(
+                "---\nname: {name}\ndescription: large skill\n---\n{}",
+                "x".repeat(MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES - 128)
+            );
+            fs::write(root.path().join(format!("{name}.md")), source).unwrap();
+        }
+        let config = WorkspaceContextConfig {
+            user_instruction_file: None,
+            user_skill_roots: vec![root.path().to_owned()],
+        };
+        assert_eq!(
+            snapshot_blocking(&config, root.path(), WorkspaceTrust::Untrusted, &names),
+            Err(WorkspaceContextError::Capacity)
+        );
+        assert_eq!(
+            snapshot_blocking(&config, root.path(), WorkspaceTrust::Untrusted, &names[..1])
+                .unwrap()
+                .invocations
+                .len(),
+            1
+        );
+        for name in &names {
+            fs::write(
+                root.path().join(format!("{name}.md")),
+                format!("---\nname: {name}\ndescription: small skill\n---\nSMALL BODY"),
+            )
+            .unwrap();
+        }
+        let snapshot =
+            snapshot_blocking(&config, root.path(), WorkspaceTrust::Untrusted, &names).unwrap();
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.invocations.len(), names.len());
+        assert!(
+            snapshot
+                .invocations
+                .iter()
+                .all(|item| item.text.contains("SMALL BODY"))
+        );
+    }
+}
+
+fn read_instructions(
+    config: &WorkspaceContextConfig,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    project_authority: Option<&ProjectAuthority>,
+    budget: &SnapshotBudget,
+    complete: &mut bool,
+) -> Result<Option<String>, WorkspaceContextError> {
+    let mut user_instruction_sections = Vec::new();
+    if let Some(path) = &config.user_instruction_file {
+        budget.check()?;
+        if let Some(text) = read_bounded_utf8(path, None, complete, &budget.cancellation) {
+            user_instruction_sections.push((display_path(path), text));
+        }
+    }
+    let mut project_instruction_sections = Vec::new();
+    let mut retained = render_instructions(&user_instruction_sections, &[])
+        .map_or(INSTRUCTIONS_PREAMBLE.len(), |text| text.len());
+    if let (Some(root), Some(authority)) = (project_root, project_authority) {
+        for directory in directories_between(root, cwd)?.into_iter().rev() {
+            budget.check()?;
+            let path = directory.join("AGENTS.md");
+            if let Some(text) =
+                read_bounded_utf8(&path, Some(authority), complete, &budget.cancellation)
+            {
+                let source = display_project_path(root, &path);
+                let bytes = source
+                    .len()
+                    .saturating_add(text.len())
+                    .saturating_add("\nInstructions from: \n\n\n".len());
+                if retained.saturating_add(bytes) <= MAXIMUM_WORKSPACE_CONTEXT_RENDERED_BYTES {
+                    retained += bytes;
+                    project_instruction_sections.push((source, text));
+                }
+            }
+        }
+    }
+    project_instruction_sections.reverse();
+    let instructions =
+        render_instructions(&user_instruction_sections, &project_instruction_sections);
+
+    Ok(instructions)
 }

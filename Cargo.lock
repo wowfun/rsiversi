@@ -1970,6 +1970,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
+ "rsi-agent-store-sqlite",
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
  "rsi-agent-workspace-context",
@@ -1980,6 +1981,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -2070,10 +2072,12 @@ name = "rsi-agent-tools"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
+ "rsi-user-questions-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -2091,6 +2095,7 @@ dependencies = [
  "rsi-jobs",
  "rsi-meta-contract",
  "rsi-sandbox",
+ "rsi-tools-protocol",
  "thiserror",
  "tokio-util",
 ]
@@ -2115,6 +2120,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "yaml_serde",
 ]
 

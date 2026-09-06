@@ -26,7 +26,7 @@ SQLite Store --Local--> Kernel --Local Turn service--> callers
 ```
 
 The Store root has one cross-process exclusive writer lease held from open
-through shutdown. SQLite uses one exact schema version and never silently
+through the final admitted operation and connection close. SQLite uses one exact schema version and never silently
 migrates or accepts an older layout. Store commits are atomic append operations
 against an expected durable sequence. The Store does not allocate identities,
 interpret effect transitions, choose recovery outcomes, or schedule turns. It
@@ -35,7 +35,8 @@ terminal Fact, so cold outcome reads and recovery do not scan unrelated
 history. Its CAS accepts immutable bounded bytes by digest and never treats a
 caller-provided path as owned data.
 Store open validates ownership and the exact schema without scanning dormant
-history. First access lazily validates one session's mechanical watermark,
+history. Metadata reads validate bounded Headers only. Explicit validation and
+execution/history access check one session's mechanical watermark,
 stored digest shape, and Fact/turn indexes; only the explicit offline verifier
 decodes every Fact and recomputes every canonical prefix digest.
 
@@ -145,6 +146,16 @@ the application reads its validated Header and exposes history, cancellation,
 observation, and approvals without consulting current presets, provider routes,
 filesystem state, or the Workspace registry. A later submit prepares only the
 dependencies of that operation.
+
+The Kernel owns one elapsed-budget clock per live Turn. Publication admission
+and the executor deadline watch read that same clock. A human interaction pauses
+only elapsed execution time and releases the exact tree/executor permits;
+provider attempts, Tool calls, and generated-Fact budgets remain charged.
+The clock resumes after execution admission has been reacquired. Deadline and
+park contend on the same state, so parking cannot revive an exhausted budget.
+Human waits last until answer or cancellation; ordinary bounded Agent waits
+retain their execution-time semantics. Restart interrupts a waiting Turn and
+never recreates a suspended human request from its historical Tool intent.
 
 One executor generation may run a bounded number of claim lanes. The Kernel's
 durable ready indexes and per-Session claim gate remain authoritative: separate
@@ -263,7 +274,14 @@ current Turn without cascading.
 Agent message horizons are selected by the operation, not by a racy read of the
 target. `send_message` always targets the next Step and remains held while idle;
 `followup_task` always queues a waking next Turn, including behind a running
-Turn. Completion messages are the only Kernel-selected case: they enter the
+Turn. Human steering is an immutable ingress intent distinct from the resolved
+delivery horizon. Under Session submission admission, a steer binds to the
+current non-cancelling activation Turn when available, otherwise it becomes
+waking next-Turn input. Same-identity retries compare the immutable intent and
+payload before consulting current activity. Unclaimed bound steering is promoted
+atomically with every terminal/recovery transition, using its original
+acceptance order; explicit message cancellation never resurrects input. Fixed
+next-Step Agent messages remain fixed. Completion messages enter the
 parent's next Step while its activation is running or parked and otherwise
 wake a new Turn. Direct Turns have no Step mailbox and leave fixed-horizon
 next-Step input held for the next activation.

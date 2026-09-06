@@ -18,7 +18,7 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 6;
+pub const SESSION_FORMAT_VERSION: u32 = 7;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -341,6 +341,57 @@ pub enum MessageTarget {
     NextStep,
 }
 
+/// Immutable caller intent, retained independently of later message promotion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDelivery {
+    /// Queue a waking next Turn.
+    NextTurn,
+    /// Hold for a next Step, even while idle.
+    NextStep,
+    /// Human input enters the current Turn when possible, otherwise the next.
+    Steer,
+}
+
+impl From<MessageTarget> for MessageDelivery {
+    fn from(target: MessageTarget) -> Self {
+        match target {
+            MessageTarget::NextTurn => Self::NextTurn,
+            MessageTarget::NextStep => Self::NextStep,
+        }
+    }
+}
+
+impl MessageDelivery {
+    /// Validates immutable intent against its initial resolved route.
+    pub fn validate_route(
+        self,
+        message: &AgentMessage,
+        target: MessageTarget,
+        bound_turn_id: Option<&TurnId>,
+    ) -> Result<()> {
+        match self {
+            Self::NextTurn if target == MessageTarget::NextTurn && bound_turn_id.is_none() => {}
+            Self::NextStep if target == MessageTarget::NextStep && bound_turn_id.is_none() => {}
+            Self::Steer
+                if matches!(message.source, AgentMessageSource::Human)
+                    && message.options == MessageOptions::default()
+                    && (target == MessageTarget::NextStep) == bound_turn_id.is_some() => {}
+            _ => {
+                return Err(SessionError::Invalid(
+                    "message delivery intent disagrees with its accepted route".into(),
+                ));
+            }
+        }
+        if target == MessageTarget::NextStep && message.options != MessageOptions::default() {
+            return Err(SessionError::Invalid(
+                "NextStep messages cannot carry new-Turn options".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Optional execution controls which can only enter a newly claimed Turn.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -517,6 +568,8 @@ pub enum ActivationOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitResumeCause {
+    /// The synchronous human interaction settled and execution admission returned.
+    HumanAnswer,
     /// A mailbox message became visible.
     Message,
     /// A child completion became visible.
@@ -527,6 +580,16 @@ pub enum WaitResumeCause {
     Cancel,
 }
 
+/// Scheduling reason for a durable activation park.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitKind {
+    /// Bounded Agent progress wait; execution elapsed time continues.
+    Agent,
+    /// Human question or approval; elapsed execution time is paused.
+    HumanInteraction,
+}
+
 /// Append-only non-Fact Agent control transition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -535,6 +598,8 @@ pub enum AgentControlRecordBody {
     /// A bounded message entered the durable mailbox.
     MessageAccepted {
         message: AgentMessage,
+        delivery: MessageDelivery,
+        bound_turn_id: Option<TurnId>,
         /// Durable Agent-tree root used by fair ready selection.
         root_session_id: SessionId,
         target: MessageTarget,
@@ -548,7 +613,7 @@ pub enum AgentControlRecordBody {
         step_id: StepId,
         entered_fact_seq: u64,
     },
-    /// A pending next-Step completion became waking next-Turn input at activation end.
+    /// A pending next-Step completion or bound human steer became waking next-Turn input.
     MessagePromoted { message_id: MessageId },
     /// An accepted message was durably discarded before claim.
     MessageDiscarded {
@@ -574,7 +639,8 @@ pub enum AgentControlRecordBody {
         activation_id: ActivationId,
         turn_id: TurnId,
         step_id: StepId,
-        deadline_ms: u64,
+        kind: WaitKind,
+        deadline_ms: Option<u64>,
     },
     /// Exactly one contender resumed a parked wait.
     WaitResumed {
@@ -597,21 +663,17 @@ impl AgentControlRecordBody {
         match self {
             Self::MessageAccepted {
                 message,
+                delivery,
+                bound_turn_id,
                 root_session_id: _,
                 target,
                 wake_required,
             } => {
                 message.validate()?;
+                delivery.validate_route(message, *target, bound_turn_id.as_ref())?;
                 if *wake_required != (*target == MessageTarget::NextTurn) {
                     return Err(SessionError::Invalid(
                         "message wake requirement disagrees with its delivery target".into(),
-                    ));
-                }
-                if *target == MessageTarget::NextStep
-                    && message.options != MessageOptions::default()
-                {
-                    return Err(SessionError::Invalid(
-                        "NextStep messages cannot carry new-Turn options".into(),
                     ));
                 }
                 Ok(())
@@ -644,9 +706,15 @@ impl AgentControlRecordBody {
                 validate_identifier("activation failure code", code)?;
                 validate_safe_diagnostic("activation failure message", message)
             }
-            Self::WaitParked { deadline_ms: 0, .. } => Err(SessionError::Invalid(
-                "parked wait deadline must be nonzero".into(),
-            )),
+            Self::WaitParked {
+                kind, deadline_ms, ..
+            } => match (kind, deadline_ms) {
+                (WaitKind::Agent, Some(deadline)) if *deadline > 0 => Ok(()),
+                (WaitKind::HumanInteraction, None) => Ok(()),
+                _ => Err(SessionError::Invalid(
+                    "parked wait deadline disagrees with its kind".into(),
+                )),
+            },
             Self::CompletionReserved { maximum_bytes, .. }
                 if *maximum_bytes == 0
                     || *maximum_bytes
@@ -661,7 +729,6 @@ impl AgentControlRecordBody {
             | Self::MessageDiscarded { .. }
             | Self::ActivationWaitingForDescendants { .. }
             | Self::ActivationSettled { .. }
-            | Self::WaitParked { .. }
             | Self::WaitResumed { .. }
             | Self::CompletionReserved { .. } => Ok(()),
         }
@@ -1849,13 +1916,8 @@ fn validate_tool_intent(
     arguments: &serde_json::Value,
     approval: Option<&ApprovalOutcome>,
 ) -> Result<()> {
-    ToolCall {
-        id: identity.call_id().into(),
-        name: name.into(),
-        arguments: arguments.clone(),
-    }
-    .validate()
-    .map_err(|error| SessionError::Invalid(error.to_string()))?;
+    ToolCall::validate_fields(identity.call_id(), name, arguments)
+        .map_err(|error| SessionError::Invalid(error.to_string()))?;
     if let Some(approval) = approval {
         approval
             .validate()

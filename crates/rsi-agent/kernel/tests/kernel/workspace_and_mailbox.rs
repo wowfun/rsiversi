@@ -23,15 +23,14 @@ async fn fresh_empty_workspace_snapshot_publishes_no_replacement_or_tombstone() 
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-empty-workspace").unwrap();
     let message_id = MessageId::new("message-empty-workspace").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message(message_id.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -103,15 +102,14 @@ async fn workspace_refresh_durably_tombstones_removed_instructions_and_suppresse
     )
     .await
     .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-workspace-refresh").unwrap();
     let message_id = MessageId::new("message-workspace-refresh").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message(message_id.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -195,14 +193,13 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
     )
     .await
     .unwrap();
-    let first_worker = first.start_write_behind();
+    let first_worker = first.start_workers();
     let session_id = SessionId::new("session-workspace-cold-digests").unwrap();
     first
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-workspace-cold-first"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -234,13 +231,12 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
     )
     .await
     .unwrap();
-    let second_worker = second.start_write_behind();
+    let second_worker = second.start_workers();
     second
         .submit_message(SubmitMessage {
             session: resume(&second, session_id.clone()).await,
             message: mailbox_message("message-workspace-cold-second"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -280,14 +276,13 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
 async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
     let store = Arc::new(MemoryStore::new());
     let first = kernel(store.clone()).await;
-    let first_worker = first.start_write_behind();
+    let first_worker = first.start_workers();
     let session_id = SessionId::new("session-mailbox-zero-fact").unwrap();
     let receipt = first
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-zero-fact"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -310,8 +305,7 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
         .submit_message(SubmitMessage {
             session: resume(&first, session_id.clone()).await,
             message: mailbox_message("message-zero-fact"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -325,8 +319,7 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
             .submit_message(SubmitMessage {
                 session: resume(&first, session_id.clone()).await,
                 message: changed,
-                target: MessageTarget::NextTurn,
-                wake_required: true,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             })
             .await,
         Err(TurnError::MessageConflict { session, message })
@@ -335,7 +328,7 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
 
     first.shutdown(first_worker).await.unwrap();
     let restarted = kernel(store).await;
-    let restarted_worker = restarted.start_write_behind();
+    let restarted_worker = restarted.start_workers();
     assert_eq!(
         restarted
             .message_status(&session_id, &MessageId::new("message-zero-fact").unwrap())
@@ -357,22 +350,21 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
 async fn message_claim_atomically_enters_activation_turn_step_and_input() {
     let store = Arc::new(MemoryStore::new());
     let initial = kernel(store.clone()).await;
-    let initial_worker = initial.start_write_behind();
+    let initial_worker = initial.start_workers();
     let session_id = SessionId::new("session-message-claim").unwrap();
     let message_id = MessageId::new("message-claim").unwrap();
     initial
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message(message_id.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
     initial.shutdown(initial_worker).await.unwrap();
 
     let restarted = kernel(store.clone()).await;
-    let restarted_worker = restarted.start_write_behind();
+    let restarted_worker = restarted.start_workers();
     let turn_id = TurnId::new("turn-message-claim").unwrap();
     let activation_id = ActivationId::new("activation-message-claim").unwrap();
     let step_id = StepId::new("step-message-claim").unwrap();
@@ -447,14 +439,13 @@ async fn message_claim_atomically_enters_activation_turn_step_and_input() {
 async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() {
     let store = Arc::new(MemoryStore::new());
     let initial = kernel(store.clone()).await;
-    let initial_worker = initial.start_write_behind();
+    let initial_worker = initial.start_workers();
     let root_id = SessionId::new("session-cold-tree-root").unwrap();
     initial
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-cold-tree-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -467,6 +458,7 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
     let child_id = SessionId::new("session-cold-tree-child").unwrap();
     initial
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: initial.agent_caller(&root_claim).unwrap(),
             child_session_id: child_id.clone(),
             task_name: "cold-child".into(),
@@ -502,7 +494,7 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
     initial.shutdown(initial_worker).await.unwrap();
 
     let restarted = kernel(store).await;
-    let restarted_worker = restarted.start_write_behind();
+    let restarted_worker = restarted.start_workers();
     assert_eq!(
         restarted.tree_sessions(&root_id).await.unwrap(),
         [root_id, child_id]
@@ -515,14 +507,13 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
 async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-interrupt-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-interrupt-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -537,6 +528,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let child_id = SessionId::new("session-interrupt-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: root_caller.clone(),
             child_session_id: child_id.clone(),
             task_name: "interrupt-child".into(),
@@ -557,6 +549,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let grandchild_id = SessionId::new("session-interrupt-grandchild").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: child_caller.clone(),
             child_session_id: grandchild_id.clone(),
             task_name: "interrupt-grandchild".into(),
@@ -579,6 +572,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     let leaf_id = SessionId::new("session-interrupt-leaf").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: grandchild_caller.clone(),
             child_session_id: leaf_id.clone(),
             task_name: "interrupt-leaf".into(),
@@ -590,7 +584,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         .unwrap();
 
     assert!(matches!(
-        kernel.interrupt_agent(&child_caller, &root_id).await,
+        kernel.interrupt_agent(&child_caller, &root_id, CancellationToken::new()).await,
         Err(TurnError::Invalid(message)) if message.contains("live ancestor caller")
     ));
     kernel
@@ -608,6 +602,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
     assert!(matches!(
         kernel
             .spawn_agent(SpawnAgentRequest {
+                cancellation: CancellationToken::new(),
                 caller: leaf_caller,
                 child_session_id: SessionId::new("session-too-deep").unwrap(),
                 task_name: "too-deep".into(),
@@ -634,7 +629,7 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         .unwrap();
     assert_eq!(
         kernel
-            .interrupt_agent(&root_caller, &leaf_id)
+            .interrupt_agent(&root_caller, &leaf_id, CancellationToken::new())
             .await
             .unwrap(),
         rsi_agent_turn_protocol::CancelResult {
@@ -650,14 +645,13 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
 async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-tree-capacity-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-tree-capacity-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -715,6 +709,8 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                                 options: MessageOptions::default(),
                             },
                             root_session_id: root_id.clone(),
+                            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                            bound_turn_id: None,
                             target: MessageTarget::NextTurn,
                             wake_required: true,
                         },
@@ -729,7 +725,7 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
             .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
                 sessions: vec![session],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await
             .unwrap();
@@ -738,6 +734,7 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
     assert!(matches!(
         kernel
             .spawn_agent(SpawnAgentRequest {
+                cancellation: CancellationToken::new(),
                 caller,
                 child_session_id: SessionId::new("session-tree-capacity-overflow").unwrap(),
                 task_name: "capacity-overflow".into(),

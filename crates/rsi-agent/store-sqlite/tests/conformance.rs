@@ -231,6 +231,8 @@ fn accepted_message_control(
                 options: MessageOptions::default(),
             },
             root_session_id: session_id.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            bound_turn_id: None,
             target: MessageTarget::NextTurn,
             wake_required: true,
         },
@@ -301,7 +303,7 @@ async fn zero_fact_agent_session_is_durable_and_multi_session_conflict_rolls_bac
                 controls: vec![accepted_message_control(1, &child_id, &child_message)],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .unwrap();
@@ -351,7 +353,7 @@ async fn zero_fact_agent_session_is_durable_and_multi_session_conflict_rolls_bac
                     },
                 ],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Conflict {
@@ -429,7 +431,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                     controls: Vec::new(),
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await
             .unwrap();
@@ -450,7 +452,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                     controls: Vec::new(),
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await,
         Err(StoreError::Invalid(message)) if message.contains("durable node bound")
@@ -494,6 +496,8 @@ async fn ready_index_schema_rejects_nonwaking_next_step_rows() {
                 options: MessageOptions::default(),
             },
             root_session_id: session.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+            bound_turn_id: None,
             target: MessageTarget::NextStep,
             wake_required: false,
         },
@@ -510,7 +514,7 @@ async fn ready_index_schema_rejects_nonwaking_next_step_rows() {
                 controls: vec![control],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .unwrap();
@@ -970,9 +974,15 @@ fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
         ),
         Err(StoreError::Corrupt(message)) if message.contains("turn index")
     ));
+    let corrupt = SessionId::new("session-index-corrupt").unwrap();
+    runtime.block_on(reopened.header(&corrupt)).unwrap();
+    assert!(
+        matches!(runtime.block_on(reopened.validate_session(&corrupt)),
+        Err(StoreError::Corrupt(message)) if message.contains("turn index"))
+    );
     assert!(matches!(
-        runtime.block_on(reopened.header(&SessionId::new("session-index-corrupt").unwrap())),
-        Err(StoreError::Corrupt(message)) if message.contains("turn index")
+        runtime.block_on(reopened.read_facts(&corrupt, 0, 1)),
+        Err(StoreError::Corrupt(_))
     ));
     drop(reopened);
     assert!(matches!(
@@ -999,7 +1009,7 @@ fn mailbox_read_rejects_an_oversized_indexed_message_before_loading_its_json() {
                 controls: vec![accepted_message_control(1, &session, &message)],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         }))
         .unwrap();
 
@@ -1071,7 +1081,7 @@ fn mailbox_summary_bounds_completion_identity_rows_before_decoding() {
                 controls: vec![accepted_message_control(1, &session, &message)],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         }))
         .unwrap();
 
@@ -1097,13 +1107,15 @@ fn mailbox_summary_bounds_completion_identity_rows_before_decoding() {
              )
              INSERT INTO agent_messages
                  (session_id, message_id, accepted_control_seq, root_session_id,
-                  message_source, message_json, target, wake_required, state, state_json)
+                  message_source, message_json, target, wake_required, state, state_json,
+                  delivery, bound_turn_id, accepted_timestamp_ms)
              SELECT '{session}',
                     CASE WHEN value = {corrupt_count}
                          THEN printf('%.*c', 257, 'x')
                          ELSE printf('completion-%03d', value) END,
                     value, '{session}', 'completion', source.message_json,
-                    'next_step', 0, 'pending', source.state_json
+                    'next_step', 0, 'pending', source.state_json,
+                    'next_step', NULL, 1
              FROM counter
              JOIN agent_messages AS source
                ON source.session_id = '{session}'
@@ -1137,7 +1149,7 @@ fn verify_rejects_a_fabricated_claim_for_a_never_claimed_message() {
                 controls: vec![accepted_message_control(1, &session, &message)],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         }))
         .unwrap();
     drop(store);
@@ -1589,7 +1601,7 @@ async fn verification_derives_activation_lineage_from_the_immutable_header() {
                 controls: vec![start(session_id)],
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .unwrap();
@@ -1677,5 +1689,170 @@ async fn a_missing_fork_terminal_digest_is_corruption() {
             )
             .await,
         Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
+async fn cold_control_reads_and_unguarded_commits_reject_missing_mailbox_indexes() {
+    for table in ["agent_messages", "ready_messages", "active_activations"] {
+        let root = tempfile::tempdir().unwrap();
+        let session = SessionId::new("missing-mailbox-index").unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: session.clone(),
+                    expected_fact_seq: 0,
+                    expected_control_seq: 0,
+                    header: Some(header(session.as_str())),
+                    facts: Vec::new(),
+                    controls: vec![
+                        accepted_message_control(1, &session, &MessageId::new("pending").unwrap()),
+                        AgentControlRecord::new(
+                            2,
+                            2,
+                            AgentControlRecordBody::ActivationStarted {
+                                activation_id: rsi_agent_session_protocol::ActivationId::new(
+                                    "waiting",
+                                )
+                                .unwrap(),
+                                root_session_id: session.clone(),
+                                parent_session_id: None,
+                                path: AgentPath::root(),
+                            },
+                        )
+                        .unwrap(),
+                        AgentControlRecord::new(
+                            3,
+                            3,
+                            AgentControlRecordBody::ActivationWaitingForDescendants {
+                                activation_id: rsi_agent_session_protocol::ActivationId::new(
+                                    "waiting",
+                                )
+                                .unwrap(),
+                            },
+                        )
+                        .unwrap(),
+                    ],
+                }],
+                required_active_activations: Vec::new(),
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .inspect_session(&session)
+                .await
+                .unwrap()
+                .activation_phase,
+            Some(rsi_agent_store_protocol::StoreActivationPhase::WaitingForDescendants)
+        );
+        drop(store);
+        let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        connection
+            .execute(&format!("DELETE FROM {table}"), [])
+            .unwrap();
+        drop(connection);
+        let store = SqliteStore::open(root.path()).unwrap();
+        store.header(&session).await.unwrap();
+        assert!(
+            matches!(
+                store.read_agent_subtree_snapshot(&session).await,
+                Err(StoreError::Corrupt(_))
+            ),
+            "{table}"
+        );
+        assert!(
+            matches!(
+                store
+                    .commit_agent(AtomicAgentCommit {
+                        sessions: vec![AtomicSessionAppend {
+                            session_id: session.clone(),
+                            expected_fact_seq: 0,
+                            expected_control_seq: 3,
+                            header: None,
+                            facts: vec![fact(1)],
+                            controls: Vec::new(),
+                        }],
+                        required_active_activations: Vec::new(),
+                        quiescent_descendants_of: None,
+                    })
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ),
+            "{table}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cold_activation_guard_rejects_a_fabricated_owner_outside_the_write_set() {
+    use rsi_agent_session_protocol::ActivationId;
+    use rsi_agent_store_protocol::AgentActivationGuard;
+    let root = tempfile::tempdir().unwrap();
+    let source = SessionId::new("guard-source").unwrap();
+    let destination = SessionId::new("guard-destination").unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: source.clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header(source.as_str())),
+                facts: Vec::new(),
+                controls: vec![
+                    AgentControlRecord::new(
+                        1,
+                        1,
+                        AgentControlRecordBody::ActivationStarted {
+                            activation_id: ActivationId::new("real-owner").unwrap(),
+                            root_session_id: source.clone(),
+                            parent_session_id: None,
+                            path: AgentPath::root(),
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE active_activations SET activation_id = 'fabricated-owner'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert!(matches!(
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: destination.clone(),
+                    expected_fact_seq: 0,
+                    expected_control_seq: 0,
+                    header: Some(header(destination.as_str())),
+                    facts: vec![fact(1)],
+                    controls: Vec::new(),
+                }],
+                required_active_activations: vec![AgentActivationGuard {
+                    session_id: source,
+                    activation_id: ActivationId::new("fabricated-owner").unwrap()
+                }],
+                quiescent_descendants_of: None,
+            })
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store.header(&destination).await,
+        Err(StoreError::NotFound(_))
     ));
 }

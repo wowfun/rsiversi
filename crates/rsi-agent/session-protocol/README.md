@@ -7,7 +7,7 @@ turn. It is a data contract, not a Runtime service or transport.
 Agent control records form a second append-only digest chain beside Facts.
 They own mailbox acceptance/claim/discard, activation and wait transitions,
 delivery-horizon promotion, completion reservations, and durable tree
-scheduling signals. A pending non-waking next-Step completion which survives
+scheduling signals. A pending non-waking next-Step completion or bound human steer which survives
 its parent's activation Turn is explicitly promoted to a waking next-Turn
 message before that activation can settle; ordinary fixed-horizon next-Step
 messages remain held, and indexes never reclassify either without a canonical

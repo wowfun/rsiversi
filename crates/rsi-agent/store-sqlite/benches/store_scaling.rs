@@ -13,7 +13,7 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const SAMPLES: usize = 5;
+const SAMPLES: usize = 100;
 
 #[derive(Clone, Copy, Debug)]
 enum Shape {
@@ -57,6 +57,9 @@ async fn run() {
         counts.push(1_000_000);
     }
 
+    for sessions in [128, 256, 512] {
+        benchmark_metadata(sessions).await;
+    }
     for fact_count in counts {
         for payload_bytes in [256, 16 * 1024] {
             if payload_bytes > 256 && fact_count > 10_000 && !large_payload {
@@ -102,7 +105,10 @@ async fn benchmark_case(fact_count: usize, payload_bytes: usize, shape: Shape) {
         let store = SqliteStore::open(root.path()).expect("validation open");
         first_validation.push(
             timed_async(async {
-                black_box(store.header(&session).await.expect("first validation"));
+                store
+                    .validate_session(&session)
+                    .await
+                    .expect("first validation");
             })
             .await,
         );
@@ -116,12 +122,10 @@ async fn benchmark_case(fact_count: usize, payload_bytes: usize, shape: Shape) {
     let cold_open = timed(|| drop(SqliteStore::open(copied.path()).expect("copied open")));
     let copied_store = SqliteStore::open(copied.path()).expect("copied validation open");
     let cold_validation = timed_async(async {
-        black_box(
-            copied_store
-                .header(&session)
-                .await
-                .expect("copied first validation"),
-        );
+        copied_store
+            .validate_session(&session)
+            .await
+            .expect("copied first validation");
     })
     .await;
     drop(copied_store);
@@ -264,9 +268,135 @@ fn report(label: &str, samples: &[Duration]) {
     let mut nanos = samples.iter().map(Duration::as_nanos).collect::<Vec<_>>();
     nanos.sort_unstable();
     let median = nanos[(nanos.len() - 1) / 2];
+    if samples.len() < 100 {
+        println!(
+            "{label} samples={} min_ns={} median_ns={} max_ns={}",
+            samples.len(),
+            nanos[0],
+            median,
+            nanos[nanos.len() - 1]
+        );
+        return;
+    }
     let p95 = nanos[nanos.len().saturating_mul(95).div_ceil(100) - 1];
     println!(
         "{label} min_ns={} median_ns={} p95_ns={}",
         nanos[0], median, p95
     );
+}
+
+#[allow(clippy::too_many_lines)] // One report-only matrix keeps setup and its compared operations together.
+async fn benchmark_metadata(sessions: usize) {
+    assert!(
+        sessions >= SAMPLES,
+        "each validation and mixed sample needs a fresh session"
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    for index in 0..sessions {
+        append_session(&store, index, 16, 256, true).await;
+    }
+    drop(store);
+    let mut cold_headers = Vec::new();
+    let id = SessionId::new("session-000").unwrap();
+    for _ in 0..SAMPLES {
+        let store = SqliteStore::open(root.path()).unwrap();
+        cold_headers.push(
+            timed_async(async {
+                black_box(store.header(&id).await.unwrap());
+            })
+            .await,
+        );
+    }
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut warm_catalog = Vec::new();
+    let mut first_validation = Vec::new();
+    let mut snapshots = Vec::new();
+    let mut mixed = Vec::new();
+    let mut snapshot_calls = 0;
+    for sample in 0..SAMPLES {
+        warm_catalog.push(
+            timed_async(async {
+                let mut after = None;
+                loop {
+                    let page = store
+                        .list_recent_sessions(after.as_ref(), 256)
+                        .await
+                        .unwrap();
+                    if !page.has_more {
+                        break;
+                    }
+                    after = page
+                        .sessions
+                        .last()
+                        .map(rsi_agent_store_protocol::StoreRecentSession::cursor);
+                }
+            })
+            .await,
+        );
+        let validation_id = SessionId::new(format!("session-{sample:03}")).unwrap();
+        first_validation.push(
+            timed_async(async {
+                store.validate_session(&validation_id).await.unwrap();
+            })
+            .await,
+        );
+        snapshots.push(
+            timed_async(async {
+                black_box(store.read_agent_subtree_snapshot(&id).await.unwrap());
+            })
+            .await,
+        );
+        snapshot_calls += 1;
+    }
+    for sample in 0..SAMPLES {
+        let write_id = SessionId::new(format!("session-{sample:03}")).unwrap();
+        mixed.push(
+            timed_async(async {
+                let seq = 17;
+                let turn = TurnId::new(format!("mixed-{sample}")).unwrap();
+                let batch = AppendBatch {
+                    session_id: write_id,
+                    expected_seq: seq - 1,
+                    header: None,
+                    facts: vec![
+                        SessionFact::new(
+                            seq,
+                            seq,
+                            SessionFactBody::TurnAccepted {
+                                turn_id: turn.clone(),
+                                text: "mixed write".into(),
+                                model: None,
+                                sandbox: SandboxMode::WorkspaceWrite,
+                                require_approval: false,
+                            },
+                        )
+                        .unwrap(),
+                        SessionFact::new(
+                            seq + 1,
+                            seq + 1,
+                            SessionFactBody::TurnTerminal {
+                                turn_id: turn,
+                                outcome: TurnOutcome::Completed,
+                            },
+                        )
+                        .unwrap(),
+                    ],
+                };
+                let (read, write) =
+                    tokio::join!(store.list_recent_sessions(None, 256), store.append(batch));
+                black_box(read.unwrap());
+                write.unwrap();
+            })
+            .await,
+        );
+    }
+    println!(
+        "metadata_case sessions={sessions} initial_facts_per_session=16 samples={SAMPLES} control_snapshot_calls={snapshot_calls}"
+    );
+    report("reopened_header", &cold_headers);
+    report("warm_complete_recent_catalog", &warm_catalog);
+    report("first_session_validation", &first_validation);
+    report("one_call_control_subtree_snapshot", &snapshots);
+    report("mixed_recent_read_and_append", &mixed);
 }

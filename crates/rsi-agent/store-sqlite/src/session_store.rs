@@ -41,7 +41,7 @@ impl SessionStore for SqliteStore {
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit> {
         batch.validate()?;
         let session_id = batch.session_id.clone();
-        if !self.touch_validated_session(&session_id)?
+        if !self.touch_validated_session(&session_id)
             && (batch.header.is_none() || self.session_exists(&session_id).await?)
         {
             self.ensure_session_validated(&session_id).await?;
@@ -60,17 +60,29 @@ impl SessionStore for SqliteStore {
                 Ok(AppendCommit { durable_seq })
             })
             .await?;
-        self.mark_session_validated(session_id)?;
+        self.mark_session_validated(session_id);
         Ok(commit)
     }
 
     async fn commit_agent(&self, commit: AtomicAgentCommit) -> Result<AtomicAgentCommitResult> {
         commit.validate()?;
         for append in &commit.sessions {
-            if !self.touch_validated_session(&append.session_id)?
+            if !self.touch_validated_session(&append.session_id)
                 && (append.header.is_none() || self.session_exists(&append.session_id).await?)
             {
                 self.ensure_session_validated(&append.session_id).await?;
+            }
+        }
+        for guard in &commit.required_active_activations {
+            // A source guard may be outside this commit's write set. Its
+            // canonical proof is required before trusting a positive index hit.
+            if let Err(error) = self.ensure_session_validated(&guard.session_id).await {
+                return Err(match error {
+                    StoreError::NotFound(_) => StoreError::ActivationGuardConflict {
+                        session: guard.session_id.to_string(),
+                    },
+                    other => other,
+                });
             }
         }
         let touched = commit
@@ -78,47 +90,43 @@ impl SessionStore for SqliteStore {
             .iter()
             .map(|append| append.session_id.clone())
             .collect::<Vec<_>>();
+        let owner = Arc::clone(&self.inner);
         let result = self
             .with_writer(move |connection| {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(sql_error)?;
-                validate_sqlite_agent_guards(&transaction, &commit)?;
+                validate_sqlite_activation_guards(&transaction, &commit)?;
                 let mut sessions = Vec::with_capacity(commit.sessions.len());
                 for append in commit.sessions {
                     sessions.push(apply_atomic_sqlite_append(&transaction, append)?);
                 }
+                let subtree = validate_sqlite_quiescence_guard(
+                    &transaction,
+                    commit.quiescent_descendants_of.as_ref(),
+                    &owner,
+                )?;
                 transaction.commit().map_err(sql_error)?;
+                if let Some(subtree) = &subtree {
+                    owner.mark_subtree_validated(subtree);
+                }
                 Ok(AtomicAgentCommitResult { sessions })
             })
             .await?;
         for session_id in touched {
-            self.mark_session_validated(session_id)?;
+            self.mark_session_validated(session_id);
         }
         Ok(result)
     }
 
+    async fn validate_session(&self, session_id: &SessionId) -> Result<()> {
+        self.ensure_session_validated(session_id).await
+    }
+
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
-            let projection = connection
-                .query_row(
-                    "SELECT length(CAST(header_json AS BLOB)),
-                            CASE WHEN length(CAST(header_json AS BLOB)) <= ?2
-                                 THEN header_json END
-                     FROM sessions WHERE session_id = ?1",
-                    params![
-                        session_id.as_str(),
-                        i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
-                            .expect("session header bound fits SQLite INTEGER")
-                    ],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-            decode_projected_json("session header", projection, MAXIMUM_SESSION_HEADER_BYTES)
+            read_session_header_row(connection, &session_id).map(|(header, _)| header)
         })
         .await
     }
@@ -132,6 +140,8 @@ impl SessionStore for SqliteStore {
         validate_read_limit(limit)?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
+        #[cfg(test)]
+        let materializations = Arc::clone(&self.inner.fact_materializations);
         self.with_reader(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -161,35 +171,45 @@ impl SessionStore for SqliteStore {
                      WHERE session_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
                     )
                     .map_err(sql_error)?;
-                let rows = statement
-                    .query_map(
-                        params![
-                            session_id.as_str(),
-                            sqlite_u64("Fact cursor", after_seq)?,
-                            i64::try_from(limit).map_err(|_| {
-                                StoreError::Invalid("read limit exceeds SQLite".into())
-                            })?,
-                            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                                .expect("session Fact bound fits SQLite INTEGER"),
-                        ],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
+                let mut rows = statement
+                    .query(params![
+                        session_id.as_str(),
+                        sqlite_u64("Fact cursor", after_seq)?,
+                        i64::try_from(limit).map_err(|_| {
+                            StoreError::Invalid("read limit exceeds SQLite".into())
+                        })?,
+                        i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                            .expect("session Fact bound fits SQLite INTEGER"),
+                    ])
                     .map_err(sql_error)?;
                 let mut facts = Vec::new();
                 let mut encoded_bytes = 0_usize;
-                for row in rows {
-                    let projection = row.map_err(sql_error)?;
+                while let Some(row) = rows.next().map_err(sql_error)? {
+                    let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
+                        .map_err(|_| StoreError::Corrupt("negative session Fact length".into()))?;
+                    if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
+                        return Err(StoreError::Corrupt(
+                            "session Fact exceeds its byte bound".into(),
+                        ));
+                    }
+                    let projected = encoded_bytes
+                        .checked_add(encoded_len)
+                        .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
+                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                        break;
+                    }
+                    #[cfg(test)]
+                    materializations.fetch_add(1, Ordering::Relaxed);
+                    let projection = (
+                        i64::try_from(encoded_len)
+                            .expect("bounded Fact length fits SQLite INTEGER"),
+                        row.get::<_, Option<String>>(1).map_err(sql_error)?,
+                    );
                     let fact: SessionFact = decode_projected_json(
                         "session Fact",
                         projection,
                         MAXIMUM_SESSION_FACT_BYTES,
                     )?;
-                    let projected = encoded_bytes
-                        .checked_add(fact.encoded_len())
-                        .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
-                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
-                        break;
-                    }
                     encoded_bytes = projected;
                     facts.push(fact);
                 }
@@ -259,20 +279,28 @@ impl SessionStore for SqliteStore {
             let mut records = Vec::new();
             let mut encoded_bytes = 0_usize;
             while let Some(row) = rows.next().map_err(sql_error)? {
-                let record: AgentControlRecord = decode_projected_json(
-                    "Agent control record",
-                    (
-                        row.get::<_, i64>(0).map_err(sql_error)?,
-                        row.get::<_, Option<String>>(1).map_err(sql_error)?,
-                    ),
-                    MAXIMUM_SESSION_FACT_BYTES,
-                )?;
+                let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
+                    .map_err(|_| StoreError::Corrupt("negative Agent control length".into()))?;
+                if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
+                    return Err(StoreError::Corrupt(
+                        "Agent control exceeds its byte bound".into(),
+                    ));
+                }
                 let projected = encoded_bytes
-                    .checked_add(record.encoded_len())
+                    .checked_add(encoded_len)
                     .ok_or_else(|| StoreError::Corrupt("control page size overflow".into()))?;
                 if !records.is_empty() && projected > MAXIMUM_STORE_CONTROL_PAGE_BYTES {
                     break;
                 }
+                let record: AgentControlRecord = decode_projected_json(
+                    "Agent control record",
+                    (
+                        i64::try_from(encoded_len)
+                            .expect("bounded control length fits SQLite INTEGER"),
+                        row.get::<_, Option<String>>(1).map_err(sql_error)?,
+                    ),
+                    MAXIMUM_SESSION_FACT_BYTES,
+                )?;
                 encoded_bytes = projected;
                 records.push(record);
             }
@@ -299,6 +327,8 @@ impl SessionStore for SqliteStore {
         validate_read_limit(limit)?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
+        #[cfg(test)]
+        let materializations = Arc::clone(&self.inner.fact_materializations);
         self.with_reader(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -337,37 +367,44 @@ impl SessionStore for SqliteStore {
                          ORDER BY seq DESC LIMIT ?3",
                     )
                     .map_err(sql_error)?;
-                let rows = statement
-                    .query_map(
-                        params![
-                            session_id.as_str(),
-                            sqlite_u64("backward Fact cursor", before_seq)?,
-                            i64::try_from(limit).map_err(|_| {
-                                StoreError::Invalid("read limit exceeds SQLite".into())
-                            })?,
-                            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                                .expect("session Fact bound fits SQLite INTEGER"),
-                        ],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
+                let mut rows = statement
+                    .query(params![
+                        session_id.as_str(),
+                        sqlite_u64("backward Fact cursor", before_seq)?,
+                        i64::try_from(limit).map_err(|_| {
+                            StoreError::Invalid("read limit exceeds SQLite".into())
+                        })?,
+                        i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                            .expect("session Fact bound fits SQLite INTEGER"),
+                    ])
                     .map_err(sql_error)?;
                 let mut facts = Vec::new();
                 let mut encoded_bytes = 0_usize;
-                for row in rows {
-                    let fact: SessionFact = decode_projected_json(
-                        "session Fact",
-                        row.map_err(sql_error)?,
-                        MAXIMUM_SESSION_FACT_BYTES,
-                    )?;
-                    let projected =
-                        encoded_bytes
-                            .checked_add(fact.encoded_len())
-                            .ok_or_else(|| {
-                                StoreError::Corrupt("backward Fact page size overflow".into())
-                            })?;
+                while let Some(row) = rows.next().map_err(sql_error)? {
+                    let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
+                        .map_err(|_| StoreError::Corrupt("negative session Fact length".into()))?;
+                    if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
+                        return Err(StoreError::Corrupt(
+                            "session Fact exceeds its byte bound".into(),
+                        ));
+                    }
+                    let projected = encoded_bytes
+                        .checked_add(encoded_len)
+                        .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
                     if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
                         break;
                     }
+                    #[cfg(test)]
+                    materializations.fetch_add(1, Ordering::Relaxed);
+                    let fact: SessionFact = decode_projected_json(
+                        "session Fact",
+                        (
+                            i64::try_from(encoded_len)
+                                .expect("bounded Fact length fits SQLite INTEGER"),
+                            row.get::<_, Option<String>>(1).map_err(sql_error)?,
+                        ),
+                        MAXIMUM_SESSION_FACT_BYTES,
+                    )?;
                     encoded_bytes = projected;
                     facts.push(fact);
                 }
@@ -399,6 +436,8 @@ impl SessionStore for SqliteStore {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         let turn_id = turn_id.clone();
+        #[cfg(test)]
+        let materializations = Arc::clone(&self.inner.fact_materializations);
         self.with_reader(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -446,43 +485,50 @@ impl SessionStore for SqliteStore {
                      ORDER BY seq LIMIT ?4",
                     )
                     .map_err(sql_error)?;
-                let rows = statement
-                    .query_map(
-                        params![
-                            session_id.as_str(),
-                            turn_id.as_str(),
-                            sqlite_u64("turn Fact cursor", after_seq)?,
-                            sqlite_limit,
-                            i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                                .expect("session Fact bound fits SQLite INTEGER"),
-                        ],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
+                let mut rows = statement
+                    .query(params![
+                        session_id.as_str(),
+                        turn_id.as_str(),
+                        sqlite_u64("turn Fact cursor", after_seq)?,
+                        sqlite_limit,
+                        i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                            .expect("session Fact bound fits SQLite INTEGER"),
+                    ])
                     .map_err(sql_error)?;
                 let mut facts = Vec::new();
                 let mut encoded_bytes = 0_usize;
                 let mut has_more = false;
-                for row in rows {
+                while let Some(row) = rows.next().map_err(sql_error)? {
+                    let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
+                        .map_err(|_| StoreError::Corrupt("negative session Fact length".into()))?;
+                    if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
+                        return Err(StoreError::Corrupt(
+                            "session Fact exceeds its byte bound".into(),
+                        ));
+                    }
+                    let projected = encoded_bytes
+                        .checked_add(encoded_len)
+                        .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
+                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                        has_more = true;
+                        break;
+                    }
                     if facts.len() == limit {
                         has_more = true;
                         break;
                     }
-                    let projection = row.map_err(sql_error)?;
+                    #[cfg(test)]
+                    materializations.fetch_add(1, Ordering::Relaxed);
+                    let projection = (
+                        i64::try_from(encoded_len)
+                            .expect("bounded Fact length fits SQLite INTEGER"),
+                        row.get::<_, Option<String>>(1).map_err(sql_error)?,
+                    );
                     let fact: SessionFact = decode_projected_json(
                         "session Fact",
                         projection,
                         MAXIMUM_SESSION_FACT_BYTES,
                     )?;
-                    let projected =
-                        encoded_bytes
-                            .checked_add(fact.encoded_len())
-                            .ok_or_else(|| {
-                                StoreError::Corrupt("turn Fact page size overflow".into())
-                            })?;
-                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
-                        has_more = true;
-                        break;
-                    }
                     encoded_bytes = projected;
                     facts.push(fact);
                 }
@@ -827,9 +873,6 @@ impl SessionStore for SqliteStore {
     ) -> Result<StoreRecentSessionPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)?;
         let after = after.cloned();
-        let validated_sessions = Arc::clone(&self.validated_sessions);
-        #[cfg(test)]
-        let validation_runs = Arc::clone(&self.validation_runs);
         let page = self
             .with_reader(move |connection| {
                 let transaction = connection
@@ -883,19 +926,7 @@ impl SessionStore for SqliteStore {
                 for (encoded_session_id, created_at_ms) in projections {
                     let session_id = SessionId::new(encoded_session_id)
                         .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-                    let cached = validated_sessions
-                        .lock()
-                        .map_err(|_| {
-                            StoreError::Io("validated-session cache mutex was poisoned".into())
-                        })?
-                        .touch(&session_id);
-                    let header = if cached {
-                        read_session_header_row(&transaction, &session_id)?.0
-                    } else {
-                        #[cfg(test)]
-                        validation_runs.fetch_add(1, Ordering::Relaxed);
-                        validate_session(&transaction, &session_id)?
-                    };
+                    let header = read_session_header_row(&transaction, &session_id)?.0;
                     if header.created_at_ms()
                         != decode_u64("session creation timestamp", created_at_ms)?
                     {
@@ -916,9 +947,6 @@ impl SessionStore for SqliteStore {
                 Ok(page)
             })
             .await?;
-        for session in &page.sessions {
-            self.mark_session_validated(session.header.session_id().clone())?;
-        }
         Ok(page)
     }
 
@@ -1048,6 +1076,55 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn inspect_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        use rsi_agent_session_protocol::MessageDelivery;
+        use rsi_agent_store_protocol::{StorePendingMessage, StoreSessionInspection};
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let owner = self.inner.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
+            let (header, _) = read_session_header_row(&transaction, &session_id)?;
+            let (fact_seq, control_seq) = transaction.query_row("SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1", [session_id.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).map_err(sql_error)?;
+            let mut statement = transaction.prepare("SELECT
+                CASE WHEN length(CAST(message_id AS BLOB)) <= 256 THEN message_id ELSE '' END,
+                CASE WHEN length(delivery) <= 16 THEN delivery ELSE '' END,
+                CASE WHEN length(target) <= 16 THEN target ELSE '' END,
+                CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END,
+                accepted_control_seq, (message_source = 'completion' OR delivery = 'steer' AND bound_turn_id IS NOT NULL) FROM agent_messages WHERE session_id = ?1 AND state = 'pending' ORDER BY accepted_control_seq LIMIT ?2").map_err(sql_error)?;
+            let rows = statement.query_map(params![session_id.as_str(), i64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES + 1).expect("bounded mailbox")], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, bool>(5)?))
+            }).map_err(sql_error)?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (id, delivery, target, bound, seq, permits_promotion) = row.map_err(sql_error)?;
+                pending.push(StorePendingMessage {
+                    permits_promotion,
+                    message_id: MessageId::new(id).map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                    delivery: match delivery.as_str() { "next_turn" => MessageDelivery::NextTurn, "next_step" => MessageDelivery::NextStep, "steer" => MessageDelivery::Steer, _ => return Err(StoreError::Corrupt("invalid inspected delivery".into())) },
+                    target: match target.as_str() { "next_turn" => MessageTarget::NextTurn, "next_step" => MessageTarget::NextStep, _ => return Err(StoreError::Corrupt("invalid inspected target".into())) },
+                    bound_turn_id: bound.map(TurnId::new).transpose().map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                    accepted_control_seq: decode_u64("inspected message acceptance", seq)?,
+                });
+            }
+            drop(statement);
+            let active_turn_id = transaction.query_row("SELECT CASE WHEN length(CAST(turn_id AS BLOB)) <= 256 THEN turn_id ELSE '' END FROM turns WHERE session_id = ?1 AND terminal_seq IS NULL ORDER BY accepted_seq LIMIT 1", [session_id.as_str()], |row| row.get::<_, String>(0)).optional().map_err(sql_error)?
+                .map(TurnId::new).transpose().map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let phase = transaction.query_row("SELECT CASE WHEN length(phase) <= 32 THEN phase ELSE '' END FROM active_activations WHERE session_id = ?1", [session_id.as_str()], |row| row.get::<_, String>(0)).optional().map_err(sql_error)?;
+            let activation_phase = phase.map(|phase| match phase.as_str() { "running" => Ok(StoreActivationPhase::Running), "parked" => Ok(StoreActivationPhase::Parked), "waiting" => Ok(StoreActivationPhase::WaitingForDescendants), _ => Err(StoreError::Corrupt("invalid inspected activation phase".into())) }).transpose()?;
+            let inspection = StoreSessionInspection { header, durable_fact_seq: decode_u64("inspection Fact tail", fact_seq)?, durable_control_seq: decode_u64("inspection control tail", control_seq)?,
+                pending, active_turn_id, activation_phase, tree: owner.read_validated_agent_subtree(&transaction, &session_id)?, };
+            inspection.validate()?;
+            transaction.commit().map_err(sql_error)?;
+            owner.mark_subtree_validated(&inspection.tree);
+            Ok(inspection)
+        }).await
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
@@ -1084,7 +1161,8 @@ impl SessionStore for SqliteStore {
                                     accepted_control_seq, state,
                                     length(CAST(state_json AS BLOB)),
                                     CASE WHEN length(CAST(state_json AS BLOB)) <= ?4
-                                         THEN state_json END
+                                         THEN state_json END,
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
                              FROM agent_messages
                              WHERE session_id = ?1 AND message_id = ?2",
                             params![
@@ -1125,7 +1203,8 @@ impl SessionStore for SqliteStore {
                             accepted_control_seq, state,
                             length(CAST(state_json AS BLOB)),
                             CASE WHEN length(CAST(state_json AS BLOB)) <= ?3
-                                 THEN state_json END
+                                 THEN state_json END,
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms
                      FROM agent_messages
                      WHERE session_id = ?1 AND state = 'pending'
                      ORDER BY accepted_control_seq",
@@ -1204,11 +1283,11 @@ impl SessionStore for SqliteStore {
                     "SELECT message_id FROM agent_messages
                      WHERE session_id = ?1 AND state = 'pending'
                        AND target = 'next_step' AND wake_required = 0
-                       AND message_source = 'completion'
+                       AND (message_source = 'completion' OR delivery = 'steer' AND bound_turn_id IS NOT NULL)
                      ORDER BY accepted_control_seq LIMIT ?2",
                 )
                 .map_err(sql_error)?;
-            let pending_next_step_completion_message_ids = statement
+            let pending_promotable_message_ids = statement
                 .query_map(
                     params![
                         session_id.as_str(),
@@ -1229,7 +1308,7 @@ impl SessionStore for SqliteStore {
                 pending_count: usize::try_from(pending_count).map_err(|_| {
                     StoreError::Corrupt("mailbox pending count is outside usize".into())
                 })?,
-                pending_next_step_completion_message_ids,
+                pending_promotable_message_ids,
                 durable_control_seq: decode_u64(
                     "mailbox durable control sequence",
                     durable_control_seq,
@@ -1334,61 +1413,20 @@ impl SessionStore for SqliteStore {
         .await
     }
 
-    async fn read_descendant_control_snapshot(
+    async fn read_agent_subtree_snapshot(
         &self,
         parent_session_id: &SessionId,
-    ) -> Result<StoreDescendantControlSnapshot> {
+    ) -> Result<StoreAgentSubtreeSnapshot> {
         self.ensure_session_validated(parent_session_id).await?;
-        let parent_session_id = parent_session_id.clone();
+        let root = parent_session_id.clone();
+        let owner = Arc::clone(&self.inner);
         self.with_reader(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let mut statement = transaction
-                .prepare(
-                    "WITH RECURSIVE descendants(session_id) AS (
-                         SELECT session_id FROM agent_nodes WHERE parent_session_id = ?1
-                         UNION
-                         SELECT child.session_id
-                         FROM agent_nodes AS child
-                         JOIN descendants AS parent
-                           ON child.parent_session_id = parent.session_id
-                     )
-                     SELECT descendants.session_id,
-                            (SELECT control_seq FROM sessions
-                             WHERE session_id = descendants.session_id)
-                     FROM descendants
-                     ORDER BY descendants.session_id
-                     LIMIT ?2",
-                )
-                .map_err(sql_error)?;
-            let rows = statement
-                .query_map(
-                    params![
-                        parent_session_id.as_str(),
-                        i64::try_from(MAXIMUM_DURABLE_AGENT_TREE_NODES)
-                            .expect("durable Agent-tree bound fits SQLite INTEGER"),
-                    ],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .map_err(sql_error)?;
-            let descendants = rows
-                .map(|row| {
-                    let (session_id, durable_control_seq) = row.map_err(sql_error)?;
-                    Ok(StoreDescendantControlWatermark {
-                        session_id: SessionId::new(session_id)
-                            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-                        durable_control_seq: decode_u64(
-                            "descendant control sequence",
-                            durable_control_seq,
-                        )?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            drop(statement);
-            let snapshot = StoreDescendantControlSnapshot { descendants };
-            snapshot.validate()?;
+            let snapshot = owner.read_validated_agent_subtree(&transaction, &root)?;
             transaction.commit().map_err(sql_error)?;
+            owner.mark_subtree_validated(&snapshot);
             Ok(snapshot)
         })
         .await
@@ -1722,8 +1760,8 @@ impl SessionStore for SqliteStore {
                 "CAS bytes must be nonempty and bounded".into(),
             ));
         }
-        let cas_dir = Arc::clone(&self.cas_dir);
-        let cas_staging_dir = Arc::clone(&self.cas_staging_dir);
+        let cas_dir = Arc::clone(&self.inner.cas_dir);
+        let cas_staging_dir = Arc::clone(&self.inner.cas_staging_dir);
         let reference = self
             .with_cas(move || {
                 let reference = CasObjectRef {
@@ -1789,7 +1827,7 @@ impl SessionStore for SqliteStore {
             Ok(())
         })
         .await?;
-        let cas_dir = Arc::clone(&self.cas_dir);
+        let cas_dir = Arc::clone(&self.inner.cas_dir);
         self.with_cas(move || {
             let bytes = read_cas_file(&cas_dir, &verified.sha256)?;
             if u64::try_from(bytes.len())
@@ -1804,4 +1842,147 @@ impl SessionStore for SqliteStore {
         })
         .await
     }
+}
+
+impl StoreInner {
+    pub(super) fn touch_validated_session(&self, session_id: &SessionId) -> bool {
+        self.validated_sessions
+            .lock()
+            .is_ok_and(|mut cache| cache.touch(session_id))
+    }
+
+    pub(super) fn read_validated_agent_subtree(
+        &self,
+        connection: &Connection,
+        root: &SessionId,
+    ) -> Result<StoreAgentSubtreeSnapshot> {
+        let snapshot = read_agent_subtree(connection, root)?;
+        for status in std::iter::once(&snapshot.session)
+            .chain(snapshot.descendants.iter().map(|child| &child.status))
+        {
+            let validated = self.touch_validated_session(&status.session_id);
+            if !validated {
+                #[cfg(test)]
+                self.validation_runs.fetch_add(1, Ordering::Relaxed);
+                validate_session(connection, &status.session_id)?;
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn mark_subtree_validated(&self, snapshot: &StoreAgentSubtreeSnapshot) {
+        let Ok(mut validated) = self.validated_sessions.lock() else {
+            return;
+        };
+        for status in std::iter::once(&snapshot.session)
+            .chain(snapshot.descendants.iter().map(|child| &child.status))
+        {
+            validated.insert(status.session_id.clone());
+        }
+    }
+}
+
+pub(super) fn read_agent_subtree(
+    connection: &Connection,
+    root: &SessionId,
+) -> Result<StoreAgentSubtreeSnapshot> {
+    let mut statement = connection
+        .prepare(
+            "WITH RECURSIVE subtree(session_id) AS (
+           SELECT session_id FROM sessions WHERE session_id = ?1
+           UNION
+           SELECT child.session_id FROM agent_nodes child JOIN subtree parent
+             ON child.parent_session_id = parent.session_id LIMIT ?2
+         )
+         SELECT CASE WHEN length(CAST(subtree.session_id AS BLOB)) <= ?4 THEN subtree.session_id END,
+           CASE WHEN length(CAST(node.parent_session_id AS BLOB)) <= ?4 THEN node.parent_session_id END,
+           CASE WHEN length(CAST(node.path_json AS BLOB)) <= ?3 THEN node.path_json END,
+           CASE WHEN length(CAST(node.task_name AS BLOB)) <= ?4 THEN node.task_name END,
+           (SELECT control_seq FROM sessions WHERE session_id = subtree.session_id),
+           EXISTS(SELECT 1 FROM turns WHERE session_id = subtree.session_id AND terminal_seq IS NULL),
+           EXISTS(SELECT 1 FROM active_activations WHERE session_id = subtree.session_id),
+           EXISTS(SELECT 1 FROM ready_messages WHERE session_id = subtree.session_id),
+           CASE WHEN subtree.session_id = ?1 THEN
+             EXISTS(SELECT 1 FROM subtree ancestry WHERE ancestry.session_id = node.parent_session_id)
+             ELSE 0 END
+         FROM subtree LEFT JOIN agent_nodes node ON node.session_id = subtree.session_id
+         ORDER BY subtree.session_id",
+        )
+        .map_err(sql_error)?;
+    let mut rows = statement
+        .query(params![
+            root.as_str(),
+            i64::try_from(MAXIMUM_DURABLE_AGENT_TREE_NODES + 1)
+                .expect("tree bound fits SQLite INTEGER"),
+            i64::try_from(rsi_agent_session_protocol::MAXIMUM_AGENT_TREE_DEPTH * 6 + 2)
+                .expect("path bound fits SQLite INTEGER"),
+            i64::try_from(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES)
+                .expect("identifier bound fits SQLite INTEGER")
+        ])
+        .map_err(sql_error)?;
+    let mut session = None;
+    let mut descendants = Vec::new();
+    while let Some(row) = rows.next().map_err(sql_error)? {
+        if descendants.len() >= MAXIMUM_DURABLE_AGENT_TREE_NODES {
+            return Err(StoreError::Corrupt(
+                "Agent subtree exceeds its node bound".into(),
+            ));
+        }
+        let status = StoreAgentSessionStatus {
+            session_id: SessionId::new(
+                row.get::<_, Option<String>>(0)
+                    .map_err(sql_error)?
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("indexed Agent identity exceeds its byte bound".into())
+                    })?,
+            )
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+            durable_control_seq: decode_u64("Agent control tail", row.get(4).map_err(sql_error)?)?,
+            has_open_turn: row.get(5).map_err(sql_error)?,
+            has_active_activation: row.get(6).map_err(sql_error)?,
+            has_waking_message: row.get(7).map_err(sql_error)?,
+        };
+        if &status.session_id == root {
+            if row.get::<_, bool>(8).map_err(sql_error)? {
+                return Err(StoreError::Corrupt(
+                    "Agent subtree contains a cycle through its root".into(),
+                ));
+            }
+            session = Some(status);
+            continue;
+        }
+        descendants.push(StoreAgentDescendantStatus {
+            status,
+            parent_session_id: SessionId::new(
+                row.get::<_, Option<String>>(1)
+                    .map_err(sql_error)?
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "indexed Agent parent is absent or exceeds its byte bound".into(),
+                        )
+                    })?,
+            )
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+            path: decode_json(
+                "Agent path",
+                &row.get::<_, Option<String>>(2)
+                    .map_err(sql_error)?
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("indexed Agent path exceeds its byte bound".into())
+                    })?,
+            )?,
+            task_name: row
+                .get::<_, Option<String>>(3)
+                .map_err(sql_error)?
+                .ok_or_else(|| {
+                    StoreError::Corrupt("indexed Agent task name exceeds its byte bound".into())
+                })?,
+        });
+    }
+    let snapshot = StoreAgentSubtreeSnapshot {
+        session: session.ok_or_else(|| StoreError::NotFound(root.to_string()))?,
+        descendants,
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
 }

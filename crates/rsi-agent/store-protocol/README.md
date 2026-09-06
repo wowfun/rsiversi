@@ -1,5 +1,19 @@
 # rsi-agent-store-protocol
 
+`inspect_session` is one bounded read snapshot of immutable Header, durable
+Fact/control cursors, pending-message metadata, current Turn and activation
+phase, and complete bounded descendant activity. It decodes no message bodies
+or historical Facts. The Memory adapter holds one state lock; SQLite uses one
+read transaction. Clients cannot reconstruct this contract by combining
+independent reads across concurrent commits.
+
+Mailbox entries retain immutable delivery intent, original acceptance timestamp,
+and an optional bound steering Turn separately from their mutable current
+target. Pending next-Step completion and bound human-steer messages can be
+promoted at terminal settlement. Human-steer ready keys retain their acceptance
+timestamp/control sequence; Completion ready keys retain promotion order.
+Both adapters validate this against the canonical control stream.
+
 This crate owns the mechanical durable seam for Agent sessions. A Store accepts
 one immutable header, contiguous compare-and-append Fact batches, bounded
 reads, session enumeration for recovery, and immutable CAS objects. Alongside
@@ -15,6 +29,14 @@ session sequence and relational turn/kind selected by its index; typed JSON
 validity alone is not an index proof. Kernel alone interprets the terminal outcome.
 See [the Agent architecture](../docs/architecture.md).
 
+`header` and recent-session listing validate bounded immutable metadata only;
+they do not scan history or establish a historical validation proof.
+`validate_session` explicitly checks the mechanical durable session invariants.
+Execution, recovery, lineage, and control decisions require that proof before
+using a cold Header. Fact, control, turn, outcome, and mutation boundaries retain
+their validation requirements. A backend may cache successful proofs within
+its exclusive writer lifetime; metadata reads neither fill nor touch that cache.
+
 Agent control commits compare both Fact and control watermarks and atomically
 touch at most three sessions. The Store maintains mechanical indexes with
 bounded query and atomic-update surfaces for ready messages, immutable
@@ -22,7 +44,7 @@ parent-child lineage, terminal-prefix digests,
 a byte-bounded prefix plus the exact pending-mailbox count and direct message
 status, and the one currently active activation per session. A lightweight
 mailbox summary returns the pending count, the bounded ordered identities of
-pending next-Step completion messages, and Fact/control tails for capacity and
+pending promotable next-Step messages, and Fact/control tails for capacity and
 terminal-promotion decisions. The full mailbox read is one Store snapshot:
 it never materializes the valid 64-message worst case at once, returns the Fact
 and control tails observed by that snapshot, and lets callers reserve its fixed
@@ -32,13 +54,19 @@ history. Each returned entry carries the exact encoded message length computed
 by the Store while it reads or indexes the payload; mailbox validation and
 Kernel next-Step batching reuse that value instead of serializing the same
 validated message again. A descendant
-control snapshot reads one subtree's immutable membership and every member's
-control watermark in one Store snapshot; Agent waits use it as their race-free
-observation baseline. Activation and quiescence guards are compare conditions:
-the Kernel chooses policy, while the Store only proves that the indexed durable
-state still equals the state on which that choice was based. Guard failures have
+status snapshot reads one subtree's immutable membership, parent/path/task,
+control watermarks, and open-Turn, active-activation and waking-message flags
+in one Store snapshot; Agent waits use it as their race-free
+observation baseline. Activation guards check exact ownership before applying
+appends; quiescence guards check the resulting indexed state before committing.
+The Kernel chooses policy and the Store proves these atomic conditions. Guard failures have
 dedicated errors and are not encoded as synthetic Fact-sequence conflicts. This
 prevents a parent settlement from racing a child claim.
+Quiescence guards name a subtree root, not a previously enumerated list. Within
+the same write transaction, after all appends, the Store checks every strict
+descendant against all three busy indexes. This includes children introduced by
+that transaction. The root may itself be newly created and is excluded.
+Traversal rejects cycles and trees exceeding 256 nodes.
 An atomic append without a Header requires an existing Session. Its absence is
 reported as `NotFound` before Fact or control cursor conflicts, identically in
 the production backend and the shared in-memory contract fixture.
@@ -82,3 +110,7 @@ from the Fact stream.
 Activation starts must match the immutable Header's root, parent, and Agent
 path. Store adapters enforce this relationship before committing any control
 or index row; SQLite verification independently rechecks historical starts.
+
+Inspection's pending-message metadata carries the immutable promotion capability
+(Completion source or steering intent bound to a Turn), so a promoted Completion remains a valid
+next-Turn route without materializing its payload.

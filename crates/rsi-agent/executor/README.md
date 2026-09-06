@@ -20,6 +20,9 @@ per call because budget rejection and retained-result commit are independently
 owned by each identity.
 Every exact-prefix durability wait has a validated executor-local deadline, so
 a persistently unhealthy Store cannot occupy that executor indefinitely.
+Only calls whose resolved policy requires approval construct an approval review;
+the reviewed identity and arguments belong to the same prepared Tool request
+that execution subsequently consumes.
 One executor registration owns a bounded pool of claim lanes. The reusable
 configuration defaults to one active turn and accepts `1..=256`; standard
 composition explicitly selects four. Kernel claim authority remains the sole

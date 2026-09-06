@@ -5,14 +5,13 @@ use super::*;
 async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-delivery-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-delivery-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -26,6 +25,7 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
     let child_id = SessionId::new("session-delivery-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: child_id.clone(),
             task_name: "delivery-child".into(),
@@ -45,6 +45,7 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
     let step_message = MessageId::new("message-delivery-step").unwrap();
     kernel
         .send_agent_message(SendAgentMessage {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             target_session_id: child_id.clone(),
             message_id: step_message.clone(),
@@ -56,6 +57,7 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
     let turn_message = MessageId::new("message-delivery-turn").unwrap();
     kernel
         .send_agent_message(SendAgentMessage {
+            cancellation: CancellationToken::new(),
             caller,
             target_session_id: child_id.clone(),
             message_id: turn_message.clone(),
@@ -123,15 +125,14 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
 async fn recovery_closes_an_activation_step_before_interrupting_its_turn() {
     let store = Arc::new(MemoryStore::new());
     let initial = kernel(store.clone()).await;
-    let initial_worker = initial.start_write_behind();
+    let initial_worker = initial.start_workers();
     let session_id = SessionId::new("session-message-step-recovery").unwrap();
     let message_id = MessageId::new("message-step-recovery").unwrap();
     initial
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message(message_id.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -178,7 +179,7 @@ async fn recovery_closes_an_activation_step_before_interrupting_its_turn() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
@@ -186,15 +187,14 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-activation-root").unwrap();
     let root_message = MessageId::new("message-activation-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message(root_message.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -221,6 +221,7 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         kernel.spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller,
             child_session_id: child_id.clone(),
             task_name: "child".into(),
@@ -275,6 +276,7 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     .unwrap()
     .unwrap();
     assert!(store.active_activation(&child_id).await.unwrap().is_none());
+    wait_for_settlement(store.as_ref(), &root_id).await;
     assert!(store.active_activation(&root_id).await.unwrap().is_none());
     let ready = store.list_ready_messages(&root_id, None, 8).await.unwrap();
     assert_eq!(ready.messages.len(), 1);
@@ -287,14 +289,13 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
 async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_scan() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-terminal-promotion-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-terminal-promotion-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -309,6 +310,7 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
     let child_id = SessionId::new("session-terminal-promotion-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: kernel.agent_caller(&root_claim).unwrap(),
             child_session_id: child_id.clone(),
             task_name: "late-child".into(),
@@ -365,6 +367,7 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
     assert_eq!(ready.messages.len(), 1);
     assert_eq!(ready.messages[0].session_id, root_id);
     assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
+    wait_for_settlement(store.as_ref(), &root_id).await;
     assert!(store.active_activation(&root_id).await.unwrap().is_none());
     kernel.shutdown(worker).await.unwrap();
 }
@@ -374,15 +377,14 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
 async fn agent_wait_persists_park_and_completion_resume_around_descendant_change() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-wait-root").unwrap();
     let root_message = MessageId::new("message-wait-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message(root_message.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -419,6 +421,7 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     let child_id = SessionId::new("session-wait-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: child_id.clone(),
             task_name: "child".into(),
@@ -477,6 +480,7 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
 
     kernel
         .send_agent_message(SendAgentMessage {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             target_session_id: child_id.clone(),
             message_id: MessageId::new("message-wait-inject").unwrap(),
@@ -577,14 +581,13 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
 async fn agent_wait_timeout_is_durably_resumed_as_timeout() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-wait-timeout-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-wait-timeout-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -599,6 +602,7 @@ async fn agent_wait_timeout_is_durably_resumed_as_timeout() {
     let caller = kernel.agent_caller(&root_claim).unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: SessionId::new("session-wait-timeout-child").unwrap(),
             task_name: "timeout-child".into(),
@@ -637,14 +641,13 @@ async fn agent_wait_timeout_is_durably_resumed_as_timeout() {
 async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-wait-cancel-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-wait-cancel-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -657,6 +660,7 @@ async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
     let caller = kernel.agent_caller(&root_claim).unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: SessionId::new("session-wait-cancel-child").unwrap(),
             task_name: "cancel-child".into(),
@@ -695,14 +699,13 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-long-wait-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-long-wait-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -716,6 +719,7 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
     let child_id = SessionId::new("session-long-wait-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: root_caller.clone(),
             child_session_id: child_id.clone(),
             task_name: "long-wait-child".into(),
@@ -780,6 +784,8 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
                             options: MessageOptions::default(),
                         },
                         root_session_id: root_id.clone(),
+                        delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                        bound_turn_id: None,
                         target: MessageTarget::NextStep,
                         wake_required: false,
                     },
@@ -808,7 +814,7 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
                 controls,
             }],
             required_active_activations: Vec::new(),
-            quiescent_sessions: Vec::new(),
+            quiescent_descendants_of: None,
         })
         .await
         .unwrap();
@@ -847,14 +853,13 @@ async fn direct_turn_claims_respect_the_same_tree_capacity() {
 async fn assert_tree_capacity(direct: bool) {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let saturated_root = SessionId::new("session-a-saturated-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(saturated_root.as_str())),
             message: mailbox_message("message-saturated-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -872,6 +877,7 @@ async fn assert_tree_capacity(direct: bool) {
         let child_id = SessionId::new(format!("session-a-running-child-{index}")).unwrap();
         kernel
             .spawn_agent(SpawnAgentRequest {
+                cancellation: CancellationToken::new(),
                 caller: root_caller.clone(),
                 child_session_id: child_id,
                 task_name: format!("running-child-{index}"),
@@ -893,6 +899,7 @@ async fn assert_tree_capacity(direct: bool) {
     }
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: root_caller,
             child_session_id: SessionId::new("session-a-blocked-child").unwrap(),
             task_name: "blocked-child".into(),
@@ -930,8 +937,7 @@ async fn assert_tree_capacity(direct: bool) {
         .submit_message(SubmitMessage {
             session: fresh(header(independent.as_str())),
             message: mailbox_message("message-independent"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -971,7 +977,7 @@ async fn assert_tree_capacity(direct: bool) {
 async fn one_ready_root_store_failure_does_not_terminate_or_hide_later_work() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     for (session, message) in [
         ("session-a-failing-root", "message-failing-root"),
         ("session-z-healthy-root", "message-healthy-root"),
@@ -980,8 +986,7 @@ async fn one_ready_root_store_failure_does_not_terminate_or_hide_later_work() {
             .submit_message(SubmitMessage {
                 session: fresh(header(session)),
                 message: mailbox_message(message),
-                target: MessageTarget::NextTurn,
-                wake_required: true,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             })
             .await
             .unwrap();
@@ -1022,14 +1027,13 @@ async fn a_corrupt_ready_index_is_not_silently_reported_as_no_work() {
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-corrupt-ready-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-corrupt-ready-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -1057,7 +1061,7 @@ async fn a_corrupt_ready_index_is_not_silently_reported_as_no_work() {
     kernel.shutdown(worker).await.unwrap();
 }
 
-async fn active_parent_and_child(
+pub(super) async fn active_parent_and_child(
     kernel: &SessionKernel,
 ) -> (
     rsi_agent_turn_protocol::TurnClaim,
@@ -1068,8 +1072,7 @@ async fn active_parent_and_child(
         .submit_message(SubmitMessage {
             session: fresh(header("session-review-parent")),
             message: mailbox_message("message-review-parent"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -1081,6 +1084,7 @@ async fn active_parent_and_child(
         .unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: kernel.agent_caller(&parent).unwrap(),
             child_session_id: SessionId::new("session-review-child").unwrap(),
             task_name: "child".into(),
@@ -1102,7 +1106,7 @@ async fn active_parent_and_child(
 async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let (parent, child, _lease) = active_parent_and_child(&kernel).await;
     let waiter = tokio::spawn({
         let kernel = kernel.clone();
@@ -1133,6 +1137,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     .expect("parent must durably park");
     kernel
         .send_agent_message(SendAgentMessage {
+            cancellation: CancellationToken::new(),
             caller: kernel.agent_caller(&child).unwrap(),
             target_session_id: parent.session_id().clone(),
             message_id: MessageId::new("message-review-inbox").unwrap(),
@@ -1168,7 +1173,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
 async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_activation() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let (parent, child, _lease) = active_parent_and_child(&kernel).await;
     kernel
         .finish_activation_turn(&parent, &TurnOutcome::Completed)
@@ -1192,6 +1197,7 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
         .unwrap();
     kernel
         .send_agent_message(SendAgentMessage {
+            cancellation: CancellationToken::new(),
             caller: kernel.agent_caller(&child).unwrap(),
             target_session_id: direct.session_id().clone(),
             message_id: MessageId::new("message-review-held").unwrap(),
@@ -1222,6 +1228,77 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
 }
 
 #[tokio::test(start_paused = true)]
+async fn later_ready_page_failures_back_off_even_when_other_claims_wake_the_scheduler() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory));
+    let kernel =
+        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let workers = kernel.start_workers();
+    for name in ["ready-a", "ready-b"] {
+        kernel
+            .submit_message(SubmitMessage {
+                session: fresh(header(name)),
+                message: mailbox_message(name),
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            })
+            .await
+            .unwrap();
+    }
+    store.ready_page_limit.store(1, Ordering::Release);
+    store.fail_later_ready_pages.store(true, Ordering::Release);
+    let _lease = kernel.register("ready-worker".into()).unwrap();
+    let first = kernel
+        .claim("ready-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    let pending = tokio::spawn({
+        let kernel = kernel.clone();
+        let cancellation = cancellation.clone();
+        async move { kernel.claim("ready-worker", cancellation).await }
+    });
+    while store.later_ready_page_reads.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    for index in 0..100 {
+        // Executor registrations wake claim_changed independently of Store reads.
+        let temporary = kernel
+            .register(format!("ready-notification-{index}"))
+            .unwrap();
+        drop(temporary);
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store.later_ready_page_reads.load(Ordering::Acquire),
+        1,
+        "notifications bypassed ready enumeration backoff"
+    );
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(store.later_ready_page_reads.load(Ordering::Acquire), 1);
+    store.fail_later_ready_pages.store(false, Ordering::Release);
+    let second = tokio::time::timeout(std::time::Duration::from_secs(6), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.session_id().as_str(), "ready-b");
+    kernel
+        .finish_activation_turn(&first, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel
+        .finish_activation_turn(&second, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn transient_ready_root_enumeration_failure_keeps_the_executor_registered() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
@@ -1229,13 +1306,12 @@ async fn transient_ready_root_enumeration_failure_keeps_the_executor_registered(
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header("session-root-retry")),
             message: mailbox_message("message-root-retry"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -1250,6 +1326,14 @@ async fn transient_ready_root_enumeration_failure_keeps_the_executor_registered(
     .expect("a transient enumeration error must not terminate claim admission")
     .unwrap();
     assert_eq!(claim.session_id().as_str(), "session-root-retry");
+    assert_eq!(kernel.ready_health().failures, 1);
+    assert!(
+        kernel
+            .ready_health()
+            .last_error
+            .unwrap()
+            .contains("transient ready-root scan failure")
+    );
     kernel.shutdown(worker).await.unwrap();
 }
 
@@ -1263,7 +1347,7 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
             SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
                 .await
                 .unwrap();
-        let worker = kernel.start_write_behind();
+        let worker = kernel.start_workers();
         let (parent, _child, _lease) = active_parent_and_child(&kernel).await;
         store.pause_second_next_descendant_snapshot();
         let cancellation = CancellationToken::new();
@@ -1282,6 +1366,7 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
         for index in 0..2 {
             kernel
                 .spawn_agent(SpawnAgentRequest {
+                    cancellation: CancellationToken::new(),
                     caller: kernel.agent_caller(&parent).unwrap(),
                     child_session_id: SessionId::new(format!("session-capacity-extra-{index}"))
                         .unwrap(),

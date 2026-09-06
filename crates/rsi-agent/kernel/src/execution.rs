@@ -101,6 +101,26 @@ impl TurnFinalization for SessionKernel {
 
 #[async_trait]
 impl TurnExecution for SessionKernel {
+    async fn park_human_wait(
+        &self,
+        claim: &TurnClaim,
+        executor: rsi_tools_protocol::ToolLaneParkingAuthority,
+    ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
+        self.park_human(claim, executor).await
+    }
+    fn elapsed_budget(
+        &self,
+        claim: &TurnClaim,
+    ) -> TurnResult<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
+        let state = lock_state(&self.inner);
+        let turn = self.validate_claim(&state, claim)?;
+        Ok(Arc::new(elapsed::Watch {
+            elapsed: Arc::clone(&turn.elapsed),
+            clock: Arc::clone(&self.inner.clock),
+            accepted: turn.accepted_at_ms,
+            limit: claim.header().settings().turn_budget().maximum_elapsed_ms(),
+        }))
+    }
     fn register(&self, executor_id: String) -> TurnResult<ExecutorLease> {
         validate_identifier("executor", &executor_id)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
@@ -159,20 +179,28 @@ impl TurnExecution for SessionKernel {
                     if !claimable {
                         continue;
                     }
-                    let root = agent_root_and_path(&state.sessions[&session_id].header).0;
-                    state.tree_lanes.retain(|_, pool| pool.strong_count() != 0);
-                    let pool = state
-                        .tree_lanes
-                        .get(&root)
-                        .and_then(Weak::upgrade)
-                        .unwrap_or_else(|| {
-                            let pool = Arc::new(Semaphore::new(MAXIMUM_RUNNING_AGENT_TREE_NODES));
-                            state.tree_lanes.insert(root, Arc::downgrade(&pool));
-                            pool
-                        });
-                    let Ok(permit) = Arc::clone(&pool).try_acquire_owned() else {
-                        enqueue(&mut state, session_id, turn_id);
-                        continue;
+                    let prepared_lane = state
+                        .sessions
+                        .get_mut(&session_id)
+                        .unwrap()
+                        .turns
+                        .get_mut(&turn_id)
+                        .unwrap()
+                        .prepared_lane
+                        .take();
+                    let tree_lane = if let Some(lane) = prepared_lane {
+                        lane
+                    } else {
+                        let root = agent_root_and_path(&state.sessions[&session_id].header).0;
+                        let pool = ready::tree_pool(&mut state, &root);
+                        let Ok(permit) = Arc::clone(&pool).try_acquire_owned() else {
+                            enqueue(&mut state, session_id, turn_id);
+                            continue;
+                        };
+                        Arc::new(TreeClaimLane {
+                            pool,
+                            permit: Mutex::new(Some(permit)),
+                        })
                     };
                     state.next_claim = state
                         .next_claim
@@ -191,14 +219,12 @@ impl TurnExecution for SessionKernel {
                     let accepted_at_ms = turn.accepted_at_ms;
                     let accepted_seq = turn.accepted_seq;
                     turn.claim = Some(ClaimOwner {
+                        mutations: Arc::new(mutation::ClaimMutationGate::default()),
                         executor: executor_id.into(),
                         registration: registration_id,
                         claim: claim_id,
                         live_seq,
-                        tree_lane: Arc::new(TreeClaimLane {
-                            pool,
-                            permit: Mutex::new(Some(permit)),
-                        }),
+                        tree_lane,
                     });
                     return Ok(Some(self.inner.claim_issuer.issue(
                         executor_id.into(),
@@ -215,9 +241,7 @@ impl TurnExecution for SessionKernel {
                     return Ok(None);
                 }
             }
-            if self.activate_one_ready_message().await? {
-                continue;
-            }
+            self.activate_one_ready_message(&cancellation)?;
             tokio::select! {
                 () = claim_changed => {}
                 () = tokio::time::sleep(READY_SCHEDULER_FALLBACK_INTERVAL) => {}
@@ -347,7 +371,7 @@ impl TurnExecution for SessionKernel {
                     .collect::<Vec<_>>(),
             )
             .await
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+            .map_err(turn_workspace_error)?;
         let (background, invocations, next_context) = workspace_context_bodies(
             claim.turn_id(),
             &next_step,
@@ -450,7 +474,7 @@ impl TurnExecution for SessionKernel {
                     controls,
                 }],
                 required_active_activations: Vec::new(),
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await
             .map_err(turn_store_error)?;
@@ -478,7 +502,7 @@ impl TurnExecution for SessionKernel {
                 .seq();
             session.flush_status.send_replace(FlushStatus {
                 durable_seq: session.durable_seq,
-                permanent_error: None,
+                permanent_error: session.permanent_flush_error.clone(),
             });
             publish_live_watermarks(session);
         }
@@ -504,7 +528,7 @@ impl TurnExecution for SessionKernel {
             .workspace_context
             .snapshot(&header, &[])
             .await
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+            .map_err(turn_workspace_error)?;
         if !snapshot.complete {
             return Ok(0);
         }
@@ -847,6 +871,22 @@ impl TurnExecution for SessionKernel {
                 "Fact publication batch is empty or too large".into(),
             ));
         }
+        let _terminal_drain = if bodies
+            .iter()
+            .any(|body| matches!(body, SessionFactBody::TurnTerminal { .. }))
+        {
+            {
+                let state = lock_state(&self.inner);
+                if self.validate_claim(&state, claim)?.activation_id.is_some() {
+                    return Err(TurnError::Invalid(
+                        "activation terminal requires finish_activation_turn".into(),
+                    ));
+                }
+            }
+            Some(self.drain_agent_mutations(claim).await?)
+        } else {
+            None
+        };
         let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
         loop {
             let process_capacity_changed = self.inner.process_pending_changed.notified();
@@ -916,8 +956,7 @@ impl TurnExecution for SessionKernel {
             .turns
             .get_mut(claim.turn_id())
             .expect("validated claim turn exists");
-        if turn.terminal.is_none() {
-            turn.claim = None;
+        if super::turn_state::retire_claim(turn) {
             enqueue(
                 &mut state,
                 claim.session_id().clone(),
@@ -941,24 +980,27 @@ pub(super) fn try_publish_once(
     claim: &TurnClaim,
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<PublishAdmission> {
-    let mut state = lock_state(&kernel.inner);
-    kernel.validate_claim(&state, claim)?;
-    if !state.accepting {
-        return Err(TurnError::ShuttingDown);
-    }
-    let session = state
-        .sessions
-        .get_mut(claim.session_id())
-        .expect("validated claim session exists");
-    if let Some(error) = &session.permanent_flush_error {
-        return Err(TurnError::Flush(error.clone()));
-    }
-    let original = session
-        .turns
-        .get(claim.turn_id())
-        .expect("validated claim turn exists");
-    let mut staged = clone_turn_control(original);
-    let mut staged_workspace_context = session.workspace_context.clone();
+    let (original, header, base_seq, mut staged_workspace_context) = {
+        let state = lock_state(&kernel.inner);
+        let original = kernel.validate_claim(&state, claim)?;
+        if !state.accepting {
+            return Err(TurnError::ShuttingDown);
+        }
+        let session = &state.sessions[claim.session_id()];
+        if let Some(error) = &session.permanent_flush_error {
+            return Err(TurnError::Flush(error.clone()));
+        }
+        for body in &bodies {
+            validate_durable_intent_fence(session, body)?;
+        }
+        (
+            clone_turn_control(original),
+            Arc::clone(&session.header),
+            session.live_seq().map_err(turn_kernel_error)?,
+            session.workspace_context.clone(),
+        )
+    };
+    let mut staged = clone_turn_control(&original);
     let mut normalized = Vec::with_capacity(bodies.len());
     for body in bodies {
         if body.turn_id() != claim.turn_id() {
@@ -966,13 +1008,12 @@ pub(super) fn try_publish_once(
                 "executor Fact changed the claimed turn identity".into(),
             ));
         }
-        validate_durable_intent_fence(session, &body)?;
         let body = canonicalize_terminal(body, staged.cancel_requested);
         apply_executor_body(&mut staged, &body)?;
         apply_workspace_context_state(&mut staged_workspace_context, &body);
         normalized.push(body);
     }
-    let mut next_seq = session.live_seq().map_err(turn_kernel_error)?;
+    let mut next_seq = base_seq;
     let mut facts = Vec::with_capacity(normalized.len());
     let mut added_bytes = 0_usize;
     for body in normalized {
@@ -987,11 +1028,28 @@ pub(super) fn try_publish_once(
         facts.push(fact);
     }
     staged.budget_usage = enforce_turn_budget(
-        session.header.settings().turn_budget(),
-        original,
+        header.settings().turn_budget(),
+        &original,
         &facts,
         kernel.inner.clock.now_ms().max(1),
     )?;
+    let mut state = lock_state(&kernel.inner);
+    kernel.validate_claim(&state, claim)?;
+    if !state.accepting {
+        return Err(TurnError::ShuttingDown);
+    }
+    let session = state
+        .sessions
+        .get_mut(claim.session_id())
+        .expect("validated claim session exists");
+    if let Some(error) = &session.permanent_flush_error {
+        return Err(TurnError::Flush(error.clone()));
+    }
+    if session.live_seq().map_err(turn_kernel_error)? != base_seq {
+        return Err(TurnError::Invariant(
+            "publication tail changed while Session admission was held".into(),
+        ));
+    }
     let projected_pending_bytes = session
         .pending_bytes
         .checked_add(added_bytes)
@@ -1038,9 +1096,7 @@ pub(super) fn try_publish_once(
             .checked_add(fact.encoded_len())
             .expect("the complete batch pending-byte projection was validated");
         session.pending.push_back(fact.clone());
-        if !is_terminal_fact(fact) {
-            publish_live_watermarks(session);
-        }
     }
+    publish_live_watermarks(session);
     Ok(PublishAdmission::Complete(PublishAttempt::Published(facts)))
 }

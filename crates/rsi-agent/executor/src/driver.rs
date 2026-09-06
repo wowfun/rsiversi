@@ -27,14 +27,22 @@ impl Driver {
         };
         let claim_stop = stop.child_token();
         let deadline_fired = Arc::new(AtomicBool::new(false));
-        let elapsed = unix_now_ms().saturating_sub(claim.accepted_at_ms());
+        let elapsed_budget = match self.turns.elapsed_budget(&claim) {
+            Ok(budget) => budget,
+            Err(error) => {
+                self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
+                    .await;
+                let _ignored = self.turns.release(&claim);
+                return;
+            }
+        };
         let limit = claim.header().settings().turn_budget().maximum_elapsed_ms();
-        let remaining = limit.saturating_sub(elapsed);
         let deadline_task = tokio::spawn({
+            let elapsed_budget = Arc::clone(&elapsed_budget);
             let deadline_fired = Arc::clone(&deadline_fired);
             let claim_stop = claim_stop.clone();
             async move {
-                tokio::time::sleep(Duration::from_millis(remaining)).await;
+                elapsed_budget.exhausted().await;
                 deadline_fired.store(true, Ordering::Release);
                 claim_stop.cancel();
             }
@@ -63,9 +71,7 @@ impl Driver {
         .await;
         deadline_task.abort();
         if elapsed_deadline_wins(deadline_fired.load(Ordering::Acquire), &drive) {
-            let consumed = unix_now_ms()
-                .saturating_sub(claim.accepted_at_ms())
-                .max(limit);
+            let consumed = elapsed_budget.consumed_ms().max(limit);
             if self
                 .finish_budget(
                     &claim,
@@ -820,7 +826,7 @@ impl Driver {
                 composition,
                 call,
                 scheduling,
-                turn_policy.require_approval,
+                turn_policy,
                 cancellation,
                 stop,
             )
@@ -885,7 +891,7 @@ impl Driver {
                     composition,
                     call,
                     ToolScheduling::ParallelSafe,
-                    turn_policy.require_approval,
+                    turn_policy,
                     cancellation,
                     stop,
                 )
@@ -955,21 +961,11 @@ impl Driver {
         composition: &AgentCompositionPin,
         call: ModelToolCall,
         scheduling: ToolScheduling,
-        require_approval: bool,
+        turn_policy: ResolvedTurnPolicy,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<PendingToolEffect, DriveFailure> {
         let (effect_id, arguments) = prepare_tool_effect(&call).map_err(|failure| *failure)?;
-        let approval = self
-            .request_tool_approval(
-                claim,
-                &effect_id,
-                &call.name,
-                require_approval,
-                cancellation,
-                stop,
-            )
-            .await?;
         let name = call.name;
         let prepared = composition
             .tools()
@@ -983,6 +979,28 @@ impl Driver {
             )
             .map_err(|error| tool_failure(&error))?;
         let identity = prepared.identity().clone();
+        let approval = if turn_policy.require_approval {
+            self.request_tool_approval(
+                claim,
+                &effect_id,
+                &name,
+                rsi_approval_protocol::ApprovalReview {
+                    arguments: arguments.clone(),
+                    cwd: claim.header().canonical_cwd().to_owned(),
+                    sandbox: serde_json::to_value(turn_policy.sandbox)
+                        .map_err(|error| fatal(error.to_string()))?
+                        .as_str()
+                        .expect("sandbox enum is a string")
+                        .to_owned(),
+                    request_sha256: identity.request_sha256().to_owned(),
+                },
+                cancellation,
+                stop,
+            )
+            .await?
+        } else {
+            None
+        };
         Ok(PendingToolEffect {
             effect_id,
             identity,
@@ -1286,36 +1304,47 @@ impl Driver {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Exact prepared review and both cancellation owners remain explicit.
     pub(super) async fn request_tool_approval(
         &self,
         claim: &TurnClaim,
         effect_id: &EffectId,
         tool_name: &str,
-        required: bool,
+        review: rsi_approval_protocol::ApprovalReview,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<Option<rsi_approval_protocol::ApprovalOutcome>, DriveFailure> {
-        if !required {
-            return Ok(None);
-        }
         let request = ApprovalRequest {
+            review: Some(review),
             subject: ApprovalSubject::new(
                 claim.session_id().as_str(),
                 claim.turn_id().as_str(),
                 effect_id.as_str(),
             )
             .map_err(|error| failed("approval.invalid_subject", error.to_string()))?,
-            id: effect_id.as_str().to_owned(),
+            id: format!("{}:{}", claim.turn_id().as_str(), effect_id.as_str()),
             action: format!("run tool {tool_name}"),
             reason: format!(
                 "Agent turn {} requested this Tool effect",
                 claim.turn_id().as_str()
             ),
         };
-        let outcome = tokio::select! {
-            outcome = self.approval.ask(request, cancellation.clone()) => outcome,
-            () = stop.cancelled() => return Err(DriveFailure::Stopped),
-        };
+        let parking = EXECUTOR_LANE_PARKING
+            .try_with(Clone::clone)
+            .map_err(|error| fatal(error.to_string()))?;
+        let waiting = self
+            .turns
+            .park_human_wait(claim, parking)
+            .await
+            .map_err(execution_support::turn_failure)?;
+        let combined = combine_cancellation(cancellation, stop);
+        let outcome = self.approval.ask(request, combined.token()).await;
+        let resumed = waiting.resume(combined.token()).await;
+        combined.cancel();
+        if stop.is_cancelled() {
+            return Err(DriveFailure::Stopped);
+        }
+        resumed.map_err(execution_support::turn_failure)?;
         match outcome {
             Ok(outcome) if outcome.decision == ApprovalDecision::AllowOnce => Ok(Some(outcome)),
             Ok(_) => Err(failed(

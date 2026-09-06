@@ -28,7 +28,7 @@ use rsi_agent_store_protocol::{
     AtomicSessionAppend, MAXIMUM_CONTEXT_CHECKPOINT_BYTES, MAXIMUM_SESSIONS_PER_READ,
     MAXIMUM_STORE_BATCH_BYTES, MAXIMUM_STORE_BATCH_FACTS, SessionStore, SessionStoreContract,
     StoreActivationPhase, StoreAgentChild, StoreAgentMessage, StoreAgentMessageState,
-    StoreDescendantControlSnapshot, StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
+    StoreAgentSubtreeSnapshot, StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
 };
 use rsi_agent_turn_protocol::{
     AgentCallerAuthority, AgentListScope, AgentNode, AgentNodeState, AgentWaitResult, CancelResult,
@@ -41,6 +41,7 @@ use rsi_agent_turn_protocol::{
     TurnFinalizationError, TurnFinalizationReport, TurnFinalizer, TurnFinalizerLease,
     TurnObservation, TurnService, TurnServiceContract, TurnUpdate,
 };
+use rsi_agent_turn_protocol::{SettlementHealth, SettlementSessionError};
 use rsi_agent_workspace_context::{
     WorkspaceContext, WorkspaceContextContract, WorkspaceContextSnapshot,
 };
@@ -49,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -59,6 +60,7 @@ use tokio::sync::{
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// Maximum nonterminal turns retained by one session.
 pub const MAXIMUM_LIVE_TURNS: usize = 256;
@@ -196,6 +198,7 @@ impl fmt::Debug for SessionKernel {
 }
 
 struct KernelInner {
+    tasks: TaskTracker,
     store: Arc<dyn SessionStore>,
     composition: Arc<dyn AgentComposition>,
     workspace_context: Arc<dyn WorkspaceContext>,
@@ -204,10 +207,12 @@ struct KernelInner {
     clock: Arc<dyn Clock>,
     state: Mutex<KernelState>,
     submission_admission: SubmissionAdmission,
-    ready_activation: AsyncMutex<Option<SessionId>>,
+    ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
     flush_requested: Notify,
     settlement_requested: Notify,
+    settlement_health: Mutex<SettlementHealth>,
+    stop_settlement: CancellationToken,
     stop_worker: CancellationToken,
     limits: KernelLimits,
     process_pending_bytes: AtomicUsize,
@@ -232,6 +237,24 @@ impl SubmissionAdmission {
     }
 
     async fn acquire(&self, session_id: &SessionId) -> TurnResult<SubmissionAdmissionLease> {
+        self.acquire_until(session_id, &self.closed).await
+    }
+
+    // Only an already admitted mutation may enter after producer shutdown.
+    async fn acquire_retained(
+        &self,
+        session_id: &SessionId,
+        _proof: &mutation::AgentMutationLease,
+    ) -> TurnResult<SubmissionAdmissionLease> {
+        self.acquire_until(session_id, &CancellationToken::new())
+            .await
+    }
+
+    async fn acquire_until(
+        &self,
+        session_id: &SessionId,
+        closed: &CancellationToken,
+    ) -> TurnResult<SubmissionAdmissionLease> {
         let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
         let session = {
             let mut sessions = self
@@ -249,14 +272,14 @@ impl SubmissionAdmission {
         };
         let guard = tokio::select! {
             biased;
-            () = self.closed.cancelled() => return Err(TurnError::ShuttingDown),
+            () = closed.cancelled() => return Err(TurnError::ShuttingDown),
             result = tokio::time::timeout_at(deadline, session.lock_owned()) => {
                 result.map_err(|_| TurnError::Capacity)?
             }
         };
         let slot = tokio::select! {
             biased;
-            () = self.closed.cancelled() => return Err(TurnError::ShuttingDown),
+            () = closed.cancelled() => return Err(TurnError::ShuttingDown),
             result = tokio::time::timeout_at(deadline, Arc::clone(&self.slots).acquire_owned()) => {
                 match result {
                     Ok(Ok(slot)) => slot,
@@ -285,7 +308,6 @@ impl SubmissionAdmission {
 
     fn close(&self) {
         self.closed.cancel();
-        self.slots.close();
     }
 }
 
@@ -538,6 +560,7 @@ struct LiveWatermarks {
 }
 
 struct TurnControl {
+    elapsed: Arc<elapsed::ElapsedState>,
     accepted_at_ms: u64,
     accepted_seq: u64,
     activation_id: Option<rsi_agent_session_protocol::ActivationId>,
@@ -547,6 +570,7 @@ struct TurnControl {
     cancel_requested: bool,
     cancellation: CancellationToken,
     claim: Option<ClaimOwner>,
+    prepared_lane: Option<Arc<TreeClaimLane>>,
     effects: BTreeMap<EffectId, ActiveEffect>,
     budget_usage: BudgetUsage,
     budget_exhausted: Option<(BudgetDimension, u64, u64)>,
@@ -554,6 +578,7 @@ struct TurnControl {
 
 #[derive(Clone)]
 struct DurableMessageEntry {
+    delivery: rsi_agent_session_protocol::MessageDelivery,
     message: AgentMessage,
     encoded_message_bytes: usize,
     root_session_id: SessionId,
@@ -585,6 +610,7 @@ struct ClaimOwner {
     registration: u64,
     claim: u64,
     live_seq: u64,
+    mutations: Arc<mutation::ClaimMutationGate>,
     tree_lane: Arc<TreeClaimLane>,
 }
 
@@ -615,6 +641,7 @@ enum ActiveEffect {
 impl TurnControl {
     fn new(accepted_at_ms: u64, accepted_seq: u64) -> Self {
         Self {
+            elapsed: Arc::new(elapsed::ElapsedState::default()),
             accepted_at_ms,
             accepted_seq,
             activation_id: None,
@@ -624,6 +651,7 @@ impl TurnControl {
             cancel_requested: false,
             cancellation: CancellationToken::new(),
             claim: None,
+            prepared_lane: None,
             effects: BTreeMap::new(),
             budget_usage: BudgetUsage::default(),
             budget_exhausted: None,
@@ -724,7 +752,7 @@ fn apply_committed_flush(
     session.retry_not_before = None;
     let _previous = session.flush_status.send_replace(FlushStatus {
         durable_seq: commit.durable_seq,
-        permanent_error: None,
+        permanent_error: session.permanent_flush_error.clone(),
     });
     publish_live_watermarks(session);
     for cancellation in committed_cancellations {
@@ -749,7 +777,9 @@ fn apply_committed_flush(
 }
 
 mod admission;
+mod elapsed;
 mod execution;
+mod human_wait;
 mod lifecycle;
 mod observation;
 mod recovery;
@@ -760,12 +790,11 @@ use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path,
     apply_workspace_context_state, bounded_step_message_prefix, completion_message,
     completion_message_id, context_checkpoints_enabled, control_tail, descendant_session_ids,
-    durable_agent_node_state, durable_observation_next, entered_message_source,
-    list_agent_descendants, list_direct_agent_children, message_receipt, observation_next,
-    observe_agent_wait_change, read_controls_bounded, read_facts_bounded,
-    read_fork_page_from_header, read_header_bounded, read_turn_boundary_bounded,
-    read_turn_facts_bounded, ready_sessions_for_root, scan_durable_messages,
-    workspace_context_bodies,
+    durable_observation_next, entered_message_source, list_agent_descendants,
+    list_direct_agent_children, message_receipt, observation_next, observe_agent_wait_change,
+    read_controls_bounded, read_facts_bounded, read_fork_page_from_header, read_header_bounded,
+    read_turn_boundary_bounded, read_turn_facts_bounded, read_validated_header_bounded,
+    scan_durable_messages, workspace_context_bodies,
 };
 use recovery::{
     is_terminal_fact, load_control_state, read_stored_outcome, repair_unfinished_session,
@@ -776,7 +805,7 @@ use turn_state::{
     clone_turn_control, deregister_executor, enforce_turn_budget, enqueue, kernel_turn_error,
     lock_state, next_fact, publish_live_watermarks, push_pending, reserve_atomic_capacity,
     submission_conflict, turn_composition_error, turn_kernel_error, turn_not_found,
-    turn_store_error,
+    turn_store_error, turn_workspace_error,
 };
 
 struct ObservationState {
@@ -909,15 +938,14 @@ impl PluginFactory for KernelFactory {
         )
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
-        let worker = kernel.start_write_behind();
+        let worker = kernel.start_workers();
         let turns: Arc<dyn TurnService> = Arc::new(kernel.clone());
         let execution: Arc<dyn TurnExecution> = Arc::new(kernel.clone());
         let finalization: Arc<dyn TurnFinalization> = Arc::new(kernel.clone());
         let turns_supply = match plan.context().provide_local::<TurnServiceContract>(turns) {
             Ok(supply) => supply,
             Err(error) => {
-                kernel.inner.stop_worker.cancel();
-                let _ignored = worker.await;
+                let _ignored = kernel.shutdown(worker).await;
                 return Err(error);
             }
         };
@@ -928,8 +956,7 @@ impl PluginFactory for KernelFactory {
             Ok(supply) => supply,
             Err(error) => {
                 drop(turns_supply);
-                kernel.inner.stop_worker.cancel();
-                let _ignored = worker.await;
+                let _ignored = kernel.shutdown(worker).await;
                 return Err(error);
             }
         };
@@ -941,8 +968,7 @@ impl PluginFactory for KernelFactory {
             Err(error) => {
                 drop(execution_supply);
                 drop(turns_supply);
-                kernel.inner.stop_worker.cancel();
-                let _ignored = worker.await;
+                let _ignored = kernel.shutdown(worker).await;
                 return Err(error);
             }
         };
@@ -965,3 +991,25 @@ impl PluginFactory for KernelFactory {
 
 #[cfg(test)]
 mod tests;
+
+mod mutation;
+
+/// Owned handles for the independent flush and settlement workers.
+#[derive(Debug)]
+pub struct KernelWorkers {
+    flush: JoinHandle<()>,
+    settlement: JoinHandle<()>,
+}
+
+impl KernelWorkers {
+    /// Stops and joins the workers without a final flush, as on an abrupt stop.
+    /// Admitted commit tasks retain their ownership independently.
+    pub async fn abort(self) {
+        self.flush.abort();
+        self.settlement.abort();
+        let _ = self.flush.await;
+        let _ = self.settlement.await;
+    }
+}
+
+mod ready;

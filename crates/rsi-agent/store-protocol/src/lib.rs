@@ -6,21 +6,21 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    ActivationId, AgentControlRecord, AgentMessage, AgentMessageSource, ForkTurnSelection,
-    InputMessageSource, MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_FACTS_PER_READ,
-    MAXIMUM_PENDING_AGENT_MESSAGES, MessageDiscardReason, MessageId, MessageTarget, SessionFact,
-    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, validate_control_sequence,
-    validate_fact_sequence,
+    ActivationId, AgentControlRecord, AgentMessage, AgentMessageSource, AgentPath,
+    ForkTurnSelection, InputMessageSource, MAXIMUM_DURABLE_AGENT_TREE_NODES,
+    MAXIMUM_FACTS_PER_READ, MAXIMUM_PENDING_AGENT_MESSAGES, MessageDiscardReason, MessageId,
+    MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId, TurnId,
+    validate_control_sequence, validate_fact_sequence,
 };
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 11;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 12;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -335,10 +335,10 @@ impl AtomicSessionAppend {
 pub struct AtomicAgentCommit {
     /// One source/target pair plus at most one new child session.
     pub sessions: Vec<AtomicSessionAppend>,
-    /// Exact active activations which must still own their sessions.
+    /// Exact active activations which must own their sessions before applying appends.
     pub required_active_activations: Vec<AgentActivationGuard>,
-    /// Sessions which must have no active activation, open Turn, or waking message.
-    pub quiescent_sessions: Vec<SessionId>,
+    /// Root whose complete strict descendants must be quiescent after all appends, before commit.
+    pub quiescent_descendants_of: Option<SessionId>,
 }
 
 impl AtomicAgentCommit {
@@ -349,9 +349,7 @@ impl AtomicAgentCommit {
                 "atomic Agent commit must touch 1..=3 sessions".into(),
             ));
         }
-        if self.required_active_activations.len() > MAXIMUM_SESSIONS_PER_READ
-            || self.quiescent_sessions.len() > MAXIMUM_SESSIONS_PER_READ
-        {
+        if self.required_active_activations.len() > MAXIMUM_SESSIONS_PER_READ {
             return Err(StoreError::Invalid(
                 "atomic Agent guard set exceeds its bounded session count".into(),
             ));
@@ -361,14 +359,6 @@ impl AtomicAgentCommit {
             if !guarded.insert(&guard.session_id) {
                 return Err(StoreError::Invalid(
                     "atomic Agent commit repeats an activation guard session".into(),
-                ));
-            }
-        }
-        let mut quiescent = BTreeSet::new();
-        for session_id in &self.quiescent_sessions {
-            if !quiescent.insert(session_id) {
-                return Err(StoreError::Invalid(
-                    "atomic Agent commit repeats a quiescence guard session".into(),
                 ));
             }
         }
@@ -410,7 +400,8 @@ pub struct AgentActivationGuard {
 }
 
 /// Indexed lifecycle phase for the single active activation of one session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum StoreActivationPhase {
     /// Its Turn has not durably terminated.
     Running,
@@ -611,6 +602,12 @@ pub enum StoreAgentMessageState {
 /// One bounded mailbox entry projected by the Store-owned message index.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreAgentMessage {
+    /// Immutable ingress intent.
+    pub delivery: rsi_agent_session_protocol::MessageDelivery,
+    /// Original resolved steering Turn; retained after promotion for audit.
+    pub bound_turn_id: Option<TurnId>,
+    /// Original acceptance time used by promoted Human steering FIFO.
+    pub accepted_timestamp_ms: u64,
     /// Exact accepted message payload.
     pub message: AgentMessage,
     /// Exact compact JSON byte length computed at the Store-owned payload boundary.
@@ -628,8 +625,56 @@ pub struct StoreAgentMessage {
 }
 
 impl StoreAgentMessage {
+    /// Ensures a bound next-Step steer cannot be consumed by another Turn.
+    pub fn validate_claim_turn(&self, turn_id: &TurnId) -> Result<()> {
+        if self.target == MessageTarget::NextStep
+            && self
+                .bound_turn_id
+                .as_ref()
+                .is_some_and(|bound| bound != turn_id)
+        {
+            return Err(StoreError::Corrupt(
+                "steering claim differs from its bound Turn".into(),
+            ));
+        }
+        Ok(())
+    }
+    /// Whether this immutable ingress may be promoted when its activation ends.
+    pub fn permits_promotion(&self) -> bool {
+        matches!(self.message.source, AgentMessageSource::Completion { .. })
+            || self.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
+                && self.bound_turn_id.is_some()
+    }
+
+    /// Ready ordering on promotion; human steering preserves acceptance FIFO.
+    pub fn promotion_order(&self, timestamp_ms: u64, control_seq: u64) -> (u64, u64) {
+        if self.delivery == rsi_agent_session_protocol::MessageDelivery::Steer {
+            (self.accepted_timestamp_ms, self.accepted_control_seq)
+        } else {
+            (timestamp_ms, control_seq)
+        }
+    }
+
     /// Revalidates one indexed projection independently of its table encoding.
     pub fn validate(&self, durable_control_seq: u64) -> Result<()> {
+        use rsi_agent_session_protocol::MessageDelivery;
+        let accepted_target = match self.delivery {
+            MessageDelivery::NextStep => MessageTarget::NextStep,
+            MessageDelivery::Steer if self.bound_turn_id.is_some() => MessageTarget::NextStep,
+            MessageDelivery::NextTurn | MessageDelivery::Steer => MessageTarget::NextTurn,
+        };
+        self.delivery
+            .validate_route(&self.message, accepted_target, self.bound_turn_id.as_ref())
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if self.accepted_timestamp_ms == 0
+            || self.wake_required != (self.target == MessageTarget::NextTurn)
+            || self.target != accepted_target
+                && !(self.permits_promotion() && self.target == MessageTarget::NextTurn)
+        {
+            return Err(StoreError::Corrupt(
+                "mailbox ingress disagrees with current route".into(),
+            ));
+        }
         self.message
             .validate()
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
@@ -667,6 +712,90 @@ impl StoreAgentMessage {
     }
 }
 
+/// Pending-message routing metadata without message-body allocation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorePendingMessage {
+    /// Exact cancellation/retry identity.
+    pub message_id: MessageId,
+    /// Immutable caller intent.
+    pub delivery: rsi_agent_session_protocol::MessageDelivery,
+    /// Current resolved route.
+    pub target: MessageTarget,
+    /// Whether immutable source/intent allows next-Step promotion.
+    pub permits_promotion: bool,
+    /// Original immutable steering Turn binding.
+    pub bound_turn_id: Option<TurnId>,
+    /// Original durable acceptance cursor.
+    pub accepted_control_seq: u64,
+}
+
+/// One atomic bounded Session inspection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSessionInspection {
+    /// Validated immutable Header.
+    pub header: SessionHeader,
+    /// Exact durable Fact tail at this snapshot.
+    pub durable_fact_seq: u64,
+    /// Exact durable control tail at this snapshot.
+    pub durable_control_seq: u64,
+    /// Pending message metadata in original acceptance order.
+    pub pending: Vec<StorePendingMessage>,
+    /// Earliest accepted nonterminal Turn, when present.
+    pub active_turn_id: Option<TurnId>,
+    /// Current activation lifecycle phase.
+    pub activation_phase: Option<StoreActivationPhase>,
+    /// Descendant membership and activity from this same snapshot.
+    pub tree: StoreAgentSubtreeSnapshot,
+}
+
+impl StoreSessionInspection {
+    /// Revalidates cardinality, identity, and cursor consistency.
+    pub fn validate(&self) -> Result<()> {
+        self.header
+            .validate()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        self.tree.validate()?;
+        if self.tree.session.session_id != *self.header.session_id()
+            || self.tree.session.durable_control_seq != self.durable_control_seq
+            || self.active_turn_id.is_some() != self.tree.session.has_open_turn
+            || self.activation_phase.is_some() != self.tree.session.has_active_activation
+            || self.pending.len() > MAXIMUM_PENDING_AGENT_MESSAGES
+        {
+            return Err(StoreError::Corrupt(
+                "Session inspection identity or bounds disagree".into(),
+            ));
+        }
+        let mut previous = 0;
+        let mut ids = BTreeSet::new();
+        for entry in &self.pending {
+            use rsi_agent_session_protocol::MessageDelivery;
+            let route_valid = matches!(
+                (entry.delivery, entry.target, entry.bound_turn_id.is_some()),
+                (MessageDelivery::NextTurn, MessageTarget::NextTurn, false)
+                    | (MessageDelivery::NextStep, MessageTarget::NextStep, false)
+                    | (MessageDelivery::Steer, MessageTarget::NextTurn, _)
+                    | (MessageDelivery::Steer, MessageTarget::NextStep, true)
+            ) || (entry.permits_promotion
+                && entry.delivery == MessageDelivery::NextStep
+                && entry.target == MessageTarget::NextTurn
+                && entry.bound_turn_id.is_none());
+            if entry.accepted_control_seq <= previous
+                || entry.accepted_control_seq > self.durable_control_seq
+                || !ids.insert(&entry.message_id)
+                || !route_valid
+            {
+                return Err(StoreError::Corrupt(
+                    "Session inspection mailbox order disagrees".into(),
+                ));
+            }
+            previous = entry.accepted_control_seq;
+        }
+        Ok(())
+    }
+}
+
 /// Atomic bounded view of one session mailbox at one control watermark.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreAgentMailbox {
@@ -687,8 +816,8 @@ pub struct StoreAgentMailbox {
 pub struct StoreAgentMailboxSummary {
     /// Complete pending-message count at the Store snapshot.
     pub pending_count: usize,
-    /// Pending next-Step completion identities in acceptance order at the same snapshot.
-    pub pending_next_step_completion_message_ids: Vec<MessageId>,
+    /// Pending promotable next-Step identities in acceptance order at the same snapshot.
+    pub pending_promotable_message_ids: Vec<MessageId>,
     /// Exact durable control tail at the same Store snapshot.
     pub durable_control_seq: u64,
     /// Exact durable Fact tail at the same Store snapshot.
@@ -732,12 +861,12 @@ impl StoreAgentMailboxSummary {
     /// Revalidates the protocol-owned pending-message bound.
     pub fn validate(&self) -> Result<()> {
         let identities = self
-            .pending_next_step_completion_message_ids
+            .pending_promotable_message_ids
             .iter()
             .collect::<BTreeSet<_>>();
         if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
-            || self.pending_next_step_completion_message_ids.len() > self.pending_count
-            || identities.len() != self.pending_next_step_completion_message_ids.len()
+            || self.pending_promotable_message_ids.len() > self.pending_count
+            || identities.len() != self.pending_promotable_message_ids.len()
         {
             return Err(StoreError::Corrupt(
                 "mailbox summary exceeds its bound or repeats a next-Step identity".into(),
@@ -868,38 +997,85 @@ impl StoreAgentChildPage {
     }
 }
 
-/// One descendant's durable Agent-control watermark captured in a subtree snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreDescendantControlWatermark {
-    /// Exact descendant Session identity.
+/// Durable activity flags and watermark for one Session in a single read snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreAgentSessionStatus {
+    /// Exact Session identity.
     pub session_id: SessionId,
-    /// Exact durable Agent-control tail captured with subtree membership.
+    /// Durable control tail.
     pub durable_control_seq: u64,
+    /// An accepted Turn has no terminal Fact.
+    pub has_open_turn: bool,
+    /// An activation remains active, including parked or waiting phases.
+    pub has_active_activation: bool,
+    /// At least one message requires activation.
+    pub has_waking_message: bool,
 }
 
-/// Atomic bounded view of one Session's complete durable descendant set.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreDescendantControlSnapshot {
+/// Immutable descendant lineage with activity from the same snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreAgentDescendantStatus {
+    /// Durable Session activity.
+    pub status: StoreAgentSessionStatus,
+    /// Direct parent identity.
+    pub parent_session_id: SessionId,
+    /// Immutable Agent path.
+    pub path: AgentPath,
+    /// Immutable task name.
+    pub task_name: String,
+}
+
+/// Atomic bounded view of one Session and its complete strict descendants.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreAgentSubtreeSnapshot {
+    /// Root activity captured with descendant membership.
+    pub session: StoreAgentSessionStatus,
     /// Descendants in strict lexical Session order.
-    pub descendants: Vec<StoreDescendantControlWatermark>,
+    pub descendants: Vec<StoreAgentDescendantStatus>,
 }
 
-impl StoreDescendantControlSnapshot {
-    /// Revalidates the tree-size bound and strict lexical identity ordering.
+impl StoreAgentSubtreeSnapshot {
+    /// Checks tree size, strict identity ordering, and closed, acyclic lineage.
     pub fn validate(&self) -> Result<()> {
         if self.descendants.len() >= MAXIMUM_DURABLE_AGENT_TREE_NODES {
             return Err(StoreError::Corrupt(
-                "descendant control snapshot exceeds the durable tree bound".into(),
+                "Agent subtree exceeds its node bound".into(),
             ));
         }
         let mut previous = None;
+        let mut parents = BTreeMap::new();
         for descendant in &self.descendants {
-            if previous.is_some_and(|previous| previous >= &descendant.session_id) {
+            rsi_agent_session_protocol::validate_identifier(
+                "subagent task name",
+                &descendant.task_name,
+            )
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let id = &descendant.status.session_id;
+            if id == &self.session.session_id
+                || previous.is_some_and(|previous| previous >= id)
+                || descendant.path.depth() == 0
+            {
                 return Err(StoreError::Corrupt(
-                    "descendant control snapshot is not strictly ordered".into(),
+                    "Agent subtree has invalid identity ordering or lineage".into(),
                 ));
             }
-            previous = Some(&descendant.session_id);
+            previous = Some(id);
+            parents.insert(id, &descendant.parent_session_id);
+        }
+        for descendant in &self.descendants {
+            let mut next = &descendant.parent_session_id;
+            let mut seen = BTreeSet::from([&descendant.status.session_id]);
+            while next != &self.session.session_id {
+                if !seen.insert(next) {
+                    return Err(StoreError::Corrupt("Agent subtree contains a cycle".into()));
+                }
+                next = parents
+                    .get(next)
+                    .ok_or_else(|| StoreError::Corrupt("Agent subtree parent is missing".into()))?;
+            }
         }
         Ok(())
     }
@@ -1408,7 +1584,9 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support Agent-control commits".into(),
         ))
     }
-    /// Reads the immutable header or returns not found.
+    /// Validates one session's mechanical durable invariants.
+    async fn validate_session(&self, session_id: &SessionId) -> Result<()>;
+    /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
     /// Reads at most `limit` contiguous Facts after one cursor.
     async fn read_facts(
@@ -1505,6 +1683,13 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support durable ready messages".into(),
         ))
     }
+    /// Reads one atomic Session and subtree inspection without message bodies.
+    async fn inspect_session(&self, session_id: &SessionId) -> Result<StoreSessionInspection> {
+        let _ = session_id;
+        Err(StoreError::Invalid(
+            "this Store does not support Session inspection".into(),
+        ))
+    }
     /// Reads the complete bounded pending mailbox and one optional message status atomically.
     async fn read_agent_mailbox(
         &self,
@@ -1562,10 +1747,10 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Atomically snapshots complete descendant membership and control watermarks.
-    async fn read_descendant_control_snapshot(
+    async fn read_agent_subtree_snapshot(
         &self,
         parent_session_id: &SessionId,
-    ) -> Result<StoreDescendantControlSnapshot> {
+    ) -> Result<StoreAgentSubtreeSnapshot> {
         let _ = parent_session_id;
         Err(StoreError::Invalid(
             "this Agent Store does not support descendant control snapshots".into(),
@@ -1724,9 +1909,7 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsi_agent_session_protocol::{
-        AgentControlRecordBody, AgentMessageContent, AgentMessageSource, MessageOptions,
-    };
+    use rsi_agent_session_protocol::{AgentMessageContent, AgentMessageSource, MessageOptions};
 
     fn cancellation_fact(sequence: u64) -> SessionFact {
         SessionFact::new(
@@ -1789,7 +1972,7 @@ mod tests {
                 AgentControlRecord::new(
                     sequence,
                     sequence,
-                    AgentControlRecordBody::MessageAccepted {
+                    rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
                         message: AgentMessage {
                             message_id: MessageId::new(format!("large-control-{sequence}"))
                                 .unwrap(),
@@ -1801,6 +1984,8 @@ mod tests {
                             options: MessageOptions::default(),
                         },
                         root_session_id: SessionId::new("large-control-root").unwrap(),
+                        delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                        bound_turn_id: None,
                         target: MessageTarget::NextStep,
                         wake_required: false,
                     },

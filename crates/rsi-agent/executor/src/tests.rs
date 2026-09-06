@@ -239,6 +239,19 @@ struct CheckpointFixture {
 
 #[async_trait]
 impl TurnExecution for CheckpointFixture {
+    async fn park_human_wait(
+        &self,
+        _claim: &TurnClaim,
+        _executor: rsi_tools_protocol::ToolLaneParkingAuthority,
+    ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
+        unreachable!("this fixture never waits for a human")
+    }
+    fn elapsed_budget(
+        &self,
+        _claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
+        unreachable!("this fixture never drives a claimed turn")
+    }
     fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
         unreachable!("checkpoint writer test does not register")
     }
@@ -385,6 +398,19 @@ impl TurnExecution for CheckpointFixture {
 
 #[async_trait]
 impl TurnExecution for FullBeforePublish {
+    async fn park_human_wait(
+        &self,
+        _claim: &TurnClaim,
+        _executor: rsi_tools_protocol::ToolLaneParkingAuthority,
+    ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
+        unreachable!("this fixture never waits for a human")
+    }
+    fn elapsed_budget(
+        &self,
+        _claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ElapsedBudget>> {
+        unreachable!("this fixture never drives a claimed turn")
+    }
     fn register(&self, _executor_id: String) -> rsi_agent_turn_protocol::Result<ExecutorLease> {
         unreachable!("terminal publication test does not register")
     }

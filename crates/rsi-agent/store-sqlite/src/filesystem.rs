@@ -128,15 +128,15 @@ pub(super) fn reject_uncheckpointed_wal(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn acquire_writer_lock(root: &Path) -> Result<File> {
+pub(super) fn acquire_writer_lock(root: &Path) -> Result<WriterLease> {
     open_writer_lock(root, true)
 }
 
-pub(super) fn acquire_existing_writer_lock(root: &Path) -> Result<File> {
+pub(super) fn acquire_existing_writer_lock(root: &Path) -> Result<WriterLease> {
     open_writer_lock(root, false)
 }
 
-pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<File> {
+pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<WriterLease> {
     let path = root.join(".writer.lock");
     reject_symlink_if_present(&path, "Store writer lock")?;
     let file = OpenOptions::new()
@@ -160,8 +160,9 @@ pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<File> {
         }
         return Err(io_error(error));
     }
-    validate_open_file(&path, &file, "Store writer lock")?;
-    Ok(file)
+    let lease = WriterLease(file);
+    validate_open_file(&path, &lease.0, "Store writer lock")?;
+    Ok(lease)
 }
 
 pub(super) fn validate_open_file(path: &Path, file: &File, label: &str) -> Result<()> {
@@ -248,4 +249,39 @@ pub(super) fn immutable_sqlite_uri(bytes: &[u8]) -> String {
     }
     uri.push_str("?immutable=1");
     uri
+}
+
+// The persistent inode is shared by every opener. Explicit unlock also releases
+// an inherited open-file description held briefly by a fork-before-exec child.
+pub(super) struct WriterLease(File);
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn last_owner_explicitly_unlocks_a_duplicated_open_file_description() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = acquire_writer_lock(root.path()).unwrap();
+        let inherited_description = lease.0.try_clone().unwrap();
+        assert!(matches!(
+            acquire_writer_lock(root.path()),
+            Err(StoreError::WriterLocked)
+        ));
+        drop(lease);
+        let next = acquire_writer_lock(root.path()).unwrap();
+        assert!(root.path().join(".writer.lock").is_file());
+        drop(inherited_description);
+        assert!(matches!(
+            acquire_writer_lock(root.path()),
+            Err(StoreError::WriterLocked)
+        ));
+        drop(next);
+    }
 }

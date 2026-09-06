@@ -10,6 +10,7 @@ pub(super) async fn repair_unfinished_session(
     if open.turns.is_empty() {
         return Ok(());
     }
+    store.validate_session(session_id).await?;
     let header = store.header(session_id).await?;
     let (durable_seq, turns, turn_order, _workspace_context) =
         load_control_state(store, None, session_id, header.settings().turn_budget()).await?;
@@ -135,6 +136,17 @@ pub(super) async fn repair_unfinished_session(
                 ));
             }
         }
+        let mailbox = store.read_agent_mailbox_summary(session_id).await?;
+        for message_id in mailbox.pending_promotable_message_ids {
+            next_control_seq = next_control_seq.checked_add(1).ok_or_else(|| {
+                KernelError::Invariant("recovery control sequence exhausted".into())
+            })?;
+            control_repairs.push(AgentControlRecord::new(
+                next_control_seq,
+                timestamp,
+                AgentControlRecordBody::MessagePromoted { message_id },
+            )?);
+        }
         next_control_seq = next_control_seq
             .checked_add(1)
             .ok_or_else(|| KernelError::Invariant("recovery control sequence exhausted".into()))?;
@@ -160,7 +172,7 @@ pub(super) async fn repair_unfinished_session(
                     session_id: session_id.clone(),
                     activation_id,
                 }],
-                quiescent_sessions: Vec::new(),
+                quiescent_descendants_of: None,
             })
             .await?;
     } else {

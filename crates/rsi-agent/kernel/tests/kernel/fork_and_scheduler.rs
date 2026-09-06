@@ -5,14 +5,13 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
     let store = Arc::new(MemoryStore::new());
     append_terminal_history(&store, "session-fork-page-root", 300).await;
     let kernel = kernel(store.clone()).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-fork-page-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: resume(&kernel, root_id.clone()).await,
             message: mailbox_message("message-fork-page-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -25,6 +24,7 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
     let child_id = SessionId::new("session-fork-page-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: kernel.agent_caller(&root_claim).unwrap(),
             child_session_id: child_id.clone(),
             task_name: "paged-child".into(),
@@ -85,14 +85,13 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
 async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let root_id = SessionId::new("session-a-busy-root").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-root-active"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -108,14 +107,14 @@ async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() 
         .submit_message(SubmitMessage {
             session: resume(&kernel, root_id.clone()).await,
             message: mailbox_message("message-root-queued"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
     let child_id = SessionId::new("session-z-idle-child").unwrap();
     kernel
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller,
             child_session_id: child_id.clone(),
             task_name: "idle-child".into(),
@@ -154,14 +153,13 @@ async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() 
 async fn concurrent_executor_lanes_contend_for_one_ready_message_without_failure() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-concurrent-ready-claim").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-concurrent-ready-claim"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -215,15 +213,14 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
     ] {
         let store = Arc::new(MemoryStore::new());
         let kernel = kernel(store.clone()).await;
-        let worker = kernel.start_write_behind();
+        let worker = kernel.start_workers();
         let root_id = SessionId::new(format!("session-cascade-root-{label}")).unwrap();
         let root_message = MessageId::new(format!("message-cascade-root-{label}")).unwrap();
         kernel
             .submit_message(SubmitMessage {
                 session: fresh(header(root_id.as_str())),
                 message: mailbox_message(root_message.as_str()),
-                target: MessageTarget::NextTurn,
-                wake_required: true,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             })
             .await
             .unwrap();
@@ -254,6 +251,7 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
         let child_id = SessionId::new(format!("session-cascade-child-{label}")).unwrap();
         kernel
             .spawn_agent(SpawnAgentRequest {
+                cancellation: CancellationToken::new(),
                 caller: caller.clone(),
                 child_session_id: child_id.clone(),
                 task_name: format!("child-{label}"),
@@ -292,6 +290,7 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
         let held_message = MessageId::new(format!("message-held-child-{label}")).unwrap();
         kernel
             .send_agent_message(SendAgentMessage {
+                cancellation: CancellationToken::new(),
                 caller,
                 target_session_id: child_id.clone(),
                 message_id: held_message.clone(),
@@ -412,15 +411,14 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
 async fn cancelling_an_unclaimed_message_is_durable_and_idempotent() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-message-cancel").unwrap();
     let message_id = MessageId::new("message-cancel").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message(message_id.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -452,14 +450,13 @@ async fn cancelling_an_unclaimed_message_is_durable_and_idempotent() {
 async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activation() {
     let store = Arc::new(MemoryStore::new());
     let initial = kernel(store.clone()).await;
-    let worker = initial.start_write_behind();
+    let worker = initial.start_workers();
     let root_id = SessionId::new("session-parked-recovery-root").unwrap();
     initial
         .submit_message(SubmitMessage {
             session: fresh(header(root_id.as_str())),
             message: mailbox_message("message-parked-recovery-root"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -475,6 +472,7 @@ async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activati
     let child_id = SessionId::new("session-parked-recovery-child").unwrap();
     initial
         .spawn_agent(SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
             caller: caller.clone(),
             child_session_id: child_id,
             task_name: "parked-recovery-child".into(),
@@ -568,15 +566,14 @@ async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_backgr
     )
     .await
     .unwrap();
-    let worker = initial.start_write_behind();
+    let worker = initial.start_workers();
     let session_id = SessionId::new("session-claim-retry-boundary").unwrap();
     let message_id = MessageId::new("message-claim-retry-boundary").unwrap();
     initial
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message(message_id.as_str()),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -629,14 +626,13 @@ async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_backgr
 async fn activation_terminal_requeues_the_next_oldest_turn() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-activation-handoff").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-activation-handoff"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();
@@ -689,7 +685,7 @@ async fn activation_terminal_requeues_the_next_oldest_turn() {
 async fn completed_activation_sessions_release_resident_capacity() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store).await;
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let _lease = kernel
         .register("executor-activation-eviction".into())
         .unwrap();
@@ -699,8 +695,7 @@ async fn completed_activation_sessions_release_resident_capacity() {
             .submit_message(SubmitMessage {
                 session: fresh(header(session_id.as_str())),
                 message: mailbox_message(&format!("message-activation-eviction-{index}")),
-                target: MessageTarget::NextTurn,
-                wake_required: true,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             })
             .await
             .unwrap();
@@ -719,17 +714,18 @@ async fn completed_activation_sessions_release_resident_capacity() {
 }
 
 #[tokio::test]
-async fn submit_message_rejects_a_waking_next_step_before_durable_admission() {
+async fn submit_message_rejects_new_turn_options_on_next_step_before_durable_admission() {
     let store = Arc::new(MemoryStore::new());
     let kernel = kernel(store.clone()).await;
     let session_id = SessionId::new("session-invalid-wake-target").unwrap();
+    let mut message = mailbox_message("message-invalid-wake-target");
+    message.options.sandbox = Some(SandboxMode::ReadOnly);
     assert!(matches!(
         kernel
             .submit_message(SubmitMessage {
                 session: fresh(header(session_id.as_str())),
-                message: mailbox_message("message-invalid-wake-target"),
-                target: MessageTarget::NextStep,
-                wake_required: true,
+                message,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
             })
             .await,
         Err(TurnError::Invalid(_))
@@ -748,7 +744,7 @@ async fn fresh_message_cannot_publish_over_an_unflushed_fresh_turn_header() {
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-fresh-message-race").unwrap();
     store.pause_next_append();
     let first = tokio::spawn({
@@ -771,8 +767,7 @@ async fn fresh_message_cannot_publish_over_an_unflushed_fresh_turn_header() {
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-fresh-message-race"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await;
     store.release_blocked_append();
@@ -791,7 +786,7 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-message-flush-race", "run").await;
     let _lease = kernel
         .register("executor-message-flush-race".into())
@@ -826,8 +821,7 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
                 .submit_message(SubmitMessage {
                     session: resumed,
                     message: mailbox_message("message-flush-race"),
-                    target: MessageTarget::NextStep,
-                    wake_required: false,
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
                 })
                 .await
         }
@@ -860,14 +854,13 @@ async fn cancellation_cannot_diverge_resident_state_from_an_applied_activation_t
     let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
-    let worker = kernel.start_write_behind();
+    let worker = kernel.start_workers();
     let session_id = SessionId::new("session-terminal-cancel-race").unwrap();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header(session_id.as_str())),
             message: mailbox_message("message-terminal-cancel-race"),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
         .unwrap();

@@ -64,6 +64,7 @@ impl SessionKernel {
         }
         let kernel = Self {
             inner: Arc::new(KernelInner {
+                tasks: TaskTracker::new(),
                 store,
                 composition,
                 workspace_context,
@@ -86,10 +87,12 @@ impl SessionKernel {
                     queued: BTreeSet::new(),
                 }),
                 submission_admission: SubmissionAdmission::new(),
-                ready_activation: AsyncMutex::new(None),
+                ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
                 flush_requested: Notify::new(),
                 settlement_requested: Notify::new(),
+                settlement_health: Mutex::new(SettlementHealth::default()),
+                stop_settlement: CancellationToken::new(),
                 stop_worker: CancellationToken::new(),
                 limits,
                 process_pending_bytes: AtomicUsize::new(0),
@@ -102,44 +105,52 @@ impl SessionKernel {
         Ok(kernel)
     }
 
-    /// Starts the sole background write-behind worker.
-    pub fn start_write_behind(&self) -> JoinHandle<()> {
-        let kernel = self.clone();
+    /// Starts independent write-behind and bounded settlement workers.
+    pub fn start_workers(&self) -> KernelWorkers {
+        let flush_kernel = self.clone();
+        let settlement_kernel = self.clone();
         let first_tick = Instant::now() + WRITE_BEHIND_INTERVAL;
-        let first_settlement = Instant::now() + WAITING_SETTLEMENT_FALLBACK_INTERVAL;
-        tokio::spawn(async move { kernel.flush_loop(first_tick, first_settlement).await })
+        KernelWorkers {
+            flush: tokio::spawn(async move { flush_kernel.flush_loop(first_tick).await }),
+            settlement: tokio::spawn(async move { settlement_kernel.settlement_loop().await }),
+        }
     }
 
-    /// Stops admission, durably drains pending Facts, ends the worker, and
-    /// releases resident generation pins.
-    pub async fn shutdown(&self, mut worker: JoinHandle<()>) -> Result<()> {
+    /// Closes producers, drains admitted work and pending Facts, and joins workers.
+    /// A timeout leaves the owned drain running until resources can be released.
+    pub async fn shutdown(&self, workers: KernelWorkers) -> Result<()> {
         {
-            let mut state = lock_state(&self.inner);
-            state.accepting = false;
+            lock_state(&self.inner).accepting = false;
         }
         self.inner.submission_admission.close();
+        self.inner.stop_settlement.cancel();
         self.inner.claim_changed.notify_waiters();
         self.inner.flush_requested.notify_waiters();
-        let flush_result =
-            match tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, self.flush_every_session()).await {
-                Ok(result) => result,
-                Err(_) => Err(KernelError::Shutdown("final flush timed out".into())),
-            };
-        self.inner.stop_worker.cancel();
-        self.inner.flush_requested.notify_waiters();
-        let worker_result = if let Ok(result) =
-            tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, &mut worker).await
-        {
-            result.map_err(|error| KernelError::Shutdown(format!("flush worker failed: {error}")))
-        } else {
-            worker.abort();
-            let _ = worker.await;
-            Err(KernelError::Shutdown(
-                "flush worker did not stop before the shutdown deadline".into(),
-            ))
-        };
-        self.quiesce();
-        flush_result.and(worker_result)
+        let kernel = self.clone();
+        let drain = tokio::spawn(async move {
+            let settlement_result = workers.settlement.await;
+            kernel.inner.tasks.close();
+            kernel.inner.tasks.wait().await;
+            let flush_result = kernel.flush_every_session().await;
+            kernel.inner.stop_worker.cancel();
+            kernel.inner.flush_requested.notify_waiters();
+            let flush_worker_result = workers.flush.await;
+            kernel.quiesce();
+            settlement_result.map_err(|error| {
+                KernelError::Shutdown(format!("settlement worker failed: {error}"))
+            })?;
+            flush_worker_result
+                .map_err(|error| KernelError::Shutdown(format!("flush worker failed: {error}")))?;
+            flush_result
+        });
+        match tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, drain).await {
+            Ok(result) => result
+                .map_err(|error| KernelError::Shutdown(format!("shutdown task failed: {error}")))?,
+            Err(_) => Err(KernelError::Shutdown(
+                "shutdown drain timed out; admitted work continues with its resources retained"
+                    .into(),
+            )),
+        }
     }
 
     pub(super) fn quiesce(&self) {
@@ -172,29 +183,15 @@ impl SessionKernel {
         drop(finalizers);
     }
 
-    pub(super) async fn flush_loop(self, mut next_tick: Instant, mut next_settlement: Instant) {
+    pub(super) async fn flush_loop(self, mut next_tick: Instant) {
         loop {
-            enum WorkerTask {
-                Flush,
-                Settle,
-            }
-            let task = tokio::select! {
-                () = tokio::time::sleep_until(next_tick) => WorkerTask::Flush,
-                () = self.inner.flush_requested.notified() => WorkerTask::Flush,
-                () = tokio::time::sleep_until(next_settlement) => WorkerTask::Settle,
-                () = self.inner.settlement_requested.notified() => WorkerTask::Settle,
+            tokio::select! {
+                () = tokio::time::sleep_until(next_tick) => {},
+                () = self.inner.flush_requested.notified() => {},
                 () = self.inner.stop_worker.cancelled() => break,
-            };
-            match task {
-                WorkerTask::Flush => {
-                    self.flush_ready_sessions().await;
-                    next_tick = rebase_write_behind_tick(next_tick, Instant::now());
-                }
-                WorkerTask::Settle => {
-                    let _result = self.reconcile_waiting_activations().await;
-                    next_settlement = Instant::now() + WAITING_SETTLEMENT_FALLBACK_INTERVAL;
-                }
             }
+            self.flush_ready_sessions().await;
+            next_tick = rebase_write_behind_tick(next_tick, Instant::now());
         }
     }
 
@@ -349,15 +346,24 @@ impl SessionKernel {
                 .sessions
                 .iter()
                 .map(|(session_id, session)| {
-                    session
-                        .live_seq()
-                        .map(|seq| (session_id.clone(), session.flush_status.subscribe(), seq))
+                    session.live_seq().map(|seq| {
+                        (
+                            session_id.clone(),
+                            session.flush_status.subscribe(),
+                            seq,
+                            session.permanent_flush_error.clone(),
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?
         };
         self.inner.flush_requested.notify_one();
         let mut failures = Vec::new();
-        for (session_id, status, through_seq) in targets {
+        for (session_id, status, through_seq, permanent_error) in targets {
+            if let Some(error) = permanent_error {
+                failures.push(format!("{}: {error}", session_id.as_str()));
+                continue;
+            }
             if let Err(error) = self.wait_on_flush_status(status, through_seq).await {
                 failures.push(format!("{}: {error}", session_id.as_str()));
             }
@@ -459,7 +465,7 @@ impl SessionKernel {
         Ok(self.inner.store.commit_agent(commit).await)
     }
 
-    async fn read_ready_roots(
+    pub(super) async fn read_ready_roots(
         &self,
         after: Option<&SessionId>,
     ) -> TurnResult<Option<rsi_agent_store_protocol::StoreReadyRootPage>> {
@@ -473,63 +479,37 @@ impl SessionKernel {
                 page.validate().map_err(turn_store_error)?;
                 Ok(Some(page))
             }
-            Err(StoreError::Io(_)) => Ok(None),
+            Err(error @ StoreError::Io(_)) => {
+                self.record_ready_failure(&turn_store_error(error));
+                Ok(None)
+            }
             Err(error) => Err(turn_store_error(error)),
         }
-    }
-
-    pub(super) async fn activate_one_ready_message(&self) -> TurnResult<bool> {
-        // Several executor lanes may ask for work concurrently. Selection and the
-        // following atomic message claim form one scheduler decision; serializing
-        // only that decision prevents normal contention from escaping as a claim
-        // error while Turn execution remains fully concurrent.
-        let mut selection = self.inner.ready_activation.lock().await;
-        let Some(mut roots) = self.read_ready_roots(selection.as_ref()).await? else {
-            return Ok(false);
-        };
-        if roots.roots.is_empty() && selection.is_some() {
-            let Some(first) = self.read_ready_roots(None).await? else {
-                return Ok(false);
-            };
-            roots = first;
-        }
-        *selection = if roots.has_more {
-            roots.roots.last().cloned()
-        } else {
-            None
-        };
-        for root_session_id in roots.roots {
-            // A bad root is isolated to its own bounded scan. It must neither
-            // terminate the shared executor generation nor hide later roots.
-            match self.activate_ready_root(&root_session_id).await {
-                Ok(true) => {
-                    *selection = Some(root_session_id);
-                    return Ok(true);
-                }
-                Err(error @ TurnError::Invariant(_)) => return Err(error),
-                Ok(false) | Err(_) => {}
-            }
-        }
-        Ok(false)
     }
 
     #[allow(clippy::too_many_lines)] // One root's eligibility scan and atomic claim form one scheduler decision.
     pub(super) async fn activate_ready_root(
         &self,
         root_session_id: &SessionId,
+        cancellation: &CancellationToken,
     ) -> TurnResult<bool> {
-        // Validate the bounded durable tree before considering its ready entries.
-        let _ = descendant_session_ids(&self.inner.store, root_session_id).await?;
-        if lock_state(&self.inner)
-            .tree_lanes
-            .get(root_session_id)
-            .and_then(Weak::upgrade)
-            .is_some_and(|pool| pool.available_permits() == 0)
+        let snapshot = self
+            .inner
+            .store
+            .read_agent_subtree_snapshot(root_session_id)
+            .await
+            .map_err(turn_store_error)?;
+        snapshot.validate().map_err(turn_store_error)?;
+        let mut claimable_sessions = BTreeMap::new();
+        for status in std::iter::once(snapshot.session)
+            .chain(snapshot.descendants.into_iter().map(|child| child.status))
         {
-            return Ok(false);
+            claimable_sessions.insert(
+                status.session_id,
+                !status.has_open_turn && !status.has_active_activation,
+            );
         }
         let mut after = None;
-        let mut claimable_sessions = BTreeMap::new();
         loop {
             let ready = self
                 .inner
@@ -544,52 +524,48 @@ impl SessionKernel {
                         "ready index contains a waking next-Step message".into(),
                     ));
                 }
-                let claimable = if let Some(claimable) = claimable_sessions.get(&message.session_id)
+                if !claimable_sessions
+                    .get(&message.session_id)
+                    .copied()
+                    .unwrap_or(false)
                 {
-                    *claimable
-                } else {
-                    let no_open_turn = self
-                        .inner
-                        .store
-                        .list_open_turns(&message.session_id, 0, 1)
-                        .await
-                        .map_err(turn_store_error)?
-                        .turns
-                        .is_empty();
-                    let no_active_activation = self
-                        .inner
-                        .store
-                        .active_activation(&message.session_id)
-                        .await
-                        .map_err(turn_store_error)?
-                        .is_none();
-                    let claimable = no_open_turn && no_active_activation;
-                    claimable_sessions.insert(message.session_id.clone(), claimable);
-                    claimable
-                };
-                if !claimable {
                     continue;
                 }
-                let header = read_header_bounded(&self.inner, &message.session_id)
+                let Some(lane) = self.reserve_tree_lane(root_session_id) else {
+                    return Ok(false);
+                };
+                if cancellation.is_cancelled() {
+                    return Ok(false);
+                }
+                let header = read_validated_header_bounded(&self.inner, &message.session_id)
                     .await
                     .map_err(turn_store_error)?;
                 let path = agent_root_and_path(&header).1;
                 let suffix = message.control_seq;
-                self.claim_message(ClaimMessage {
-                    session: self.prepare_resume(&message.session_id).await?,
-                    message_id: message.message_id.clone(),
-                    activation_id: rsi_agent_session_protocol::ActivationId::new(format!(
-                        "activation-{suffix}"
-                    ))
-                    .map_err(|error| TurnError::Invalid(error.to_string()))?,
-                    path,
-                    turn_id: TurnId::new(format!("turn-message-{suffix}"))
+                let prepared = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Ok(false),
+                    result = self.prepare_resume(&message.session_id) => result?,
+                };
+                self.claim_message_with_lane(
+                    ClaimMessage {
+                        session: prepared,
+                        message_id: message.message_id.clone(),
+                        activation_id: rsi_agent_session_protocol::ActivationId::new(format!(
+                            "activation-{suffix}"
+                        ))
                         .map_err(|error| TurnError::Invalid(error.to_string()))?,
-                    step_id: rsi_agent_session_protocol::StepId::new(format!(
-                        "step-message-{suffix}"
-                    ))
-                    .map_err(|error| TurnError::Invalid(error.to_string()))?,
-                })
+                        path,
+                        turn_id: TurnId::new(format!("turn-message-{suffix}"))
+                            .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                        step_id: rsi_agent_session_protocol::StepId::new(format!(
+                            "step-message-{suffix}"
+                        ))
+                        .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                    },
+                    Some(lane),
+                    Some(cancellation),
+                )
                 .await?;
                 return Ok(true);
             }
@@ -631,7 +607,8 @@ impl SessionKernel {
             .ok_or(TurnError::StaleClaim)?;
         match &turn.claim {
             Some(owner)
-                if owner.executor == claim.executor_id()
+                if !owner.mutations.retiring.load(Ordering::Acquire)
+                    && owner.executor == claim.executor_id()
                     && owner.registration == registration_id
                     && owner.claim == claim.claim_id()
                     && owner.live_seq == claim.live_seq()
@@ -732,7 +709,7 @@ impl SessionKernel {
                 continue;
             }
 
-            let header = read_header_bounded(&self.inner, session_id)
+            let header = read_validated_header_bounded(&self.inner, session_id)
                 .await
                 .map_err(turn_store_error)?;
             let composition = match self.inner.composition.pin(header.agent_preset_id()).await {
@@ -906,8 +883,6 @@ impl SessionKernel {
         turn_id: TurnId,
         body: SessionFactBody,
     ) -> TurnResult<SubmittedTurn> {
-        body.validate()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let session_id = session_selection.session_id().clone();
         let mut state = lock_state(&self.inner);
         if !state.accepting {
@@ -1036,9 +1011,6 @@ impl SessionKernel {
                         true,
                     ));
                 }
-            } else if state.sessions.contains_key(session_id) {
-                // A resident session may have pruned this turn's durable
-                // terminal entry; fall through to the indexed Store read.
             }
         }
 

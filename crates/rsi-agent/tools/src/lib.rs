@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod questions;
+pub use questions::QuestionToolsFactory;
+
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     ForkTurnSelection, MAXIMUM_AGENT_IDENTIFIER_BYTES, MessageId, SessionId,
@@ -153,7 +156,7 @@ fn registrations(
             Ok(ToolRegistration {
                 definition: ToolDefinition::new(name, description, parameters)?
                     .with_scheduling(scheduling),
-                timeout_ms,
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms },
                 executor: Arc::new(NativeExecutor {
                     kind,
                     turns: Arc::clone(turns),
@@ -202,6 +205,7 @@ impl NativeExecutor {
         match self
             .turns
             .spawn_agent(SpawnAgentRequest {
+                cancellation: execution.cancellation.clone(),
                 caller: caller.clone(),
                 child_session_id: deterministic_session(
                     "agent",
@@ -247,6 +251,7 @@ impl NativeExecutor {
         match self
             .turns
             .send_agent_message(SendAgentMessage {
+                cancellation: execution.cancellation.clone(),
                 caller: caller.clone(),
                 target_session_id: target,
                 message_id: deterministic_message(
@@ -309,6 +314,7 @@ impl NativeExecutor {
     async fn interrupt(
         &self,
         arguments: Value,
+        execution: &ToolExecution,
         caller: &AgentCallerAuthority,
     ) -> rsi_tools_protocol::Result<ToolResult> {
         let arguments: TargetArguments = parse(arguments)?;
@@ -316,7 +322,11 @@ impl NativeExecutor {
             Ok(target) => target,
             Err(error) => return tool_error("invalid_target", error.to_string()),
         };
-        match self.turns.interrupt_agent(caller, &target).await {
+        match self
+            .turns
+            .interrupt_agent(caller, &target, execution.cancellation.clone())
+            .await
+        {
             Ok(result) => tool_ok(
                 json!({
                     "accepted":result.accepted,
@@ -424,7 +434,7 @@ impl ToolExecutor for NativeExecutor {
                 self.send(arguments, &execution, caller.as_ref()).await
             }
             NativeTool::Wait => self.wait(arguments, &execution, caller.as_ref()).await,
-            NativeTool::Interrupt => self.interrupt(arguments, caller.as_ref()).await,
+            NativeTool::Interrupt => self.interrupt(arguments, &execution, caller.as_ref()).await,
             NativeTool::List => self.list(arguments, caller.as_ref()).await,
         }
     }

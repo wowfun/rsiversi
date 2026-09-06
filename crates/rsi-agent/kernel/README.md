@@ -20,12 +20,81 @@ use the current healthy source generation. The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
-Durable waking-message selection rotates a bounded ready-root cursor so a full
-or unclaimable early page cannot hide later trees. Eligibility and the following
-atomic message claim remain serialized as one local scheduler decision to
-preserve the per-tree running limit. Failure in one root's bounded Store scan is
+Agent mutations prepare and acquire target admission before their final source
+check. That check, under the short Kernel state lock, verifies the exact claim,
+executor registration, open mutation gate, and execution cancellation. An
+accepted mutation holds a move-only source lease through its owned commit task,
+Store retries, and resident installation even when the caller stops waiting.
+Spawn retries serialize on the child identity and return the existing initial
+message receipt only when the parent, invoking Turn, fork selection, task, Header
+and message match. Cancellation stops the waiter; an admitted creation remains
+discoverable through that exact retry or ordinary Agent listing.
+Release or executor withdrawal closes that gate and defers claim retirement
+until the last accepted mutation completes, then clears its owner and requeues
+only nonterminal Turns. Terminal publication closes and drains the same gate
+before acquiring any submission admission. Drain uses the
+one-minute durability deadline and never forcibly releases accepted ownership.
+Before terminal admission, a rejected or abandoned attempt restores mutation
+admission after the last retained mutation drains, provided that the same claim
+is still live and has not been retired. Restoration installs a fresh stop token;
+it cannot revive a cancelled, replaced, or terminal claim. Once the terminal
+commit task owns admission, its gate remains closed through Store reconciliation.
+Activation terminals must use `finish_activation_turn`, which commits the
+terminal and activation transition together; raw terminal publication is only
+valid for direct Turns.
+Agent interruption publishes its cancellation Fact only after the direct atomic
+commit succeeds. Ordinary external cancellation retains write-behind behavior.
+
+A parked human or Agent wait retains its mutation lease while its durable resume
+is recoverable. One claim can own only one wait through completion of its cleanup;
+a second park is rejected before touching durable state or elapsed admission.
+Resume checks the exact activation under retained Session admission
+and accepts an already-running activation after a lost commit acknowledgement.
+An attempted park owns reconciliation before its commit acknowledgement: cleanup
+reads back the activation and resumes a committed park, including when the park
+acknowledgement was lost. A failed park reports its original cause; if cleanup
+also fails, the bounded diagnostic includes both failures.
+I/O, cursor contention, and admission waits retry every five seconds independently
+of cancellation or shutdown. A deterministic ownership, lifecycle, or Store
+validation failure stops retrying, latches a bounded permanent Session failure,
+and releases the wait's local ownership. The failed Session cannot be reclaimed
+for another model run; durable recovery remains responsible for its unfinished
+activation. The resume caller waits at most one minute; timeout or caller drop
+cancels lane reacquisition while the tracked cleanup retains ownership until
+storage recovers. Failed executor parking uses the same bounded waiter and owned
+cleanup. An unavailable or corrupt Store cannot be reported as a completed resume
+or a successful drain. Only human waits pause elapsed execution; Agent waits retain the
+ordinary execution budget.
+
+Flush and waiting-activation settlement have independent workers. Runtime
+settlement retains its cursor across 16-session slices, isolates local errors,
+and exposes bounded read-only health; startup recovery remains fail-closed.
+Global diagnostics clear only after a complete error-free scan, while an
+enumerator failure backs off independently of wake notifications.
+Finite admitted tasks share one task tracker. Shutdown closes producers and
+admission before draining that tracker with flush still running. The public
+shutdown wait has one five-second budget for the whole drain, including worker
+joins. Slow admitted work can outlive that budget; background drain retains all
+live resources through final flush, worker exit, and resident quiescence.
+Parent settlement that becomes eligible after the settlement producer exits
+remains a durable waiting activation for the next recovery. Shutdown drains
+accepted commits, not every subsequently eligible ancestor transition.
+
+Durable waking-message selection rotates a cursor and caches at most 256 roots
+under a short scheduler lock. Page reads and preparation run outside that lock,
+with at most four preparation jobs and one job per root. New durable input
+requests another root scan even while the previous final page still has a
+blocked preparation; retained preparations continue to count against the bound.
+A generation-bound reservation releases the exact root on completion. A candidate reserves one of
+its tree's three lanes before composition/workspace preparation and transfers
+that lane through the resident Turn into the executor claim. Failure in one root's bounded Store scan is
 isolated from later roots and from the executor lease; an otherwise idle claim
 loop retries skipped roots every five seconds as well as on commit notification.
+Enumeration failures retain their cursor but fence further page reads for five
+seconds, including reads triggered by unrelated claim notifications.
+Transient enumeration I/O is retried. Other global enumeration errors propagate
+through `claim` and stop the receiving executor pool; the health snapshot retains
+the bounded diagnostic.
 
 The live scheduler is a bounded working set, not a mirror of durable history.
 Recovery streams lexical pages of sessions selected by the Store's open-turn
@@ -61,6 +130,9 @@ Capacity and completion paths use the Store's metadata-only mailbox summary,
 so reading an exact count and Fact/control tails does not reserve or decode the
 payload prefix. Identity-only Agent-tree scheduling and settlement reuse the
 Store's one-call recursive descendant snapshot.
+Tree selection for control and approval operations validates the requested
+Session before using its Header lineage, even when presentation can read its
+bounded metadata independently.
 Waiting activation settlement is retried by the Kernel worker after an
 in-process settlement failure and by a bounded five-second fallback scan, so a
 durable descendant terminal does not require process restart to settle its
@@ -113,10 +185,10 @@ is direct within the contiguous pending suffix. Flush selection snapshots only
 `Arc` Fact handles while holding the global Kernel lock; materializing the
 Store-owned batch occurs after that lock is released.
 
-Shutdown closes admission before its final flush, settles any in-flight cold
-hydration as shutting down, and releases all resident sessions after the worker
-has joined. Escaped service handles therefore cannot keep composition
-generation pins or speculative Kernel state alive after shutdown returns.
+Successful shutdown releases resident sessions and generation pins after all
+admitted tasks and workers have joined. A bounded timeout reports that drain
+continues; escaped handles cannot admit new work, and background completion
+releases pins only after actual admitted work finishes.
 
 The Kernel stores Context checkpoints only after verifying that the claimed
 turn is durably terminal and that the checkpoint covers the unchanged durable

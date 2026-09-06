@@ -5,13 +5,14 @@ use super::{
     MAXIMUM_INDEXED_MESSAGE_STATE_BYTES, MAXIMUM_SESSION_FACT_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId, MessageTarget,
     OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
-    StoreAgentMessage, StoreAgentMessageState, StoreError, StoreFactTurnRole, StoreReadyMessage,
-    Transaction, TurnId, advance_control_prefix_digest, advance_fact_prefix_digest,
-    decode_projected_json, decode_sha256, decode_u64, encode_json, fact_index_kind, params,
-    read_session_header_row, sql_error, sqlite_u64, validate_message_claim_fact,
+    StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
+    StoreFactTurnRole, StoreInner, StoreReadyMessage, Transaction, TurnId,
+    advance_control_prefix_digest, advance_fact_prefix_digest, decode_projected_json,
+    decode_sha256, decode_u64, encode_json, fact_index_kind, params, read_session_header_row,
+    sql_error, sqlite_u64, validate_message_claim_fact,
 };
 
-pub(super) fn validate_sqlite_agent_guards(
+pub(super) fn validate_sqlite_activation_guards(
     transaction: &Transaction<'_>,
     commit: &AtomicAgentCommit,
 ) -> Result<()> {
@@ -32,27 +33,27 @@ pub(super) fn validate_sqlite_agent_guards(
             });
         }
     }
-    for session_id in &commit.quiescent_sessions {
-        let busy = transaction
-            .query_row(
-                "SELECT
-                   EXISTS(SELECT 1 FROM active_activations WHERE session_id = ?1)
-                   OR EXISTS(
-                     SELECT 1 FROM turns
-                     WHERE session_id = ?1 AND terminal_seq IS NULL
-                   )
-                   OR EXISTS(SELECT 1 FROM ready_messages WHERE session_id = ?1)",
-                [session_id.as_str()],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(sql_error)?;
-        if busy {
-            return Err(StoreError::SessionNotQuiescent {
-                session: session_id.to_string(),
-            });
-        }
-    }
     Ok(())
+}
+
+pub(super) fn validate_sqlite_quiescence_guard(
+    transaction: &Transaction<'_>,
+    root: Option<&SessionId>,
+    owner: &StoreInner,
+) -> Result<Option<StoreAgentSubtreeSnapshot>> {
+    if let Some(root) = root {
+        let snapshot = owner.read_validated_agent_subtree(transaction, root)?;
+        for descendant in &snapshot.descendants {
+            let status = &descendant.status;
+            if status.has_active_activation || status.has_open_turn || status.has_waking_message {
+                return Err(StoreError::SessionNotQuiescent {
+                    session: status.session_id.to_string(),
+                });
+            }
+        }
+        return Ok(Some(snapshot));
+    }
+    Ok(None)
 }
 
 #[allow(clippy::too_many_lines)] // The complete per-Session compare-and-append transaction must remain one audit unit.
@@ -244,10 +245,19 @@ impl ControlIndexer<'_, '_> {
         match self.record.body() {
             AgentControlRecordBody::MessageAccepted {
                 message,
+                delivery,
+                bound_turn_id,
                 root_session_id,
                 target,
                 wake_required,
-            } => self.insert_message_accepted(message, root_session_id, *target, *wake_required),
+            } => self.insert_message_accepted(
+                message,
+                root_session_id,
+                *target,
+                *wake_required,
+                *delivery,
+                bound_turn_id.as_ref(),
+            ),
             AgentControlRecordBody::MessagePromoted { message_id } => {
                 self.insert_message_promoted(message_id)
             }
@@ -306,14 +316,28 @@ impl ControlIndexer<'_, '_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Canonical acceptance and its route indexes share one transaction.
     fn insert_message_accepted(
         &self,
         message: &AgentMessage,
         root_session_id: &SessionId,
         target: MessageTarget,
         wake_required: bool,
+        delivery: rsi_agent_session_protocol::MessageDelivery,
+        bound_turn_id: Option<&TurnId>,
     ) -> Result<()> {
         let expected_root = derived_session_root(self.transaction, self.session_id)?;
+        if let Some(bound) = bound_turn_id {
+            let active = self.transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM active_activations WHERE session_id = ?1 AND turn_id = ?2 AND phase IN ('running', 'parked'))",
+                params![self.session_id.as_str(), bound.as_str()], |row| row.get::<_, bool>(0),
+            ).map_err(sql_error)?;
+            if !active {
+                return Err(StoreError::Invalid(
+                    "steering binding requires the current activation Turn".into(),
+                ));
+            }
+        }
         if root_session_id != &expected_root {
             return Err(StoreError::Invalid(
                 "Agent message root differs from its target Session root".into(),
@@ -365,8 +389,9 @@ impl ControlIndexer<'_, '_> {
             .execute(
                 "INSERT INTO agent_messages
                     (session_id, message_id, accepted_control_seq, root_session_id,
-                     message_source, message_json, target, wake_required, state, state_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                     message_source, message_json, target, wake_required, state, state_json,
+                     delivery, bound_turn_id, accepted_timestamp_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12)",
                 params![
                     self.session_id.as_str(),
                     message.message_id.as_str(),
@@ -377,6 +402,9 @@ impl ControlIndexer<'_, '_> {
                     message_target_name(target),
                     wake_required,
                     encode_json("Agent message state", &StoreAgentMessageState::Pending)?,
+                    message_delivery_name(delivery),
+                    bound_turn_id.map(TurnId::as_str),
+                    sqlite_u64("acceptance timestamp", self.record.timestamp_ms())?,
                 ],
             )
             .map_err(sql_error)?;
@@ -403,48 +431,20 @@ impl ControlIndexer<'_, '_> {
     }
 
     fn insert_message_promoted(&self, message_id: &MessageId) -> Result<()> {
-        let indexed = self
-            .transaction
-            .query_row(
-                "SELECT root_session_id, target, wake_required, state,
-                        length(CAST(message_json AS BLOB)),
-                        CASE WHEN length(CAST(message_json AS BLOB)) <= ?3
-                             THEN message_json END
-                 FROM agent_messages WHERE session_id = ?1 AND message_id = ?2",
-                params![
-                    self.session_id.as_str(),
-                    message_id.as_str(),
-                    i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
-                        .expect("mailbox page bound fits SQLite INTEGER"),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, bool>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(sql_error)?
-            .ok_or_else(|| {
-                StoreError::Corrupt("mailbox promotion has no indexed message".into())
-            })?;
-        let message = decode_projected_json::<AgentMessage>(
-            "Agent message",
-            (indexed.4, indexed.5),
-            MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
+        let entry = super::validation::read_indexed_agent_message(
+            self.transaction,
+            self.session_id,
+            message_id,
         )?;
-        if indexed.1 != "next_step"
-            || indexed.2
-            || indexed.3 != "pending"
-            || !matches!(message.source, AgentMessageSource::Completion { .. })
+        let (timestamp_ms, control_seq) =
+            entry.promotion_order(self.record.timestamp_ms(), self.record.seq());
+        if entry.target != MessageTarget::NextStep
+            || entry.wake_required
+            || !matches!(entry.state, StoreAgentMessageState::Pending)
+            || !entry.permits_promotion()
         {
             return Err(StoreError::Corrupt(
-                "mailbox promotion requires pending non-waking next-Step completion".into(),
+                "mailbox promotion requires eligible pending next-Step input".into(),
             ));
         }
         let changed = self
@@ -467,11 +467,11 @@ impl ControlIndexer<'_, '_> {
                      timestamp_ms, target)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'next_turn')",
                 params![
-                    indexed.0,
+                    entry.root_session_id.as_str(),
                     self.session_id.as_str(),
                     message_id.as_str(),
-                    sqlite_u64("promotion control sequence", self.record.seq())?,
-                    sqlite_u64("promotion timestamp", self.record.timestamp_ms())?,
+                    sqlite_u64("promotion ready control sequence", control_seq)?,
+                    sqlite_u64("promotion ready timestamp", timestamp_ms)?,
                 ],
             )
             .map_err(sql_error)?;
@@ -486,32 +486,18 @@ impl ControlIndexer<'_, '_> {
         step_id: &StepId,
         entered_fact_seq: u64,
     ) -> Result<()> {
-        let message_projection = self
-            .transaction
-            .query_row(
-                "SELECT length(CAST(message_json AS BLOB)),
-                        CASE WHEN length(CAST(message_json AS BLOB)) <= ?3
-                             THEN message_json END
-                 FROM agent_messages
-                 WHERE session_id = ?1 AND message_id = ?2 AND state = 'pending'",
-                params![
-                    self.session_id.as_str(),
-                    message_id.as_str(),
-                    i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
-                        .expect("mailbox page bound fits SQLite INTEGER"),
-                ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?
-            .ok_or_else(|| {
-                StoreError::Corrupt("mailbox claim has no pending indexed message".into())
-            })?;
-        let message = decode_projected_json::<AgentMessage>(
-            "Agent message",
-            message_projection,
-            MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
+        let entry = super::validation::read_indexed_agent_message(
+            self.transaction,
+            self.session_id,
+            message_id,
         )?;
+        if !matches!(entry.state, StoreAgentMessageState::Pending) {
+            return Err(StoreError::Corrupt(
+                "mailbox claim has no pending indexed message".into(),
+            ));
+        }
+        entry.validate_claim_turn(turn_id)?;
+        let message = entry.message;
         let fact_projection = self
             .transaction
             .query_row(
@@ -783,6 +769,17 @@ pub(super) const fn message_target_name(target: MessageTarget) -> &'static str {
     }
 }
 
+pub(super) const fn message_delivery_name(
+    delivery: rsi_agent_session_protocol::MessageDelivery,
+) -> &'static str {
+    use rsi_agent_session_protocol::MessageDelivery;
+    match delivery {
+        MessageDelivery::NextTurn => "next_turn",
+        MessageDelivery::NextStep => "next_step",
+        MessageDelivery::Steer => "steer",
+    }
+}
+
 pub(super) const fn message_source_name(source: &AgentMessageSource) -> &'static str {
     match source {
         AgentMessageSource::Human => "human",
@@ -802,6 +799,9 @@ pub(super) type IndexedMessageRow = (
     String,
     i64,
     Option<String>,
+    String,
+    Option<String>,
+    i64,
 );
 
 pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedMessageRow> {
@@ -816,6 +816,9 @@ pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<I
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
     ))
 }
 
@@ -853,6 +856,18 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
         ));
     }
     Ok(StoreAgentMessage {
+        delivery: match row.10.as_str() {
+            "next_turn" => rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            "next_step" => rsi_agent_session_protocol::MessageDelivery::NextStep,
+            "steer" => rsi_agent_session_protocol::MessageDelivery::Steer,
+            _ => return Err(StoreError::Corrupt("invalid message delivery".into())),
+        },
+        bound_turn_id: row
+            .11
+            .map(TurnId::new)
+            .transpose()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+        accepted_timestamp_ms: decode_u64("acceptance timestamp", row.12)?,
         message,
         encoded_message_bytes,
         root_session_id: SessionId::new(row.3)

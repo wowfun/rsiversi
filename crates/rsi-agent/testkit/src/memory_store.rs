@@ -1,22 +1,21 @@
 use super::{
-    AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AgentMessageSource,
-    AppendBatch, AppendCommit, Arc, AtomicAgentCommit, AtomicAgentCommitResult,
-    AtomicSessionAppend, BTreeMap, BTreeSet, CasObjectRef, Digest, EMPTY_CONTROL_PREFIX_DIGEST,
-    EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, InputMessageSource, MAXIMUM_STORE_CAS_BYTES,
-    MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState, MemoryStore, MemoryTurnBoundary,
-    MessageId, MessageTarget, Ordering, Result, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation, StoreAgentChild,
-    StoreAgentChildPage, StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage,
-    StoreAgentMessageState, StoreBackwardFactPage, StoreControlPage,
-    StoreDescendantControlSnapshot, StoreDescendantControlWatermark, StoreError, StoreFactPage,
-    StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
-    StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
-    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
-    StoreTurnFactPage, StoreWaitingActivationPage, StoreWorkspaceContextState,
-    StoredContextCheckpoint, TurnId, WriteContextCheckpoint, advance_control_prefix_digest,
-    advance_fact_prefix_digest, async_trait, validate_message_claim_fact, validate_read_limit,
-    validate_session_read_limit,
+    AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit,
+    Arc, AtomicAgentCommit, AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet,
+    CasObjectRef, Digest, EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
+    InputMessageSource, MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+    MAXIMUM_STORE_FACT_PAGE_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState,
+    MemoryStore, MemoryTurnBoundary, MessageId, MessageTarget, Ordering, Result, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, SessionStore, Sha256, StoreActivationPhase,
+    StoreActiveActivation, StoreAgentChild, StoreAgentChildPage, StoreAgentDescendantStatus,
+    StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState,
+    StoreAgentSessionStatus, StoreAgentSubtreeSnapshot, StoreBackwardFactPage, StoreControlPage,
+    StoreError, StoreFactPage, StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn,
+    StoreOpenTurnPage, StoreReadyMessage, StoreReadyMessageCursor, StoreReadyMessagePage,
+    StoreReadyRootPage, StoreRecentSession, StoreRecentSessionCursor, StoreRecentSessionPage,
+    StoreSessionPage, StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage,
+    StoreWorkspaceContextState, StoredContextCheckpoint, TurnId, WriteContextCheckpoint,
+    advance_control_prefix_digest, advance_fact_prefix_digest, async_trait,
+    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 
 #[async_trait]
@@ -117,16 +116,30 @@ impl SessionStore for MemoryStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        validate_memory_agent_guards(&state, &commit)?;
+        validate_memory_activation_guards(&state, &commit)?;
         let mut candidate = state.clone();
         let mut watermarks = Vec::with_capacity(commit.sessions.len());
         for append in commit.sessions {
             watermarks.push(apply_atomic_memory_append(&mut candidate, append)?);
         }
+        validate_memory_quiescence_guard(&candidate, commit.quiescent_descendants_of.as_ref())?;
         *state = candidate;
         Ok(AtomicAgentCommitResult {
             sessions: watermarks,
         })
+    }
+
+    async fn validate_session(&self, session_id: &SessionId) -> Result<()> {
+        // Every mutation validates typed state before installing it under this lock.
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.sessions.contains_key(session_id) {
+            Ok(())
+        } else {
+            Err(StoreError::NotFound(session_id.to_string()))
+        }
     }
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
@@ -680,6 +693,56 @@ impl SessionStore for MemoryStore {
         Ok(page)
     }
 
+    async fn inspect_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        use rsi_agent_store_protocol::{StorePendingMessage, StoreSessionInspection};
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let mut pending = state
+            .agent_messages
+            .iter()
+            .filter(|((candidate, _), entry)| {
+                candidate == session_id && matches!(entry.state, StoreAgentMessageState::Pending)
+            })
+            .map(|(_, entry)| StorePendingMessage {
+                permits_promotion: entry.permits_promotion(),
+                message_id: entry.message.message_id.clone(),
+                delivery: entry.delivery,
+                target: entry.target,
+                bound_turn_id: entry.bound_turn_id.clone(),
+                accepted_control_seq: entry.accepted_control_seq,
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|entry| entry.accepted_control_seq);
+        let inspection = StoreSessionInspection {
+            header: session.header.clone(),
+            durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            pending,
+            active_turn_id: session
+                .turns
+                .iter()
+                .filter(|(_, turn)| turn.terminal_seq.is_none())
+                .min_by_key(|(_, turn)| turn.accepted_seq)
+                .map(|(id, _)| id.clone()),
+            activation_phase: state
+                .active_activations
+                .get(session_id)
+                .map(|activation| activation.phase),
+            tree: memory_agent_subtree(&state, session_id)?,
+        };
+        inspection.validate()?;
+        Ok(inspection)
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
@@ -756,7 +819,7 @@ impl SessionStore for MemoryStore {
                         && matches!(entry.state, StoreAgentMessageState::Pending)
                 })
                 .count(),
-            pending_next_step_completion_message_ids: {
+            pending_promotable_message_ids: {
                 let mut messages = state
                     .agent_messages
                     .iter()
@@ -765,7 +828,7 @@ impl SessionStore for MemoryStore {
                             && matches!(entry.state, StoreAgentMessageState::Pending)
                             && entry.target == MessageTarget::NextStep
                             && !entry.wake_required
-                            && matches!(entry.message.source, AgentMessageSource::Completion { .. })
+                            && entry.permits_promotion()
                     })
                     .map(|(_, entry)| {
                         (entry.accepted_control_seq, entry.message.message_id.clone())
@@ -846,10 +909,10 @@ impl SessionStore for MemoryStore {
         Ok(page)
     }
 
-    async fn read_descendant_control_snapshot(
+    async fn read_agent_subtree_snapshot(
         &self,
         parent_session_id: &SessionId,
-    ) -> Result<StoreDescendantControlSnapshot> {
+    ) -> Result<StoreAgentSubtreeSnapshot> {
         if self.should_fail_agent_tree_read(parent_session_id) {
             return Err(StoreError::Io("injected Agent tree-read failure".into()));
         }
@@ -857,37 +920,7 @@ impl SessionStore for MemoryStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.sessions.contains_key(parent_session_id) {
-            return Err(StoreError::NotFound(parent_session_id.to_string()));
-        }
-        let mut visited = BTreeSet::new();
-        let mut pending = vec![parent_session_id.clone()];
-        while let Some(parent) = pending.pop() {
-            for (candidate, child) in state.agent_children.keys() {
-                if candidate == &parent && visited.insert(child.clone()) {
-                    pending.push(child.clone());
-                }
-            }
-        }
-        let descendants = visited
-            .into_iter()
-            .map(|session_id| {
-                let durable_control_seq = state
-                    .sessions
-                    .get(&session_id)
-                    .expect("indexed descendant has a durable session")
-                    .controls
-                    .last()
-                    .map_or(0, AgentControlRecord::seq);
-                StoreDescendantControlWatermark {
-                    session_id,
-                    durable_control_seq,
-                }
-            })
-            .collect();
-        let snapshot = StoreDescendantControlSnapshot { descendants };
-        snapshot.validate()?;
-        Ok(snapshot)
+        memory_agent_subtree(&state, parent_session_id)
     }
 
     async fn list_ready_roots(
@@ -1277,6 +1310,8 @@ fn apply_message_updates(
         match record.body() {
             AgentControlRecordBody::MessageAccepted {
                 message,
+                delivery,
+                bound_turn_id,
                 root_session_id,
                 target,
                 wake_required,
@@ -1323,6 +1358,9 @@ fn apply_message_updates(
                     .insert(
                         key,
                         StoreAgentMessage {
+                            delivery: *delivery,
+                            bound_turn_id: bound_turn_id.clone(),
+                            accepted_timestamp_ms: record.timestamp_ms(),
                             message: message.clone(),
                             encoded_message_bytes: serde_json::to_vec(message)
                                 .map_err(|error| StoreError::Invalid(error.to_string()))?
@@ -1361,6 +1399,7 @@ fn apply_message_updates(
                         "mailbox claim references a non-pending message".into(),
                     ));
                 }
+                message.validate_claim_turn(turn_id)?;
                 let fact = usize::try_from(*entered_fact_seq)
                     .ok()
                     .and_then(|sequence| sequence.checked_sub(1))
@@ -1398,10 +1437,10 @@ fn apply_message_updates(
                 if !matches!(entry.state, StoreAgentMessageState::Pending)
                     || entry.target != MessageTarget::NextStep
                     || entry.wake_required
-                    || !matches!(entry.message.source, AgentMessageSource::Completion { .. })
+                    || !entry.permits_promotion()
                 {
                     return Err(StoreError::Corrupt(
-                        "mailbox promotion requires pending non-waking next-Step completion".into(),
+                        "mailbox promotion requires eligible pending next-Step input".into(),
                     ));
                 }
                 entry.target = MessageTarget::NextTurn;
@@ -1435,7 +1474,10 @@ fn apply_message_updates(
     Ok(())
 }
 
-fn validate_memory_agent_guards(state: &MemoryState, commit: &AtomicAgentCommit) -> Result<()> {
+fn validate_memory_activation_guards(
+    state: &MemoryState,
+    commit: &AtomicAgentCommit,
+) -> Result<()> {
     for guard in &commit.required_active_activations {
         if state
             .active_activations
@@ -1447,22 +1489,18 @@ fn validate_memory_agent_guards(state: &MemoryState, commit: &AtomicAgentCommit)
             });
         }
     }
-    for session_id in &commit.quiescent_sessions {
-        let active = state.active_activations.contains_key(session_id);
-        let open_turn = state.sessions.get(session_id).is_some_and(|session| {
-            session
-                .turns
-                .values()
-                .any(|turn| turn.terminal_seq.is_none())
-        });
-        let waking_message = state
-            .ready_keys
-            .keys()
-            .any(|(candidate, _)| candidate == session_id);
-        if active || open_turn || waking_message {
-            return Err(StoreError::SessionNotQuiescent {
-                session: session_id.to_string(),
-            });
+    Ok(())
+}
+
+fn validate_memory_quiescence_guard(state: &MemoryState, root: Option<&SessionId>) -> Result<()> {
+    if let Some(root) = root {
+        for descendant in memory_agent_subtree(state, root)?.descendants {
+            let status = descendant.status;
+            if status.has_active_activation || status.has_open_turn || status.has_waking_message {
+                return Err(StoreError::SessionNotQuiescent {
+                    session: status.session_id.to_string(),
+                });
+            }
         }
     }
     Ok(())
@@ -1646,7 +1684,30 @@ fn apply_activation_updates(
                 }
                 activation.phase = StoreActivationPhase::Running;
             }
-            AgentControlRecordBody::MessageAccepted { .. }
+            AgentControlRecordBody::MessageAccepted {
+                bound_turn_id: Some(bound),
+                ..
+            } => {
+                if !state
+                    .active_activations
+                    .get(session_id)
+                    .is_some_and(|active| {
+                        active.turn_id.as_ref() == Some(bound)
+                            && matches!(
+                                active.phase,
+                                StoreActivationPhase::Running | StoreActivationPhase::Parked
+                            )
+                    })
+                {
+                    return Err(StoreError::Invalid(
+                        "steering binding requires the current activation Turn".into(),
+                    ));
+                }
+            }
+            AgentControlRecordBody::MessageAccepted {
+                bound_turn_id: None,
+                ..
+            }
             | AgentControlRecordBody::MessagePromoted { .. }
             | AgentControlRecordBody::MessageDiscarded { .. } => {}
         }
@@ -1666,6 +1727,7 @@ fn apply_ready_updates(
                 root_session_id,
                 target,
                 wake_required: true,
+                ..
             } => {
                 let message_key = (session_id.clone(), message.message_id.clone());
                 if state.ready_keys.contains_key(&message_key) {
@@ -1708,19 +1770,21 @@ fn apply_ready_updates(
                 let entry = state.agent_messages.get(&message_key).ok_or_else(|| {
                     StoreError::Corrupt("ready promotion has no indexed message".into())
                 })?;
+                let (timestamp_ms, control_seq) =
+                    entry.promotion_order(record.timestamp_ms(), record.seq());
                 let key = (
                     entry.root_session_id.clone(),
-                    record.timestamp_ms(),
+                    timestamp_ms,
                     session_id.clone(),
-                    record.seq(),
+                    control_seq,
                 );
                 state.ready_messages.insert(
                     key.clone(),
                     StoreReadyMessage {
                         session_id: session_id.clone(),
                         message_id: message_id.clone(),
-                        control_seq: record.seq(),
-                        timestamp_ms: record.timestamp_ms(),
+                        control_seq,
+                        timestamp_ms,
                         target: MessageTarget::NextTurn,
                     },
                 );
@@ -1793,4 +1857,61 @@ fn index_appended_turns(
         }
     }
     Ok((updates, prefix_digest))
+}
+
+fn memory_agent_subtree(
+    state: &MemoryState,
+    root: &SessionId,
+) -> Result<StoreAgentSubtreeSnapshot> {
+    let status = |id: &SessionId| -> Result<StoreAgentSessionStatus> {
+        let session = state
+            .sessions
+            .get(id)
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+        Ok(StoreAgentSessionStatus {
+            session_id: id.clone(),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            has_open_turn: session
+                .turns
+                .values()
+                .any(|turn| turn.terminal_seq.is_none()),
+            has_active_activation: state.active_activations.contains_key(id),
+            has_waking_message: state
+                .ready_keys
+                .keys()
+                .any(|(candidate, _)| candidate == id),
+        })
+    };
+    let session = status(root)?;
+    let mut visited = BTreeSet::from([root.clone()]);
+    let mut pending = vec![root.clone()];
+    let mut descendants = Vec::new();
+    while let Some(parent) = pending.pop() {
+        for ((candidate, id), child) in &state.agent_children {
+            if candidate != &parent {
+                continue;
+            }
+            if visited.len() >= rsi_agent_session_protocol::MAXIMUM_DURABLE_AGENT_TREE_NODES
+                || !visited.insert(id.clone())
+            {
+                return Err(StoreError::Corrupt(
+                    "Agent subtree exceeds its node bound or contains a cycle".into(),
+                ));
+            }
+            pending.push(id.clone());
+            descendants.push(StoreAgentDescendantStatus {
+                status: status(id)?,
+                parent_session_id: parent.clone(),
+                path: child.path.clone(),
+                task_name: child.task_name.clone(),
+            });
+        }
+    }
+    descendants.sort_by(|left, right| left.status.session_id.cmp(&right.status.session_id));
+    let snapshot = StoreAgentSubtreeSnapshot {
+        session,
+        descendants,
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
 }

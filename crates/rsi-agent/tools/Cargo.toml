@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+getrandom.workspace = true
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-trait.workspace = true
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-agent-turn-protocol = { path = "../turn-protocol" }

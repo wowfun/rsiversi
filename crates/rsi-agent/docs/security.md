@@ -43,8 +43,9 @@ objects and verifies their digest; cleanup must never follow or delete a path
 supplied by a session Fact.
 
 The Store's derived turn rows are committed in the same transaction as their
-canonical Facts. Open checks the exact schema; first access checks the selected
-session's relational and lifecycle consistency. The explicit offline verifier
+canonical Facts. Open checks the exact schema. Header and recent-session reads
+validate bounded metadata; explicit validation and execution/history access check
+the selected session's relational and lifecycle consistency. The explicit offline verifier
 performs the whole-database physical, foreign-key, and logical audit while
 holding the writer lease. Kernel recovery never trusts an index row without
 decoding and validating the selected bounded Facts, while cold outcome lookup

@@ -5,6 +5,33 @@ use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
+#[test]
+fn parked_wait_deadline_matches_its_kind_on_construction_and_decode() {
+    for (kind, deadline_ms, valid) in [
+        (WaitKind::Agent, Some(1), true),
+        (WaitKind::HumanInteraction, None, true),
+        (WaitKind::Agent, None, false),
+        (WaitKind::Agent, Some(0), false),
+        (WaitKind::HumanInteraction, Some(1), false),
+    ] {
+        let body = AgentControlRecordBody::WaitParked {
+            activation_id: ActivationId::new("activation").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            step_id: StepId::new("step").unwrap(),
+            kind,
+            deadline_ms,
+        };
+        assert_eq!(AgentControlRecord::new(1, 1, body.clone()).is_ok(), valid);
+        let mut encoded = serde_json::to_value(&body).unwrap();
+        encoded["seq"] = json!(1);
+        encoded["timestamp_ms"] = json!(1);
+        assert_eq!(
+            serde_json::from_value::<AgentControlRecord>(encoded).is_ok(),
+            valid
+        );
+    }
+}
+
 fn settings() -> FrozenAgentSettings {
     FrozenAgentSettings::new(
         "default",
@@ -649,6 +676,8 @@ fn durable_agent_tree_values_revalidate_nested_bounds() {
                         options: MessageOptions::default(),
                     },
                     root_session_id: SessionId::new("session-root").unwrap(),
+                    delivery: target.into(),
+                    bound_turn_id: None,
                     target,
                     wake_required,
                 },
@@ -677,6 +706,8 @@ fn control_records_bound_message_authority_and_form_a_digest_chain() {
         AgentControlRecordBody::MessageAccepted {
             message: message.clone(),
             root_session_id: SessionId::new("session-root").unwrap(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            bound_turn_id: None,
             target: MessageTarget::NextTurn,
             wake_required: true,
         },
@@ -712,6 +743,8 @@ fn control_records_bound_message_authority_and_form_a_digest_chain() {
             AgentControlRecordBody::MessageAccepted {
                 message: with_options,
                 root_session_id: SessionId::new("session-root").unwrap(),
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                bound_turn_id: None,
                 target: MessageTarget::NextStep,
                 wake_required: true,
             },

@@ -235,77 +235,90 @@ async fn lane_failure_waits_for_siblings_before_executor_cleanup() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parked_tool_releases_a_single_lane_and_reacquires_it_before_returning() {
-    let stack = BaseStack::activate().await;
-    let parked = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let tools = Arc::clone(&stack.tool_registrar);
-    let parking_lease = tools
-        .register(ToolRegistration {
-            definition: ToolDefinition::new("park", "park", json!({"type":"object"}))
-                .unwrap()
-                .with_scheduling(ToolScheduling::ExclusiveFinal),
-            timeout_ms: 5_000,
-            executor: Arc::new(ParkingTool {
-                parked: Arc::clone(&parked),
-                release: Arc::clone(&release),
-            }),
-        })
-        .unwrap();
-    let fixture = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([
-            StartOutcome::Stream(tool_calls_script(&[("park-call", "park", r"{}")])),
-            StartOutcome::Stream(answer_script()),
-            StartOutcome::Stream(answer_script()),
-        ])),
-        requests: Mutex::new(vec![]),
-        starts: Arc::new(AtomicUsize::new(0)),
-        store: stack.store.clone(),
-        retry_policy: RetryPolicy::default(),
-    });
-    let language_fiber = stack
-        .activate_language("test.language.parked-lane", fixture)
-        .await;
-    let executor_fiber = stack
-        .activate_executor_with_config(json!({
-            "executor_id": "executor-parked-lane",
-            "maximum_active_turns": 1,
-        }))
-        .await;
-    let turns = stack
-        .runtime
-        .root()
-        .lookup_local::<TurnServiceContract>()
-        .unwrap();
-    let first = stack
-        .submit_fresh(&turns, "session-parked-lane-a", "park")
-        .await;
-    tokio::time::timeout(std::time::Duration::from_secs(2), parked.notified())
-        .await
-        .expect("the first Tool did not release its executor lane");
-
-    let second = stack
-        .submit_fresh(&turns, "session-parked-lane-b", "run while parked")
-        .await;
-    assert_eq!(
-        wait_for_outcome(&turns, &second).await,
-        TurnOutcome::Completed
-    );
-    assert!(
-        turns
-            .outcome(&first.session_id, &first.turn_id)
+    for human in [false, true] {
+        let stack = BaseStack::activate().await;
+        let parked = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let tools = Arc::clone(&stack.tool_registrar);
+        let parking_lease = tools
+            .register(ToolRegistration {
+                definition: ToolDefinition::new("park", "park", json!({"type":"object"}))
+                    .unwrap()
+                    .with_scheduling(ToolScheduling::ExclusiveFinal),
+                timeout: if human {
+                    rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+                } else {
+                    rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 5_000 }
+                },
+                executor: Arc::new(ParkingTool {
+                    turns: human.then(|| {
+                        stack
+                            .runtime
+                            .root()
+                            .lookup_local::<TurnExecutionContract>()
+                            .unwrap()
+                    }),
+                    parked: Arc::clone(&parked),
+                    release: Arc::clone(&release),
+                }),
+            })
+            .unwrap();
+        let fixture = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([
+                StartOutcome::Stream(tool_calls_script(&[("park-call", "park", r"{}")])),
+                StartOutcome::Stream(answer_script()),
+                StartOutcome::Stream(answer_script()),
+            ])),
+            requests: Mutex::new(vec![]),
+            starts: Arc::new(AtomicUsize::new(0)),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let language_fiber = stack
+            .activate_language("test.language.parked-lane", fixture)
+            .await;
+        let executor_fiber = stack
+            .activate_executor_with_config(json!({
+                "executor_id": "executor-parked-lane",
+                "maximum_active_turns": 1,
+            }))
+            .await;
+        let turns = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap();
+        let first = stack
+            .submit_fresh(&turns, "session-parked-lane-a", "park")
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked.notified())
             .await
-            .unwrap()
-            .is_none()
-    );
+            .expect("the first Tool did not release its executor lane");
 
-    release.notify_one();
-    assert_eq!(
-        wait_for_outcome(&turns, &first).await,
-        TurnOutcome::Completed
-    );
+        let second = stack
+            .submit_fresh(&turns, "session-parked-lane-b", "run while parked")
+            .await;
+        assert_eq!(
+            wait_for_outcome(&turns, &second).await,
+            TurnOutcome::Completed
+        );
+        assert!(
+            turns
+                .outcome(&first.session_id, &first.turn_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
-    drop((parking_lease, tools, turns));
-    stack.dispose(language_fiber, executor_fiber).await;
+        release.notify_one();
+        assert_eq!(
+            wait_for_outcome(&turns, &first).await,
+            TurnOutcome::Completed
+        );
+
+        drop((parking_lease, tools, turns));
+        stack.dispose(language_fiber, executor_fiber).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -637,7 +650,7 @@ async fn lane_panic_releases_tracking_pins_after_all_lanes_stop() {
         .tool_registrar
         .register(ToolRegistration {
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout_ms: 1000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),

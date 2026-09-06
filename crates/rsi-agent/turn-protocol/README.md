@@ -1,5 +1,10 @@
 # rsi-agent-turn-protocol
 
+`SubmitMessage.delivery` is immutable ingress intent: fixed next Turn, fixed
+next Step, or Human steering. The Kernel resolves steering atomically while
+holding Session submission admission. A receipt means durable acceptance; it
+does not claim that an active model request has already consumed the message.
+
 Process-local application and executor contracts for Agent execution. Product
 callers admit durable mailbox messages, read their indexed pending/claimed/
 discarded state, observe independent Agent-control and Fact streams, cancel an
@@ -25,6 +30,11 @@ provide fork replay, next-Step admission, workspace refresh, Step closure, and
 activation settlement behavior; these durable lifecycle hooks never default to
 silent no-ops. Dropping an observation is detach.
 
+Source mutation requests carry the Tool execution cancellation token separately
+from model JSON. Final source admission and retained commit ownership follow the
+[Kernel contract](../kernel/README.md). `settlement_health` reads bounded runtime
+settlement diagnostics without Store I/O.
+
 Mailbox admission, message state, dual-stream reconnectable observation, and
 the six source-authorized Agent operations share this seam. Spawn creates a
 durable continuable fork child; send/followup address only a direct parent-child
@@ -38,7 +48,11 @@ the call performs one revalidated observation and returns `NoProgress` or
 `Changed` without recording a park/resume pair because no live supervision wait
 began. Cancellation while a durable wait is parked records a cancel-caused
 resume and returns `TurnError::Cancelled`, rather than classifying cancellation
-as malformed Tool input. An unforgeable `AgentCallerAuthority` is derived from a live
+as malformed Tool input. A cancelled wait returns without reacquiring execution
+capacity. Its caller must end execution and may only settle already admitted
+effects and publish the terminal outcome; it cannot start further effects with
+that wait's released lane. The standard executor maps cancellation/timeout to a
+terminal drive failure. An unforgeable `AgentCallerAuthority` is derived from a live
 claim and transported to trusted Tools through the generic typed extension
 slot, so model arguments cannot invent tree authority. The legacy direct
 Language-turn method remains a lower-level test and recovery seam; the standard
@@ -103,3 +117,23 @@ blocker, which outranks the original outcome. Cleanup failure replaces every
 non-success outcome; a blocker replaces only `Completed` or `PartialFailed`.
 Blocker messages use the durable diagnostic byte and NUL/DEL safety contract.
 Finalizer-owned reaping must outlive a dropped executor wait.
+
+The executor reads its deadline through the Kernel's read-only `ElapsedBudget`
+watch. A watch reports consumed execution milliseconds and waits for exhaustion;
+it confers no authority to pause, extend, or reset a Turn budget.
+
+`park_human_wait` consumes an explicit generic Tool lane-parking authority and
+returns one single-use `HumanWait`. The Kernel owns the complete park/resume
+sequence, including its tree permit, the caller's opaque executor permit, and
+the budget clock. Dropping a resume waiter does not cancel the admitted cleanup
+operation. No executor implementation or semaphore crosses this interface.
+A human wait is owned by a Kernel task from admission through cleanup. Dropping
+its handle only closes a channel and is safe outside a Tokio runtime. Claim
+release, executor withdrawal, and Kernel shutdown also request cleanup. The
+retained mutation lease authorizes only completion of the admitted wait after
+live claim authority is withdrawn; shutdown drains that completion before its
+final flush. A terminal Turn cannot start a human wait.
+
+`ready_health` reports cumulative ready-scheduler failures and the latest bounded
+diagnostic without Store I/O. The diagnostic remains available after recovery;
+transient enumeration and per-root failures retry without withdrawing executors.

@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-agent-session-protocol = { path = "../session-protocol" }

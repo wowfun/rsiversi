@@ -40,6 +40,65 @@ fn test_fact(sequence: u64) -> SessionFact {
     .unwrap()
 }
 
+#[tokio::test]
+async fn activation_validator_enforces_the_individual_control_bound_independently() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("activation-control-bound");
+    store
+        .append(AppendBatch {
+            session_id: header.session_id().clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![test_fact(1)],
+        })
+        .await
+        .unwrap();
+    let writer = store.inner.connections.writer.lock().unwrap();
+    let record = AgentControlRecord::new(
+        1,
+        1,
+        AgentControlRecordBody::MessageDiscarded {
+            message_id: MessageId::new("discarded").unwrap(),
+            reason: MessageDiscardReason::Cancelled,
+        },
+    )
+    .unwrap();
+    writer.execute("INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,1,?2 || printf('%*s',?3,''))",
+        params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
+    let result = crate::validation::validate_active_activation_index(&writer, header.session_id());
+    assert!(
+        matches!(result, Err(StoreError::Corrupt(message)) if message.contains("encoded bytes")),
+        "activation projection admitted an individually oversized control"
+    );
+}
+
+#[tokio::test]
+async fn poisoned_validation_hint_cannot_fail_a_valid_store_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let cache = store.inner.validated_sessions.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = cache.lock().unwrap();
+        panic!("injected validation-cache poison");
+    })
+    .join();
+    let header = test_header("poisoned-hint");
+    let id = header.session_id().clone();
+    let commit = store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: Some(header),
+            facts: vec![test_fact(1)],
+        })
+        .await
+        .expect("optional cache failure overrode Store admission or commit");
+    assert_eq!(commit.durable_seq, 1);
+    store.validate_session(&id).await.unwrap();
+    assert_eq!(store.read_facts(&id, 0, 1).await.unwrap().facts.len(), 1);
+}
+
 #[test]
 fn prepared_store_charge_includes_inline_and_dynamic_config_state() {
     let config = SqliteStoreConfig {
@@ -70,7 +129,7 @@ fn validated_session_cache_has_exact_recency_eviction() {
 fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
-    let connection = store.connections.reader.lock().unwrap();
+    let connection = store.inner.connections.reader.lock().unwrap();
     let detail = connection
         .query_row(
             "EXPLAIN QUERY PLAN
@@ -89,7 +148,7 @@ fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
 fn agent_cursor_queries_seek_their_complete_ordering_keys() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
-    let connection = store.connections.reader.lock().unwrap();
+    let connection = store.inner.connections.reader.lock().unwrap();
 
     let ready_messages = connection
         .query_row(
@@ -159,6 +218,7 @@ async fn concurrent_first_access_runs_one_session_validation() {
         let session_id = session_id.clone();
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
+            store.validate_session(&session_id).await.unwrap();
             store.header(&session_id).await.unwrap()
         }));
     }
@@ -166,11 +226,11 @@ async fn concurrent_first_access_runs_one_session_validation() {
     for task in tasks {
         assert_eq!(task.await.unwrap().session_id(), &session_id);
     }
-    assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
-async fn repeated_recent_listing_reuses_the_session_validation_cache() {
+async fn repeated_recent_listing_does_not_validate_history() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let session_id = SessionId::new("session-recent-cache").unwrap();
@@ -195,7 +255,7 @@ async fn repeated_recent_listing_reuses_the_session_validation_cache() {
             .len(),
         1
     );
-    assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
     assert_eq!(
         store
             .list_recent_sessions(None, 1)
@@ -205,7 +265,7 @@ async fn repeated_recent_listing_reuses_the_session_validation_cache() {
             .len(),
         1
     );
-    assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -234,12 +294,14 @@ async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
             .await
             .unwrap();
     }
-    assert_eq!(store.validation_runs.load(Ordering::Relaxed), 0);
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
 
+    store.validate_session(&first).await.unwrap();
     assert_eq!(store.header(&first).await.unwrap().session_id(), &first);
-    assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
+    store.validate_session(&first).await.unwrap();
     assert_eq!(store.header(&first).await.unwrap().session_id(), &first);
-    assert_eq!(store.validation_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -308,7 +370,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
     assert_eq!(after.durable_seq, 2);
     assert_eq!(after.facts.len(), 2);
 
-    let reader = store.connections.reader.lock().unwrap();
+    let reader = store.inner.connections.reader.lock().unwrap();
     assert_eq!(
         reader
             .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))
@@ -320,5 +382,547 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
             .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         5_000
+    );
+}
+
+#[tokio::test]
+async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
+    for kind in ["reader", "writer", "cas"] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let owner = Arc::downgrade(&store.inner);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            let operation = move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            };
+            match kind {
+                "reader" => store.with_reader(move |_| operation()).await,
+                "writer" => store.with_writer(move |_| operation()).await,
+                _ => store.with_cas(operation).await,
+            }
+        });
+        entered_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(owner.upgrade().is_some(), "{kind}");
+        assert!(
+            matches!(
+                SqliteStore::open(root.path()),
+                Err(StoreError::WriterLocked)
+            ),
+            "{kind}"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while owner.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+            loop {
+                match SqliteStore::open(root.path()) {
+                    Ok(reopened) => {
+                        drop(reopened);
+                        break;
+                    }
+                    Err(StoreError::WriterLocked) => tokio::task::yield_now().await,
+                    Err(error) => panic!("{kind}: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        SqliteStore::verify(root.path()).unwrap();
+    }
+}
+
+#[test]
+fn null_schema_definition_is_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    drop(SqliteStore::open(root.path()).unwrap());
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=NULL WHERE type='index' AND name='agent_messages_pending'").unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStore::open(root.path()),
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
+async fn missing_subtree_session_is_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("orphan-root");
+    store
+        .append(AppendBatch {
+            session_id: header.session_id().clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![test_fact(1)],
+        })
+        .await
+        .unwrap();
+    store.inner.connections.writer.lock().unwrap().execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         INSERT INTO agent_nodes VALUES ('missing-session', 'orphan-root', 'orphan-root', '[1]', 'child');
+         PRAGMA foreign_keys=ON;"
+    ).unwrap();
+    assert!(matches!(
+        store.read_agent_subtree_snapshot(header.session_id()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn schema_literals_are_compared_without_normalization() {
+    for (kind, name, literal) in [
+        ("table", "active_activations", "running"),
+        ("index", "agent_messages_pending", "pending"),
+    ] {
+        for replacement in [
+            literal.to_uppercase(),
+            format!("{} {}", &literal[..1], &literal[1..]),
+            format!("{literal} "),
+            format!("{literal};"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            drop(SqliteStore::open(root.path()).unwrap());
+            SqliteStore::verify(root.path()).unwrap();
+            let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+            let observed: String = db
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+                    params![kind, name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mutated = observed.replace(&format!("'{literal}'"), &format!("'{replacement}'"));
+            assert_ne!(observed, mutated);
+            db.execute_batch("PRAGMA writable_schema=ON").unwrap();
+            db.execute(
+                "UPDATE sqlite_master SET sql=?1 WHERE type=?2 AND name=?3",
+                params![mutated, kind, name],
+            )
+            .unwrap();
+            drop(db);
+            assert!(matches!(
+                SqliteStore::open(root.path()),
+                Err(StoreError::Corrupt(_))
+            ));
+            assert!(matches!(
+                SqliteStore::verify(root.path()),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One cold-open scenario proves every guarded projection and transaction rollback.
+async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
+    for table in [
+        "turns",
+        "agent_messages",
+        "ready_messages",
+        "active_activations",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let parent = test_header("cold-proof-parent");
+        let child_id = SessionId::new("cold-proof-child").unwrap();
+        let child = parent
+            .forked_child(
+                child_id.clone(),
+                2,
+                rsi_agent_session_protocol::ForkOrigin {
+                    parent_session_id: parent.session_id().clone(),
+                    root_session_id: parent.session_id().clone(),
+                    path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
+                    task_name: "child".into(),
+                    parent_header_fingerprint: parent.fingerprint().unwrap(),
+                    invoking_turn_id: TurnId::new("turn-1").unwrap(),
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 0,
+                    terminal_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256([])
+                        .unwrap(),
+                    requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
+                    effective_turns: 0,
+                },
+            )
+            .unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        for header in [parent.clone(), child] {
+            store
+                .append(AppendBatch {
+                    session_id: header.session_id().clone(),
+                    expected_seq: 0,
+                    header: Some(header),
+                    facts: vec![test_fact(1)],
+                })
+                .await
+                .unwrap();
+        }
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: child_id.clone(),
+                    expected_fact_seq: 1,
+                    expected_control_seq: 0,
+                    header: None,
+                    facts: Vec::new(),
+                    controls: vec![
+                        AgentControlRecord::new(
+                            1,
+                            1,
+                            AgentControlRecordBody::MessageAccepted {
+                                message: rsi_agent_session_protocol::AgentMessage {
+                                    message_id: MessageId::new("pending-child").unwrap(),
+                                    source: AgentMessageSource::Human,
+                                    content: vec![
+                                        rsi_agent_session_protocol::AgentMessageContent::Text {
+                                            text: "pending".into(),
+                                        },
+                                    ],
+                                    options: rsi_agent_session_protocol::MessageOptions::default(),
+                                },
+                                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                                bound_turn_id: None,
+                                root_session_id: parent.session_id().clone(),
+                                target: MessageTarget::NextTurn,
+                                wake_required: true,
+                            },
+                        )
+                        .unwrap(),
+                        AgentControlRecord::new(
+                            2,
+                            2,
+                            AgentControlRecordBody::ActivationStarted {
+                                activation_id: ActivationId::new("child-active").unwrap(),
+                                parent_session_id: Some(parent.session_id().clone()),
+                                root_session_id: parent.session_id().clone(),
+                                path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
+                            },
+                        )
+                        .unwrap(),
+                    ],
+                }],
+                required_active_activations: Vec::new(),
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = SqliteStore::open(root.path()).unwrap();
+        for _ in 0..2 {
+            let snapshot = store
+                .read_agent_subtree_snapshot(parent.session_id())
+                .await
+                .unwrap();
+            assert_eq!(snapshot.descendants.len(), 1);
+            assert!(snapshot.descendants[0].status.has_open_turn);
+        }
+        assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 2);
+        drop(store);
+        let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        connection
+            .execute(
+                &format!("DELETE FROM {table} WHERE session_id=?1"),
+                [child_id.as_str()],
+            )
+            .unwrap();
+        drop(connection);
+        let store = SqliteStore::open(root.path()).unwrap();
+        assert!(store.header(&child_id).await.is_ok());
+        assert!(matches!(
+            store.read_agent_subtree_snapshot(parent.session_id()).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            store
+                .commit_agent(AtomicAgentCommit {
+                    sessions: vec![AtomicSessionAppend {
+                        session_id: parent.session_id().clone(),
+                        expected_fact_seq: 1,
+                        expected_control_seq: 0,
+                        header: None,
+                        facts: vec![test_fact(2)],
+                        controls: Vec::new()
+                    }],
+                    required_active_activations: Vec::new(),
+                    quiescent_descendants_of: Some(parent.session_id().clone()),
+                })
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(
+            store
+                .read_facts(parent.session_id(), 0, 8)
+                .await
+                .unwrap()
+                .durable_seq,
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    for id in ["subtree-root", "subtree-child"] {
+        store
+            .append(AppendBatch {
+                session_id: SessionId::new(id).unwrap(),
+                expected_seq: 0,
+                header: Some(test_header(id)),
+                facts: vec![test_fact(1)],
+            })
+            .await
+            .unwrap();
+    }
+    let id = SessionId::new("subtree-root").unwrap();
+    // Fault injection deliberately bypasses the Header-derived lineage writer.
+    {
+        let writer = store.inner.connections.writer.lock().unwrap();
+        writer.execute(
+            "INSERT INTO agent_nodes VALUES ('subtree-child', 'subtree-root', 'subtree-root', '[1]', 'child')",
+            [],
+        ).unwrap();
+    }
+    assert_eq!(
+        store
+            .read_agent_subtree_snapshot(&id)
+            .await
+            .unwrap()
+            .descendants
+            .len(),
+        1
+    );
+    for (field, value) in [
+        ("task_name", "x".repeat(257)),
+        ("task_name", "invalid name".into()),
+        ("path_json", " ".repeat(4096)),
+    ] {
+        let original: String = {
+            let writer = store.inner.connections.writer.lock().unwrap();
+            let original = writer
+                .query_row(
+                    &format!("SELECT {field} FROM agent_nodes WHERE session_id='subtree-child'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            writer
+                .execute(
+                    &format!("UPDATE agent_nodes SET {field}=?1 WHERE session_id='subtree-child'"),
+                    [&value],
+                )
+                .unwrap();
+            original
+        };
+        assert!(matches!(
+            store.read_agent_subtree_snapshot(&id).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        store
+            .inner
+            .connections
+            .writer
+            .lock()
+            .unwrap()
+            .execute(
+                &format!("UPDATE agent_nodes SET {field}=?1 WHERE session_id='subtree-child'"),
+                [&original],
+            )
+            .unwrap();
+    }
+    store.inner.connections.writer.lock().unwrap().execute(
+        "INSERT INTO agent_nodes VALUES ('subtree-root', 'subtree-root', 'subtree-child', '[2]', 'root')",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        store.read_agent_subtree_snapshot(&id).await,
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
+async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
+    use rsi_agent_session_protocol::EffectId;
+    use rsi_ai_protocol::{ContentDelta, LanguageEvent};
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = SessionId::new("length-admission").unwrap();
+    let turn = TurnId::new("turn-1").unwrap();
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: Some(test_header(id.as_str())),
+            facts: vec![test_fact(1)],
+        })
+        .await
+        .unwrap();
+    for seq in 2..=4 {
+        let fact = SessionFact::new(
+            seq,
+            seq,
+            SessionFactBody::ModelEvent {
+                turn_id: turn.clone(),
+                effect_id: EffectId::new("large-delta").unwrap(),
+                event: LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("x".repeat(32 * 1024 * 1024)),
+                },
+            },
+        )
+        .unwrap();
+        store
+            .append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: seq - 1,
+                header: None,
+                facts: vec![fact],
+            })
+            .await
+            .unwrap();
+    }
+    let count = || store.inner.fact_materializations.swap(0, Ordering::Relaxed);
+    let page = store.read_facts(&id, 0, 8).await.unwrap();
+    assert_eq!(page.facts.len(), 2);
+    assert_eq!(count(), 2);
+    drop(page);
+    let page = store.read_facts(&id, 2, 8).await.unwrap();
+    assert_eq!(page.facts[0].seq(), 3);
+    assert_eq!(page.facts.len(), 1);
+    assert_eq!(count(), 1);
+    drop(page);
+    let page = store.read_facts_before(&id, 0, 8).await.unwrap();
+    assert_eq!(page.facts[0].seq(), 4);
+    assert!(page.has_more);
+    assert_eq!(count(), 1);
+    drop(page);
+    let page = store.read_turn_facts(&id, &turn, 1, 8).await.unwrap();
+    assert_eq!(page.facts[0].seq(), 2);
+    assert!(page.has_more);
+    assert_eq!(count(), 1);
+    drop(page);
+    let page = store.read_turn_facts(&id, &turn, 2, 1).await.unwrap();
+    assert_eq!(page.facts[0].seq(), 3);
+    assert!(page.has_more);
+    assert_eq!(count(), 1, "count lookahead must not materialize a body");
+}
+
+#[tokio::test]
+async fn control_pages_admit_stored_lengths_before_materializing_the_next_body() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("control-length-admission");
+    store
+        .append(AppendBatch {
+            session_id: header.session_id().clone(),
+            expected_seq: 0,
+            header: Some(header.clone()),
+            facts: vec![test_fact(1)],
+        })
+        .await
+        .unwrap();
+    {
+        let writer = store.inner.connections.writer.lock().unwrap();
+        // Valid JSON whitespace exercises the stored-byte bound independently of
+        // the much smaller canonical record. No mailbox projection is consulted.
+        for seq in 1..=2 {
+            let record = AgentControlRecord::new(
+                seq,
+                seq,
+                AgentControlRecordBody::MessageDiscarded {
+                    message_id: MessageId::new(format!("discarded-{seq}")).unwrap(),
+                    reason: MessageDiscardReason::Cancelled,
+                },
+            )
+            .unwrap();
+            let mut json = serde_json::to_string(&record).unwrap();
+            json.extend(std::iter::repeat_n(' ', 32 * 1024 * 1024));
+            writer
+                .execute(
+                    "INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,?2,?3)",
+                    params![
+                        header.session_id().as_str(),
+                        i64::try_from(seq).unwrap(),
+                        json
+                    ],
+                )
+                .unwrap();
+        }
+        writer
+            .execute(
+                "UPDATE sessions SET control_seq=2 WHERE session_id=?1",
+                [header.session_id().as_str()],
+            )
+            .unwrap();
+    }
+    let page = store
+        .read_controls(header.session_id(), 0, 8)
+        .await
+        .unwrap();
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].seq(), 1);
+    let next = store
+        .read_controls(header.session_id(), 1, 8)
+        .await
+        .unwrap();
+    assert_eq!(next.records.len(), 1);
+    assert_eq!(next.records[0].seq(), 2);
+}
+
+#[tokio::test]
+async fn metadata_catalog_larger_than_validation_cache_never_validates_history() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    for index in 0..512 {
+        let id = SessionId::new(format!("metadata-{index:03}")).unwrap();
+        store
+            .append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: 0,
+                header: Some(test_header(id.as_str())),
+                facts: vec![test_fact(1)],
+            })
+            .await
+            .unwrap();
+    }
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    for _ in 0..2 {
+        let mut cursor = None;
+        loop {
+            let page = store
+                .list_recent_sessions(cursor.as_ref(), 256)
+                .await
+                .unwrap();
+            for session in &page.sessions {
+                store.header(session.header.session_id()).await.unwrap();
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.sessions.last().map(StoreRecentSession::cursor);
+        }
+    }
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
+    assert!(
+        store
+            .inner
+            .validated_sessions
+            .lock()
+            .unwrap()
+            .recency
+            .is_empty()
     );
 }

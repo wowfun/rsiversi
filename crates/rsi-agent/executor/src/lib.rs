@@ -46,7 +46,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -297,7 +297,7 @@ use execution_support::{
     combine_cancellation, failed, failure_outcome, fatal, image_ai_failure,
     image_operation_failure, next_effect_id, prepare_tool_effect, publish_budget_exhaustion,
     publish_nonterminal_with_capacity_retry, publish_terminal, retry_delay, run_executor_pool,
-    settled_tool_budget, should_retry, tool_failure, unix_now_ms,
+    settled_tool_budget, should_retry, tool_failure,
 };
 
 #[derive(Debug)]
