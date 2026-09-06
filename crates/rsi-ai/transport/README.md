@@ -25,7 +25,9 @@ carry the complete response; normalized event-count and output-byte limits
 remain separate semantic gates. The decoder admits retained bytes in 256 KiB
 units. Each unfinished frame begins with one unit and grows only when the
 process-wide claim set remains safe: all unfinished frames can reach their
-declared ceilings and finish in some release order. Empty transport items do
+declared ceilings and finish in some release order. Registered claims with no
+allocated units are waiting for admission and do not participate in that
+completion simulation, except for the candidate being granted. Empty transport items do
 not alter cross-item CR/LF framing state. A delivered `data` value owns
 its actual units until the consumer drops it. Cancellation removes a queued
 growth claim, and no admission lock is held while waiting for bytes or capacity.

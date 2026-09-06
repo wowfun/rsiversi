@@ -17,7 +17,9 @@ deadlock when several frames consume the budget but none can reach its ceiling.
 Transport owns one process-wide safe-state admission scheduler measured in 256
 KiB units. Each unfinished frame declares its finite maximum, acquires one unit
 before body polling, and grows only if the resulting claims retain a possible
-completion order. Oldest currently grantable growth waiters precede new-frame
+completion order. Other registered claims with zero allocated units are still
+waiting for admission and are excluded from the completion simulation; the
+candidate participates with its proposed grant. Oldest currently grantable growth waiters precede new-frame
 admission, cancellation removes its ticket, and no scheduler lock crosses an
 await.
 

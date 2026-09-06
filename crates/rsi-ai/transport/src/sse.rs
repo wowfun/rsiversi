@@ -595,6 +595,9 @@ fn safe_after_grant(state: &AdmissionState, waiter: &Waiter, total_units: usize)
         if allocated > claim.maximum_units {
             return false;
         }
+        if allocated == 0 {
+            continue;
+        }
         let Some(next_used) = used.checked_add(allocated) else {
             return false;
         };
@@ -761,6 +764,37 @@ mod tests {
             },
             3,
         ));
+    }
+
+    #[test]
+    fn unadmitted_large_claim_does_not_block_a_small_candidate() {
+        let mut state = AdmissionState {
+            fixed_units: 1,
+            declared_maximum_units: 5,
+            ..AdmissionState::default()
+        };
+        state.claims.insert(
+            1,
+            Claim {
+                maximum_units: 3,
+                allocated_units: 0,
+            },
+        );
+        state.claims.insert(
+            2,
+            Claim {
+                maximum_units: 2,
+                allocated_units: 0,
+            },
+        );
+        let waiter = |claim| Waiter {
+            claim,
+            target_units: 1,
+            kind: WaitKind::Begin,
+            changed: Arc::new(Notify::new()),
+        };
+        assert!(!safe_after_grant(&state, &waiter(1), 3));
+        assert!(safe_after_grant(&state, &waiter(2), 3));
     }
 
     #[test]
