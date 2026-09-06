@@ -1,5 +1,51 @@
 # rsi
 
+The line Session CLI accepts ordinary text directly into the durable next-Turn
+mailbox and `:steer TEXT` as immutable steering intent. It observes continuously
+across Turns. `--list`, `--history SESSION`, and `--resume SESSION` select bounded
+listing, history, and attachment. `:sessions`, `:attach SESSION`, `:history
+[BEFORE]`, `:status`, `:agents`, and `:queue` expose durable inspection. Repeated
+listing/history commands advance pages of 20 Sessions or 128 Facts and report
+exhaustion without replaying the first page. Observation and live interaction
+refresh retry independently with bounded backoff. Unchanged interaction snapshots
+back off from 250 ms to two seconds; a changed snapshot restores the short interval.
+Five consecutive observation failures end the attachment with a visible error
+and a nonzero exit, even while stdin remains open. Interaction refresh failure
+stops that watcher and explains that reattachment restarts it. Switching
+Session first reads the new bounded snapshot/history, then stops the previous
+observer before rendering the new attachment. A failed read preserves the
+current handle, observer, cancellation ownership, and history cursor.
+In text mode, Session query results go to stdout as indented JSON; live status
+and errors go to stderr. JSONL mode keeps all events on stdout.
+
+`:approvals`, `:allow ID`, `:deny ID`, `:questions`, and `:answer ID` expose live
+human intervention. Answer mode collects one answer per prompt, accepting an
+option number or free text; Ctrl-C abandons only that answer draft. Outside
+answer mode, Ctrl-C cancels this client's accepted pending messages and current
+Turn; `:cancel [MESSAGE_OR_TURN_ID]` explicitly permits cancellation of attached
+work. `:output ID [OFFSET]` reads a completed cache page. `::TEXT` escapes a
+leading colon. `:exit` or EOF detaches a remote client; an embedded owner shuts
+down and interrupts active work while preserving accepted mailbox input.
+
+One renderer owns output: model text uses stdout and status, Tool feedback,
+and human prompts use stderr. JSONL version 4 emits only structured envelopes
+on stdout, including live interaction snapshots. These snapshots report live
+Host state; their absence in history never authorizes replay of a human wait.
+Turn cancellation does not discard terminal Fact or Outcome envelopes queued for
+the renderer. Detaching or stopping the renderer still ends presentation.
+
+The standard Linux coding catalog includes `output_read`, an independent
+read-only contribution over the Process completed-output cache. It accepts only
+an issued output identity, raw offset, and bounded page size. Complete logs live
+under the Host cache identity and may survive normal exit/restart until quota
+eviction; they are not a durable Session archive. Model text includes safe UTF-8
+decoding and raw cursors. A page that splits a UTF-8 character may display the
+replacement character U+FFFD; the next cursor always advances by raw bytes.
+Tool results and `:output` include `bytes_hex` for exact reconstruction. When
+decoding or display sanitization changes a page, the Tool's model-facing text
+also carries those hex bytes. Display text replaces control characters and
+Unicode bidi controls, while preserving newline, tab, and ordinary joiners.
+
 The `rsi` product is the standard RSIversi local Session application and Host.
 Its library owns the explicit linked factory catalog, standard composition,
 closed Application and Host Profile catalogs, the transport-independent
@@ -76,27 +122,21 @@ typed conflict. Agent-control records and Facts are independent durable streams.
 Approval waiters remain bounded live Host state and are never replayed as
 effects.
 
-The interactive `session` application is line-oriented. Ordinary lines are
-accepted FIFO through a 16-message application queue and a one-line reader
-handoff; the blocking stdin producer stops reading while both are full.
-`:queue`, `:cancel`, `:approvals`, `:allow`, `:deny`, `:exit`,
-and `:help` are local commands, while `::` escapes a leading colon. Ctrl-C
-cancels only this client's tracked message or its claimed Turn, and detach never
-cancels work. The `headless` application accepts one message, may attach
-repeatable `--image` inputs before admission, and has no approval capability; an
-unanswered approval remains pending until cancellation or Host shutdown rather
-than being denied merely because the submitter is headless.
+The `headless` application accepts one message, may attach repeatable `--image`
+inputs before admission, and has no answering UI. Unanswered interactions remain
+pending until another attached client answers, cancellation, or Host shutdown.
+The line reader has a bounded handoff; acceptance receipts always describe
+Kernel-persisted input, and client memory is never a follow-up queue.
 On Unix, each image path is opened no-follow and nonblocking before its handle is
 verified as a regular file, so a FIFO, device, or final symlink cannot occupy a
 blocking worker while waiting to be classified.
 
-Application exit status 0 means a completed turn; an interactive Session also
-treats its user's locally cancelled turn as a successful control action. Status
-1 covers failures after the application has acquired its Session surface,
-including submission-time route or provider configuration rejection and a
-failed, partial, interrupted, or budget-exceeded terminal outcome. Status 2
-covers command-line, Profile/catalog, and Host bootstrap failures before that
-handoff. Status 130 means headless signal cancellation.
+Headless exit status 0 means a completed turn, 1 means a submission or execution
+failure, and 130 means signal cancellation. Interactive exit status 0 means the
+client detached successfully; individual Turn outcomes appear in observation and
+history. Interactive client or rendering failures return 1. Both applications
+return 2 for command-line, Profile/catalog, or Host bootstrap failures before
+acquiring the Session surface.
 
 The Rust Session interface additionally exposes direct Image generation. Its
 caller allocates the `TurnId`; the operation validates its exact Image route and

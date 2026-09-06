@@ -4,12 +4,14 @@ use rsi_approval_protocol::{
     ApprovalAnswerer, ApprovalDecision, ApprovalError, ApprovalOutcome, ApprovalRequest,
 };
 use rsi_session::{Result as SessionResult, SessionApplicationError, SessionApprovalControl};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 const MAXIMUM_PENDING_APPROVALS: usize = 1024;
+const MAXIMUM_PENDING_APPROVAL_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_SETTLED_APPROVALS: usize = 1024;
 
 /// Host-generation approval broker shared by every capable Session client.
 #[derive(Clone, Debug)]
@@ -25,12 +27,16 @@ struct State {
 
 #[derive(Debug, Default)]
 struct Inner {
+    pending_bytes: usize,
     next_generation: u64,
     pending: BTreeMap<(String, String), Pending>,
+    settled: BTreeMap<(String, String), ApprovalDecision>,
+    settled_order: VecDeque<(String, String)>,
 }
 
 #[derive(Debug)]
 struct Pending {
+    encoded_len: usize,
     generation: u64,
     request: ApprovalRequest,
     answer: Option<oneshot::Sender<ApprovalOutcome>>,
@@ -60,12 +66,13 @@ impl ApprovalBroker {
     /// Cancels every pending request and rejects later admissions.
     pub fn stop(&self) {
         self.stopped.cancel();
-        self.state
+        let mut inner = self
+            .state
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .clear();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.pending.clear();
+        inner.pending_bytes = 0;
     }
 
     fn remove_if_current(&self, key: &(String, String), generation: u64) {
@@ -79,7 +86,11 @@ impl ApprovalBroker {
             .get(key)
             .is_some_and(|pending| pending.generation == generation)
         {
-            inner.pending.remove(key);
+            let pending = inner
+                .pending
+                .remove(key)
+                .expect("current registration exists");
+            inner.pending_bytes -= pending.encoded_len;
         }
     }
 }
@@ -98,6 +109,7 @@ impl ApprovalAnswerer for ApprovalBroker {
         cancellation: CancellationToken,
     ) -> rsi_approval_protocol::Result<Option<ApprovalOutcome>> {
         request.validate()?;
+        let encoded_len = request.encoded_len()?;
         if self.stopped.is_cancelled() {
             return Err(ApprovalError::Cancelled);
         }
@@ -108,12 +120,17 @@ impl ApprovalAnswerer for ApprovalBroker {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if inner.pending.len() >= MAXIMUM_PENDING_APPROVALS {
+            if self.stopped.is_cancelled() || cancellation.is_cancelled() {
+                return Err(ApprovalError::Cancelled);
+            }
+            if inner.pending.len() >= MAXIMUM_PENDING_APPROVALS
+                || encoded_len > MAXIMUM_PENDING_APPROVAL_BYTES - inner.pending_bytes
+            {
                 return Err(ApprovalError::Answerer(
                     "Session Host pending approval capacity is exhausted".into(),
                 ));
             }
-            if inner.pending.contains_key(&key) {
+            if inner.pending.contains_key(&key) || inner.settled.contains_key(&key) {
                 return Err(ApprovalError::Answerer(
                     "Session Host received a duplicate pending approval identity".into(),
                 ));
@@ -124,9 +141,11 @@ impl ApprovalAnswerer for ApprovalBroker {
                 .ok_or_else(|| ApprovalError::Answerer("approval generation exhausted".into()))?;
             let generation = inner.next_generation;
             let (sender, receiver) = oneshot::channel();
+            inner.pending_bytes += encoded_len;
             inner.pending.insert(
                 key.clone(),
                 Pending {
+                    encoded_len,
                     generation,
                     request,
                     answer: Some(sender),
@@ -193,17 +212,37 @@ impl SessionApprovalControl for ApprovalBroker {
             .validate()
             .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
         let key = (session_id.as_str().to_owned(), approval_id.to_owned());
-        let sender = self
+        let mut inner = self
             .state
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .remove(&key)
-            .and_then(|mut pending| pending.answer.take());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(prior) = inner.settled.get(&key) {
+            return if *prior == decision {
+                Ok(true)
+            } else {
+                Err(SessionApplicationError::Invalid(
+                    "approval answer conflicts with its settled receipt".into(),
+                ))
+            };
+        }
+        let sender = inner.pending.remove(&key).and_then(|mut pending| {
+            inner.pending_bytes -= pending.encoded_len;
+            pending.answer.take()
+        });
         let Some(sender) = sender else {
             return Ok(false);
         };
-        Ok(sender.send(outcome).is_ok())
+        if sender.send(outcome).is_err() {
+            return Ok(false);
+        }
+        if inner.settled_order.len() == MAXIMUM_SETTLED_APPROVALS
+            && let Some(expired) = inner.settled_order.pop_front()
+        {
+            inner.settled.remove(&expired);
+        }
+        inner.settled_order.push_back(key.clone());
+        inner.settled.insert(key, decision);
+        Ok(true)
     }
 }

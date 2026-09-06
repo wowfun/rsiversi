@@ -130,6 +130,23 @@ impl Default for FrameReadBudget {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WireOperation {
+    Inspect {
+        session_id: SessionId,
+    },
+    PendingQuestions {
+        session_id: SessionId,
+    },
+    AnswerQuestion {
+        session_id: SessionId,
+        id: String,
+        answer: rsi_user_questions_protocol::QuestionAnswer,
+    },
+    ReadOutput {
+        session_id: SessionId,
+        id: String,
+        offset: u64,
+        limit: usize,
+    },
     Probe,
     Create {
         cwd: String,
@@ -148,6 +165,7 @@ enum WireOperation {
         session_id: SessionId,
     },
     SubmitInput {
+        delivery: rsi_agent_session_protocol::MessageDelivery,
         session_id: SessionId,
         message_id: MessageId,
         content: Vec<WireInputBlock>,
@@ -257,6 +275,18 @@ enum ServerFrame {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WireResponse {
+    Inspection {
+        snapshot: Box<rsi_agent_store_protocol::StoreSessionInspection>,
+    },
+    Questions {
+        requests: Vec<rsi_user_questions_protocol::QuestionRequest>,
+    },
+    QuestionAnswer {
+        accepted: bool,
+    },
+    Output {
+        page: rsi_process::OutputPage,
+    },
     Ready,
     Session {
         header: Box<SessionHeader>,

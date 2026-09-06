@@ -29,7 +29,7 @@ use rsi_session_host::{
 };
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future as _;
 use std::io::Read as _;

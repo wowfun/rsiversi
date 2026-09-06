@@ -1,4 +1,7 @@
 use super::*;
+use serde_json::Value;
+mod session_cli;
+pub(super) use session_cli::run_session_application;
 
 pub(super) enum ParsedApplication {
     Headless(Command),
@@ -13,7 +16,7 @@ pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {
         .any(|argument| matches!(argument.to_str(), Some("-h" | "--help")))
     {
         print!(
-            "Usage:\n  rsi --profile headless [TASK | --stdin] [HEADLESS OPTIONS]\n  rsi --profile session [--cwd PATH] [--resume SESSION | --session-id SESSION] [--agent-preset ID] [--trust-workspace] [--output text|jsonl]\n"
+            "Usage:\n  rsi --profile headless [TASK | --stdin] [HEADLESS OPTIONS]\n  rsi --profile session [--cwd PATH] [--resume SESSION | --history SESSION | --list | --session-id SESSION] [--agent-preset ID] [--trust-workspace] [--output text|jsonl]\n"
         );
         return 0;
     }
@@ -71,9 +74,7 @@ pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {
         ParsedApplication::Headless(command) => {
             run_headless_application(application, command).await
         }
-        ParsedApplication::Session(command) => {
-            run_session_application(application, connection.mode(), command).await
-        }
+        ParsedApplication::Session(command) => run_session_application(application, command).await,
     };
     let exit = match connection.shutdown().await {
         Ok(()) => exit,
@@ -96,6 +97,8 @@ pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {
 
 #[derive(Clone, Debug)]
 pub(super) struct SessionCommand {
+    list: bool,
+    history: Option<SessionId>,
     cwd: Option<PathBuf>,
     resume: Option<SessionId>,
     session_id: Option<SessionId>,
@@ -138,6 +141,10 @@ pub(super) struct HeadlessTurnOptions {
 
 #[derive(Clone, Debug)]
 pub(super) enum CliEvent {
+    Notice {
+        kind: &'static str,
+        value: Value,
+    },
     Message {
         session_id: SessionId,
         message_id: MessageId,
@@ -165,12 +172,15 @@ pub(super) enum CliEvent {
 impl CliEvent {
     fn json_line(&self) -> std::result::Result<String, serde_json::Error> {
         match self {
+            Self::Notice { kind, value } => {
+                serde_json::to_string(&serde_json::json!({"version":4,"type":kind,"data":value}))
+            }
             Self::Message {
                 session_id,
                 message_id,
                 accepted_control_seq,
             } => serde_json::to_string(&MessageEnvelope {
-                version: 3,
+                version: 4,
                 kind: "message",
                 session_id,
                 message_id,
@@ -182,7 +192,7 @@ impl CliEvent {
                 turn_id,
                 entered_fact_seq,
             } => serde_json::to_string(&TurnEnvelope {
-                version: 3,
+                version: 4,
                 kind: "turn",
                 session_id,
                 message_id,
@@ -194,7 +204,7 @@ impl CliEvent {
                 fact,
                 durable_seq,
             } => serde_json::to_string(&LiveFactEnvelope {
-                version: 3,
+                version: 4,
                 kind: "fact",
                 session_id,
                 fact,
@@ -206,7 +216,7 @@ impl CliEvent {
                 outcome,
                 durable_seq,
             } => serde_json::to_string(&OutcomeEnvelope {
-                version: 3,
+                version: 4,
                 kind: "outcome",
                 session_id,
                 turn_id,
@@ -262,6 +272,8 @@ pub(super) struct OutcomeEnvelope<'a> {
 impl SessionCommand {
     pub(super) fn parse(arguments: Vec<OsString>) -> rsi::Result<Self> {
         let mut command = Self {
+            list: false,
+            history: None,
             cwd: None,
             resume: None,
             session_id: None,
@@ -274,6 +286,12 @@ impl SessionCommand {
         while let Some(argument) = arguments.next() {
             let argument = utf8(argument)?;
             match argument.as_str() {
+                "--list" => set_flag(&mut command.list, "--list")?,
+                "--history" => set_option(
+                    &mut command.history,
+                    session_value(&mut arguments, "--history")?,
+                    "--history",
+                )?,
                 "--cwd" => set_option(
                     &mut command.cwd,
                     path_value(&mut arguments, "--cwd")?,
@@ -310,6 +328,25 @@ impl SessionCommand {
                     )));
                 }
             }
+        }
+        if (u8::from(command.list)
+            + u8::from(command.history.is_some())
+            + u8::from(command.resume.is_some()))
+            > 1
+        {
+            return Err(usage(
+                "--list, --history and --resume are mutually exclusive",
+            ));
+        }
+        if (command.list || command.history.is_some())
+            && (command.cwd.is_some()
+                || command.session_id.is_some()
+                || command.agent_preset.is_some()
+                || command.trust_workspace)
+        {
+            return Err(usage(
+                "read-only Session commands cannot change creation settings",
+            ));
         }
         if command.resume.is_some() && command.session_id.is_some() {
             return Err(usage("--resume and --session-id are mutually exclusive"));
@@ -380,8 +417,7 @@ pub(super) enum CliRenderMessage {
 
 #[derive(Debug)]
 pub(super) struct MessageTaskFinished {
-    message_id: MessageId,
-    result: rsi::Result<TurnOutcome>,
+    pub(super) result: rsi::Result<TurnOutcome>,
     cancellation_requested: bool,
 }
 
@@ -532,6 +568,7 @@ pub(super) async fn drive_application_turn(
             })
             .await
             .map_err(|error| RsiError::Run(error.to_string()))?;
+        let _interactions = session_cli::spawn_interactions(handle.clone(), renderer.clone(), &rendering_stopped);
         loop {
             tokio::select! {
                 biased;
@@ -577,7 +614,7 @@ pub(super) async fn drive_application_turn(
                                 },
                             )
                             .await?;
-                            send_finish_line(&renderer, &rendering_stopped, &cancellation).await?;
+                            send_finish_line(&renderer, &rendering_stopped).await?;
                             return Ok(outcome);
                         }
                     }
@@ -588,7 +625,6 @@ pub(super) async fn drive_application_turn(
     .await;
     let _ = completion
         .send(MessageTaskFinished {
-            message_id,
             result,
             cancellation_requested: cancellation.is_cancelled(),
         })
@@ -604,19 +640,20 @@ pub(super) async fn send_cli_event(
     if rendering_stopped.is_cancelled() {
         return Ok(());
     }
+    let terminal = matches!(&event, CliEvent::Outcome { .. })
+        || matches!(&event, CliEvent::Fact { fact, .. } if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }));
     tokio::select! {
         biased;
         () = rendering_stopped.cancelled() => Ok(()),
         result = renderer.send(CliRenderMessage::Event(event)) => result
             .map_err(|_| RsiError::Run("terminal renderer stopped before the turn ended".into())),
-        () = turn_cancellation.cancelled() => Ok(()),
+        () = turn_cancellation.cancelled(), if !terminal => Ok(()),
     }
 }
 
 pub(super) async fn send_finish_line(
     renderer: &tokio::sync::mpsc::Sender<CliRenderMessage>,
     rendering_stopped: &CancellationToken,
-    turn_cancellation: &CancellationToken,
 ) -> rsi::Result<()> {
     if rendering_stopped.is_cancelled() {
         return Ok(());
@@ -626,7 +663,6 @@ pub(super) async fn send_finish_line(
         () = rendering_stopped.cancelled() => Ok(()),
         result = renderer.send(CliRenderMessage::FinishLine) => result
             .map_err(|_| RsiError::Run("terminal renderer stopped before the turn ended".into())),
-        () = turn_cancellation.cancelled() => Ok(()),
     }
 }
 
@@ -638,6 +674,9 @@ pub(super) struct CliRenderState {
 
 impl CliRenderState {
     fn write(&mut self, output: OutputMode, event: &CliEvent) -> rsi::Result<()> {
+        if output == OutputMode::Text {
+            write_status_event(event)?;
+        }
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();
         write_live_event(
@@ -724,6 +763,7 @@ pub(super) async fn run_headless_application(
     tokio::spawn(drive_application_turn(
         handle,
         SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id,
             content,
             model: options.model,
@@ -891,7 +931,6 @@ pub(super) enum SessionInput {
 }
 
 pub(super) const SESSION_INPUT_CHANNEL_CAPACITY: usize = 1;
-pub(super) const MAXIMUM_QUEUED_SESSION_TURNS: usize = 16;
 
 pub(super) fn spawn_session_input() -> tokio::sync::mpsc::Receiver<SessionInput> {
     let (sender, receiver) = tokio::sync::mpsc::channel(SESSION_INPUT_CHANNEL_CAPACITY);
@@ -964,230 +1003,6 @@ pub(super) fn read_bounded_stdin_line(reader: &mut impl std::io::BufRead) -> Ses
         bytes.pop();
     }
     String::from_utf8(bytes).map_or(SessionInput::InvalidUtf8, SessionInput::Line)
-}
-
-#[allow(clippy::too_many_lines)] // One REPL loop owns FIFO admission, signals, rendering, and detach.
-pub(super) async fn run_session_application(
-    application: Arc<dyn SessionApplication>,
-    mode: rsi::SessionHostConnectionMode,
-    command: SessionCommand,
-) -> u8 {
-    let selection = match command.resume {
-        Some(session_id) => SessionSelection::Resume {
-            session_id,
-            cwd: command.cwd,
-        },
-        None => SessionSelection::Fresh {
-            cwd: match command.cwd {
-                Some(cwd) => cwd,
-                None => match std::env::current_dir() {
-                    Ok(cwd) => cwd,
-                    Err(error) => return report_error(&RsiError::Boot(error.to_string())),
-                },
-            },
-            session_id: command.session_id,
-            agent_preset_id: command.agent_preset,
-            workspace_trust: if command.trust_workspace {
-                WorkspaceTrust::Trusted
-            } else {
-                WorkspaceTrust::Untrusted
-            },
-        },
-    };
-    let handle = match resolve_application_handle(&application, selection).await {
-        Ok(handle) => handle,
-        Err(error) => return report_error(&error),
-    };
-    let header = match handle.header().await {
-        Ok(header) => header,
-        Err(error) => return report_error(&RsiError::Run(error.to_string())),
-    };
-    eprintln!("session: {}", header.session_id());
-    let mut input = spawn_session_input();
-    let rendering_stopped = CancellationToken::new();
-    let (renderer, render_receiver) = tokio::sync::mpsc::channel(CLI_RENDER_CHANNEL_CAPACITY);
-    let render_task = spawn_cli_renderer(command.output, render_receiver);
-    let (completion, mut completed_turns) =
-        tokio::sync::mpsc::channel(TURN_COMPLETION_CHANNEL_CAPACITY);
-    let mut queue = VecDeque::new();
-    let mut active: Option<(MessageId, CancellationToken)> = None;
-    let mut detaching = false;
-    let mut turn_failed = false;
-    loop {
-        if active.is_none() {
-            if let Some(text) = queue.pop_front() {
-                let message_id = match generated_cli_message_id() {
-                    Ok(id) => id,
-                    Err(error) => return report_error(&error),
-                };
-                let cancellation = CancellationToken::new();
-                tokio::spawn(drive_application_turn(
-                    Arc::clone(&handle),
-                    SubmitInput {
-                        message_id: message_id.clone(),
-                        content: vec![MessageInput::Text { text }],
-                        model: None,
-                        sandbox: None,
-                    },
-                    cancellation.clone(),
-                    rendering_stopped.clone(),
-                    renderer.clone(),
-                    completion.clone(),
-                ));
-                active = Some((message_id, cancellation));
-            } else if detaching {
-                break;
-            }
-        }
-
-        tokio::select! {
-            biased;
-            signal = tokio::signal::ctrl_c(), if active.is_some() => {
-                if signal.is_ok()
-                    && let Some((_, cancellation)) = &active {
-                    cancellation.cancel();
-                }
-            }
-            message = completed_turns.recv(), if active.is_some() => {
-                match message {
-                    Some(MessageTaskFinished { message_id, result, cancellation_requested: _ }) => {
-                        if active.as_ref().is_some_and(|(active, _)| active == &message_id) {
-                            active = None;
-                            match result {
-                                Ok(outcome) => {
-                                    turn_failed |= !matches!(
-                                        &outcome,
-                                        TurnOutcome::Completed | TurnOutcome::Cancelled
-                                    );
-                                    if !detaching {
-                                        report_terminal_diagnostic(&outcome);
-                                    }
-                                }
-                                Err(error) => {
-                                    turn_failed = true;
-                                    if !detaching {
-                                        eprintln!("error: {error}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    None => return report_error(&RsiError::Run("Session turn worker exited".into())),
-                }
-            }
-            incoming = input.recv(), if !detaching && queue.len() < MAXIMUM_QUEUED_SESSION_TURNS => {
-                match incoming.unwrap_or(SessionInput::Eof) {
-                    SessionInput::Line(line) => {
-                        if let Some(text) = line.strip_prefix("::") {
-                            queue.push_back(format!(":{text}"));
-                        } else if let Some(command_line) = line.strip_prefix(':') {
-                            match handle_session_command(command_line, &handle, active.as_ref(), queue.len()).await {
-                                SessionCommandAction::Continue => {}
-                                SessionCommandAction::Exit => {
-                                    queue.clear();
-                                    if active.is_none() || mode == rsi::SessionHostConnectionMode::Remote {
-                                        rendering_stopped.cancel();
-                                        break;
-                                    }
-                                    rendering_stopped.cancel();
-                                    detaching = true;
-                                }
-                            }
-                        } else if !line.is_empty() {
-                            queue.push_back(line);
-                        }
-                    }
-                    SessionInput::TooLarge => eprintln!("error: input line exceeds {MAXIMUM_TURN_TEXT_BYTES} bytes"),
-                    SessionInput::InvalidUtf8 => eprintln!("error: input line is not UTF-8"),
-                    SessionInput::Error(error) => {
-                        eprintln!("error: stdin read failed: {error}");
-                        queue.clear();
-                        rendering_stopped.cancel();
-                        detaching = true;
-                    }
-                    SessionInput::Eof => {
-                        queue.clear();
-                        if active.is_none() || mode == rsi::SessionHostConnectionMode::Remote {
-                            rendering_stopped.cancel();
-                            break;
-                        }
-                        rendering_stopped.cancel();
-                        detaching = true;
-                    }
-                }
-            }
-        }
-    }
-    drop(renderer);
-    drop(completion);
-    if active.is_none()
-        && let Err(error) = join_cli_renderer(render_task).await
-    {
-        return report_error(&error);
-    }
-    u8::from(turn_failed)
-}
-
-pub(super) enum SessionCommandAction {
-    Continue,
-    Exit,
-}
-
-pub(super) async fn handle_session_command(
-    command: &str,
-    handle: &Arc<dyn SessionHandle>,
-    active: Option<&(MessageId, CancellationToken)>,
-    queued: usize,
-) -> SessionCommandAction {
-    let mut parts = command.split_whitespace();
-    match parts.next().unwrap_or("") {
-        "queue" => eprintln!(
-            "active: {}\tqueued: {queued}",
-            active.map_or("none", |(message, _)| message.as_str())
-        ),
-        "cancel" => {
-            if let Some((_, cancellation)) = active {
-                cancellation.cancel();
-            } else {
-                eprintln!("no active message");
-            }
-        }
-        "approvals" => match handle.pending_approvals().await {
-            Ok(requests) if requests.is_empty() => eprintln!("no pending approvals"),
-            Ok(requests) => {
-                for request in requests {
-                    eprintln!("{}\t{}\t{}", request.id, request.action, request.reason);
-                }
-            }
-            Err(error) => eprintln!("error: {error}"),
-        },
-        decision @ ("allow" | "deny") => {
-            let Some(id) = parts.next() else {
-                eprintln!("usage: :{decision} APPROVAL_ID");
-                return SessionCommandAction::Continue;
-            };
-            if parts.next().is_some() {
-                eprintln!("usage: :{decision} APPROVAL_ID");
-                return SessionCommandAction::Continue;
-            }
-            let choice = if decision == "allow" {
-                rsi_approval_protocol::ApprovalDecision::AllowOnce
-            } else {
-                rsi_approval_protocol::ApprovalDecision::Deny
-            };
-            match handle.answer_approval(id, choice).await {
-                Ok(true) => eprintln!("answered {id}"),
-                Ok(false) => eprintln!("approval is not pending: {id}"),
-                Err(error) => eprintln!("error: {error}"),
-            }
-        }
-        "exit" => return SessionCommandAction::Exit,
-        "help" | "" => {
-            eprintln!(":queue  :cancel  :approvals  :allow ID  :deny ID  :exit  :help  ::TEXT");
-        }
-        other => eprintln!("unknown Session command: :{other}"),
-    }
-    SessionCommandAction::Continue
 }
 
 #[cfg(target_os = "linux")]
@@ -1288,6 +1103,17 @@ pub(super) fn write_text_event(
     wrote_text: &mut bool,
     text_ends_newline: &mut bool,
 ) -> rsi::Result<()> {
+    if let CliEvent::Notice { kind, value } = event
+        && is_query_result(kind)
+    {
+        let text = serde_json::to_string_pretty(value)
+            .map_err(|error| RsiError::Run(error.to_string()))?;
+        if *wrote_text && !*text_ends_newline {
+            write_text_delta(stdout, "\n", wrote_text, text_ends_newline)?;
+        }
+        write_text_delta(stdout, &text, wrote_text, text_ends_newline)?;
+        return write_text_delta(stdout, "\n", wrote_text, text_ends_newline);
+    }
     let CliEvent::Fact { fact, .. } = event else {
         return Ok(());
     };
@@ -1320,6 +1146,63 @@ pub(super) fn write_text_event(
     }
 }
 
+pub(crate) fn terminal_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\t')
+                || matches!(character, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn write_status_event(event: &CliEvent) -> rsi::Result<()> {
+    let text = match event {
+        CliEvent::Notice { kind, .. } if is_query_result(kind) => return Ok(()),
+        CliEvent::Notice {
+            kind: "control", ..
+        } => return Ok(()),
+        CliEvent::Notice { kind, value } => format!("{kind}: {value}"),
+        CliEvent::Message {
+            message_id,
+            accepted_control_seq,
+            ..
+        } => format!("accepted: {message_id} (control {accepted_control_seq})"),
+        CliEvent::Turn { turn_id, .. } => format!("turn: {turn_id}"),
+        CliEvent::Outcome { outcome, .. } => format!("outcome: {outcome:?}"),
+        CliEvent::Fact { fact, .. } => match fact.body() {
+            SessionFactBody::ToolIntent {
+                name, arguments, ..
+            } => format!("tool {name}: {arguments}"),
+            SessionFactBody::ToolResult { result, .. } => result
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    ToolContent::Text { text } => Some(text.as_str()),
+                    ToolContent::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => return Ok(()),
+        },
+    };
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    writeln!(stderr, "{}", terminal_text(&text))
+        .and_then(|()| stderr.flush())
+        .map_err(|error| RsiError::Run(format!("stderr write failed: {error}")))
+}
+
+fn is_query_result(kind: &str) -> bool {
+    matches!(
+        kind,
+        "sessions" | "history" | "inspection" | "output" | "approvals" | "questions"
+    )
+}
+
 pub(super) fn write_text_delta(
     stdout: &mut impl Write,
     text: &str,
@@ -1327,7 +1210,7 @@ pub(super) fn write_text_delta(
     text_ends_newline: &mut bool,
 ) -> rsi::Result<()> {
     stdout
-        .write_all(text.as_bytes())
+        .write_all(terminal_text(text).as_bytes())
         .and_then(|()| stdout.flush())
         .map_err(|error| stdout_write_error(&error))?;
     *wrote_text = true;

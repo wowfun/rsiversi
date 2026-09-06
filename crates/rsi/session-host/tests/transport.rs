@@ -36,6 +36,13 @@ use tokio_util::sync::CancellationToken;
 
 const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[derive(Clone, Copy, Debug, Default)]
+enum ObservationFixture {
+    #[default]
+    Empty,
+    Pending,
+}
+
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools)] // Independent malformed-adapter modes stay explicit.
 struct FakeApplication {
@@ -44,6 +51,7 @@ struct FakeApplication {
     pending: Arc<Mutex<Vec<ApprovalRequest>>>,
     history_fact_count: usize,
     history_ignores_limit: bool,
+    observation: ObservationFixture,
     mismatched_create_header: bool,
     mismatched_attach_header: bool,
     mismatched_receipt: bool,
@@ -81,6 +89,7 @@ impl SessionApplication for FakeApplication {
             header,
             history_fact_count: self.history_fact_count,
             history_ignores_limit: self.history_ignores_limit,
+            observation: self.observation,
             mismatched_receipt: self.mismatched_receipt,
             submit_conflict: self.submit_conflict,
             submitted_inputs: Arc::clone(&self.submitted_inputs),
@@ -107,6 +116,7 @@ impl SessionApplication for FakeApplication {
             header: durable_header,
             history_fact_count: self.history_fact_count,
             history_ignores_limit: self.history_ignores_limit,
+            observation: self.observation,
             mismatched_receipt: self.mismatched_receipt,
             submit_conflict: self.submit_conflict,
             submitted_inputs: Arc::clone(&self.submitted_inputs),
@@ -142,6 +152,7 @@ struct FakeHandle {
     header: SessionHeader,
     history_fact_count: usize,
     history_ignores_limit: bool,
+    observation: ObservationFixture,
     mismatched_receipt: bool,
     submit_conflict: bool,
     submitted_inputs: Arc<Mutex<Vec<SubmitInput>>>,
@@ -150,6 +161,31 @@ struct FakeHandle {
 
 #[async_trait]
 impl SessionHandle for FakeHandle {
+    async fn inspect(
+        &self,
+    ) -> rsi_session::Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        unimplemented!("fixture does not inspect")
+    }
+    async fn pending_questions(
+        &self,
+    ) -> rsi_session::Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
+        Ok(Vec::new())
+    }
+    async fn answer_question(
+        &self,
+        _: &str,
+        _: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> rsi_session::Result<bool> {
+        Ok(false)
+    }
+    async fn read_output(
+        &self,
+        _: &str,
+        _: u64,
+        _: usize,
+    ) -> rsi_session::Result<rsi_process::OutputPage> {
+        unimplemented!("fixture does not read output")
+    }
     async fn header(&self) -> rsi_session::Result<SessionHeader> {
         Ok(self.header.clone())
     }
@@ -249,7 +285,11 @@ impl SessionHandle for FakeHandle {
         &self,
         _cursor: ObservationCursor,
     ) -> rsi_session::Result<SessionObservationStream> {
-        Ok(Box::pin(futures_util::stream::empty()))
+        if matches!(self.observation, ObservationFixture::Pending) {
+            Ok(Box::pin(futures_util::stream::pending()))
+        } else {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
     }
 
     async fn pending_approvals(&self) -> rsi_session::Result<Vec<ApprovalRequest>> {
@@ -402,6 +442,61 @@ async fn wait_for_diagnostics(
 }
 
 #[tokio::test]
+async fn idle_subscriptions_release_padded_request_bytes() {
+    let root = TempDir::new().unwrap();
+    let paths = paths(&root);
+    let application = Arc::new(FakeApplication {
+        observation: ObservationFixture::Pending,
+        ..Default::default()
+    });
+    let id = SessionId::new("idle-subscription").unwrap();
+    application.insert(header(id.clone(), root.path()));
+    let epoch = HostEpoch::generate().unwrap();
+    let server = UdsSessionServer::bind(&paths, application, KEY, epoch.clone()).unwrap();
+    let stop = CancellationToken::new();
+    let serving = tokio::spawn(server.serve(stop.clone()));
+    let mut streams = Vec::new();
+    for _ in 0..3 {
+        let mut stream = tokio::net::UnixStream::connect(paths.socket())
+            .await
+            .unwrap();
+        raw_handshake(&mut stream, &epoch).await;
+        streams.push(stream);
+    }
+    for stream in &mut streams[..2] {
+        let mut body = serde_json::to_vec(&json!({"type":"request", "request_id":"subscribe",
+            "operation":{"type":"subscribe", "session_id":id, "cursor":{"control_seq":0,"fact_seq":0}}})).unwrap();
+        body.resize(32 * 1024 * 1024, b' ');
+        stream
+            .write_u32(u32::try_from(body.len()).unwrap())
+            .await
+            .unwrap();
+        stream.write_all(&body).await.unwrap();
+        assert_eq!(
+            read_json_frame(stream).await["response"]["type"],
+            "subscribed"
+        );
+    }
+    write_json_frame(
+        &mut streams[2],
+        &json!({"type":"request", "request_id":"probe", "operation":{"type":"probe"}}),
+    )
+    .await;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        read_json_frame(&mut streams[2]),
+    )
+    .await;
+    stop.cancel();
+    drop(streams);
+    serving.await.unwrap().unwrap();
+    assert_eq!(
+        response.expect("idle subscriptions pinned all request bytes")["response"]["type"],
+        "ready"
+    );
+}
+
+#[tokio::test]
 async fn remote_adapter_preserves_the_public_session_interface() {
     let root = TempDir::new().unwrap();
     let paths = paths(&root);
@@ -440,6 +535,7 @@ async fn remote_adapter_preserves_the_public_session_interface() {
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("oversized-message").unwrap(),
                 content: vec![SessionInput::Text {
                     text: "x".repeat(MAXIMUM_TURN_TEXT_BYTES + 1),
@@ -454,6 +550,7 @@ async fn remote_adapter_preserves_the_public_session_interface() {
     assert!(observation.next().await.is_none());
     let receipt = handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-1").unwrap(),
             content: vec![SessionInput::Text {
                 text: "hello".into(),
@@ -523,6 +620,7 @@ async fn multimodal_upload_reconstructs_ordered_exact_bodies_across_chunks() {
     let second = Arc::<[u8]>::from(vec![0xa5; 97]);
     let receipt = handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("multimodal-message").unwrap(),
             content: vec![
                 SessionInput::Text {
@@ -634,6 +732,7 @@ async fn malformed_uploads_return_typed_errors_before_the_application_observes_i
                 "request_id": request_id,
                 "operation": {
                     "type": "submit_input",
+                    "delivery": "next_turn",
                     "session_id": "malformed-upload",
                     "message_id": format!("message-{case}"),
                     "content": [{
@@ -1113,6 +1212,7 @@ async fn client_rejects_a_receipt_for_another_session_or_message() {
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("receipt-message").unwrap(),
                 content: vec![SessionInput::Text {
                     text: "hello".into(),
@@ -1191,6 +1291,7 @@ async fn response_timeout_reports_the_exact_unknown_message_identity() {
         async move {
             handle
                 .submit(SubmitInput {
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                     message_id,
                     content: vec![SessionInput::Text {
                         text: "may commit after timeout".into(),
@@ -1284,6 +1385,7 @@ async fn invalid_matching_response_envelope_reports_the_exact_unknown_message_id
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: message_id.clone(),
                 content: vec![SessionInput::Text {
                     text: "may already be committed".into(),
@@ -1351,6 +1453,7 @@ async fn connection_failure_before_message_transmission_remains_a_backend_error(
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("pre-send-failure-message").unwrap(),
                 content: vec![SessionInput::Text {
                     text: "never transmitted".into(),
@@ -1440,6 +1543,7 @@ async fn submission_conflict_releases_the_unpublished_draft_slot() {
         assert!(matches!(
             handle
                 .submit(SubmitInput {
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                     message_id: MessageId::new(format!("conflicted-message-{index}")).unwrap(),
                     content: vec![SessionInput::Text {
                         text: "conflict".into(),
@@ -1543,6 +1647,7 @@ async fn unpublished_draft_activity_renews_its_idle_lease() {
     tokio::time::advance(std::time::Duration::from_mins(2)).await;
     handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("renewed-draft-message").unwrap(),
             content: vec![SessionInput::Text {
                 text: "hello".into(),
@@ -1663,6 +1768,7 @@ async fn approval_sequence_accepts_descendants_but_rejects_an_unrelated_session(
     fake.insert(child.clone());
     fake.insert(unrelated.clone());
     let request = |session: &SessionHeader| ApprovalRequest {
+        review: None,
         id: "approval-request".into(),
         subject: ApprovalSubject::new(session.session_id().as_str(), "turn", "effect").unwrap(),
         action: "write".into(),

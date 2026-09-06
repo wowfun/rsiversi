@@ -343,9 +343,9 @@ impl SequenceContract {
             ) if item_session_id == session_id => (*limit, fact.encoded_len()),
             (Self::PendingApprovals, WireItem::Approval { request }) => (
                 MAXIMUM_SEQUENCE_ITEMS,
-                serde_json::to_vec(request)
-                    .map_err(|error| SessionApplicationError::Backend(error.to_string()))?
-                    .len(),
+                request
+                    .encoded_len()
+                    .map_err(|error| SessionApplicationError::Backend(error.to_string()))?,
             ),
             _ => {
                 return Err(SessionApplicationError::Backend(
@@ -524,6 +524,7 @@ impl SessionHandle for UdsSessionHandle {
             }
         }
         let operation = WireOperation::SubmitInput {
+            delivery: request.delivery,
             session_id: self.header.session_id().clone(),
             message_id: message_id.clone(),
             content,
@@ -725,6 +726,105 @@ impl SessionHandle for UdsSessionHandle {
                 }
             }
         }))
+    }
+
+    async fn inspect(
+        &self,
+    ) -> rsi_session::Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        match self
+            .application
+            .call(WireOperation::Inspect {
+                session_id: self.header.session_id().clone(),
+            })
+            .await?
+        {
+            WireResponse::Inspection { snapshot } => {
+                snapshot
+                    .validate()
+                    .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+                if snapshot.header != self.header {
+                    return Err(unexpected_response());
+                }
+                Ok(*snapshot)
+            }
+            _ => Err(unexpected_response()),
+        }
+    }
+    async fn pending_questions(
+        &self,
+    ) -> rsi_session::Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
+        match self
+            .application
+            .call(WireOperation::PendingQuestions {
+                session_id: self.header.session_id().clone(),
+            })
+            .await?
+        {
+            WireResponse::Questions { requests } if requests.len() <= 256 => {
+                let mut ids = std::collections::BTreeSet::new();
+                for request in &requests {
+                    request
+                        .validate()
+                        .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+                    if request.session_id != self.header.session_id().as_str()
+                        || !ids.insert(&request.id)
+                    {
+                        return Err(unexpected_response());
+                    }
+                }
+                Ok(requests)
+            }
+            _ => Err(unexpected_response()),
+        }
+    }
+    async fn answer_question(
+        &self,
+        id: &str,
+        answer: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> rsi_session::Result<bool> {
+        answer
+            .validate()
+            .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
+        rsi_user_questions_protocol::validate_identity(id)
+            .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
+        match self
+            .application
+            .call(WireOperation::AnswerQuestion {
+                session_id: self.header.session_id().clone(),
+                id: id.to_owned(),
+                answer,
+            })
+            .await?
+        {
+            WireResponse::QuestionAnswer { accepted } => Ok(accepted),
+            _ => Err(unexpected_response()),
+        }
+    }
+    async fn read_output(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: usize,
+    ) -> rsi_session::Result<rsi_process::OutputPage> {
+        rsi_process::validate_output_read(id, limit)
+            .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
+        match self
+            .application
+            .call(WireOperation::ReadOutput {
+                session_id: self.header.session_id().clone(),
+                id: id.to_owned(),
+                offset,
+                limit,
+            })
+            .await?
+        {
+            WireResponse::Output { page } => {
+                page.validate_for(id, offset, limit)
+                    .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+                Ok(page)
+            }
+            _ => Err(unexpected_response()),
+        }
     }
 
     async fn pending_approvals(&self) -> rsi_session::Result<Vec<ApprovalRequest>> {

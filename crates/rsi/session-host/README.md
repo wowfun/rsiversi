@@ -42,7 +42,12 @@ claim wait to use one subscription instead of opening a handshake connection
 for each status poll. One absolute one-minute
 deadline covers the complete upload stream, so frame progress cannot renew an
 upload reservation indefinitely. The decoded request keeps its raw-frame
-admission until dispatch and response complete. History Facts and subscription
+admission until dispatch and response complete. A subscription releases that
+charge before entering its unbounded event loop; only bounded identifiers and
+cursors remain. Each upload reads one frame at a time using a separate 80 KiB
+per-connection allowance, bounded to 10 MiB by the 128-connection ceiling.
+It never reacquires the pool already charged for its retained request.
+History Facts and subscription
 events carry the requested Session identity, which the client verifies before
 exposing them; receipt sequences, per-stream cursor continuity, monotonic
 durable watermarks, and recent-session ordering are revalidated at the client
@@ -51,12 +56,13 @@ start frame, one typed item per frame, and an end frame. Each item has the
 single-frame byte ceiling and clients reject more than 1,024 items in one
 sequence, including from a malformed same-user server. Clients additionally
 enforce the requested operation's item variants, identity, count, and aggregate
-page-byte bound. Frame lengths are admitted against one process-wide 64 MiB raw
-decode budget before allocation; handshake frames have a separate 16 KiB ceiling.
+page-byte bound. Ordinary frame lengths are admitted against one process-wide
+64 MiB raw decode budget before allocation; handshake frames have a separate
+16 KiB ceiling. Upload frame scratch follows the separate bound above.
 Handshake, request-frame, response-frame, and write waits are bounded. An established
 subscription may remain idle until an event or shutdown, but after its next
-frame length arrives, decoder-ledger admission and the remaining body read have
-a 30-second deadline. Unpublished drafts have a one-hour idle
+frame's first byte arrives, the remaining length prefix, decoder-ledger admission,
+and body read share a 30-second deadline. Unpublished drafts have a one-hour idle
 lease on their exact composition pin; each operation renews that lease, and a
 targeted lookup removes only that draft when its deadline already elapsed. A
 one-minute server sweep performs the global reclamation of expired pins and
@@ -97,3 +103,30 @@ requests are live process state rather than Facts. Every capable client attached
 to the same Session may observe them; the first valid answer wins, later answers
 observe settlement, and cancellation, Host shutdown, or dropping the waiting
 answer future removes the request.
+The broker admits at most 1,024 requests and 16 MiB of aggregate encoded request
+bytes per Host generation. It measures each request without a temporary JSON
+buffer, retains that charge with the pending entry, and releases it on answer,
+waiter drop, or stop. This is an encoded-data capacity policy, not an exact heap
+measurement. Large prepared reviews therefore cannot multiply the per-item
+4 MiB bound by the count limit.
+Settled answers retain a bounded Host-generation receipt: an identical retry
+succeeds, a different decision conflicts, and an evicted or cancelled request
+is unavailable. Receipts are live transport evidence, not durable approval
+Facts, and never recreate a request after Host restart.
+
+`QuestionBroker` is an ordinary Base plugin scoped to one Host generation. It
+admits at most 256 live requests and retains a separate FIFO of 256 settled
+answer receipts. Requests and answers follow the
+[User Questions contract](../../rsi-user-questions/protocol/README.md).
+Cancellation, waiter drop, and Host shutdown remove pending questions; restart
+never recreates them. Waiter cleanup removes only its own registration, even
+after receipt eviction allows another request to reuse the identity.
+Identical answer retries succeed while their receipt is
+retained; conflicting answers fail.
+
+Protocol epoch 5 carries immutable input delivery, atomic Session inspection,
+pending questions, question answers, and completed-output pages. Inspection and
+questions use one bounded response frame: 256 requests of at most 64 KiB fit
+inside the frame ceiling. Clients revalidate request/answer identity, inspection
+cursors and activity, and output byte cursors before exposing the response.
+History and approvals retain their existing per-item framed sequences.

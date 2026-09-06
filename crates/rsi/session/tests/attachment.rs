@@ -728,6 +728,7 @@ async fn submit_text(
 ) -> rsi_session::Result<MessageReceipt> {
     handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new(message_id).unwrap(),
             content: vec![SessionInput::Text { text: text.into() }],
             model: None,
@@ -925,6 +926,7 @@ async fn assert_competing_message_publication(change_created_at: bool) {
     assert!(
         handle
             .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("message-lost-publication-race").unwrap(),
                 content: vec![SessionInput::Text {
                     text: "first attempt".into(),
@@ -937,6 +939,7 @@ async fn assert_competing_message_publication(change_created_at: bool) {
     );
     let receipt = handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-after-publication-race").unwrap(),
             content: vec![SessionInput::Text {
                 text: "retry through the attached path".into(),
@@ -1195,6 +1198,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
 
     let result = handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-must-not-start").unwrap(),
             content: vec![SessionInput::Text {
                 text: "must not start".into(),
@@ -1315,6 +1319,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
         .await
         .unwrap();
     let request = ApprovalRequest {
+        review: None,
         subject: ApprovalSubject::new(child.as_str(), "turn-child", "effect-child").unwrap(),
         id: "approval-child".into(),
         action: "write child file".into(),
@@ -1414,4 +1419,79 @@ async fn image_only_draft_defers_language_and_workspace_until_the_selected_opera
         .expect("direct Image submission must not require a Language route");
     assert_eq!(receipt.accepted_seq, 1);
     assert_eq!(workspace.registrations.load(Ordering::Acquire), 0);
+}
+
+#[derive(Debug)]
+struct FailedQuestions(rsi_user_questions_protocol::QuestionError);
+
+#[async_trait]
+impl rsi_user_questions_protocol::UserQuestions for FailedQuestions {
+    async fn ask(
+        &self,
+        _: rsi_user_questions_protocol::QuestionRequest,
+        _: CancellationToken,
+    ) -> rsi_user_questions_protocol::Result<rsi_user_questions_protocol::QuestionAnswer> {
+        Err(self.0.clone())
+    }
+    async fn pending(
+        &self,
+        _: &str,
+    ) -> rsi_user_questions_protocol::Result<Vec<rsi_user_questions_protocol::QuestionRequest>>
+    {
+        Err(self.0.clone())
+    }
+    async fn answer(
+        &self,
+        _: &str,
+        _: &str,
+        _: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> rsi_user_questions_protocol::Result<bool> {
+        Err(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn question_operations_preserve_shutdown_and_capacity_errors() {
+    use rsi_user_questions_protocol::{QuestionAnswer, QuestionError};
+    for (error, expected) in [
+        (
+            QuestionError::Cancelled,
+            SessionApplicationError::ShuttingDown,
+        ),
+        (QuestionError::Capacity, SessionApplicationError::Capacity),
+    ] {
+        let application = LocalSessionApplication::new(
+            Arc::new(ImageTurns),
+            Arc::new(MemoryStore::new()),
+            Arc::new(AvailableComposition),
+            Arc::new(UnavailableWorkspace),
+            Arc::new(ImageSettings),
+            Arc::new(UnavailableLanguage),
+            Arc::new(AvailableImage),
+            Arc::new(UnavailableMedia),
+            Arc::new(NoApprovalControl),
+        )
+        .with_live_capabilities(Some(Arc::new(FailedQuestions(error))), None);
+        let handle = application
+            .create(CreateSession {
+                cwd: std::env::current_dir().unwrap(),
+                session_id: Some(SessionId::new("question-errors").unwrap()),
+                agent_preset_id: None,
+                workspace_trust: WorkspaceTrust::Untrusted,
+            })
+            .await
+            .unwrap();
+        assert_eq!(handle.pending_questions().await, Err(expected.clone()));
+        assert_eq!(
+            handle
+                .answer_question(
+                    "q",
+                    QuestionAnswer {
+                        answers: vec!["answer".into()]
+                    }
+                )
+                .await,
+            Err(expected)
+        );
+    }
 }

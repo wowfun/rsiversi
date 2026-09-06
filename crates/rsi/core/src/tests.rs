@@ -10,19 +10,122 @@ use super::host_cli::{
 };
 use super::*;
 
+#[test]
+fn terminal_rendering_neutralizes_bidi_controls_without_removing_joiners() {
+    assert_eq!(
+        application::terminal_text("ab\u{202e}cd\u{202c}\u{2066}x\u{2069}\u{200f}\u{061c}\r"),
+        "ab�cd��x����"
+    );
+    assert_eq!(
+        application::terminal_text("中文\n\t👩\u{200d}💻"),
+        "中文\n\t👩\u{200d}💻"
+    );
+}
+
+#[test]
+fn text_session_queries_write_their_results_to_stdout() {
+    let mut output = Vec::new();
+    let mut wrote = false;
+    let mut newline = false;
+    application::write_text_event(&mut output, &application::CliEvent::Notice {
+        kind: "sessions", value: serde_json::json!({"sessions": [{"session_id": "readable-session"}], "has_more": false}),
+    }, &mut wrote, &mut newline).unwrap();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("readable-session"),
+        "text query results were omitted from stdout"
+    );
+    assert!(wrote && newline);
+}
+
+#[tokio::test]
+async fn cancelled_terminal_keeps_its_finish_line_under_renderer_backpressure() {
+    use super::application::{CliRenderMessage, send_finish_line};
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    sender.send(CliRenderMessage::FinishLine).await.unwrap();
+    let stopped = CancellationToken::new();
+    let mut finishing = Box::pin(send_finish_line(&sender, &stopped));
+    assert!(
+        futures_util::poll!(&mut finishing).is_pending(),
+        "cancelled terminal discarded its trailing newline under pressure"
+    );
+    receiver.recv().await.unwrap();
+    finishing.await.unwrap();
+    assert!(matches!(
+        receiver.recv().await,
+        Some(CliRenderMessage::FinishLine)
+    ));
+}
+
 #[derive(Debug, Default)]
-struct UnknownThenAcceptedHandle {
-    submissions: std::sync::atomic::AtomicUsize,
-    cancellation_race: bool,
-    query_finds_message: bool,
-    queries: std::sync::atomic::AtomicUsize,
-    cancellations: std::sync::Mutex<Vec<CancelTarget>>,
+pub(crate) struct UnknownThenAcceptedHandle {
+    pub(crate) submissions: std::sync::atomic::AtomicUsize,
+    pub(crate) cancellation_race: bool,
+    pub(crate) observation_gate: Option<Arc<tokio::sync::Semaphore>>,
+    pub(crate) query_finds_message: bool,
+    pub(crate) queries: std::sync::atomic::AtomicUsize,
+    pub(crate) cancellations: std::sync::Mutex<Vec<CancelTarget>>,
+    pub(crate) fail_observation: bool,
+    pub(crate) observations: std::sync::atomic::AtomicUsize,
+    pub(crate) first_status_error: Option<SessionApplicationError>,
+    pub(crate) interaction_polls: std::sync::atomic::AtomicUsize,
+    pub(crate) interaction_failures: std::sync::atomic::AtomicUsize,
+    pub(crate) pending_question:
+        std::sync::Mutex<Option<rsi_user_questions_protocol::QuestionRequest>>,
+    pub(crate) history_error: Option<SessionApplicationError>,
 }
 
 #[async_trait::async_trait]
 impl SessionHandle for UnknownThenAcceptedHandle {
+    async fn inspect(
+        &self,
+    ) -> rsi_session::Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        unimplemented!("fixture does not inspect")
+    }
+    async fn pending_questions(
+        &self,
+    ) -> rsi_session::Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
+        Ok(self
+            .pending_question
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect())
+    }
+    async fn answer_question(
+        &self,
+        _: &str,
+        _: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> rsi_session::Result<bool> {
+        Ok(false)
+    }
+    async fn read_output(
+        &self,
+        _: &str,
+        _: u64,
+        _: usize,
+    ) -> rsi_session::Result<rsi_process::OutputPage> {
+        unimplemented!("fixture does not read output")
+    }
     async fn header(&self) -> rsi_session::Result<rsi_agent_session_protocol::SessionHeader> {
-        unreachable!("not used")
+        use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
+        Ok(SessionHeader::new(
+            SessionId::new("session-reconcile").unwrap(),
+            1,
+            std::env::temp_dir().to_str().unwrap(),
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "test",
+                "system",
+                rsi_ai_protocol::ModelRef::new("test", "model").unwrap(),
+                rsi_sandbox::SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap())
     }
 
     async fn submit(
@@ -55,6 +158,11 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     ) -> rsi_session::Result<rsi_agent_turn_protocol::MessageReceipt> {
         self.queries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if message_id.as_str() == "a-first"
+            && let Some(error) = &self.first_status_error
+        {
+            return Err(error.clone());
+        }
         if !self.query_finds_message {
             return Err(SessionApplicationError::NotFound(message_id.to_string()));
         }
@@ -92,6 +200,9 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         _exclusive_before_seq: Option<u64>,
         _limit: usize,
     ) -> rsi_session::Result<rsi_session::SessionHistoryPage> {
+        if let Some(error) = &self.history_error {
+            return Err(error.clone());
+        }
         unreachable!("not used")
     }
 
@@ -100,6 +211,13 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         cursor: ObservationCursor,
     ) -> rsi_session::Result<rsi_agent_turn_protocol::SessionObservationStream> {
         use rsi_agent_session_protocol::{ActivationId, AgentControlRecord, StepId};
+        self.observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_observation {
+            return Err(SessionApplicationError::Backend(
+                "persistent failure".into(),
+            ));
+        }
         let turn_id = TurnId::new("turn-reconcile").unwrap();
         let update = if cursor.fact_seq == 0 {
             SessionObservation::Control {
@@ -135,13 +253,40 @@ impl SessionHandle for UnknownThenAcceptedHandle {
                 durable_fact_seq: 2,
             }
         };
+        if cursor.fact_seq > 0
+            && let Some(gate) = &self.observation_gate
+        {
+            let gate = gate.clone();
+            return Ok(Box::pin(futures_util::stream::once(async move {
+                let permit = gate.acquire().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                drop(permit);
+                Ok(update)
+            })));
+        }
         Ok(Box::pin(futures_util::stream::iter([Ok(update)])))
     }
 
     async fn pending_approvals(
         &self,
     ) -> rsi_session::Result<Vec<rsi_approval_protocol::ApprovalRequest>> {
-        unreachable!("not used")
+        use std::sync::atomic::Ordering;
+        self.interaction_polls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .interaction_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(SessionApplicationError::Backend(
+                "injected interaction failure".into(),
+            ));
+        }
+        if let Some(gate) = &self.observation_gate {
+            let _permit = gate.acquire().await.unwrap();
+        }
+        Ok(Vec::new())
     }
 
     async fn answer_approval(
@@ -161,6 +306,7 @@ async fn unknown_message_outcome_retries_the_same_identity_once() {
     let receipt = submit_with_reconciliation(
         &handle,
         SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
             content: vec![MessageInput::Text {
                 text: "reconcile".into(),
@@ -563,6 +709,7 @@ async fn interrupt_that_loses_message_claim_race_still_cancels_the_claimed_turn(
     drive_application_turn(
         concrete.clone(),
         SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
                 text: "cancel".into(),
@@ -596,6 +743,7 @@ async fn unknown_message_outcome_queries_before_resending_input() {
     let receipt = submit_with_reconciliation(
         &handle,
         SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
                 text: "query accepted input".into(),
@@ -617,4 +765,89 @@ async fn unknown_message_outcome_queries_before_resending_input() {
         concrete.queries.load(std::sync::atomic::Ordering::SeqCst),
         1
     );
+}
+
+#[tokio::test]
+async fn interaction_refresh_cannot_deadlock_a_suspended_observation_read() {
+    let concrete = Arc::new(UnknownThenAcceptedHandle {
+        query_finds_message: false,
+        observation_gate: Some(Arc::new(tokio::sync::Semaphore::new(1))),
+        ..UnknownThenAcceptedHandle::default()
+    });
+    let (render, mut rendered) = tokio::sync::mpsc::channel(32);
+    let rendering = tokio::spawn(async move { while rendered.recv().await.is_some() {} });
+    let (completion, mut completed) = tokio::sync::mpsc::channel(1);
+    let task = tokio::spawn(drive_application_turn(
+        concrete,
+        SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            message_id: MessageId::new("message-reconcile").unwrap(),
+            content: vec![MessageInput::Text {
+                text: "observe".into(),
+            }],
+            model: None,
+            sandbox: None,
+        },
+        CancellationToken::new(),
+        CancellationToken::new(),
+        render,
+        completion,
+    ));
+    let result = tokio::time::timeout(Duration::from_secs(2), completed.recv())
+        .await
+        .expect("stream must keep polling while interaction refresh awaits its read permit")
+        .unwrap();
+    assert_eq!(result.result.unwrap(), TurnOutcome::Completed);
+    task.await.unwrap();
+    rendering.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_turn_still_delivers_terminal_envelopes_through_backpressure() {
+    use super::application::{CliEvent, CliRenderMessage, send_cli_event};
+    let session_id = SessionId::new("terminal-render").unwrap();
+    let turn_id = TurnId::new("terminal-turn").unwrap();
+    let fact = Arc::new(
+        rsi_agent_session_protocol::SessionFact::new(
+            1,
+            1,
+            rsi_agent_session_protocol::SessionFactBody::TurnTerminal {
+                turn_id: turn_id.clone(),
+                outcome: TurnOutcome::Cancelled,
+            },
+        )
+        .unwrap(),
+    );
+    for event in [
+        CliEvent::Fact {
+            session_id: session_id.clone(),
+            fact,
+            durable_seq: 1,
+        },
+        CliEvent::Outcome {
+            session_id,
+            turn_id,
+            outcome: TurnOutcome::Cancelled,
+            durable_seq: 1,
+        },
+    ] {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.send(CliRenderMessage::FinishLine).await.unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let task = tokio::spawn(async move {
+            send_cli_event(&sender, &CancellationToken::new(), &cancelled, event).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "terminal event was dropped on cancellation"
+        );
+        receiver.recv().await.unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(CliRenderMessage::Event(_))
+        ));
+        task.await.unwrap().unwrap();
+    }
 }

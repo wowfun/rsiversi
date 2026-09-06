@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use thiserror::Error;
 
 /// Session Host wire protocol epoch.
-pub const SESSION_HOST_PROTOCOL_EPOCH: u32 = 4;
+pub const SESSION_HOST_PROTOCOL_EPOCH: u32 = 5;
 static SESSION_HOST_PRODUCT_BUILD: LazyLock<Result<String, String>> =
     LazyLock::new(executable_product_build);
 

@@ -6,7 +6,7 @@ pub(super) const HELP: &str = "Usage:\n\
                 [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
                 [--deployment ID --model ID] [--sandbox MODE]\n\
                 [--trust-workspace] [--output text|jsonl]\n\
-      session:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
+      session:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
                 [--agent-preset ID] [--trust-workspace] [--output text|jsonl]\n\
   rsi profile <application|host> <COMMAND> [--output text|json]\n\
   rsi host <start|serve|restart|stop|status|reload> [--profile HOST]\n\

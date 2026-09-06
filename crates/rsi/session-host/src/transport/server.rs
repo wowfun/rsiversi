@@ -268,7 +268,7 @@ pub(super) async fn handle_connection(
     {
         return Ok(());
     }
-    let (request, _request_admission): (ClientFrame, OwnedSemaphorePermit) =
+    let (request, request_admission): (ClientFrame, OwnedSemaphorePermit) =
         read_frame_with_retained_budget(
             &mut stream,
             MAXIMUM_FRAME_BYTES,
@@ -288,6 +288,7 @@ pub(super) async fn handle_connection(
     validate_request_id(&request_id).map_err(|_| ConnectionFailureStage::Request)?;
     validate_wire_operation(&operation).map_err(|_| ConnectionFailureStage::Request)?;
     if let WireOperation::Subscribe { session_id, cursor } = operation {
+        drop(request_admission);
         return serve_subscription(
             &mut stream,
             &request_id,
@@ -319,20 +320,16 @@ pub(super) async fn handle_connection(
         .await
         .map_err(|_| ConnectionFailureStage::Response);
     }
-    let uploads = match read_message_uploads(
-        &mut stream,
-        &request_id,
-        &operation,
-        &context.frame_budget,
-        &context.upload_budget,
-    )
-    .await
-    {
-        Ok(uploads) => uploads,
-        Err(error) => {
-            return write_request_error(&mut stream, request_id, host_as_wire_error(error)).await;
-        }
-    };
+    let uploads =
+        match read_message_uploads(&mut stream, &request_id, &operation, &context.upload_budget)
+            .await
+        {
+            Ok(uploads) => uploads,
+            Err(error) => {
+                return write_request_error(&mut stream, request_id, host_as_wire_error(error))
+                    .await;
+            }
+        };
     let result = execute_operation(
         context.application,
         context.drafts,
@@ -444,7 +441,6 @@ pub(super) async fn read_message_uploads<R>(
     stream: &mut R,
     request_id: &str,
     operation: &WireOperation,
-    frame_budget: &FrameReadBudget,
     upload_budget: &Arc<Semaphore>,
 ) -> Result<MessageUploads, SessionHostError>
 where
@@ -511,11 +507,14 @@ where
         .iter()
         .map(|(id, (bytes, _))| (*id, (Vec::with_capacity(*bytes), 0_u32)))
         .collect::<BTreeMap<_, _>>();
+    // The request still owns admission in the shared request pool. One
+    // upload frame per bounded connection cannot depend on that same pool.
+    let frame_budget = FrameReadBudget::new(MAXIMUM_UPLOAD_FRAME_BYTES);
     let upload_deadline = tokio::time::Instant::now() + UPLOAD_READ_TIMEOUT;
     loop {
         let frame: ClientFrame = tokio::time::timeout_at(
             upload_deadline,
-            read_frame(stream, MAXIMUM_UPLOAD_FRAME_BYTES, frame_budget),
+            read_frame(stream, MAXIMUM_UPLOAD_FRAME_BYTES, &frame_budget),
         )
         .await
         .map_err(|_| SessionHostError::Io("Session Host image upload timed out".into()))??;
@@ -626,6 +625,7 @@ pub(super) async fn execute_operation(
             })
         }
         WireOperation::SubmitInput {
+            delivery,
             session_id,
             message_id,
             content,
@@ -649,6 +649,7 @@ pub(super) async fn execute_operation(
             validate_session_input(&content)?;
             let result = handle
                 .submit(SubmitInput {
+                    delivery,
                     message_id,
                     content,
                     model,
@@ -707,6 +708,39 @@ pub(super) async fn execute_operation(
             Ok(WireResponse::Cancel {
                 accepted: result.accepted,
                 already_terminal: result.already_terminal,
+            })
+        }
+        WireOperation::Inspect { session_id } => {
+            let handle = get_handle(&application, &drafts, &session_id).await?;
+            Ok(WireResponse::Inspection {
+                snapshot: Box::new(handle.inspect().await?),
+            })
+        }
+        WireOperation::PendingQuestions { session_id } => {
+            let handle = get_handle(&application, &drafts, &session_id).await?;
+            Ok(WireResponse::Questions {
+                requests: handle.pending_questions().await?,
+            })
+        }
+        WireOperation::AnswerQuestion {
+            session_id,
+            id,
+            answer,
+        } => {
+            let handle = get_handle(&application, &drafts, &session_id).await?;
+            Ok(WireResponse::QuestionAnswer {
+                accepted: handle.answer_question(&id, answer).await?,
+            })
+        }
+        WireOperation::ReadOutput {
+            session_id,
+            id,
+            offset,
+            limit,
+        } => {
+            let handle = get_handle(&application, &drafts, &session_id).await?;
+            Ok(WireResponse::Output {
+                page: handle.read_output(&id, offset, limit).await?,
             })
         }
         WireOperation::AnswerApproval {
@@ -1147,6 +1181,15 @@ pub(super) fn validate_wire_operation(operation: &WireOperation) -> Result<(), S
             Err(SessionHostError::Invalid(format!(
                 "approval id must be within 1..={MAXIMUM_APPROVAL_FIELD_BYTES} bytes"
             )))
+        }
+        WireOperation::AnswerQuestion { id, answer, .. } => {
+            rsi_user_questions_protocol::validate_identity(id)
+                .and_then(|()| answer.validate())
+                .map_err(|error| SessionHostError::Invalid(error.to_string()))
+        }
+        WireOperation::ReadOutput { id, limit, .. } => {
+            rsi_process::validate_output_read(id, *limit)
+                .map_err(|error| SessionHostError::Invalid(error.to_string()))
         }
         _ => Ok(()),
     }

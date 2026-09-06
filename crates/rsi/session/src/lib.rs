@@ -11,7 +11,7 @@ use rsi_agent_composition_protocol::{
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, FrozenAgentSettings,
     MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS, MAXIMUM_FACTS_PER_READ, MessageId, MessageOptions,
-    MessageTarget, SessionFact, SessionHeader, SessionId, TurnId, WorkspaceTrust,
+    SessionFact, SessionHeader, SessionId, TurnId, WorkspaceTrust,
 };
 use rsi_agent_store_protocol::{
     MAXIMUM_SESSIONS_PER_READ, SessionStore, StoreError, StoreRecentSessionCursor,
@@ -47,7 +47,7 @@ pub trait AgentSettingsSource: fmt::Debug + Send + Sync + 'static {
 pub trait SessionApprovalControl: fmt::Debug + Send + Sync + 'static {
     /// Lists bounded pending requests for one exact session.
     async fn pending(&self, session_id: &SessionId) -> Result<Vec<ApprovalRequest>>;
-    /// Attempts to settle one request; `false` means it was already settled.
+    /// Settles or confirms an identical retained answer; `false` means unavailable.
     async fn answer(
         &self,
         session_id: &SessionId,
@@ -72,9 +72,7 @@ impl SessionApprovalControl for NoApprovalControl {
         _approval_id: &str,
         _decision: ApprovalDecision,
     ) -> Result<bool> {
-        Err(SessionApplicationError::Invalid(
-            "this Session client is not approval-capable".into(),
-        ))
+        Ok(false)
     }
 }
 
@@ -164,6 +162,8 @@ pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
 /// One idempotent multimodal mailbox submission.
 #[derive(Clone, Debug)]
 pub struct SubmitInput {
+    /// Immutable human ingress intent: `NextTurn` or `Steer`.
+    pub delivery: rsi_agent_session_protocol::MessageDelivery,
     /// Caller-preallocated durable message identity.
     pub message_id: MessageId,
     /// Nonempty ordered text and image content.
@@ -275,6 +275,23 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<SessionHistoryPage>;
     /// Reconnectably observes durable control records and Facts after exact cursors.
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream>;
+    /// Captures one atomic durable inspection of this Session and subtree.
+    async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection>;
+    /// Lists this root Session's live pending human questions.
+    async fn pending_questions(&self) -> Result<Vec<rsi_user_questions_protocol::QuestionRequest>>;
+    /// Accepts or retries a live answer without promising durable Tool settlement.
+    async fn answer_question(
+        &self,
+        id: &str,
+        answer: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> Result<bool>;
+    /// Reads one bounded raw-byte page by completed output identity.
+    async fn read_output(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<rsi_process::OutputPage>;
     /// Lists live pending approvals for this complete Agent tree.
     async fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>>;
     /// Attempts to settle one live approval in this Agent tree.
@@ -311,6 +328,8 @@ pub struct LocalSessionApplication {
     image: Arc<dyn ImageCall>,
     media: Arc<dyn Media>,
     approvals: Arc<dyn SessionApprovalControl>,
+    questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
+    output: Option<Arc<dyn rsi_process::ProcessOutputCache>>,
 }
 
 impl fmt::Debug for LocalSessionApplication {
@@ -345,7 +364,21 @@ impl LocalSessionApplication {
             image,
             media,
             approvals,
+            questions: None,
+            output: None,
         }
+    }
+
+    /// Supplies optional Host-generation human interaction and completed output capabilities.
+    #[must_use]
+    pub fn with_live_capabilities(
+        mut self,
+        questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
+        output: Option<Arc<dyn rsi_process::ProcessOutputCache>>,
+    ) -> Self {
+        self.questions = questions;
+        self.output = output;
+        self
     }
 
     fn handle_from_header(
@@ -363,6 +396,8 @@ impl LocalSessionApplication {
             image: Arc::clone(&self.image),
             media: Arc::clone(&self.media),
             approvals: Arc::clone(&self.approvals),
+            questions: self.questions.clone(),
+            output: self.output.clone(),
         })
     }
 }
@@ -467,6 +502,8 @@ struct LocalSessionHandle {
     image: Arc<dyn ImageCall>,
     media: Arc<dyn Media>,
     approvals: Arc<dyn SessionApprovalControl>,
+    questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
+    output: Option<Arc<dyn rsi_process::ProcessOutputCache>>,
 }
 
 impl fmt::Debug for LocalSessionHandle {
@@ -532,6 +569,12 @@ impl SessionHandle for LocalSessionHandle {
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
         validate_session_input(&request.content)?;
+        let delivery = request.delivery;
+        if delivery == rsi_agent_session_protocol::MessageDelivery::NextStep {
+            return Err(SessionApplicationError::Invalid(
+                "human Session input requires NextTurn or Steer intent".into(),
+            ));
+        }
         self.language
             .describe(
                 request
@@ -555,8 +598,7 @@ impl SessionHandle for LocalSessionHandle {
                 .submit_message(SubmitAgentMessage {
                     session,
                     message,
-                    target: MessageTarget::NextTurn,
-                    wake_required: true,
+                    delivery,
                 })
                 .await
                 .map_err(map_turn_error);
@@ -573,8 +615,7 @@ impl SessionHandle for LocalSessionHandle {
             .submit_message(SubmitAgentMessage {
                 session,
                 message,
-                target: MessageTarget::NextTurn,
-                wake_required: true,
+                delivery,
             })
             .await;
         let durable_header_matches = if result.is_err() {
@@ -701,6 +742,57 @@ impl SessionHandle for LocalSessionHandle {
             .map_err(map_turn_error)
     }
 
+    async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        self.store
+            .inspect_session(self.header.session_id())
+            .await
+            .map_err(|error| SessionApplicationError::Backend(error.to_string()))
+    }
+
+    async fn pending_questions(&self) -> Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
+        let Some(questions) = &self.questions else {
+            return Ok(Vec::new());
+        };
+        questions
+            .pending(self.header.session_id().as_str())
+            .await
+            .map_err(map_question_error)
+    }
+
+    async fn answer_question(
+        &self,
+        id: &str,
+        answer: rsi_user_questions_protocol::QuestionAnswer,
+    ) -> Result<bool> {
+        let questions = self.questions.as_ref().ok_or_else(|| {
+            SessionApplicationError::Invalid("human questions are unavailable in this Host".into())
+        })?;
+        questions
+            .answer(self.header.session_id().as_str(), id, answer)
+            .await
+            .map_err(map_question_error)
+    }
+
+    async fn read_output(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<rsi_process::OutputPage> {
+        let output = self.output.as_ref().ok_or_else(|| {
+            SessionApplicationError::Invalid(
+                "completed output cache is unavailable in this Host".into(),
+            )
+        })?;
+        let page = output
+            .read(id, offset, limit)
+            .await
+            .map_err(map_output_error)?;
+        page.validate_for(id, offset, limit)
+            .map_err(map_output_error)?;
+        Ok(page)
+    }
+
     async fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>> {
         let mut pending = Vec::new();
         for session_id in self
@@ -715,32 +807,39 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn answer_approval(&self, approval_id: &str, decision: ApprovalDecision) -> Result<bool> {
-        let mut selected = None;
-        for session_id in self
+        let sessions = self
             .turns
             .tree_sessions(self.header.session_id())
             .await
-            .map_err(map_turn_error)?
-        {
+            .map_err(map_turn_error)?;
+        let mut selected = None;
+        for session in &sessions {
             if self
                 .approvals
-                .pending(&session_id)
+                .pending(session)
                 .await?
                 .iter()
                 .any(|request| request.id == approval_id)
-                && selected.replace(session_id).is_some()
+                && selected.replace(session).is_some()
             {
                 return Err(SessionApplicationError::Invalid(
                     "approval identity is ambiguous within the Agent tree".into(),
                 ));
             }
         }
-        let Some(session_id) = selected else {
-            return Ok(false);
-        };
-        self.approvals
-            .answer(&session_id, approval_id, decision)
-            .await
+        if let Some(session) = selected {
+            return self.approvals.answer(session, approval_id, decision).await;
+        }
+        for session in &sessions {
+            if self
+                .approvals
+                .answer(session, approval_id, decision)
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -783,6 +882,9 @@ fn map_turn_error(error: TurnError) -> SessionApplicationError {
     match error {
         TurnError::Invalid(message) => SessionApplicationError::Invalid(message),
         TurnError::SessionNotFound(session) => SessionApplicationError::NotFound(session),
+        TurnError::MessageNotFound { session, message } => {
+            SessionApplicationError::NotFound(format!("{session}/{message}"))
+        }
         TurnError::TurnNotFound { session, turn } => {
             SessionApplicationError::NotFound(format!("{session}/{turn}"))
         }
@@ -811,6 +913,16 @@ fn map_store_error(error: StoreError) -> SessionApplicationError {
 
 fn map_ai_error(error: &rsi_ai_protocol::AiError) -> SessionApplicationError {
     SessionApplicationError::Invalid(error.to_string())
+}
+
+fn map_output_error(error: rsi_process::ProcessError) -> SessionApplicationError {
+    use rsi_process::ProcessError;
+    match error {
+        ProcessError::InvalidInput(message) => SessionApplicationError::Invalid(message),
+        ProcessError::Capacity => SessionApplicationError::Capacity,
+        ProcessError::ShuttingDown => SessionApplicationError::ShuttingDown,
+        other => SessionApplicationError::Backend(other.to_string()),
+    }
 }
 
 fn map_media_import_error(error: &MediaError) -> SessionApplicationError {
@@ -875,3 +987,16 @@ pub enum SessionApplicationError {
 
 /// Session application result.
 pub type Result<T> = std::result::Result<T, SessionApplicationError>;
+
+fn map_question_error(
+    error: rsi_user_questions_protocol::QuestionError,
+) -> SessionApplicationError {
+    use rsi_user_questions_protocol::QuestionError;
+    match error {
+        QuestionError::Cancelled => SessionApplicationError::ShuttingDown,
+        QuestionError::Capacity => SessionApplicationError::Capacity,
+        error @ (QuestionError::Invalid(_) | QuestionError::Conflict) => {
+            SessionApplicationError::Invalid(error.to_string())
+        }
+    }
+}

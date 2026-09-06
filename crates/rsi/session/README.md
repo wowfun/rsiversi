@@ -48,3 +48,20 @@ Agent-control records are the historical authority; subscriptions are
 reconnectable. Approval listing and answers cover the exact durable Agent tree
 rooted at the attached root Session, so a child request is never hidden behind
 a root-only client surface.
+
+Human ingress carries immutable `NextTurn` or `Steer` intent; the Kernel alone
+resolves its current route. Read-only inspection captures Header, durable Fact
+and control cursors, bounded mailbox state, and the Agent tree in one Store
+snapshot. An attaching client inspects, reads history at the captured Fact
+boundary, then observes with both captured cursors across subsequent Turns.
+Pending questions and approvals are separate live snapshots refreshed on
+reconnect. Question answers return live receipt acceptance, not a durable Tool
+result acknowledgment. Output reads accept only completed-cache identities and
+raw byte cursors through a separate read-only capability.
+Both question operations preserve broker shutdown and capacity as typed Session
+errors; malformed or conflicting answers remain invalid operations.
+
+Completed-output identities name the Host's Process cache, independently of
+Session history. A Session handle supplies read-only access to that same Host
+capability; the cache is not partitioned by Session or presented as a durable
+Session archive.

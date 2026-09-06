@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-process = { path = "../../rsi-process/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true

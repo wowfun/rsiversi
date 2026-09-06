@@ -6,11 +6,71 @@ use tokio_util::sync::CancellationToken;
 
 fn request(id: &str) -> ApprovalRequest {
     ApprovalRequest {
+        review: None,
         subject: ApprovalSubject::new("session-1", "turn-1", "effect-1").unwrap(),
         id: id.into(),
         action: "write file".into(),
         reason: "mutation requested".into(),
     }
+}
+
+#[tokio::test]
+async fn pending_reviews_share_a_byte_budget_released_by_answer_and_drop() {
+    let broker = ApprovalBroker::new();
+    let session = SessionId::new("session-1").unwrap();
+    let large = |index| {
+        let mut request = request(&format!("large-{index}"));
+        request.review = Some(rsi_approval_protocol::ApprovalReview {
+            arguments: serde_json::json!({"text": "x".repeat(4 * 1024 * 1024 - 64)}),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            sandbox: "read-only".into(),
+            request_sha256: "a".repeat(64),
+        });
+        request
+    };
+    let mut waits = Vec::new();
+    for index in 0..3 {
+        let mut wait = Box::pin(ApprovalAnswerer::answer(
+            &broker,
+            large(index),
+            CancellationToken::new(),
+        ));
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        waits.push(wait);
+    }
+    let mut excess = Box::pin(ApprovalAnswerer::answer(
+        &broker,
+        large(3),
+        CancellationToken::new(),
+    ));
+    assert!(
+        matches!(
+            futures_util::poll!(&mut excess),
+            std::task::Poll::Ready(Err(_))
+        ),
+        "count-only admission retained another 4 MiB review beyond the aggregate byte budget"
+    );
+    drop(excess);
+    assert!(
+        SessionApprovalControl::answer(&broker, &session, "large-0", ApprovalDecision::Deny)
+            .await
+            .unwrap()
+    );
+    let mut replacement = Box::pin(ApprovalAnswerer::answer(
+        &broker,
+        large(4),
+        CancellationToken::new(),
+    ));
+    assert!(futures_util::poll!(&mut replacement).is_pending());
+    drop(replacement);
+    let mut after_drop = Box::pin(ApprovalAnswerer::answer(
+        &broker,
+        large(5),
+        CancellationToken::new(),
+    ));
+    assert!(futures_util::poll!(&mut after_drop).is_pending());
+    broker.stop();
+    assert!(after_drop.await.is_err());
 }
 
 async fn wait_pending(broker: &ApprovalBroker, count: usize) -> Vec<ApprovalRequest> {
@@ -69,9 +129,19 @@ async fn pending_is_session_scoped_and_first_valid_client_answer_wins() {
         .unwrap()
     );
     assert!(
-        !SessionApprovalControl::answer(&broker, &session, "approval-1", ApprovalDecision::Deny,)
+        SessionApprovalControl::answer(&broker, &session, "approval-1", ApprovalDecision::Deny,)
             .await
-            .unwrap()
+            .is_err()
+    );
+    assert!(
+        SessionApprovalControl::answer(
+            &broker,
+            &session,
+            "approval-1",
+            ApprovalDecision::AllowOnce
+        )
+        .await
+        .unwrap()
     );
     let outcome = waiting.await.unwrap().unwrap().unwrap();
     assert_eq!(outcome.decision, ApprovalDecision::AllowOnce);
@@ -109,8 +179,8 @@ async fn concurrent_answers_have_exactly_one_winner() {
             ApprovalDecision::Deny,
         ),
     );
-    let allowed = allowed.unwrap();
-    let denied = denied.unwrap();
+    let allowed = allowed.is_ok_and(|value| value);
+    let denied = denied.is_ok_and(|value| value);
     assert_ne!(allowed, denied, "exactly one concurrent answer must win");
     let outcome = waiting.await.unwrap().unwrap().unwrap();
     assert_eq!(

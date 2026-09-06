@@ -750,6 +750,7 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         .unwrap();
     let first = first_handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-first").unwrap(),
             content: vec![SessionInput::Text {
                 text: "/status".into(),
@@ -784,6 +785,7 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let second_handle = application.attach(&first.session_id).await.unwrap();
     let second = second_handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-second").unwrap(),
             content: vec![SessionInput::Text {
                 text: "again".into(),
@@ -866,7 +868,7 @@ async fn resume_rejects_a_different_canonical_workspace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
+async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
     let (endpoint, server) = server().await;
     let fixture = fixture(&endpoint);
     let binary = env!("CARGO_BIN_EXE_rsi");
@@ -898,7 +900,7 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lines.first().unwrap()["type"], "message");
-    assert_eq!(lines.first().unwrap()["version"], 3);
+    assert_eq!(lines.first().unwrap()["version"], 4);
     assert_eq!(lines.first().unwrap()["session_id"], "session-binary");
     assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert_eq!(lines.last().unwrap()["type"], "outcome");
@@ -927,7 +929,8 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(second.stdout, b"hello\n");
-    assert!(second.stderr.is_empty());
+    let status = String::from_utf8(second.stderr).unwrap();
+    assert!(status.contains("accepted:") && status.contains("outcome: Completed"));
 
     let mut third = binary_command(binary, &fixture)
         .args([
@@ -952,7 +955,11 @@ async fn built_binary_preserves_jsonl_text_and_success_stderr_contracts() {
     let third = third.wait_with_output().await.unwrap();
     assert!(third.status.success());
     assert_eq!(third.stdout, b"hello\n");
-    assert!(third.stderr.is_empty());
+    assert!(
+        String::from_utf8(third.stderr)
+            .unwrap()
+            .contains("outcome: Completed")
+    );
     server.abort();
 }
 
@@ -1102,6 +1109,7 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
         tool_names,
         [
             "apply_patch",
+            "ask_user",
             "bash",
             "followup_task",
             "interrupt_agent",
@@ -1109,6 +1117,7 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             "job_list",
             "job_output",
             "list_agents",
+            "output_read",
             "send_message",
             "spawn_agent",
             "wait_agent",
@@ -1116,7 +1125,7 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
     );
     assert_eq!(
         tool_message(&requests[1], "call-foreground-bash")["content"],
-        "foreground-complete"
+        "foreground-complete\n[status: exited; exit code: 0; signal: none]"
     );
     let job_id = background_job_id(&requests[2]).to_owned();
     assert!(
@@ -1560,4 +1569,425 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
 fn fixture_paths_remain_absolute() {
     let fixture = fixture("http://127.0.0.1:9");
     assert!(fixture.paths.config().is_absolute());
+}
+
+async fn question_then_chat(
+    State(state): State<ToolServerState>,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> Response {
+    state.requests.lock().unwrap().push(request);
+    if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+        tool_call_response(
+            "ask-choice",
+            "ask_user",
+            &serde_json::json!({"questions":[{"id":"name","prompt":"Which name?","options":["one","two"]}]}),
+        )
+    } else {
+        completed_chat_response("answer received")
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // One real Host lifecycle per adapter validates the same question protocol.
+async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
+    use rsi_session_host::{HostEpoch, SessionHostPaths, UdsSessionApplication, UdsSessionServer};
+    use tokio_util::sync::CancellationToken;
+    for remote in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = ToolServerState {
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: requests.clone(),
+        };
+        let http = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/v1/chat/completions", post(question_then_chat))
+                    .with_state(state),
+            )
+            .await
+            .unwrap();
+        });
+        let fixture = fixture(&endpoint);
+        let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+            .await
+            .unwrap();
+        let local = Arc::new(running.session_application().unwrap());
+        let paths = SessionHostPaths::from_host_paths_with_runtime(
+            &fixture.paths,
+            Some(&fixture.temporary.path().join("runtime")),
+        )
+        .unwrap();
+        let epoch = HostEpoch::generate().unwrap();
+        let transport = UdsSessionServer::bind(
+            &paths,
+            local.clone(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            epoch.clone(),
+        )
+        .unwrap();
+        let stop = CancellationToken::new();
+        let server = tokio::spawn(transport.serve(stop.clone()));
+        let application: Arc<dyn rsi_session::SessionApplication> = if remote {
+            Arc::new(
+                UdsSessionApplication::connect(
+                    paths.socket(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    epoch.clone(),
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            local.clone()
+        };
+        let handle = application
+            .create(CreateSession {
+                cwd: fixture.workspace.clone(),
+                session_id: Some(SessionId::new("question-session").unwrap()),
+                agent_preset_id: None,
+                workspace_trust: WorkspaceTrust::Untrusted,
+            })
+            .await
+            .unwrap();
+        let receipt = handle
+            .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                message_id: MessageId::new("question-input").unwrap(),
+                content: vec![SessionInput::Text {
+                    text: "ask a question".into(),
+                }],
+                model: None,
+                sandbox: None,
+            })
+            .await
+            .unwrap();
+        let (turn, entered) = claim_message(&handle, &receipt).await;
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let pending = handle.pending_questions().await.unwrap();
+                if let Some(request) = pending.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = handle.inspect().await.unwrap();
+        assert_eq!(snapshot.active_turn_id.as_ref(), Some(&turn));
+        assert_eq!(
+            snapshot.activation_phase,
+            Some(rsi_agent_store_protocol::StoreActivationPhase::Parked)
+        );
+        assert_eq!(
+            snapshot.tree.session.session_id,
+            *handle.header().await.unwrap().session_id()
+        );
+        let reconnect = UdsSessionApplication::connect(
+            paths.socket(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            epoch,
+        )
+        .await
+        .unwrap();
+        let attached = reconnect
+            .attach(handle.header().await.unwrap().session_id())
+            .await
+            .unwrap();
+        assert_eq!(
+            attached.pending_questions().await.unwrap().as_slice(),
+            std::slice::from_ref(&request)
+        );
+        let answer = rsi_user_questions_protocol::QuestionAnswer {
+            answers: vec!["my free answer".into()],
+        };
+        assert!(
+            attached
+                .answer_question(&request.id, answer.clone())
+                .await
+                .unwrap()
+        );
+        assert!(handle.answer_question(&request.id, answer).await.unwrap());
+        assert!(
+            handle
+                .answer_question(
+                    &request.id,
+                    rsi_user_questions_protocol::QuestionAnswer {
+                        answers: vec!["conflict".into()]
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let (facts, outcome, _) = observe_turn_after(&handle, &turn, entered).await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert!(facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { result, .. } if result.value["answers"][0] == "my free answer")));
+        assert!(
+            tool_message(&requests.lock().unwrap()[1], "ask-choice")["content"]
+                .as_str()
+                .unwrap()
+                .contains("my free answer")
+        );
+        assert!(handle.pending_questions().await.unwrap().is_empty());
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        assert!(running.shutdown().await.is_clean());
+        http.abort();
+    }
+}
+
+async fn full_output_then_chat(
+    State(state): State<ToolServerState>,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> Response {
+    let call = state.calls.fetch_add(1, Ordering::SeqCst);
+    state.requests.lock().unwrap().push(request.clone());
+    match call {
+        0 => tool_call_response(
+            "large-bash",
+            "bash",
+            &serde_json::json!({"command":"printf 'prefix 中😀'; head -c 100000 /dev/zero | tr '\\0' x; printf suffix; exit 7"}),
+        ),
+        1 | 2 => {
+            let feedback = tool_message(&request, "large-bash")["content"]
+                .as_str()
+                .unwrap();
+            assert!(
+                feedback.contains("[stdout truncated; showing retained tail]"),
+                "feedback: {feedback}"
+            );
+            assert!(feedback.contains("exit code: 7"));
+            assert!(!feedback.contains("prefix 中😀"));
+            let id = feedback
+                .split("[full stdout: ")
+                .nth(1)
+                .unwrap()
+                .split(']')
+                .next()
+                .unwrap();
+            let (name, offset, limit) = if call == 1 {
+                ("read-prefix", 0, 12)
+            } else {
+                ("read-next", 12, 8)
+            };
+            tool_call_response(
+                name,
+                "output_read",
+                &serde_json::json!({"id":id,"offset":offset,"limit":limit}),
+            )
+        }
+        3 => {
+            let prefix = tool_message(&request, "read-prefix")["content"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let next = tool_message(&request, "read-next")["content"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let raw = |text: &str| {
+                hex::decode(
+                    text.split("[raw bytes hex: ")
+                        .nth(1)
+                        .expect("split UTF-8 page lost its raw bytes")
+                        .split(']')
+                        .next()
+                        .unwrap(),
+                )
+                .unwrap()
+            };
+            let mut bytes = raw(&prefix);
+            bytes.extend(raw(&next));
+            assert!(String::from_utf8(bytes).unwrap().starts_with("prefix 中😀"));
+            assert!(
+                tool_message(&request, "read-prefix")["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("prefix 中")
+            );
+            assert!(
+                tool_message(&request, "read-next")["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("bytes: 12..20 of 100020")
+            );
+            completed_chat_response("full output read")
+        }
+        _ => panic!("unexpected model request"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_reads_full_command_output_across_raw_utf8_page_boundaries() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let state = ToolServerState {
+        calls: Arc::new(AtomicUsize::new(0)),
+        requests: Arc::default(),
+    };
+    let http = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/v1/chat/completions", post(full_output_then_chat))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let fixture = fixture(&endpoint);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+            .args([
+                "--profile",
+                "test-headless",
+                "read complete output",
+                "--cwd",
+                fixture.workspace.to_str().unwrap(),
+                "--output",
+                "jsonl",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let first = durable_tool_result(&lines, "read-prefix");
+    let second = durable_tool_result(&lines, "read-next");
+    assert_eq!(first["fact"]["result"]["value"]["next_offset"], 12);
+    assert_eq!(second["fact"]["result"]["value"]["offset"], 12);
+    assert_eq!(second["fact"]["result"]["value"]["next_offset"], 20);
+    let bash = durable_tool_result(&lines, "large-bash");
+    assert_eq!(bash["fact"]["result"]["value"]["exit_code"], 7);
+    assert_eq!(bash["fact"]["result"]["is_error"], false);
+    http.abort();
+}
+
+async fn child_question_chat(
+    State(state): State<ToolServerState>,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> Response {
+    state.requests.lock().unwrap().push(request.clone());
+    let messages = request["messages"].as_array().unwrap();
+    let has_tool = |id: &str| {
+        messages
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+    };
+    let child = messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"]
+                .to_string()
+                .contains("child-only-question")
+    });
+    if child {
+        if has_tool("child-question") {
+            completed_chat_response("child returned question to parent")
+        } else {
+            tool_call_response(
+                "child-question",
+                "ask_user",
+                &serde_json::json!({"questions":[{"id":"child","prompt":"Forbidden child prompt"}]}),
+            )
+        }
+    } else if !has_tool("spawn-question-child") {
+        tool_call_response(
+            "spawn-question-child",
+            "spawn_agent",
+            &serde_json::json!({"task_name":"question-child","message":"child-only-question","fork_turns":"none"}),
+        )
+    } else if !has_tool("wait-question-child") {
+        tool_call_response(
+            "wait-question-child",
+            "wait_agent",
+            &serde_json::json!({"timeout_ms":5000}),
+        )
+    } else {
+        completed_chat_response("root finished")
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = ToolServerState {
+        calls: Arc::new(AtomicUsize::new(0)),
+        requests: requests.clone(),
+    };
+    let http = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/v1/chat/completions", post(child_question_chat))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let fixture = fixture(&endpoint);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+            .args([
+                "--profile",
+                "test-headless",
+                "spawn a worker and wait",
+                "--cwd",
+                fixture.workspace.to_str().unwrap(),
+                "--output",
+                "jsonl",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = requests.lock().unwrap();
+    let result = requests
+        .iter()
+        .flat_map(|request| request["messages"].as_array().unwrap())
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == "child-question")
+        .expect("child must receive a question Tool result");
+    assert!(
+        result["content"]
+            .as_str()
+            .unwrap()
+            .contains("Only the root Agent")
+    );
+    let lines = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!lines.iter().any(|v| {
+        v["type"] == "interactions"
+            && v["data"]["questions"]
+                .as_array()
+                .is_some_and(|questions| !questions.is_empty())
+    }));
+    http.abort();
 }

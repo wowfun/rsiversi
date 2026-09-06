@@ -10,6 +10,7 @@ use rsi_session_host::{
 };
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(target_os = "linux")]
 use tokio_util::sync::CancellationToken;
 
 const OWNER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);

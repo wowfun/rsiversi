@@ -231,6 +231,7 @@ async fn run_message_to_terminal(handle: &Arc<dyn rsi_session::SessionHandle>, m
     let message_id = MessageId::new(message_id).unwrap();
     let receipt = handle
         .submit(SubmitInput {
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
             content: vec![SessionInput::Text {
                 text: "inspect workspace context".into(),
@@ -369,6 +370,7 @@ async fn assert_session_application_contract(
 
     let message_id = MessageId::new(format!("{session}-message")).unwrap();
     let submission = SubmitInput {
+        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: message_id.clone(),
         content: vec![SessionInput::Text {
             text: "hello contract".into(),
@@ -388,6 +390,7 @@ async fn assert_session_application_contract(
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: message_id.clone(),
                 content: vec![SessionInput::Text {
                     text: "changed body".into(),

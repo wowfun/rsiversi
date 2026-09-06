@@ -7,6 +7,7 @@
 mod approval;
 mod diagnostics;
 mod owner;
+mod questions;
 #[cfg(unix)]
 mod transport;
 
@@ -17,5 +18,6 @@ pub use owner::{
     SESSION_HOST_PROTOCOL_EPOCH, SessionHostError, SessionHostPaths, owner_process_is_current,
     session_host_product_build, signal_owner,
 };
+pub use questions::{QuestionBroker, QuestionBrokerFactory};
 #[cfg(unix)]
 pub use transport::{SESSION_HOST_DRAIN_TIMEOUT, UdsSessionApplication, UdsSessionServer};

@@ -80,15 +80,26 @@ fn validate_wire_operation_shape(value: &serde_json::Value) -> Result<(), Sessio
     let fields = match variant {
         "probe" => &[][..],
         "create" => &["cwd", "session_id", "agent_preset_id", "workspace_trust"][..],
-        "attach" | "header" | "pending_approvals" => &["session_id"][..],
+        "attach" | "header" | "pending_approvals" | "inspect" | "pending_questions" => {
+            &["session_id"][..]
+        }
         "list_recent" => &["after", "limit"][..],
-        "submit_input" => &["session_id", "message_id", "content", "model", "sandbox"][..],
+        "submit_input" => &[
+            "session_id",
+            "message_id",
+            "content",
+            "model",
+            "sandbox",
+            "delivery",
+        ][..],
         "message_status" => &["session_id", "message_id"][..],
         "submit_image" => &["session_id", "turn_id", "model", "request"][..],
         "cancel" => &["session_id", "target", "reason"][..],
         "history" => &["session_id", "exclusive_before_seq", "limit"][..],
         "subscribe" => &["session_id", "cursor"][..],
         "answer_approval" => &["session_id", "approval_id", "decision"][..],
+        "answer_question" => &["session_id", "id", "answer"][..],
+        "read_output" => &["session_id", "id", "offset", "limit"][..],
         _ => return Ok(()),
     };
     reject_unknown_fields(object, "type", fields, "wire operation")?;
@@ -189,6 +200,10 @@ fn validate_wire_response_shape(value: &serde_json::Value) -> Result<(), Session
     let fields = match variant {
         "ready" | "pending_approvals_start" | "subscribed" => &[][..],
         "session" => &["header"][..],
+        "inspection" => &["snapshot"][..],
+        "questions" => &["requests"][..],
+        "question_answer" | "approval_answer" => &["accepted"][..],
+        "output" => &["page"][..],
         "recent_start" => &["has_more"][..],
         "turn_receipt" => &["session_id", "turn_id", "accepted_seq"][..],
         "message_receipt" => &[
@@ -200,7 +215,6 @@ fn validate_wire_response_shape(value: &serde_json::Value) -> Result<(), Session
         ][..],
         "cancel" => &["accepted", "already_terminal"][..],
         "history_start" => &["before_seq", "durable_seq", "has_more"][..],
-        "approval_answer" => &["accepted"][..],
         _ => return Ok(()),
     };
     reject_unknown_fields(object, "type", fields, "wire response")?;
@@ -286,6 +300,10 @@ where
     R: AsyncRead + Unpin,
 {
     let length = reader.read_u32().await.map_err(io_error)? as usize;
+    validate_frame_length(length, maximum_bytes)
+}
+
+fn validate_frame_length(length: usize, maximum_bytes: usize) -> Result<usize, SessionHostError> {
     if length == 0 || length > maximum_bytes {
         return Err(SessionHostError::Invalid(format!(
             "frame length must be within 1..={maximum_bytes} bytes"
@@ -372,15 +390,20 @@ where
     R: AsyncRead + Unpin,
     T: FrameShape,
 {
-    let length = read_frame_length(reader, maximum_bytes).await?;
-    tokio::time::timeout(
-        RESPONSE_READ_TIMEOUT,
-        read_frame_body(reader, length, budget),
-    )
+    // Idle subscriptions have no heartbeat. Once a frame starts, partial
+    // prefixes must consume the same finite read budget as its body.
+    let mut prefix = [0_u8; 4];
+    prefix[0] = reader.read_u8().await.map_err(io_error)?;
+    tokio::time::timeout(RESPONSE_READ_TIMEOUT, async {
+        reader
+            .read_exact(&mut prefix[1..])
+            .await
+            .map_err(io_error)?;
+        let length = validate_frame_length(u32::from_be_bytes(prefix) as usize, maximum_bytes)?;
+        read_frame_body(reader, length, budget).await
+    })
     .await
-    .map_err(|_| {
-        SessionHostError::Io("Session Host subscription frame body read timed out".into())
-    })?
+    .map_err(|_| SessionHostError::Io("Session Host subscription frame read timed out".into()))?
 }
 
 pub(super) async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<(), SessionHostError>

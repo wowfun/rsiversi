@@ -70,10 +70,13 @@ const SETTINGS_CORE_FACTORY: &str = "rsi.settings";
 const CREDENTIALS_FACTORY: &str = "rsi.credentials.local";
 const MEDIA_LOCAL_FACTORY: &str = "rsi.media.local";
 const MEDIA_FACTORY: &str = "rsi.media";
+const QUESTIONS_FACTORY: &str = "rsi.user-questions";
+const QUESTION_TOOLS_FACTORY: &str = "rsi.agent.questions";
 const APPROVAL_FACTORY: &str = "rsi.approval";
 const PERMISSIONS_FACTORY: &str = "rsi.permission-presets";
 const SANDBOX_FACTORY: &str = "rsi.sandbox.local";
 const PROCESS_FACTORY: &str = "rsi.process.local";
+const OUTPUT_READ_FACTORY: &str = "rsi.output.read";
 const COMMANDS_FACTORY: &str = "rsi.commands";
 const JOBS_FACTORY: &str = "rsi.jobs.local";
 const JOBS_FINALIZER_FACTORY: &str = "rsi.session.jobs-finalizer";
@@ -91,8 +94,14 @@ const STANDARD_AGENT_CONTRIBUTION_IDS: &[&str] = &[
     JOBS_TOOLS_FACTORY,
     AGENT_TOOLS_FACTORY,
     APPLY_PATCH_FACTORY,
+    OUTPUT_READ_FACTORY,
+    QUESTION_TOOLS_FACTORY,
 ];
-const PORTABLE_AGENT_CONTRIBUTION_IDS: &[&str] = &[JOBS_TOOLS_FACTORY, AGENT_TOOLS_FACTORY];
+const PORTABLE_AGENT_CONTRIBUTION_IDS: &[&str] = &[
+    JOBS_TOOLS_FACTORY,
+    AGENT_TOOLS_FACTORY,
+    QUESTION_TOOLS_FACTORY,
+];
 const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
 const AGENT_COMPOSITION_FACTORY: &str = "rsi.agent.composition";
 const LANGUAGE_FACTORY: &str = "rsi.ai.language";
@@ -154,9 +163,9 @@ impl StandardCodingTools {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (bash, helper, child_environment);
-            return Err(crate::RsiError::Boot(
+            Err(crate::RsiError::Boot(
                 "the standard Bash and apply-patch contributions require Linux".into(),
-            ));
+            ))
         }
         #[cfg(target_os = "linux")]
         {
@@ -178,6 +187,12 @@ fn standard_agent_contributions(
 ) -> rsi_host::Result<AgentContributionCatalog> {
     let mut factories = vec![
         ResolvedFactory::linked(
+            QUESTION_TOOLS_FACTORY,
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_agent_tools::QuestionToolsFactory),
+        ),
+        ResolvedFactory::linked(
             JOBS_TOOLS_FACTORY,
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
@@ -192,6 +207,12 @@ fn standard_agent_contributions(
     ];
     if let Some(coding) = coding_tools {
         factories.extend([
+            ResolvedFactory::linked(
+                OUTPUT_READ_FACTORY,
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                Arc::new(crate::output_read::OutputReadToolFactory),
+            ),
             ResolvedFactory::linked(
                 BASH_TOOL_FACTORY,
                 env!("CARGO_PKG_VERSION"),
@@ -999,11 +1020,18 @@ fn register_factories(
     register_agent_ai_factories(builder)
 }
 
+#[allow(clippy::too_many_lines)] // The standard linked catalog is one product-owned composition boundary.
 fn register_runtime_factories(
     builder: &mut HostBuilder,
     coding_tools: Option<StandardCodingTools>,
     agent_composition: AgentCompositionFactory,
 ) -> rsi_host::Result<()> {
+    register(
+        builder,
+        QUESTIONS_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_session_host::QuestionBrokerFactory,
+    )?;
     let sandbox_factory = if coding_tools.is_some() {
         rsi_sandbox_local::SandboxLocalFactory::default().require_restricted_backend()
     } else {
@@ -1182,6 +1210,8 @@ fn register_contracts(builder: &mut HostBuilder) -> rsi_host::Result<()> {
     builder.register_local_contract::<PermissionPresetsContract>()?;
     builder.register_local_contract::<SandboxContract>()?;
     builder.register_local_contract::<ProcessContract>()?;
+    builder.register_local_contract::<rsi_process::ProcessOutputCacheContract>()?;
+    builder.register_local_contract::<rsi_user_questions_protocol::UserQuestionsContract>()?;
     builder.register_local_contract::<CommandRuntimeContract>()?;
     builder.register_local_contract::<JobsContract>()?;
     builder.register_local_contract::<ProjectionRegistryContract>()?;
@@ -1236,6 +1266,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ),
         ProfileEntry::new("rsi-media", MEDIA_FACTORY, Value::Null),
         ProfileEntry::new("rsi-approval", APPROVAL_FACTORY, Value::Null),
+        ProfileEntry::new("rsi-user-questions", QUESTIONS_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-permission-presets",
             PERMISSIONS_FACTORY,
@@ -1253,7 +1284,15 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
                 "landlock": []
             }),
         ),
-        ProfileEntry::new("rsi-process", PROCESS_FACTORY, Value::Null),
+        ProfileEntry::new(
+            "rsi-process",
+            PROCESS_FACTORY,
+            if cfg!(unix) {
+                json!({"output_cache":{"directory":paths.cache().join("process-output/v1")}})
+            } else {
+                Value::Null
+            },
+        ),
         ProfileEntry::new("rsi-commands", COMMANDS_FACTORY, Value::Null),
         ProfileEntry::new("rsi-jobs", JOBS_FACTORY, Value::Null),
         ProfileEntry::new(
@@ -1497,10 +1536,12 @@ mod tests {
                 .map(|leaf| leaf.plugin().as_str())
                 .collect::<Vec<_>>(),
             [
+                OUTPUT_READ_FACTORY,
                 BASH_TOOL_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
                 APPLY_PATCH_FACTORY,
+                QUESTION_TOOLS_FACTORY,
             ]
         );
         assert_eq!(
@@ -1511,7 +1552,11 @@ mod tests {
                 .iter()
                 .map(|leaf| leaf.plugin().as_str())
                 .collect::<Vec<_>>(),
-            [JOBS_TOOLS_FACTORY, AGENT_TOOLS_FACTORY]
+            [
+                JOBS_TOOLS_FACTORY,
+                AGENT_TOOLS_FACTORY,
+                QUESTION_TOOLS_FACTORY
+            ]
         );
 
         let portable = standard_agent_contributions(None).unwrap();

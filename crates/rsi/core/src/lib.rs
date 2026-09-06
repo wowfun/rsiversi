@@ -7,6 +7,7 @@
 mod agent_preset;
 mod composition;
 mod local_host;
+mod output_read;
 mod profiles;
 mod settings;
 
@@ -130,6 +131,13 @@ impl RunningRsi {
             image,
             media,
             approvals,
+        )
+        .with_live_capabilities(
+            Some(required_local::<
+                rsi_user_questions_protocol::UserQuestionsContract,
+            >(&self.host, "human questions")?),
+            self.host
+                .lookup_local::<rsi_process::ProcessOutputCacheContract>(),
         ))
     }
 

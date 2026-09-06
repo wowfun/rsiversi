@@ -86,6 +86,7 @@ fn wire_operation_bounds_cancellation_reason_and_approval_id() {
 #[test]
 fn wire_operation_bounds_message_content_before_reading_uploads() {
     let operation = WireOperation::SubmitInput {
+        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         session_id: SessionId::new("session-content-bound").unwrap(),
         message_id: MessageId::new("message-content-bound").unwrap(),
         content: vec![
@@ -194,10 +195,60 @@ async fn decoded_request_can_retain_its_frame_budget_through_dispatch() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn upload_progress_does_not_reacquire_its_retained_request_budget() {
+    let budget = FrameReadBudget::new(MAXIMUM_UPLOAD_FRAME_BYTES);
+    let _request = budget.acquire(MAXIMUM_UPLOAD_FRAME_BYTES).await.unwrap();
+    let upload_budget = Arc::new(Semaphore::new(MAXIMUM_SESSION_INPUT_IMAGE_BYTES));
+    let operation = WireOperation::SubmitInput {
+        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        session_id: SessionId::new("upload").unwrap(),
+        message_id: MessageId::new("upload").unwrap(),
+        content: vec![WireInputBlock::Image {
+            upload_id: 0,
+            bytes: 1,
+            sha256: hex::encode(sha2::Sha256::digest(b"a")),
+        }],
+        model: None,
+        sandbox: None,
+    };
+    let (mut writer, mut reader) = tokio::io::duplex(MAXIMUM_UPLOAD_FRAME_BYTES);
+    write_frame(
+        &mut writer,
+        &ClientFrame::UploadChunk {
+            request_id: "upload".into(),
+            upload_id: 0,
+            index: 0,
+            data: "YQ==".into(),
+        },
+    )
+    .await
+    .unwrap();
+    write_frame(
+        &mut writer,
+        &ClientFrame::UploadEnd {
+            request_id: "upload".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        read_message_uploads(&mut reader, "upload", &operation, &upload_budget),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "upload held a request permit while waiting on the same budget"
+    );
+    assert!(result.unwrap().is_ok());
+}
+
+#[tokio::test(start_paused = true)]
 async fn upload_uses_one_absolute_deadline_across_progressing_frames() {
     let request_id = "request-upload-deadline";
     let body = vec![b'a'; MAXIMUM_UPLOAD_CHUNK_BYTES + 1];
     let operation = WireOperation::SubmitInput {
+        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         session_id: SessionId::new("session-upload-deadline").unwrap(),
         message_id: MessageId::new("message-upload-deadline").unwrap(),
         content: vec![WireInputBlock::Image {
@@ -208,15 +259,11 @@ async fn upload_uses_one_absolute_deadline_across_progressing_frames() {
         model: None,
         sandbox: None,
     };
-    let budget = FrameReadBudget::new(MAXIMUM_UPLOAD_FRAME_BYTES);
     let upload_budget = Arc::new(Semaphore::new(MAXIMUM_SESSION_INPUT_IMAGE_BYTES));
     let (mut writer, mut reader) = tokio::io::duplex(MAXIMUM_UPLOAD_FRAME_BYTES);
     let read = tokio::spawn({
-        let budget = budget.clone();
         let upload_budget = Arc::clone(&upload_budget);
-        async move {
-            read_message_uploads(&mut reader, request_id, &operation, &budget, &upload_budget).await
-        }
+        async move { read_message_uploads(&mut reader, request_id, &operation, &upload_budget).await }
     });
     tokio::task::yield_now().await;
     tokio::time::advance(UPLOAD_READ_TIMEOUT.saturating_sub(Duration::from_secs(1))).await;
@@ -265,7 +312,7 @@ async fn subscription_frame_body_is_bounded_after_its_length_arrives() {
     );
     assert!(matches!(
         read.await.unwrap(),
-        Err(SessionHostError::Io(message)) if message.contains("subscription frame body read timed out")
+        Err(SessionHostError::Io(message)) if message.contains("subscription frame read timed out")
     ));
 
     let (mut valid_writer, mut valid_reader) = tokio::io::duplex(32);
@@ -277,6 +324,31 @@ async fn subscription_frame_body_is_bounded_after_its_length_arrives() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn subscription_partial_length_has_a_deadline_after_its_first_byte() {
+    for prefix in 1..4 {
+        let budget = FrameReadBudget::new(4);
+        let (mut writer, mut reader) = tokio::io::duplex(32);
+        writer
+            .write_all(&4_u32.to_be_bytes()[..prefix])
+            .await
+            .unwrap();
+        let read = tokio::spawn(async move {
+            read_subscription_frame::<_, Option<()>>(&mut reader, 4, &budget).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(RESPONSE_READ_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            read.is_finished(),
+            "partial prefix of {prefix} bytes stalled indefinitely"
+        );
+        assert!(
+            matches!(read.await.unwrap(), Err(SessionHostError::Io(message)) if message.contains("timed out"))
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -440,6 +512,7 @@ fn sequence_item_count_is_bounded_independently_of_frame_size() {
 #[tokio::test]
 async fn upload_rejects_short_nonfinal_chunks_before_admission() {
     let operation = WireOperation::SubmitInput {
+        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         session_id: SessionId::new("chunk-session").unwrap(),
         message_id: MessageId::new("chunk-message").unwrap(),
         content: vec![WireInputBlock::Image {
@@ -476,11 +549,80 @@ async fn upload_rejects_short_nonfinal_chunks_before_admission() {
         &mut reader,
         "chunks",
         &operation,
-        &FrameReadBudget::new(MAXIMUM_UPLOAD_FRAME_BYTES),
         &Arc::new(Semaphore::new(MAXIMUM_SESSION_INPUT_IMAGE_BYTES)),
     )
     .await;
     assert!(
         matches!(result, Err(SessionHostError::Invalid(message)) if message.contains("chunk length"))
     );
+}
+
+#[tokio::test]
+async fn interaction_and_inspection_wire_operations_have_closed_round_trips() {
+    for operation in [
+        serde_json::json!({"type":"inspect","session_id":"session"}),
+        serde_json::json!({"type":"pending_questions","session_id":"session"}),
+        serde_json::json!({"type":"answer_question","session_id":"session","id":"question","answer":{"answers":["free text"]}}),
+        serde_json::json!({"type":"read_output","session_id":"session","id":"0123456789abcdef0123456789abcdef","offset":3,"limit":16384}),
+    ] {
+        for unknown in [false, true] {
+            let mut operation = operation.clone();
+            if unknown {
+                operation["extra"] = serde_json::Value::Bool(true);
+            }
+            let body = serde_json::to_vec(
+                &serde_json::json!({"type":"request","request_id":"request","operation":operation}),
+            )
+            .unwrap();
+            let budget = FrameReadBudget::new(body.len());
+            let (mut writer, mut reader) = tokio::io::duplex(4096);
+            writer
+                .write_u32(u32::try_from(body.len()).unwrap())
+                .await
+                .unwrap();
+            writer.write_all(&body).await.unwrap();
+            let decoded = read_frame::<_, ClientFrame>(&mut reader, body.len(), &budget).await;
+            if unknown {
+                assert!(
+                    matches!(decoded, Err(SessionHostError::Invalid(message)) if message.contains("extra"))
+                );
+            } else {
+                assert!(decoded.is_ok(), "{operation}: {decoded:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn wire_operation_bounds_question_answers_and_output_pages() {
+    let session_id = SessionId::new("wire-bounds").unwrap();
+    for (id, answers) in [
+        (String::new(), vec!["answer".into()]),
+        ("id".into(), vec![]),
+        ("id".into(), vec!["x".repeat(65536)]),
+    ] {
+        assert!(
+            validate_wire_operation(&WireOperation::AnswerQuestion {
+                session_id: session_id.clone(),
+                id,
+                answer: rsi_user_questions_protocol::QuestionAnswer { answers },
+            })
+            .is_err()
+        );
+    }
+    for (id, limit) in [
+        ("bad".into(), 1),
+        ("a".repeat(32), 0),
+        ("a".repeat(32), 65537),
+    ] {
+        assert!(
+            validate_wire_operation(&WireOperation::ReadOutput {
+                session_id: session_id.clone(),
+                id,
+                offset: 0,
+                limit
+            })
+            .is_err()
+        );
+    }
 }

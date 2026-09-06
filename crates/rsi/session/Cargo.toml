@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-process = { path = "../../rsi-process/core" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-trait.workspace = true
 getrandom.workspace = true
 rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
