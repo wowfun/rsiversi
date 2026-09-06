@@ -85,6 +85,51 @@ async fn raw_tail_reads_use_global_offsets_and_report_an_expired_cursor() {
 }
 
 #[tokio::test]
+async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_outcomes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.process.local",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(ProcessLocalFactory),
+            ),
+            json!({"output_cache":{"directory":temporary.path().join("output")}}),
+        )
+        .await
+        .unwrap();
+    let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
+    let cache = runtime
+        .root()
+        .lookup_local::<rsi_process::ProcessOutputCacheContract>()
+        .unwrap();
+    let managed = process
+        .spawn(spec(
+            "printf prefix; head -c 100000 /dev/zero; printf suffix; printf warning >&2; exit 7",
+            32,
+        ))
+        .unwrap();
+    assert_eq!(managed.wait().await.unwrap().exit_code, Some(7));
+    let read = managed.stdout().read_from(0).unwrap();
+    assert!(read.lossy);
+    assert_eq!(read.bytes.len(), 32);
+    let id = read.full_output.unwrap();
+    let page = cache.read(&id, 0, 16).await.unwrap();
+    assert_eq!(&page.bytes[..6], b"prefix");
+    assert_eq!(page.total_bytes, 100_012);
+    assert_eq!(cache.read(&id, 100_006, 16).await.unwrap().bytes, b"suffix");
+    let stderr_id = managed.stderr().read_from(0).unwrap().full_output.unwrap();
+    assert_eq!(
+        cache.read(&stderr_id, 0, 16).await.unwrap().bytes,
+        b"warning"
+    );
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
 async fn capture_reservation_survives_exit_until_the_handle_is_dropped() {
     let (fiber, process) = activated(json!({"maximum_capture_bytes":65536})).await;
     let retained = process.spawn(spec("exit 0", 32_768)).unwrap();
@@ -250,8 +295,14 @@ async fn escaped_stdin_reader_cannot_block_settlement_forever() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
-    let (fiber, process) = activated(json!({})).await;
     let temporary = tempfile::tempdir().unwrap();
+    let (fiber, process) = activated(json!({"output_cache": {
+        "directory": temporary.path().join("output"),
+        "maximum_stream_bytes": 64,
+        "maximum_total_bytes": 128,
+        "maximum_files": 2
+    }}))
+    .await;
     let marker = temporary.path().join("escaped-pipe-pgid");
     let script = format!(
         "/usr/bin/setsid /bin/sh -c 'echo $$ > {}; /bin/sleep 30' & while [ ! -s {} ]; do :; done; exit 0",
@@ -283,6 +334,13 @@ async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     assert!(
         matches!(outcome, Err(ProcessError::Io(message)) if message.contains("drain timed out"))
     );
+    assert!(managed.stdout().read_from(0).unwrap().full_output.is_none());
+    assert!(managed.stderr().read_from(0).unwrap().full_output.is_none());
+    // Retaining the failed process must not retain its disk capture quota.
+    let next = process.spawn(spec("printf recovered", 32)).unwrap();
+    next.wait().await.unwrap();
+    assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
+    assert!(next.stderr().read_from(0).unwrap().full_output.is_some());
 
     drop(managed);
     drop(process);
@@ -364,7 +422,11 @@ async fn provider_retirement_escalates_term_to_kill_and_waits_for_reaping() {
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping() {
-    let (fiber, process) = activated(json!({"shutdown_timeout_ms":1})).await;
+    let temporary = tempfile::tempdir().unwrap();
+    let config = json!({"shutdown_timeout_ms":1, "output_cache": {
+        "directory": temporary.path().join("output")
+    }});
+    let (fiber, process) = activated(config.clone()).await;
     let mut request = spec(
         "trap '' TERM; printf ready; while :; do /bin/sleep 1; done",
         1024,
@@ -397,6 +459,27 @@ async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping(
         .unwrap();
     assert_eq!(outcome.signal, Some(9));
     assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+    let lease = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(temporary.path().join("output/owner.lock"))
+        .unwrap();
+    // Keep the old ManagedProcess alive while the detached cleanup releases the cache.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while lease.try_lock().is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("detached process cleanup retained the output cache lease");
+    lease.unlock().unwrap();
+    let mut replacement_config = config;
+    replacement_config["shutdown_timeout_ms"] = json!(1000);
+    let (replacement, process) = activated(replacement_config).await;
+    let next = process.spawn(spec("printf replacement", 32)).unwrap();
+    next.wait().await.unwrap();
+    assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
+    assert!(replacement.dispose().await.is_clean());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -434,4 +517,48 @@ async fn provider_retirement_joins_every_spawn_racing_admission_publication() {
         process.wait().await.unwrap();
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
     }
+}
+
+#[tokio::test]
+async fn unavailable_cache_directory_preserves_command_execution_and_read_capability() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("not-a-directory");
+    std::fs::write(&directory, b"keep this file").unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.process.local",
+                "unavailable-cache",
+                UpdateMode::Replayable,
+                Arc::new(ProcessLocalFactory),
+            ),
+            json!({"output_cache":{"directory":directory}}),
+        )
+        .await
+        .unwrap();
+    let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
+    let cache = runtime
+        .root()
+        .lookup_local::<rsi_process::ProcessOutputCacheContract>()
+        .unwrap();
+    let managed = process
+        .spawn(spec("printf command-still-runs; exit 7", 32))
+        .unwrap();
+    assert_eq!(managed.wait().await.unwrap().exit_code, Some(7));
+    let output = managed.stdout().read_from(0).unwrap();
+    assert_eq!(output.bytes, b"command-still-runs");
+    assert!(output.full_output.is_none());
+    assert!(matches!(
+        cache.read("0123456789abcdef0123456789abcdef", 0, 16).await,
+        Err(ProcessError::Io(message)) if message.to_ascii_lowercase().contains("not a directory")
+    ));
+    assert!(matches!(
+        cache.read("../arbitrary", 0, 16).await,
+        Err(ProcessError::InvalidInput(_))
+    ));
+    assert_eq!(std::fs::read(directory).unwrap(), b"keep this file");
+    drop((cache, process, managed));
+    assert!(fiber.dispose().await.is_clean());
 }

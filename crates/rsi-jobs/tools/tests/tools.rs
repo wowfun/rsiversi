@@ -132,6 +132,7 @@ impl JobControl for TestControl {
             .unwrap_or(usize::MAX)
             .min(bytes.len());
         Ok(JobOutputRead {
+            full_output: None,
             bytes: bytes[offset..].to_vec(),
             oldest_offset: 0,
             next_offset: bytes.len() as u64,
@@ -400,6 +401,11 @@ async fn factory_publishes_only_generic_jobs_tools_and_preserves_control_semanti
     assert_eq!(output.value["reported"], true);
     assert_eq!(output.value["stdout"]["text"], "output");
     assert_eq!(output.value["stderr"]["text"], "warning");
+    assert!(
+        matches!(output.content.as_slice(), [rsi_tools_protocol::ToolContent::Text { text }]
+        if text.contains("status: completed") && text.contains("exit code: 0")
+            && text.contains("wait timed out: false") && text.contains(&complete))
+    );
 
     let running = fixture.submit(TestRequest::Block);
     let listed = fixture.call("job_list", json!({}), true).await.unwrap();
@@ -417,6 +423,10 @@ async fn factory_publishes_only_generic_jobs_tools_and_preserves_control_semanti
     assert!(!killed.is_error);
     assert_eq!(killed.value["status"], "cancelled");
     assert_eq!(killed.value["reported"], true);
+    assert!(
+        matches!(killed.content.as_slice(), [rsi_tools_protocol::ToolContent::Text { text }]
+        if text.contains("status: cancelled"))
+    );
     fixture.shutdown().await;
 }
 

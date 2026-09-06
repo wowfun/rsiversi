@@ -217,7 +217,7 @@ fn seal(
 fn echo_registration(name: &str) -> ToolRegistration {
     ToolRegistration {
         definition: ToolDefinition::new(name, "echo", true.into()).unwrap(),
-        timeout_ms: 1_000,
+        timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
         executor: Arc::new(EchoTool),
     }
 }
@@ -564,7 +564,9 @@ async fn catalog_withdrawal_cannot_recycle_admission_owned_by_active_bodies() {
             &provider,
             vec![ToolRegistration {
                 definition: ToolDefinition::new("hold", "hold admission", true.into()).unwrap(),
-                timeout_ms: 600_000,
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
+                    timeout_ms: 600_000,
+                },
                 executor: Arc::new(AdmissionHoldingTool {
                     entered: Arc::clone(&entered),
                     entered_changed: Arc::clone(&entered_changed),
@@ -651,7 +653,7 @@ async fn retained_wait_observes_settlement_without_an_unrelated_notification() {
         &provider,
         vec![ToolRegistration {
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
-            timeout_ms: 1_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(StubbornTool {
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
@@ -705,7 +707,7 @@ async fn dropping_a_catalog_reclaims_settled_and_late_retained_results() {
             echo_registration("echo"),
             ToolRegistration {
                 definition: ToolDefinition::new("blocking", "blocking", true.into()).unwrap(),
-                timeout_ms: 1_000,
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
                 executor: Arc::new(BlockingTool {
                     entered: Arc::clone(&entered),
                 }),
@@ -777,7 +779,7 @@ async fn sandbox_rejection_remains_structured_across_tool_execution() {
         &provider,
         vec![ToolRegistration {
             definition: ToolDefinition::new("confine", "confine", true.into()).unwrap(),
-            timeout_ms: 1_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(ConfineTool),
         }],
     );
@@ -831,7 +833,7 @@ async fn dropping_a_catalog_withdraws_prepared_calls_and_cancels_admitted_calls(
         &provider,
         vec![ToolRegistration {
             definition: ToolDefinition::new("wait", "wait", true.into()).unwrap(),
-            timeout_ms: 10_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
             executor: Arc::new(BlockingTool {
                 entered: entered.clone(),
             }),
@@ -866,7 +868,9 @@ async fn catalog_bounds_tool_count_and_per_call_timeout_before_seal() {
         registrar
             .register(ToolRegistration {
                 definition: ToolDefinition::new("too-slow", "", json!({})).unwrap(),
-                timeout_ms: 600_001,
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
+                    timeout_ms: 600_001
+                },
                 executor: Arc::new(EchoTool),
             })
             .is_err()
@@ -902,7 +906,7 @@ async fn timeout_is_retained_until_the_orchestrator_commits_it() {
                 json!({"type":"object"}),
             )
             .unwrap(),
-            timeout_ms: 100,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 100 },
             executor: Arc::new(BlockingTool {
                 entered: entered.clone(),
             }),
@@ -938,6 +942,63 @@ async fn timeout_is_retained_until_the_orchestrator_commits_it() {
     assert!(fiber.dispose().await.is_clean());
 }
 
+#[tokio::test(start_paused = true)]
+async fn human_interaction_waits_beyond_execution_timeout_and_cancels_quiescently() {
+    let (fiber, provider) = activated().await;
+    let entered = Arc::new(Notify::new());
+    let stage = provider.begin_stage().unwrap();
+    let registrar = stage.registrar();
+    assert!(
+        registrar
+            .register(ToolRegistration {
+                definition: ToolDefinition::new("invalid-human", "", json!({})).unwrap(),
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction,
+                executor: Arc::new(EchoTool),
+            })
+            .is_err()
+    );
+    let _lease = registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("human", "wait", json!({"type":"object"}))
+                .unwrap()
+                .with_scheduling(rsi_tools_protocol::ToolScheduling::ExclusiveFinal),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction,
+            executor: Arc::new(BlockingTool {
+                entered: entered.clone(),
+            }),
+        })
+        .unwrap();
+    let tools = stage.seal().unwrap();
+    let prepared = tools
+        .prepare(
+            "human-effect",
+            ToolCall {
+                id: "human-call".into(),
+                name: "human".into(),
+                arguments: json!({}),
+            },
+        )
+        .unwrap();
+    let identity = prepared.identity().clone();
+    let cancellation = CancellationToken::new();
+    let start = tool_start(cancellation.clone());
+    let invocation = tokio::spawn(async move { prepared.start(start).await });
+    entered.notified().await;
+    tokio::time::advance(std::time::Duration::from_hours(24)).await;
+    assert!(!invocation.is_finished());
+    assert_eq!(tools.query(&identity).unwrap(), RetainedToolResult::Pending);
+    cancellation.cancel();
+    assert_eq!(invocation.await.unwrap(), Err(ToolError::Cancelled));
+    assert!(
+        matches!(tools.query(&identity).unwrap(), RetainedToolResult::Failed(failure) if failure.kind == RetainedToolFailureKind::Cancelled)
+    );
+    tools.commit(&identity).unwrap();
+    drop(tools);
+    drop(registrar);
+    drop(provider);
+    assert!(fiber.dispose().await.is_clean());
+}
+
 #[tokio::test]
 async fn recursive_panic_payload_destruction_cannot_abandon_settlement() {
     let (fiber, provider) = activated().await;
@@ -945,7 +1006,7 @@ async fn recursive_panic_payload_destruction_cannot_abandon_settlement() {
         &provider,
         vec![ToolRegistration {
             definition: ToolDefinition::new("panic", "panic", true.into()).unwrap(),
-            timeout_ms: 1_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(RecursivePanicTool),
         }],
     );
@@ -1042,7 +1103,7 @@ async fn cancellation_and_dropped_waiters_do_not_abandon_tool_settlement() {
         &provider,
         vec![ToolRegistration {
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
-            timeout_ms: 10_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
             executor: Arc::new(StubbornTool {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -1101,7 +1162,7 @@ async fn provider_cleanup_reports_unsettled_noncooperative_tools_within_its_boun
         &provider,
         vec![ToolRegistration {
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
-            timeout_ms: 10_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
             executor: Arc::new(StubbornTool {
                 entered: entered.clone(),
                 release: release.clone(),

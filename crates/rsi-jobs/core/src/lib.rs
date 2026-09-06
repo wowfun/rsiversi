@@ -293,6 +293,8 @@ impl JobTerminal {
 /// One raw offset-based output read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobOutputRead {
+    /// Optional producer-issued complete-output reference (at most 256 bytes).
+    pub full_output: Option<String>,
     /// Retained bytes at or after the requested whole-stream offset.
     pub bytes: Vec<u8>,
     /// Oldest whole-stream offset still retained.

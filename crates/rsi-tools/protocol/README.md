@@ -46,8 +46,10 @@ true settlement, and an outcome produced after catalog withdrawal is
 discarded. Starting above the provider-wide admission bound returns
 `ToolError::Capacity`; starts after shutdown begins return
 `ToolError::ShuttingDown`. Each
-registration timeout is within
-1..=600,000 milliseconds. The current
+execution registration timeout is within
+1..=600,000 milliseconds. The owner-declared `HumanInteraction` policy instead
+requires `exclusive_final` scheduling and ends on answer or cancellation; it
+has no implicit answer or timer. The current
 pre-release result shape is exactly `{ value, content, is_error }`; image
 content contains a durable `MediaRef`, not an inline blob or status envelope.
 Model-facing text rejects C0 terminal controls other than tab and line breaks.

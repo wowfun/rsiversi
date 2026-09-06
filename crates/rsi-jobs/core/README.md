@@ -1,5 +1,10 @@
 # rsi-jobs
 
+Output reads may carry an optional producer-issued `full_output` reference for
+a complete best-effort log. Jobs passes the bounded opaque reference through;
+the producer's output reader owns its interpretation and expiry. The reference
+does not extend Job lifetime or make Jobs restart-recoverable.
+
 This package owns runtime-independent process-local Jobs contracts. A producer
 generation accepts a bounded type-erased request and returns a live control
 object. Jobs performs scope, producer, and capacity preflight before calling the

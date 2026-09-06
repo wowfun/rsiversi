@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
+serde.workspace = true
 thiserror.workspace = true
 
 [lints]

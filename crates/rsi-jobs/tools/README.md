@@ -13,6 +13,9 @@ Model-facing output is a bounded tail of each raw retained stream. Its offsets
 and `truncated` flag describe that projected window, so a legal producer-sized
 capture cannot become an invalid Tool result after a terminal read has already
 reported the Job.
+Every output/kill text result includes the Job identity, status, terminal exit
+code and signal when present, and whether the bounded wait expired. These
+fields remain visible to models even when the captured streams are nonempty.
 Both identifier-taking schemas publish the same 256-byte `job_id` ceiling that
 the Jobs protocol enforces. The executor parses the bounded shape, and the Jobs
 provider remains the authoritative identifier-validation boundary before any

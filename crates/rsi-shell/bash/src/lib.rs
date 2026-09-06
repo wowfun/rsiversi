@@ -345,7 +345,9 @@ mod linux {
                     "additionalProperties":false
                 }),
             )?,
-            timeout_ms: BASH_TOOL_TIMEOUT_MS,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
+                timeout_ms: BASH_TOOL_TIMEOUT_MS,
+            },
             executor: Arc::new(BashTool { services }),
         })
     }
@@ -521,6 +523,7 @@ mod linux {
             }
             .map_err(map_process)?;
             Ok(JobOutputRead {
+                full_output: read.full_output,
                 bytes: read.bytes,
                 oldest_offset: read.oldest_offset,
                 next_offset: read.next_offset,
@@ -589,7 +592,16 @@ mod linux {
                 "stdout":process_stream_value(&stdout),
                 "stderr":process_stream_value(&stderr)
             }),
-            render_stream_text(&stdout, &stderr, status),
+            format!(
+                "{}\n[status: {status}; exit code: {}; signal: {}]",
+                render_stream_text(&stdout, &stderr, status),
+                outcome
+                    .exit_code
+                    .map_or_else(|| "none".into(), |code| code.to_string()),
+                outcome
+                    .signal
+                    .map_or_else(|| "none".into(), |signal| signal.to_string()),
+            ),
             false,
         )
     }
@@ -603,17 +615,29 @@ mod linux {
             "next_offset":read.next_offset,
             "truncated":read.lossy,
             "utf8_lossy":utf8_lossy
+            ,"full_output":read.full_output
         })
     }
 
     fn render_stream_text(stdout: &ProcessRead, stderr: &ProcessRead, fallback: &str) -> String {
+        use std::fmt::Write as _;
         let mut stdout_text = safe_model_text(&stdout.bytes);
         let mut stderr_text = safe_model_text(&stderr.bytes);
         if stdout.lossy {
             stdout_text.insert_str(0, "[stdout truncated; showing retained tail]\n");
+            let _ = write!(
+                stdout_text,
+                "\n[full stdout: {}]",
+                stdout.full_output.as_deref().unwrap_or("unavailable")
+            );
         }
         if stderr.lossy {
             stderr_text.insert_str(0, "[stderr truncated; showing retained tail]\n");
+            let _ = write!(
+                stderr_text,
+                "\n[full stderr: {}]",
+                stderr.full_output.as_deref().unwrap_or("unavailable")
+            );
         }
         let stdout = stdout_text;
         let stderr = stderr_text;

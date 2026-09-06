@@ -262,7 +262,9 @@ mod linux {
                     "additionalProperties":false
                 }),
             )?,
-            timeout_ms: APPLY_PATCH_TOOL_TIMEOUT_MS,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
+                timeout_ms: APPLY_PATCH_TOOL_TIMEOUT_MS,
+            },
             executor: Arc::new(ApplyPatchTool { helper, process }),
         })
     }

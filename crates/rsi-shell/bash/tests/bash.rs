@@ -360,6 +360,10 @@ async fn factories_publish_only_bash_and_preserve_foreground_and_background_beha
     assert_eq!(foreground.value["exit_code"], 7);
     assert_eq!(foreground.value["stdout"]["text"], "yes|1|dumb|cat|cat");
     assert_eq!(foreground.value["stderr"]["text"], "warning");
+    assert!(
+        matches!(foreground.content.as_slice(), [ToolContent::Text { text }]
+        if text.contains("[status: exited; exit code: 7; signal: none]"))
+    );
 
     let truncated = fixture
         .call(json!({
@@ -393,6 +397,10 @@ async fn factories_publish_only_bash_and_preserve_foreground_and_background_beha
     assert!(!timed_out.is_error);
     assert_eq!(timed_out.value["status"], "timed_out");
     assert!(timed_out.value["signal"].as_i64().is_some());
+    assert!(
+        matches!(timed_out.content.as_slice(), [ToolContent::Text { text }]
+        if text.contains("status: timed_out") && text.contains("signal:"))
+    );
 
     let background_timeout = fixture
         .call(json!({
@@ -451,7 +459,7 @@ async fn foreground_output_sanitizes_terminal_controls_only_in_model_text() {
     );
     assert!(matches!(
         result.content.as_slice(),
-        [ToolContent::Text { text }] if text == "\u{fffd}[31mred\u{fffd}\u{fffd}"
+        [ToolContent::Text { text }] if text == "\u{fffd}[31mred\u{fffd}\u{fffd}\n[status: exited; exit code: 0; signal: none]"
     ));
     fixture.shutdown().await;
 }

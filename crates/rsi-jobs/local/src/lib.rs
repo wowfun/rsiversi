@@ -1037,8 +1037,18 @@ fn contained_read(
     stream: JobStream,
     offset: u64,
 ) -> Result<JobOutputRead> {
-    std::panic::catch_unwind(AssertUnwindSafe(|| control.read(stream, offset)))
-        .map_err(|_| JobsError::Execution("job control read panicked".into()))?
+    let read = std::panic::catch_unwind(AssertUnwindSafe(|| control.read(stream, offset)))
+        .map_err(|_| JobsError::Execution("job control read panicked".into()))??;
+    if read
+        .full_output
+        .as_ref()
+        .is_some_and(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err(JobsError::Execution(
+            "invalid producer output reference".into(),
+        ));
+    }
+    Ok(read)
 }
 
 fn contained_cancel(control: &Arc<dyn JobControl>) -> Result<()> {
@@ -1048,6 +1058,7 @@ fn contained_cancel(control: &Arc<dyn JobControl>) -> Result<()> {
 
 fn compacted_read(stream_end: u64, offset: u64) -> JobOutputRead {
     JobOutputRead {
+        full_output: None,
         bytes: Vec::new(),
         oldest_offset: stream_end,
         next_offset: stream_end,

@@ -31,12 +31,20 @@ use tokio::sync::Notify;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 #[cfg(unix)]
+mod output_cache;
+#[cfg(unix)]
+pub use output_cache::OutputCacheConfig;
+#[cfg(unix)]
 const POST_KILL_GROUP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration for one local Process provider generation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessLocalConfig {
+    /// Optional best-effort completed-output cache.
+    #[cfg(unix)]
+    #[serde(default)]
+    pub output_cache: Option<OutputCacheConfig>,
     /// Maximum simultaneously unsettled direct children.
     #[serde(default = "default_maximum_active_processes")]
     pub maximum_active_processes: usize,
@@ -63,6 +71,8 @@ const fn default_shutdown_timeout_ms() -> u64 {
 impl Default for ProcessLocalConfig {
     fn default() -> Self {
         Self {
+            #[cfg(unix)]
+            output_cache: None,
             maximum_active_processes: default_maximum_active_processes(),
             maximum_capture_bytes: default_maximum_capture_bytes(),
             shutdown_timeout_ms: default_shutdown_timeout_ms(),
@@ -72,6 +82,10 @@ impl Default for ProcessLocalConfig {
 
 impl ProcessLocalConfig {
     fn validate(&self) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(config) = &self.output_cache {
+            config.validate()?;
+        }
         if self.maximum_active_processes == 0
             || self.maximum_active_processes > MAXIMUM_ACTIVE_PROCESSES
         {
@@ -97,6 +111,10 @@ impl ProcessLocalConfig {
 
 #[derive(Debug)]
 struct Service {
+    #[cfg(unix)]
+    cache: Option<Arc<output_cache::Cache>>,
+    #[cfg(unix)]
+    cache_failure: Option<ProcessError>,
     #[cfg(unix)]
     config: ProcessLocalConfig,
     #[cfg(unix)]
@@ -135,6 +153,7 @@ impl Registry {
 #[cfg(unix)]
 #[derive(Debug)]
 struct Tail {
+    capture: Option<output_cache::Capture>,
     maximum: usize,
     inner: Mutex<TailInner>,
     _reservation: Arc<CaptureReservation>,
@@ -168,6 +187,7 @@ struct TailInner {
 impl Tail {
     fn new(maximum: usize, reservation: Arc<CaptureReservation>) -> Self {
         Self {
+            capture: None,
             maximum,
             inner: Mutex::new(TailInner::default()),
             _reservation: reservation,
@@ -186,6 +206,9 @@ impl Tail {
         inner.bytes.extend(chunk);
         let excess = inner.bytes.len().saturating_sub(self.maximum);
         inner.bytes.drain(..excess);
+        if let Some(capture) = &self.capture {
+            capture.push(chunk);
+        }
         Ok(())
     }
 }
@@ -212,6 +235,10 @@ impl ProcessOutput for Tail {
             oldest_offset,
             next_offset: inner.total,
             lossy,
+            full_output: self
+                .capture
+                .as_ref()
+                .and_then(output_cache::Capture::reference),
         })
     }
 }
@@ -365,6 +392,20 @@ impl ProcessControl for ManagedControl {
     }
 }
 
+#[cfg(unix)]
+#[async_trait]
+impl rsi_process::ProcessOutputCache for Service {
+    async fn read(&self, id: &str, offset: u64, limit: usize) -> Result<rsi_process::OutputPage> {
+        rsi_process::validate_output_read(id, limit)?;
+        let cache = self.cache.as_ref().ok_or_else(|| {
+            self.cache_failure
+                .clone()
+                .unwrap_or_else(|| ProcessError::Io("completed output cache is unavailable".into()))
+        })?;
+        cache.read(id, offset, limit).await
+    }
+}
+
 impl Process for Service {
     fn spawn(&self, spec: ProcessSpec) -> Result<ManagedProcess> {
         spec.validate()?;
@@ -391,6 +432,8 @@ impl Service {
     #[cfg(unix)]
     fn with_groups(config: ProcessLocalConfig, groups: Arc<dyn ProcessGroups>) -> Self {
         Self {
+            cache: None,
+            cache_failure: None,
             config,
             state: Arc::new(ServiceState {
                 inner: Mutex::new(Registry::accepting()),
@@ -411,8 +454,14 @@ impl Service {
             service: Arc::downgrade(&self.state),
             bytes: capture_bytes,
         });
-        let stdout = Arc::new(Tail::new(spec.stdout_max_bytes, Arc::clone(&reservation)));
-        let stderr = Arc::new(Tail::new(spec.stderr_max_bytes, reservation));
+        let mut stdout = Tail::new(spec.stdout_max_bytes, Arc::clone(&reservation));
+        let mut stderr = Tail::new(spec.stderr_max_bytes, reservation);
+        if let Some(cache) = &self.cache {
+            stdout.capture = cache.capture();
+            stderr.capture = cache.capture();
+        }
+        let stdout = Arc::new(stdout);
+        let stderr = Arc::new(stderr);
         let state = Arc::new(ChildState {
             pid,
             grace: Duration::from_millis(spec.termination_grace_ms),
@@ -524,11 +573,16 @@ impl Service {
             process.terminate();
         }
         let state = Arc::clone(&self.state);
+        let cache = self.cache.clone();
         let mut cleanup = tokio::spawn(async move {
             let _state = state;
             for process in processes {
                 let _ = process.wait_outcome().await;
             }
+            if let Some(cache) = cache {
+                cache.shutdown().await?;
+            }
+            Ok(())
         });
         match tokio::time::timeout(
             Duration::from_millis(self.config.shutdown_timeout_ms),
@@ -536,7 +590,7 @@ impl Service {
         )
         .await
         {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(result)) => result,
             Ok(Err(error)) => Err(ProcessError::Io(format!(
                 "process cleanup task failed: {error}"
             ))),
@@ -568,8 +622,8 @@ fn supervise_child(
         .stderr
         .take()
         .expect("piped stderr is present after successful spawn");
-    let mut stdout_task = runtime.spawn(drain(stdout_pipe, stdout));
-    let mut stderr_task = runtime.spawn(drain(stderr_pipe, stderr));
+    let mut stdout_task = runtime.spawn(drain(stdout_pipe, stdout.clone()));
+    let mut stderr_task = runtime.spawn(drain(stderr_pipe, stderr.clone()));
     let wait_state = Arc::clone(state);
     let drain_grace = state.grace;
     runtime.spawn(async move {
@@ -614,6 +668,25 @@ fn supervise_child(
                 Some("captured pipe drain timed out before EOF".into())
             }
         };
+        if drain_error.is_none() {
+            // Cache publication has its own bound and cannot consume pipe-drain grace.
+            tokio::join!(
+                async {
+                    if let Some(capture) = &stdout.capture {
+                        capture.finish().await;
+                    }
+                },
+                async {
+                    if let Some(capture) = &stderr.capture {
+                        capture.finish().await;
+                    }
+                },
+            );
+        } else {
+            for capture in [&stdout.capture, &stderr.capture].into_iter().flatten() {
+                capture.abandon();
+            }
+        }
         let outcome = status.and_then(|status| {
             if group_settlement_timed_out {
                 return Err(ProcessError::SettlementTimeout);
@@ -748,7 +821,21 @@ impl PluginFactory for ProcessLocalFactory {
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         #[cfg(unix)]
-        let service = Arc::new(Service::new(plan.take_state::<ProcessLocalConfig>()?));
+        let service = {
+            let config = plan.take_state::<ProcessLocalConfig>()?;
+            let cache_config = config.output_cache.clone();
+            let cache = tokio::task::spawn_blocking(move || {
+                cache_config.map(output_cache::Cache::open).transpose()
+            })
+            .await
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
+            let mut service = Service::new(config);
+            match cache {
+                Ok(cache) => service.cache = cache,
+                Err(error) => service.cache_failure = Some(error),
+            }
+            Arc::new(service)
+        };
         #[cfg(not(unix))]
         let service = {
             let _: ProcessLocalConfig = plan.take_state()?;
@@ -756,6 +843,16 @@ impl PluginFactory for ProcessLocalFactory {
         };
         let process: Arc<dyn Process> = service.clone();
         let supply = plan.context().provide_local::<ProcessContract>(process)?;
+        #[cfg(unix)]
+        let cache_supply = if service.config.output_cache.is_some() {
+            let cache: Arc<dyn rsi_process::ProcessOutputCache> = service.clone();
+            Some(
+                plan.context()
+                    .provide_local::<rsi_process::ProcessOutputCacheContract>(cache)?,
+            )
+        } else {
+            None
+        };
         plan.defer(
             "shutdown local Process provider",
             Box::new(move || {
@@ -766,6 +863,8 @@ impl PluginFactory for ProcessLocalFactory {
                     let result = Ok(());
                     drop(service);
                     drop(supply);
+                    #[cfg(unix)]
+                    drop(cache_supply);
                     result
                 })
             }),
@@ -913,6 +1012,7 @@ mod tests {
                 maximum_active_processes: 1,
                 maximum_capture_bytes: 4,
                 shutdown_timeout_ms: 1_000,
+                ..ProcessLocalConfig::default()
             },
             groups.clone(),
         );

@@ -92,6 +92,45 @@ impl ApprovalSubject {
     }
 }
 
+/// Exact prepared effect metadata; requested sandbox policy is not enforcement evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalReview {
+    /// Canonical prepared arguments, without truncation.
+    pub arguments: serde_json::Value,
+    /// Absolute working directory frozen for execution.
+    pub cwd: String,
+    /// Requested sandbox mode.
+    pub sandbox: String,
+    /// Canonical prepared request digest.
+    pub request_sha256: String,
+}
+
+impl ApprovalReview {
+    /// Bounds the review before admission or after external decoding.
+    pub fn validate(&self) -> Result<()> {
+        if !std::path::Path::new(&self.cwd).is_absolute()
+            || self.cwd.len() > MAXIMUM_APPROVAL_FIELD_BYTES
+            || self.cwd.chars().any(char::is_control)
+            || !matches!(
+                self.sandbox.as_str(),
+                "read-only" | "workspace-write" | "danger-full-access"
+            )
+            || self.request_sha256.len() != 64
+            || !self
+                .request_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || encoded_json_len(&self.arguments)? > 4 * 1024 * 1024
+        {
+            return Err(ApprovalError::InvalidInput(
+                "prepared effect review exceeds its bounds".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Minimal live approval request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +143,8 @@ pub struct ApprovalRequest {
     pub action: String,
     /// Human-facing reason.
     pub reason: String,
+    /// Exact prepared effect, when this request protects a Tool call.
+    pub review: Option<ApprovalReview>,
 }
 
 impl<'de> Deserialize<'de> for ApprovalRequest {
@@ -118,6 +159,7 @@ impl<'de> Deserialize<'de> for ApprovalRequest {
             id: String,
             action: String,
             reason: String,
+            review: Option<ApprovalReview>,
         }
 
         let wire = WireRequest::deserialize(deserializer)?;
@@ -126,6 +168,7 @@ impl<'de> Deserialize<'de> for ApprovalRequest {
             id: wire.id,
             action: wire.action,
             reason: wire.reason,
+            review: wire.review,
         };
         request
             .validate()
@@ -135,9 +178,17 @@ impl<'de> Deserialize<'de> for ApprovalRequest {
 }
 
 impl ApprovalRequest {
+    /// Measures canonical JSON bytes without allocating an encoded copy.
+    pub fn encoded_len(&self) -> Result<usize> {
+        encoded_json_len(self)
+    }
+
     /// Validates closed current request bounds.
     pub fn validate(&self) -> Result<()> {
         self.subject.validate()?;
+        if let Some(review) = &self.review {
+            review.validate()?;
+        }
         for (kind, value) in [
             ("approval id", self.id.as_str()),
             ("approval action", self.action.as_str()),
@@ -151,6 +202,26 @@ impl ApprovalRequest {
         }
         Ok(())
     }
+}
+
+fn encoded_json_len(value: &impl Serialize) -> Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("approval byte length overflowed"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| ApprovalError::InvalidInput(error.to_string()))?;
+    Ok(counter.0)
 }
 
 /// Closed approval choice.

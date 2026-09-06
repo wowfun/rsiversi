@@ -104,6 +104,7 @@ struct EmptyProcessOutput;
 impl ProcessOutput for EmptyProcessOutput {
     fn read_from(&self, offset: u64) -> rsi_process::Result<ProcessRead> {
         Ok(ProcessRead {
+            full_output: None,
             bytes: Vec::new(),
             oldest_offset: offset,
             next_offset: offset,

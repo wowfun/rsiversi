@@ -189,6 +189,83 @@ pub struct ProcessRead {
     pub next_offset: u64,
     /// Whether bytes between the requested offset and retained window were lost.
     pub lossy: bool,
+    /// Complete cached stream identity, if published; best-effort and evictable.
+    pub full_output: Option<String>,
+}
+
+/// Maximum retained bytes in one completed output stream.
+pub const MAXIMUM_COMPLETED_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Default raw completed-output page size.
+pub const DEFAULT_OUTPUT_READ_BYTES: usize = 16 * 1024;
+/// Maximum raw completed-output page size.
+pub const MAXIMUM_OUTPUT_READ_BYTES: usize = 64 * 1024;
+
+/// Validates an external completed-output read before lookup or allocation.
+pub fn validate_output_read(id: &str, limit: usize) -> Result<()> {
+    if id.len() != 32
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProcessError::InvalidInput("invalid output identity".into()));
+    }
+    if limit == 0 || limit > MAXIMUM_OUTPUT_READ_BYTES {
+        return Err(ProcessError::InvalidInput(
+            "output page must contain 1..=65536 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// One raw page from a completed, best-effort output cache.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputPage {
+    /// Exact published identity supplied by the caller.
+    pub id: String,
+    /// Whole-stream byte offset of the first returned byte.
+    pub offset: u64,
+    /// Whole-stream byte offset following the returned bytes.
+    pub next_offset: u64,
+    /// Complete stream byte length.
+    pub total_bytes: u64,
+    /// Unmodified raw bytes; consumers own decoding and terminal sanitization.
+    pub bytes: Vec<u8>,
+}
+
+impl OutputPage {
+    /// Validates provider pagination against the exact admitted read.
+    pub fn validate_for(&self, id: &str, offset: u64, limit: usize) -> Result<()> {
+        validate_output_read(id, limit)?;
+        if self.id != id
+            || self.offset != offset
+            || self.bytes.len() > limit
+            || self.total_bytes > MAXIMUM_COMPLETED_OUTPUT_BYTES
+            || offset.checked_add(self.bytes.len() as u64) != Some(self.next_offset)
+            || self.next_offset > self.total_bytes
+            || (self.bytes.is_empty() && self.next_offset < self.total_bytes)
+        {
+            return Err(ProcessError::Io("invalid completed-output page".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Read-only access to completed output; confers no process execution authority.
+#[async_trait]
+pub trait ProcessOutputCache: fmt::Debug + Send + Sync + 'static {
+    /// Reads one bounded raw page, or reports an unavailable/evicted identity.
+    async fn read(&self, id: &str, offset: u64, limit: usize) -> Result<OutputPage>;
+}
+
+/// Nominal Local contract for [`ProcessOutputCache`].
+#[derive(Debug)]
+pub struct ProcessOutputCacheContract;
+
+impl LocalContract for ProcessOutputCacheContract {
+    const KEY: &'static str = "rsi.process.output-cache";
+    type Service = dyn ProcessOutputCache;
 }
 
 /// Cursor-free reader for one retained raw process stream.
@@ -455,5 +532,30 @@ mod tests {
                 "accepted a process path that the platform API cannot represent: {spec:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod output_page_tests {
+    use super::*;
+    #[test]
+    fn remote_output_rejects_unbounded_or_nonadvancing_pages() {
+        let id = "a".repeat(32);
+        let mut page = OutputPage {
+            id: id.clone(),
+            offset: 0,
+            next_offset: 1,
+            total_bytes: 1,
+            bytes: vec![b'x'],
+        };
+        page.validate_for(&id, 0, 1).unwrap();
+        page.total_bytes = u64::MAX;
+        assert!(page.validate_for(&id, 0, 1).is_err());
+        page.total_bytes = 1;
+        page.bytes.clear();
+        page.next_offset = 0;
+        assert!(page.validate_for(&id, 0, 1).is_err());
+        page.total_bytes = 0;
+        page.validate_for(&id, 0, 1).unwrap();
     }
 }

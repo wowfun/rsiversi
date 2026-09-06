@@ -2620,6 +2620,7 @@ dependencies = [
  "async-trait",
  "rsi-meta-contract",
  "rsi-sandbox",
+ "serde",
  "thiserror",
 ]
 
@@ -2628,6 +2629,8 @@ name = "rsi-process-local"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
+ "hex",
  "rsi-meta",
  "rsi-process",
  "rsi-sandbox",
@@ -2878,6 +2881,18 @@ dependencies = [
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-user-questions-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta-contract",
  "serde",
  "serde_json",
  "thiserror",

@@ -77,7 +77,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                     "additionalProperties":false
                 }),
             )?,
-            timeout_ms: JOB_OUTPUT_TOOL_TIMEOUT_MS,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: JOB_OUTPUT_TOOL_TIMEOUT_MS },
             executor: Arc::new(JobOutputTool {
                 jobs: Arc::clone(&jobs),
             }),
@@ -89,7 +89,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                 json!({"type":"object","properties":{},"additionalProperties":false}),
             )?
             .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout_ms: 30_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
             executor: Arc::new(JobListTool {
                 jobs: Arc::clone(&jobs),
             }),
@@ -105,7 +105,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                     "additionalProperties":false
                 }),
             )?,
-            timeout_ms: 30_000,
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
             executor: Arc::new(JobKillTool { jobs }),
         },
     ])
@@ -297,19 +297,35 @@ fn job_read_result(read: &JobRead, wait_timed_out: bool) -> rsi_tools_protocol::
         "stdout":job_stream_value(&stdout),
         "stderr":job_stream_value(&stderr)
     });
-    result_with_text(
-        value,
-        render_stream_text(
-            &stdout,
-            &stderr,
-            if wait_timed_out {
-                "wait timed out; job remains active"
-            } else {
-                "job output"
-            },
-        ),
-        false,
-    )
+    let text = render_stream_text(
+        &stdout,
+        &stderr,
+        if wait_timed_out {
+            "wait timed out; job remains active"
+        } else {
+            "job output"
+        },
+    );
+    let exit_code = read
+        .job
+        .terminal
+        .as_ref()
+        .and_then(|terminal| terminal.exit_code);
+    let signal = read
+        .job
+        .terminal
+        .as_ref()
+        .and_then(|terminal| terminal.signal);
+    let text = format!(
+        "{text}\n[job: {}; status: {}; exit code: {}; signal: {}; wait timed out: {wait_timed_out}]",
+        read.job.id,
+        value["status"]
+            .as_str()
+            .expect("JobStatus serializes as a string"),
+        exit_code.map_or_else(|| "none".into(), |code| code.to_string()),
+        signal.map_or_else(|| "none".into(), |signal| signal.to_string()),
+    );
+    result_with_text(value, text, false)
 }
 
 fn project_stream(read: &JobOutputRead) -> JobOutputRead {
@@ -317,6 +333,7 @@ fn project_stream(read: &JobOutputRead) -> JobOutputRead {
     let bytes = read.bytes[start..].to_vec();
     let projection_truncated = start != 0;
     JobOutputRead {
+        full_output: read.full_output.clone(),
         oldest_offset: if projection_truncated {
             read.next_offset.saturating_sub(bytes.len() as u64)
         } else {
@@ -336,7 +353,8 @@ fn job_stream_value(read: &JobOutputRead) -> Value {
         "oldest_offset":read.oldest_offset,
         "next_offset":read.next_offset,
         "truncated":read.lossy,
-        "utf8_lossy":utf8_lossy
+        "utf8_lossy":utf8_lossy,
+        "full_output":read.full_output
     })
 }
 
@@ -356,8 +374,10 @@ fn render_stream_text(stdout: &JobOutputRead, stderr: &JobOutputRead, fallback: 
 fn render_one_stream(kind: &str, read: &JobOutputRead, text: &str) -> String {
     if read.lossy {
         format!(
-            "[{kind} truncated; showing bytes {}..{}]\n{text}",
-            read.oldest_offset, read.next_offset
+            "[{kind} truncated; showing bytes {}..{}]\n{text}\n[full {kind}: {}]",
+            read.oldest_offset,
+            read.next_offset,
+            read.full_output.as_deref().unwrap_or("unavailable")
         )
     } else {
         text.to_owned()

@@ -5,8 +5,11 @@ opens a bounded unpublished stage, contributes exact-name definitions through
 its registrar, and consumes the stage to seal one immutable runtime. Duplicate
 names fail atomically, schema listing is deterministic, and runtime execution
 never shares the staging lock or holds provider locks across Tool code. One
-stage admits at most 64 definitions, and a registration's cooperative timeout
-must be within 1..=600,000 milliseconds.
+stage admits at most 64 definitions, and an execution registration's cooperative timeout
+must be within 1..=600,000 milliseconds. An owner may instead declare
+`HumanInteraction` for an exclusive-final tool: it waits until human settlement
+or cancellation without a runtime timer, while retaining bounded invocation
+ownership and cooperative shutdown semantics.
 
 Registration leases support activation rollback by withdrawing their exact
 batch while the stage is open. Once the stage is sealed, dropping or retiring
@@ -56,3 +59,9 @@ minutes). A body that does
 not settle within that interval remains recorded and retains its admission
 until its eventual settlement while unresolved cleanup is reported; safe Rust
 cannot forcibly stop arbitrary trusted Tool code.
+
+Prepared request identity is lowercase hex SHA-256 of UTF-8
+`serde_json::to_vec({"arguments": arguments, "name": tool_name})`. Object keys
+are recursively sorted lexically, arrays retain order, and scalar JSON values
+retain their serde_json representation. The call ID, cwd, sandbox policy, and
+approval outcome are separate execution metadata, outside this digest.

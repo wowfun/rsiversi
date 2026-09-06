@@ -629,13 +629,25 @@ pub trait ToolExecutor: fmt::Debug + Send + Sync + 'static {
     async fn execute(&self, arguments: Value, execution: ToolExecution) -> Result<ToolResult>;
 }
 
+/// Owner-declared cooperative timeout policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolTimeoutPolicy {
+    /// Finite cooperative execution timeout, validated at registration.
+    Execution {
+        /// Maximum execution duration in milliseconds.
+        timeout_ms: u64,
+    },
+    /// Synchronous human interaction, bounded by cancellation and provider ownership.
+    HumanInteraction,
+}
+
 /// One process-local implementation registered for a model-visible definition.
 #[derive(Clone)]
 pub struct ToolRegistration {
     /// Model-visible definition.
     pub definition: ToolDefinition,
-    /// Cooperative timeout within `1..=MAXIMUM_TOOL_TIMEOUT_MS` milliseconds.
-    pub timeout_ms: u64,
+    /// Owner-declared timeout policy; model arguments cannot select it.
+    pub timeout: ToolTimeoutPolicy,
     /// Trusted body.
     pub executor: Arc<dyn ToolExecutor>,
 }
@@ -645,7 +657,7 @@ impl fmt::Debug for ToolRegistration {
         formatter
             .debug_struct("ToolRegistration")
             .field("definition", &self.definition)
-            .field("timeout_ms", &self.timeout_ms)
+            .field("timeout", &self.timeout)
             .field("executor", &"<tool executor>")
             .finish()
     }
@@ -691,9 +703,14 @@ impl<'de> Deserialize<'de> for ToolCall {
 impl ToolCall {
     /// Revalidates one model-produced call.
     pub fn validate(&self) -> Result<()> {
-        validate_identifier("tool call id", &self.id)?;
-        validate_model_tool_name(&self.name)?;
-        validate_json("tool arguments", &self.arguments)
+        Self::validate_fields(&self.id, &self.name, &self.arguments)
+    }
+
+    /// Validates borrowed call fields without copying the arguments tree.
+    pub fn validate_fields(id: &str, name: &str, arguments: &Value) -> Result<()> {
+        validate_identifier("tool call id", id)?;
+        validate_model_tool_name(name)?;
+        validate_json("tool arguments", arguments)
     }
 }
 

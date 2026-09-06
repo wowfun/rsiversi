@@ -23,7 +23,11 @@ Each command runs as `bash --noprofile --norc -c <command>` through the exact
 Sandbox-produced Process plan. Foreground timeout/cancellation joins process
 cleanup. Model-facing foreground text labels every retained tail whose prefix
 was truncated and replaces terminal control characters with U+FFFD; the
-structured stream text and offsets remain authoritative. Background
+structured stream text and offsets remain authoritative.
+Foreground model text always includes status, exit code, and signal, including
+when output is nonempty. A nonzero exit is a command outcome rather than a Tool
+transport failure, so the model can inspect the evidence and correct its work.
+Background
 commands have no command timeout and require live
 turn-scoped Jobs authority. Activation fails closed outside Linux until the
 Process family provides equivalent native settlement semantics there.

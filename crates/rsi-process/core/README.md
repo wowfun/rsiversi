@@ -33,3 +33,17 @@ outcome. That failure releases active-process admission; it does not claim that
 an unkillable host task was contained. Capture remains reserved while the
 owning `ManagedProcess` and its readable tail are retained, even after
 settlement or failure.
+
+An optional completed-output cache is a separate read-only Local contract,
+`ProcessOutputCacheContract`; possession never grants spawn authority. It
+accepts an opaque 32-character lowercase hexadecimal output identity and raw
+byte offset, with a 16 KiB default and 64 KiB maximum page. Readers return raw
+bytes and the next raw cursor. Process stream reads expose a completed identity
+only after the entire stream was captured and closed. Missing references mean
+capture is pending, disabled, or unavailable; they never imply an empty stream.
+Identities are best-effort same-user cache references, may be evicted at any
+time, and are neither Session archives nor per-Session access-control tokens.
+
+A completed stream is at most 64 MiB. Pages must advance by their exact raw byte
+length, stay within that total, and return a nonempty page before EOF. Remote
+consumers validate this contract before exposing provider data.

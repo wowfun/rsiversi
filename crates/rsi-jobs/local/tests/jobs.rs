@@ -66,6 +66,7 @@ impl JobControl for TestControl {
             .unwrap_or(usize::MAX)
             .min(bytes.len());
         Ok(JobOutputRead {
+            full_output: None,
             bytes: bytes[start..].to_vec(),
             oldest_offset: 0,
             next_offset: bytes.len() as u64,
@@ -139,6 +140,7 @@ impl JobControl for RacingReadControl {
             .unwrap_or(usize::MAX)
             .min(bytes.len());
         Ok(JobOutputRead {
+            full_output: None,
             bytes: bytes[start..].to_vec(),
             oldest_offset: 0,
             next_offset: bytes.len() as u64,
@@ -211,6 +213,7 @@ impl JobControl for FinalizationReportRaceControl {
             }
         }
         Ok(JobOutputRead {
+            full_output: None,
             bytes: b"stable".to_vec(),
             oldest_offset: 0,
             next_offset: 6,
@@ -270,6 +273,7 @@ impl JobControl for EvictionRaceControl {
             .unwrap_or(usize::MAX)
             .min(bytes.len());
         Ok(JobOutputRead {
+            full_output: None,
             bytes: bytes[start..].to_vec(),
             oldest_offset: 0,
             next_offset: bytes.len() as u64,
@@ -299,6 +303,7 @@ impl JobControl for PanickingCallbackControl {
     fn read(&self, _stream: JobStream, _offset: u64) -> Result<JobOutputRead> {
         assert!(!self.panic_read, "injected read panic");
         Ok(JobOutputRead {
+            full_output: None,
             bytes: Vec::new(),
             oldest_offset: 0,
             next_offset: 0,

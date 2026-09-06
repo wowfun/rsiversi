@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-process = { path = "../core" }
 serde.workspace = true

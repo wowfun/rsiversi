@@ -666,7 +666,16 @@ async fn settle(
     let future = AssertUnwindSafe(entry.definition.executor.execute(call.arguments, execution))
         .catch_unwind();
     tokio::pin!(future);
-    let timeout = tokio::time::sleep(Duration::from_millis(entry.definition.timeout_ms));
+    let timeout = async {
+        match entry.definition.timeout {
+            rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms } => {
+                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+            }
+            rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction => {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
     tokio::pin!(timeout);
 
     let completion = tokio::select! {
@@ -761,7 +770,15 @@ async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> 
 
 fn validate_definition(definition: &ToolRegistration) -> Result<()> {
     definition.definition.validate()?;
-    if definition.timeout_ms == 0 || definition.timeout_ms > MAXIMUM_TOOL_TIMEOUT_MS {
+    if definition.timeout == rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+        && definition.definition.scheduling() != rsi_tools_protocol::ToolScheduling::ExclusiveFinal
+    {
+        return Err(ToolError::InvalidInput(
+            "human interaction tools require exclusive-final scheduling".into(),
+        ));
+    }
+    if matches!(definition.timeout, rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms } if timeout_ms == 0 || timeout_ms > MAXIMUM_TOOL_TIMEOUT_MS)
+    {
         return Err(ToolError::InvalidInput(format!(
             "tool timeout must be within 1..={MAXIMUM_TOOL_TIMEOUT_MS} milliseconds"
         )));

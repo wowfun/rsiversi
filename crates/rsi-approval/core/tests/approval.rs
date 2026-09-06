@@ -43,6 +43,7 @@ impl ApprovalAnswerer for Allow {
 
 fn request() -> ApprovalRequest {
     ApprovalRequest {
+        review: None,
         subject: ApprovalSubject::new("session-1", "turn-1", "effect-1").unwrap(),
         id: "approval-1".into(),
         action: "write file".into(),
