@@ -80,8 +80,8 @@ impl FinalResources {
     }
 
     /// Drops the mapping only after both raw tables are permanently closed.
-    /// The library is intentionally last: if any earlier destructor unwinds,
-    /// `Drop` leaks every still-owned field and keeps foreign code mapped.
+    /// Close the library before removing its staged artifact. If a destructor
+    /// or library close fails, Drop retains every still-owned resource.
     fn release(mut self) {
         assert!(
             self.can_release(),
@@ -89,10 +89,18 @@ impl FinalResources {
         );
         drop(self.transport.take());
         drop(self.host.take());
+        if self
+            .library
+            .take()
+            .expect("final resources retain library")
+            .close()
+            .is_err()
+        {
+            return;
+        }
         drop(self.artifact.take());
         drop(self.catalog.take());
         drop(self.host_resources.take());
-        drop(self.library.take());
         self.released = true;
     }
 }

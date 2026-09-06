@@ -482,6 +482,7 @@ fn staging_capacity_is_reserved_and_released_at_the_catalog_seam() {
     let cache = tempfile::tempdir().unwrap();
     let source = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(source.path(), b"two bytes").unwrap();
+    let source = source.into_temp_path();
     let mut options = CatalogOptions::new(cache.path());
     options.limits = NativeCatalogLimits {
         maximum_staging_bytes: 1,
@@ -490,7 +491,7 @@ fn staging_capacity_is_reserved_and_released_at_the_catalog_seam() {
     let catalog = NativeCatalog::new(options).unwrap();
 
     assert!(matches!(
-        catalog.load(source.path()),
+        catalog.load(&source),
         Err(LoaderError::CapacityExhausted {
             resource: "staging bytes",
             limit: 1,
@@ -509,8 +510,9 @@ fn catalog_rejects_an_oversized_artifact_before_mapping() {
     file.as_file()
         .set_len(rsi_meta_native_loader::MAX_ARTIFACT_BYTES + 1)
         .unwrap();
+    let file = file.into_temp_path();
     assert!(matches!(
-        catalog.load(file.path()),
+        catalog.load(&file),
         Err(rsi_meta_native_loader::LoaderError::ArtifactTooLarge)
     ));
 }

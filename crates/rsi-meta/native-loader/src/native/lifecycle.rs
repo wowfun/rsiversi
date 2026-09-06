@@ -191,9 +191,14 @@ fn enqueue_unentered_release(
     let (artifact, catalog) = resources.into_parts();
     queue.enqueue(Box::new(move || {
         drop(host);
+        if library.close().is_err() {
+            catalog.retain_failed_finalization();
+            std::mem::forget(artifact);
+            std::mem::forget(catalog);
+            return;
+        }
         drop(artifact);
         drop(catalog);
-        drop(library);
     }));
 }
 

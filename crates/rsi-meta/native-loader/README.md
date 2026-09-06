@@ -125,6 +125,9 @@ failed finalization output token is released on that lane before ordinary
 admission reopens. Successful `FINALIZE` invalidates the raw table immediately;
 no guard, pointer, or destructor touches it afterward. Only successful factory
 destruction plus a fully validated successful `FINALIZE` permits unmapping.
+The module lane explicitly closes the library before deleting its staged file
+or releasing catalog accounting. If library close fails, the artifact and
+catalog lease remain retained and load admission closes as for failed finalization.
 Refusal, panic, or malformed success records a retained finalization and pins
 the complete bundle rather than risking use-after-free. That fail-closed bundle
 also retains its catalog lease, staged artifact accounting, and cooperative
