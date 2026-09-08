@@ -140,12 +140,12 @@ mod tests {
             ))
             .unwrap();
         });
-        assert!(
-            result
-                .recv_timeout(std::time::Duration::from_millis(50))
-                .is_err()
-        );
+        let initial = result.recv_timeout(std::time::Duration::from_millis(50));
         stop.cancel();
+        assert!(
+            matches!(initial, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "writer completed before cancellation: {initial:?}"
+        );
         assert_eq!(
             result
                 .recv_timeout(std::time::Duration::from_secs(1))

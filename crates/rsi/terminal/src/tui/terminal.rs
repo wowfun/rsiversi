@@ -295,6 +295,8 @@ mod tests {
     use super::*;
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+    mod capture;
+
     #[test]
     fn identical_cells_emit_no_terminal_bytes() {
         let buffer = Buffer::with_lines(["hello 界"]);
@@ -504,7 +506,6 @@ mod tests {
 
     #[test]
     fn panic_restores_terminal_and_blocked_writer_does_not_prevent_exit() {
-        use std::io::Read as _;
         for mode in ["panic", "slow"] {
             let directory = tempfile::tempdir().unwrap();
             let completed = directory.path().join("closed");
@@ -544,14 +545,7 @@ mod tests {
             }
             // Only resume draining after the blocked writer has restored termios;
             // libtest itself prints its result synchronously after this point.
-            let reader = {
-                let mut reader = pair.master.try_clone_reader().unwrap();
-                Some(std::thread::spawn(move || {
-                    let mut output = Vec::new();
-                    let _ = reader.read_to_end(&mut output);
-                    output
-                }))
-            };
+            let reader = capture::PtyCapture::start(pair.master.as_ref());
             let start = std::time::Instant::now();
             let status = loop {
                 if let Some(status) = child.try_wait().unwrap() {
@@ -568,11 +562,9 @@ mod tests {
             assert!(
                 format!("{:?}", pair.master.get_termios().unwrap().local_flags).contains("ICANON")
             );
-            if let Some(reader) = reader {
-                let bytes = reader.join().unwrap();
-                if mode == "panic" {
-                    assert!(bytes.windows(RESTORE.len()).any(|bytes| bytes == RESTORE));
-                }
+            let bytes = reader.finish();
+            if mode == "panic" {
+                assert!(bytes.windows(RESTORE.len()).any(|bytes| bytes == RESTORE));
             }
         }
     }

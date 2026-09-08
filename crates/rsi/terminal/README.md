@@ -69,3 +69,6 @@ The [development tutorial](../../../docs/tui-development.md)
 and [debugging reference](../../../docs/tui-debugging.md) explain isolated launch,
 source tracing and visual evidence. Pure projection, argument and controller
 tests live here; built-product CLI/PTY integration remains with the launcher.
+The terminal-restoration PTY probe bounds captured output and explicitly stops
+and joins its nonblocking reader after child exit. It never relies on the host
+PTY delivering EOF to complete fixture cleanup.
