@@ -2,9 +2,11 @@ use async_trait::async_trait;
 mod commands;
 mod messages;
 pub use commands::exact_command_reconciliation;
+mod projections;
 mod reads;
 use futures_util::StreamExt;
 pub use messages::message_claim_cancellation_and_terminal_delivery;
+pub use projections::independent_projection_observation;
 pub use reads::bounded_read_capacity_recovery_and_cancellation;
 use rsi_agent_session_protocol::{
     MessageId, SessionFact, SessionFactBody, SessionId, TurnId, TurnOutcome,
@@ -51,6 +53,7 @@ impl Drop for Active {
 #[derive(Debug)]
 pub struct Handle {
     pub commands: commands::Scenario,
+    pub projections: projections::Scenario,
     pub id: SessionId,
     pub submissions: Mutex<Vec<SubmitInput>>,
     pub release: Semaphore,
@@ -64,6 +67,7 @@ impl Handle {
     pub fn new(id: &str, truncate: bool) -> Arc<Self> {
         Arc::new(Self {
             commands: commands::Scenario::default(),
+            projections: projections::Scenario::default(),
             id: SessionId::new(id).unwrap(),
             submissions: Mutex::new(Vec::new()),
             release: Semaphore::new(0),
@@ -248,7 +252,7 @@ impl SessionHandle for Handle {
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
-        panic!("unexpected projection observation")
+        self.projections.open(&self.id)
     }
     async fn observe_interactions(
         &self,
@@ -317,6 +321,8 @@ impl PluginFactory for Service {
 pub struct Sink {
     pub observations: AtomicUsize,
     pub interactions: AtomicUsize,
+    pub projections: Mutex<Option<rsi_session_protocol::ProjectionSnapshot>>,
+    pub projection_stopped: AtomicUsize,
     pub retries: AtomicUsize,
     pub stopped: AtomicUsize,
     pub delivery: Option<Semaphore>,
@@ -326,6 +332,8 @@ impl Sink {
         Arc::new(Self {
             observations: AtomicUsize::new(0),
             interactions: AtomicUsize::new(0),
+            projections: Mutex::new(None),
+            projection_stopped: AtomicUsize::new(0),
             retries: AtomicUsize::new(0),
             stopped: AtomicUsize::new(0),
             delivery: blocked.then(|| Semaphore::new(0)),
@@ -349,12 +357,27 @@ impl ObservationSink for Sink {
         self.interactions.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn reconnecting(&self, _: &ObservationFailure) -> Result<(), ObservationFailure> {
+    async fn projections(
+        &self,
+        snapshot: rsi_session_protocol::ProjectionSnapshot,
+    ) -> Result<(), ObservationFailure> {
+        *self.projections.lock().unwrap() = Some(snapshot);
+        Ok(())
+    }
+    async fn reconnecting(
+        &self,
+        _: rsi_client::ObservationKind,
+        _: &ObservationFailure,
+    ) -> Result<(), ObservationFailure> {
         self.retries.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn stopped(&self, _: rsi_client::ObservationKind, _: &ObservationFailure) {
-        self.stopped.fetch_add(1, Ordering::SeqCst);
+    async fn stopped(&self, kind: rsi_client::ObservationKind, _: &ObservationFailure) {
+        if kind == rsi_client::ObservationKind::Projections {
+            self.projection_stopped.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 #[derive(Debug)]
@@ -368,10 +391,12 @@ impl PluginFactory for Renderer {
         let supply = plan
             .context()
             .provide_local::<ObservationSinkContract>(self.0.clone())?;
+        let sink = self.0.clone();
         plan.defer(
             "withdraw sink",
             Box::new(move || {
                 Box::pin(async move {
+                    sink.projections.lock().unwrap().take();
                     drop(supply);
                     Ok(())
                 })
@@ -497,6 +522,8 @@ pub async fn isolated_controller_scopes(execution: Execution) {
     let (first_controller, first_scope) = mounted.remove(0);
     assert!(first_scope.dispose().await.is_clean());
     assert_eq!(first.active_streams.load(Ordering::SeqCst), 0);
+    assert_eq!(first.projections.active.load(Ordering::SeqCst), 0);
+    assert_eq!(first.projections.retention.retained_bytes(), 0);
     assert_eq!(
         first_controller.submit(input("retired")).await.unwrap_err(),
         SessionError::ShuttingDown
@@ -515,6 +542,8 @@ pub async fn isolated_controller_scopes(execution: Execution) {
     assert!(runtime.root().lookup_local::<SessionContract>().is_some());
     assert!(runtime.shutdown().await.is_clean());
     assert_eq!(second.active_streams.load(Ordering::SeqCst), 0);
+    assert_eq!(second.projections.active.load(Ordering::SeqCst), 0);
+    assert_eq!(second.projections.retention.retained_bytes(), 0);
 }
 
 pub async fn owned_submission_drain(execution: Execution) {

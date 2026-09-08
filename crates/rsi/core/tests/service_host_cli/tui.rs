@@ -27,6 +27,7 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "pty-plan-command"]);
     terminal.until("Ready").await;
+    inspect_plan_projection(&mut terminal, false, "Draft").await;
     terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\r");
     terminal.until("Session commands").await;
     terminal.until("/plan").await;
@@ -45,6 +46,7 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
     }
     terminal.send(b"/plan on\r");
     terminal.until("DraftChanged").await;
+    inspect_plan_projection(&mut terminal, true, "Draft").await;
     assert!(requests.lock().unwrap().is_empty());
     terminal.send(b"inspect plan\r");
     terminal.until("hello from daemon").await;
@@ -57,10 +59,35 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
     );
     terminal.send(b"/plan off\r");
     terminal.until("Committed").await;
+    inspect_plan_projection(&mut terminal, false, "Durable").await;
     assert_eq!(requests.lock().unwrap().len(), 1);
     terminal.send(b"\x04");
     terminal.finish().await;
     provider.abort();
+}
+
+async fn inspect_plan_projection(terminal: &mut TerminalClient, enabled: bool, cursor: &str) {
+    let mut keys = vec![0x10];
+    keys.extend(b"\x1b[B".repeat(11));
+    keys.push(b'\r');
+    terminal.send(&keys);
+    terminal.until("rsi.plan-policy.view").await;
+    terminal.send(b"\r");
+    terminal.until(&format!("\"enabled\": {enabled}")).await;
+    terminal.until(cursor).await;
+    terminal.send(b"\x1b");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while terminal
+        .screen
+        .lock()
+        .unwrap()
+        .screen()
+        .contents()
+        .contains("rsi.plan-policy.view")
+    {
+        assert!(Instant::now() < deadline, "extension detail did not close");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 impl TerminalClient {

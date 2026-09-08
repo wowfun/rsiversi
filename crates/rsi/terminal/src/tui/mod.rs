@@ -176,6 +176,9 @@ struct Client {
     cancellation_queued: bool,
     inspection: Option<StoreSessionInspection>,
     interactions: Option<rsi_session_protocol::InteractionSnapshot>,
+    projections: Option<rsi_session_protocol::ProjectionSnapshot>,
+    projection_notice: String,
+    extension_view: Option<commands::ExtensionView>,
     history: History,
     live_transcript: Option<transcript::Transcript>,
     inspecting: bool,
@@ -216,6 +219,9 @@ impl Client {
             cancellation_queued: false,
             inspection: attached.inspection,
             interactions: None,
+            projections: None,
+            projection_notice: String::new(),
+            extension_view: None,
             live_transcript: None,
             history: History {
                 backfill: attached.page.is_some(),
@@ -617,9 +623,12 @@ impl Client {
         let handle = self.handle.clone();
         let application = self.application.clone();
         self.state.view_revision = self.state.view_revision.wrapping_add(1);
+        self.extension_view = None;
         match action {
             Action::Commands => self.command_menu(),
             Action::CommandResult => self.command_result(),
+            Action::Extensions => self.extension_menu(),
+            Action::Extension(producer) => self.extension_detail(&producer),
             Action::CommandHelp(name, description) => {
                 self.state.open_detail(format!("/{name}\n{description}"));
                 self.state.notice("Type the command in the composer and press Enter");
@@ -1046,6 +1055,7 @@ async fn run_inner(
                             };
                             if let Some(observer) = observer.take() { observer.stop().await?; }
                             client.controller = next.controller.clone();
+                            client.projections = None; client.projection_notice.clear(); client.extension_view = None;
                             observer = Some(next);
                             client.tasks.clear(); client.generation += 1;
                             let old = client.state.header.session_id().clone();
@@ -1075,6 +1085,10 @@ async fn run_inner(
                             match fact.body() { SessionFactBody::TurnAccepted {..} | SessionFactBody::MessageTurnAccepted {..} => client.state.active = true, SessionFactBody::TurnTerminal {..} => { client.state.active = false; client.inspect(); }, _ => {} }
                             client.live_fact(&fact);
                         },
+                        CliRenderMessage::Event(CliEvent::Projections { snapshot }) => {
+                            client.projections = Some(snapshot); client.projection_notice.clear();
+                            client.refresh_extensions();
+                        },
                         CliRenderMessage::Event(CliEvent::Interactions { snapshot }) => {
                             client.state.questions = snapshot.questions().len(); client.state.approvals = snapshot.approvals().len();
                             if client.state.answer.as_ref().is_some_and(|answer| !snapshot.questions().contains(&answer.request)) { client.state.answer = None; client.state.notice("Question settled or withdrawn; answer draft closed"); }
@@ -1085,7 +1099,11 @@ async fn run_inner(
                             AgentControlRecordBody::MessagePromoted { message_id } if client.owned.contains(message_id) => client.state.notice(format!("{message_id} promoted to NextTurn; Session default applies to Steer")),
                             _ => {},
                         },
-                        CliRenderMessage::Event(CliEvent::Notice { kind, value }) => client.state.notice(format!("{kind}: {}", transcript::json_window(&value))),
+                        CliRenderMessage::Event(CliEvent::Notice { kind, value }) => {
+                            let notice = format!("{kind}: {}", transcript::json_window(&value));
+                            if matches!(kind, "projection_reconnecting" | "projection_stopped") { client.projection_notice.clone_from(&notice); client.refresh_extensions(); }
+                            client.state.notice(notice);
+                        },
                         _ => {},
                     }
                 },

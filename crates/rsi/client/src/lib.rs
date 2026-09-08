@@ -20,7 +20,8 @@ pub use lifetime::{ConnectionLifetime, ConnectionLifetimeContract};
 pub use message::{MessageEvent, MessageRunError, MessageSink, drive_message};
 pub use observation::ObservationSinkContract;
 pub use observation::{
-    ObservationFailure, ObservationKind, ObservationSink, observe_interactions, observe_session,
+    ObservationFailure, ObservationKind, ObservationSink, observe_interactions,
+    observe_projections, observe_session,
 };
 pub use read::read_with_capacity_retry;
 pub use submission::submit_with_reconciliation;

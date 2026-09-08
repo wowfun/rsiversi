@@ -38,3 +38,8 @@ async fn replay_cursor_advances_after_delivery_acknowledgement_without_skipping_
 async fn message_driver_preserves_claim_identity_cancellation_and_terminal_delivery() {
     support::message_claim_cancellation_and_terminal_delivery(execution()).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn fresh_projection_baselines_reconnect_and_fail_independently_of_core_history() {
+    support::independent_projection_observation(execution()).await;
+}

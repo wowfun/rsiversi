@@ -228,7 +228,7 @@ impl SessionHandle for Backend {
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
-        panic!("unexpected projection observation")
+        Ok(Box::pin(futures_util::stream::pending()))
     }
     async fn observe_interactions(&self) -> rsi_session_protocol::Result<InteractionStream> {
         Ok(Box::pin(futures_util::stream::pending()))

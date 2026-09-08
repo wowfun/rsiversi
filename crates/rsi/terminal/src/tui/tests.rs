@@ -38,6 +38,94 @@ async fn registered_slash_command_retains_unknown_identity_without_submitting_a_
     assert!(runtime.shutdown().await.is_clean());
 }
 
+#[tokio::test]
+async fn extension_inspection_tracks_replacements_without_reopening_a_closed_detail() {
+    use rsi_agent_session_protocol::{
+        ContributionId, ProjectionCursor, ProjectionEntry, ProjectionValue,
+        SessionProjectionSnapshot,
+    };
+    let (mut client, _, runtime, surface) = client().await;
+    let pool = rsi_session_protocol::ProjectionRetention::default();
+    let snapshot = |revision| {
+        pool.reserve_capture()
+            .unwrap()
+            .retain(
+                SessionProjectionSnapshot::new(
+                    client.state.header.session_id().clone(),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    ProjectionCursor::Draft { revision },
+                    vec![
+                        ProjectionEntry::value(
+                            ContributionId::new("fixture.good").unwrap(),
+                            ProjectionValue::new(serde_json::json!({"revision":revision})).unwrap(),
+                        ),
+                        ProjectionEntry::failed(
+                            ContributionId::new("fixture.failed").unwrap(),
+                            "isolated failure",
+                        )
+                        .unwrap(),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    };
+    let first = snapshot(0);
+    let second = snapshot(1);
+    client.projections = Some(first);
+    client.action(Action::Extensions);
+    assert_eq!(client.state.menu.as_ref().unwrap().items.len(), 2);
+    client.action(Action::Extension("fixture.good".into()));
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("revision: 0")
+    );
+    client.projections = Some(second);
+    client.refresh_extensions();
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("revision: 1")
+    );
+    assert_eq!(
+        pool.retained_bytes(),
+        client
+            .projections
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .encoded_len()
+            .unwrap()
+    );
+    client.state.detail = None;
+    client.refresh_extensions();
+    assert!(client.state.detail.is_none());
+    assert!(client.extension_view.is_none());
+    client.action(Action::Extension("fixture.failed".into()));
+    assert!(
+        client
+            .state
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("Producer failed: isolated failure")
+    );
+    client.action(Action::CommandResult);
+    assert!(client.extension_view.is_none());
+    client.projections = None;
+    assert_eq!(pool.retained_bytes(), 0);
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[derive(Debug)]
 struct Application(Arc<UnknownThenAcceptedHandle>);
 

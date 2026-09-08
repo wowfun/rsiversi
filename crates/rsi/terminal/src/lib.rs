@@ -105,6 +105,9 @@ pub(crate) struct HeadlessTurnOptions {
 
 #[derive(Clone, Debug)]
 pub(crate) enum CliEvent {
+    Projections {
+        snapshot: rsi_session_protocol::ProjectionSnapshot,
+    },
     Interactions {
         snapshot: rsi_session_protocol::InteractionSnapshot,
     },
@@ -152,6 +155,9 @@ struct InteractionEnvelope<'a> {
 impl CliEvent {
     fn json_line(&self) -> std::result::Result<String, serde_json::Error> {
         match self {
+            Self::Projections { snapshot } => serde_json::to_string(
+                &serde_json::json!({"version":4,"type":"projections","data":snapshot}),
+            ),
             Self::Interactions { snapshot } => serde_json::to_string(&InteractionEnvelope {
                 version: 4,
                 kind: "interactions",
@@ -1174,7 +1180,7 @@ fn terminal_character(character: char) -> char {
 fn write_status_event(stderr: &mut impl Write, event: &CliEvent) -> Result<()> {
     let text = match event {
         CliEvent::Notice { kind, .. } if is_query_result(kind) => return Ok(()),
-        CliEvent::Control { .. } => return Ok(()),
+        CliEvent::Control { .. } | CliEvent::Projections { .. } => return Ok(()),
         CliEvent::Interactions { snapshot } => format!(
             "interactions: {}",
             serde_json::to_string(snapshot).map_err(|error| RsiError::Run(error.to_string()))?

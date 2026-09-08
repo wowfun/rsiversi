@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation, TurnError};
 use rsi_meta_execution::Execution;
-use rsi_session_protocol::{InteractionSnapshot, SessionError, SessionHandle};
+use rsi_session_protocol::{InteractionSnapshot, ProjectionSnapshot, SessionError, SessionHandle};
 use std::time::Duration;
 
 /// Domain observation failure, independent of a renderer's error vocabulary.
@@ -39,6 +39,8 @@ pub enum ObservationKind {
     Facts,
     /// Live interaction replacement snapshots.
     Interactions,
+    /// Pure extension-state replacement snapshots, including fresh drafts.
+    Projections,
 }
 
 /// One explicit delivery boundary. Returning success acknowledges the exact item.
@@ -48,8 +50,14 @@ pub trait ObservationSink: std::fmt::Debug + Send + Sync {
     async fn observation(&self, update: SessionObservation) -> Result<(), ObservationFailure>;
     /// Delivers a replacement interaction snapshot.
     async fn interactions(&self, snapshot: InteractionSnapshot) -> Result<(), ObservationFailure>;
+    /// Delivers a complete replacement and its final-clone retention lease.
+    async fn projections(&self, snapshot: ProjectionSnapshot) -> Result<(), ObservationFailure>;
     /// Reports an impending retry without acknowledging any domain record.
-    async fn reconnecting(&self, error: &ObservationFailure) -> Result<(), ObservationFailure>;
+    async fn reconnecting(
+        &self,
+        kind: ObservationKind,
+        error: &ObservationFailure,
+    ) -> Result<(), ObservationFailure>;
     /// Reports final failure; the renderer owns recovery guidance and presentation.
     async fn stopped(&self, kind: ObservationKind, error: &ObservationFailure);
 }
@@ -78,6 +86,7 @@ impl Retry {
     async fn after(
         &mut self,
         error: ObservationFailure,
+        kind: ObservationKind,
         sink: &dyn ObservationSink,
         execution: &Execution,
     ) -> Result<(), ObservationFailure> {
@@ -90,7 +99,7 @@ impl Retry {
         if self.failures >= 5 {
             return Err(error);
         }
-        sink.reconnecting(&error).await?;
+        sink.reconnecting(kind, &error).await?;
         execution.sleep(self.delay).await;
         self.delay = (self.delay * 2).min(Duration::from_secs(2));
         Ok(())
@@ -125,7 +134,9 @@ pub async fn observe_session(
         }
         .await;
         if let Err(error) = result {
-            retry.after(error, sink, execution).await?;
+            retry
+                .after(error, ObservationKind::Facts, sink, execution)
+                .await?;
         }
     }
 }
@@ -148,7 +159,34 @@ pub async fn observe_interactions(
         }
         .await;
         if let Err(error) = result {
-            retry.after(error, sink, execution).await?;
+            retry
+                .after(error, ObservationKind::Interactions, sink, execution)
+                .await?;
+        }
+    }
+}
+
+/// Drives independent complete projection baselines and replacements.
+pub async fn observe_projections(
+    handle: &dyn SessionHandle,
+    sink: &dyn ObservationSink,
+    execution: &Execution,
+) -> Result<(), ObservationFailure> {
+    let mut retry = Retry::default();
+    loop {
+        let result: Result<(), ObservationFailure> = async {
+            let mut stream = handle.observe_projections().await?;
+            while let Some(snapshot) = stream.next().await {
+                sink.projections(snapshot?).await?;
+                retry = Retry::default();
+            }
+            Err(ObservationFailure::Ended)
+        }
+        .await;
+        if let Err(error) = result {
+            retry
+                .after(error, ObservationKind::Projections, sink, execution)
+                .await?;
         }
     }
 }

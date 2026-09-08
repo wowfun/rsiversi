@@ -111,3 +111,9 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 @media(max-width:850px) { .panes { display:flex; } .pane { width:100%; } .pane:not(.selected) { display:none; } .login { gap:30px; } .app-header { padding:0 20px; } }
 @media(max-width:560px) { .app-header { height:58px; gap:14px; padding:0 14px; } .app-purpose { font-size:.72rem; } .connection-state { font-size:.68rem; } #sign-out { font-size:.72rem; padding:5px; } .workbench { height:calc(100dvh - 58px); grid-template-columns:1fr; } .sidebar { max-height:215px; border-right:0; border-bottom:1px solid var(--line); display:block; } .nav-list { flex-direction:row; overflow:auto; } .nav-item { flex-shrink:0; max-width:220px; } .workspace-form { display:grid; grid-template-columns:minmax(0,1fr) auto; } .workspace-form label { grid-column:1 / -1; } .conversations-heading { margin:14px 0 5px; } .sidebar-footer { padding:4px 0; } .sidebar-footer span { display:none; } .workspace-main { min-height:420px; } .workbench { overflow:auto; min-height:0; } .pane-tabs { padding:8px 12px; } .login { display:block; margin:45px auto; padding:0 20px; } .login-heading { margin-bottom:26px; } h1 { font-size:40px; } .login-form { padding:20px; } }
 @media(prefers-reduced-motion:no-preference) { button { transition:background-color .12s ease; } }
+
+.session-extensions { flex: 0 0 auto; max-height: 200px; overflow: auto; padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.session-extensions summary { cursor: pointer; }
+.extension-value { margin-top: 12px; }
+.extension-value pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.extension-error { color: var(--danger, #9b302c); }

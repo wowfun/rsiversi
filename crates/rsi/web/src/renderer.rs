@@ -33,6 +33,8 @@ pub(crate) struct RenderState {
     pub history_more: bool,
     pub history_generation: u64,
     pub interactions: Option<InteractionSnapshot>,
+    pub projections: Option<rsi_session_protocol::ProjectionSnapshot>,
+    pub projection_notice: String,
     pub notice: String,
 }
 
@@ -119,10 +121,35 @@ impl ObservationSink for Renderer {
         self.changed();
         Ok(())
     }
-    async fn reconnecting(&self, error: &ObservationFailure) -> Result<(), ObservationFailure> {
+    async fn projections(
+        &self,
+        snapshot: rsi_session_protocol::ProjectionSnapshot,
+    ) -> Result<(), ObservationFailure> {
         self.ready().await?;
-        self.state.lock().expect("Web renderer poisoned").notice =
-            short(&format!("Reconnecting: {error}"), 4096).into();
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        if self.stop.is_cancelled() {
+            return Err(ObservationFailure::SinkStopped);
+        }
+        state.projections = Some(snapshot);
+        state.projection_notice.clear();
+        drop(state);
+        self.changed();
+        Ok(())
+    }
+    async fn reconnecting(
+        &self,
+        kind: ObservationKind,
+        error: &ObservationFailure,
+    ) -> Result<(), ObservationFailure> {
+        self.ready().await?;
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        let notice = if kind == ObservationKind::Projections {
+            &mut state.projection_notice
+        } else {
+            &mut state.notice
+        };
+        *notice = short(&format!("Reconnecting {kind:?}: {error}"), 4096).into();
+        drop(state);
         self.changed();
         Ok(())
     }
@@ -130,11 +157,18 @@ impl ObservationSink for Renderer {
         if self.stop.is_cancelled() {
             return;
         }
-        self.state.lock().expect("Web renderer poisoned").notice = short(
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        let notice = if kind == ObservationKind::Projections {
+            &mut state.projection_notice
+        } else {
+            &mut state.notice
+        };
+        *notice = short(
             &format!("{kind:?} observation stopped; reattach to continue: {error}"),
             4096,
         )
         .into();
+        drop(state);
         self.changed();
     }
 }
@@ -182,6 +216,11 @@ impl PluginFactory for RendererFactory {
             Box::new(move || {
                 Box::pin(async move {
                     renderer.stop.cancel();
+                    renderer
+                        .state
+                        .lock()
+                        .expect("Web renderer poisoned")
+                        .projections = None;
                     drop(supplies);
                     Ok(())
                 })
@@ -195,6 +234,30 @@ mod tests {
     use super::*;
     use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId, TurnOutcome};
     use rsi_agent_turn_protocol::{ObservationRetention, SessionObservation};
+    fn failed_projection(
+        pool: &rsi_session_protocol::ProjectionRetention,
+    ) -> rsi_session_protocol::ProjectionSnapshot {
+        pool.reserve_capture()
+            .unwrap()
+            .retain(
+                rsi_agent_session_protocol::SessionProjectionSnapshot::new(
+                    rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    rsi_agent_session_protocol::ProjectionCursor::Draft { revision: 0 },
+                    vec![
+                        rsi_agent_session_protocol::ProjectionEntry::failed(
+                            rsi_agent_session_protocol::ContributionId::new("fixture.failed")
+                                .unwrap(),
+                            "producer failed",
+                        )
+                        .unwrap(),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    }
     #[tokio::test]
     async fn real_renderer_holds_delivery_until_history_seed_and_fences_escaped_sink_on_withdrawal()
     {
@@ -244,7 +307,40 @@ mod tests {
             renderer.state.lock().unwrap().transcript.status,
             "Completed"
         );
+        let pool = rsi_session_protocol::ProjectionRetention::default();
+        let snapshot = failed_projection(&pool);
+        renderer.projections(snapshot.clone()).await.unwrap();
+        renderer
+            .stopped(ObservationKind::Projections, &ObservationFailure::Ended)
+            .await;
+        {
+            let state = renderer.state.lock().unwrap();
+            assert!(
+                state
+                    .projection_notice
+                    .contains("Projections observation stopped")
+            );
+            assert!(state.notice.is_empty());
+            assert!(
+                state.projections.as_ref().unwrap().snapshot().entries()[0]
+                    .failure()
+                    .is_some()
+            );
+        }
+        renderer.observation(update.clone()).await.unwrap();
+        renderer.projections(snapshot.clone()).await.unwrap();
+        assert!(renderer.state.lock().unwrap().projection_notice.is_empty());
+        assert_eq!(
+            pool.retained_bytes(),
+            snapshot.snapshot().encoded_len().unwrap()
+        );
         assert!(runtime.shutdown().await.is_clean());
+        assert!(renderer.state.lock().unwrap().projections.is_none());
+        assert!(matches!(
+            renderer.projections(snapshot).await,
+            Err(ObservationFailure::SinkStopped)
+        ));
+        assert_eq!(pool.retained_bytes(), 0);
         assert!(matches!(
             renderer.observation(update).await,
             Err(ObservationFailure::SinkStopped)

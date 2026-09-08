@@ -1,5 +1,11 @@
 # rsi-web
 
+Each pane displays the latest complete extension-state snapshot, including fresh
+drafts and idle control changes without a model request. Producer values and
+failures are rendered as text. Snapshot replacement releases the prior retention;
+attachment withdrawal releases the latest value. Projection-stream failure leaves
+core history observation independent and marks extension state unavailable.
+
 Each conversation exposes its discovered Session commands and saved command
 receipt. Registered slash names execute through the shared controller; unknown
 names remain Human input for workspace skills. One unresolved invocation per

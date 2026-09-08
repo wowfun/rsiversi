@@ -94,13 +94,27 @@ impl rsi_client::ObservationSink for CliObservationSink {
             .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
     }
 
+    async fn projections(
+        &self,
+        snapshot: rsi_session_protocol::ProjectionSnapshot,
+    ) -> Result<(), rsi_client::ObservationFailure> {
+        self.send(CliEvent::Projections { snapshot })
+            .await
+            .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
+    }
+
     async fn reconnecting(
         &self,
+        kind: rsi_client::ObservationKind,
         error: &rsi_client::ObservationFailure,
     ) -> Result<(), rsi_client::ObservationFailure> {
         self.send(CliEvent::Notice {
-            kind: "reconnecting",
-            value: json!({"message": error.to_string()}),
+            kind: if kind == rsi_client::ObservationKind::Projections {
+                "projection_reconnecting"
+            } else {
+                "reconnecting"
+            },
+            value: json!({"message": format!("{kind:?}: {error}")}),
         })
         .await
         .map_err(|_| rsi_client::ObservationFailure::SinkStopped)
@@ -114,8 +128,9 @@ impl rsi_client::ObservationSink for CliObservationSink {
         let name = match kind {
             rsi_client::ObservationKind::Facts => "Session",
             rsi_client::ObservationKind::Interactions => "Interaction",
+            rsi_client::ObservationKind::Projections => "Extension state",
         };
-        let _ = self.send(CliEvent::Notice { kind: "error", value: json!({"message":format!("{name} observation stopped; reattach to continue: {error}")}) }).await;
+        let _ = self.send(CliEvent::Notice { kind: if kind == rsi_client::ObservationKind::Projections { "projection_stopped" } else { "error" }, value: json!({"message":format!("{name} observation stopped; reattach to continue: {error}")}) }).await;
         if kind == rsi_client::ObservationKind::Facts {
             self.finished.cancel();
         }

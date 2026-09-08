@@ -13,6 +13,8 @@ pub(super) enum Action {
     Commands,
     CommandResult,
     CommandHelp(String, String),
+    Extensions,
+    Extension(String),
     Queue,
     Agents,
     Questions,
@@ -63,6 +65,7 @@ impl Menu {
                 ("Approvals".into(), Action::Approvals),
                 ("Focused card / full output".into(), Action::Detail),
                 ("Pending / rejected submission".into(), Action::Submission),
+                ("Extension state".into(), Action::Extensions),
                 ("Exit".into(), Action::Exit),
             ],
         }

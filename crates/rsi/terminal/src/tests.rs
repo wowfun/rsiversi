@@ -168,7 +168,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
-        panic!("unexpected projection observation")
+        Ok(Box::pin(futures_util::stream::pending()))
     }
     async fn observe_interactions(
         &self,

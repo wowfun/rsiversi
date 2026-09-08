@@ -190,6 +190,23 @@ impl SessionController {
         }
     }
 
+    fn start_projections(self: &Arc<Self>) {
+        let controller = self.clone();
+        drop(self.execution.spawn(self.tasks.track_future(async move {
+            tokio::select! { biased;
+                () = controller.stop.cancelled() => {},
+                result = crate::observe_projections(controller.handle.as_ref(), controller.sink.as_ref(), &controller.execution) => {
+                    if let Err(error) = result {
+                        tokio::select! { biased;
+                            () = controller.stop.cancelled() => {},
+                            () = controller.sink.stopped(crate::ObservationKind::Projections, &error) => {},
+                        }
+                    }
+                },
+            }
+        })));
+    }
+
     async fn close(&self) {
         self.retire();
         self.tasks.wait().await;
@@ -262,6 +279,7 @@ impl PluginFactory for SessionControllerFactory {
                 })
             }),
         )?;
+        controller.start_projections();
         if let Some(cursor) = config.cursor {
             controller.start_observing(cursor);
         }

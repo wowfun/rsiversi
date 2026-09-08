@@ -134,6 +134,8 @@ class Pane {
     this.commands = button("Session commands", () => this.action("commands"), "quiet");
     tools.append(this.history, this.live, this.commands);
     this.commandView = element("div", "session-commands");
+    this.extensionView = element("details", "session-extensions");
+    this.extensionView.setAttribute("aria-label", "Extension state");
     this.transcript = element("div", "transcript");
     this.transcript.setAttribute("aria-label", "Conversation transcript");
     this.transcript.tabIndex = 0;
@@ -161,7 +163,7 @@ class Pane {
     this.send = button("Send ↗", () => this.submit(false), "primary");
     actions.append(this.cancel, this.steer, this.send); bar.append(this.model, actions);
     this.composer.append(this.input, bar, element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line"));
-    this.node.append(header, tools, this.commandView, this.transcript, this.waiting, this.notice, this.composer);
+    this.node.append(header, tools, this.commandView, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
   }
@@ -224,6 +226,24 @@ class Pane {
     }
     this.commandView.hidden = this.commandView.childElementCount === 0;
   }
+  renderExtensions(data) {
+    const key = JSON.stringify([data?.generation, data?.projections, data?.projection_notice]);
+    if (key === this.extensionKey) return;
+    this.extensionKey = key;
+    this.extensionView.replaceChildren();
+    this.extensionView.hidden = !data;
+    const snapshot = data?.projections;
+    const status = data?.projection_notice ? "Unavailable · last snapshot" : snapshot ? (snapshot.cursor.kind === "draft" ? `Draft · revision ${snapshot.cursor.revision}` : `Durable · Fact ${snapshot.cursor.fact_seq} · control ${snapshot.cursor.control_seq}`) : "Loading";
+    this.extensionView.append(element("summary", "", `Extension state · ${status}`));
+    if (data?.projection_notice) this.extensionView.append(element("p", "extension-error", data.projection_notice));
+    for (const entry of snapshot?.entries ?? []) {
+      const section = element("section", "extension-value");
+      section.dataset.producer = entry.producer;
+      section.append(element("strong", "", entry.producer), element("pre", entry.content.kind === "failed" ? "extension-error" : "", entry.content.kind === "failed" ? `Producer failed: ${entry.content.message}` : JSON.stringify(entry.content.value, null, 2)));
+      this.extensionView.append(section);
+    }
+    if (snapshot && !snapshot.entries.length) this.extensionView.append(element("p", "", "No extension views in this preset"));
+  }
   render(data, models) {
     const changed = this.generation !== data?.generation;
     if (changed) {
@@ -247,6 +267,7 @@ class Pane {
     this.steer.disabled ||= this.retryText != null;
     this.cancel.disabled = !data;
     this.renderCommands(data);
+    this.renderExtensions(data);
     if (!data) {
       if (!this.transcript.querySelector(".empty-pane")) {
         const empty = element("div", "empty-pane");

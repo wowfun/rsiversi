@@ -1,5 +1,12 @@
 # rsi-terminal
 
+The TUI extension-state action inspects the latest complete projection snapshot,
+with bounded per-producer detail and separate failure text. Fresh drafts subscribe
+without creating a message. A snapshot replaces the previous value and is released
+on attachment replacement. Line-mode text suppresses unsolicited projection
+payloads; JSONL emits typed replacement events. Projection failure does not stop
+core history observation.
+
 Interactive applications expose the pinned Session command catalog: the TUI
 action menu and line-mode `:commands`. Registered `/name arguments` inputs run
 through the shared controller; unknown slash names remain Human messages for
@@ -64,8 +71,8 @@ Interactive attachments are ordinary child Profiles owned by a bounded Shell in
 the application generation. Each Profile publishes its terminal observation sink
 and shared Session controller with fresh Local identities, inheriting the chosen
 Session service. The renderer sink owns presentation, while the shared controller
-owns submissions and both observation tasks. A fresh draft starts observation only
-after acceptance. Switching closes the prior surface and rejects its later work;
+owns submissions and all observation tasks. A fresh draft starts Fact/interaction
+observation after acceptance and projection observation immediately. Switching closes the prior surface and rejects its later work;
 dropped surface waiters are cleaned up by the Shell. No additional Runtime is
 created for an attachment.
 

@@ -7,16 +7,18 @@ Application/controller plugins own the futures they drive and their cancellation
 SessionControllerFactory is an ordinary plugin requiring the Session domain and
 an ObservationSink capability. Its bounded configuration names one SessionId and
 an optional initial cursor. An attached surface supplies its inspection cursor;
-a fresh draft omits it and starts observation from origin after the first accepted
-message. The factory attaches only within its own Context's Session capability.
+a fresh draft omits it and starts Fact/interaction observation from origin after
+the first accepted message. A separate projection subscription starts on activation,
+including fresh drafts, and delivers complete replacement snapshots. The factory
+attaches only within its own Context's Session capability.
 Each surface isolates its controller and sink contracts while inheriting its
 connection/domain capabilities. Session-free application compositions omit these
 plugins entirely.
 
 The controller owns at most four non-queued message submissions and one pair of
-observation tasks. Calling submit admits and schedules reconciliation before
+Fact/interaction observation tasks and one projection task. Calling submit admits and schedules reconciliation before
 returning a waiter. Dropping the waiter leaves that work owned; controller
-retirement fences submissions, cancels both observations and drains submitted work.
+retirement fences submissions, cancels all observations and drains submitted work.
 An application may explicitly supply a reconciliation-stop token with
 `submit_cancellable`. Cancelling it ends client reconciliation with the original
 Session/Message unknown-outcome identity; it cannot cancel an admitted domain
@@ -80,7 +82,7 @@ cancellation; the helper creates no task or queue. Each underlying operation
 retains its own I/O deadline. Other errors, including unknown outcomes, return
 immediately. Mutations use their domain-specific reconciliation policy.
 
-Fact/control and interaction observation share one retry policy: 250 ms initial
+Fact/control, interaction and projection observation share one retry policy: 250 ms initial
 delay, doubling to 2 seconds; successful delivery resets both delay and failure
 count. Capacity failures, including API Capacity, do not consume the five-failure
 cutoff. Other consecutive failures terminate on the fifth. Reconnection notices
@@ -92,6 +94,11 @@ record. A durable watermark can exceed the delivered sequence and never advances
 this cursor. Applications supply an origin cursor for fresh drafts or the exact
 inspection cursor used to render an attached Session's snapshot. Interaction
 streams deliver replacement snapshots rather than polling individual questions.
+Projection delivery transfers a retained snapshot without folding domain state.
+Each reconnect starts with a complete baseline. Producer failures stay attached
+to their entries; a failed projection stream stops only extension-state updates,
+independently of core history. Renderers retain at most one latest snapshot and
+release it on replacement or withdrawal; Session retention lasts through its final clone.
 Dropping the observation future releases its stream and timer; it does not cancel
 an admitted server mutation or terminate the connected service.
 
