@@ -581,12 +581,15 @@ fn image_files_are_read_in_order_and_rejected_by_metadata_before_oversized_alloc
 fn image_fifo_is_rejected_without_waiting_for_a_writer() {
     let temporary = tempfile::tempdir().unwrap();
     let fifo = temporary.path().join("image.fifo");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .env_clear()
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
 
     let started = std::time::Instant::now();
     assert!(matches!(

@@ -113,14 +113,15 @@ async fn rejects_symlink_directory_symlink_file_and_fifo_without_opening_their_c
             .await
             .is_err()
     );
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        bundle.join("pipe.js"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .env_clear()
+            .args(["-m", "600"])
+            .arg(bundle.join("pipe.js"))
+            .status()
+            .unwrap()
+            .success()
+    );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         assert!(
             host()

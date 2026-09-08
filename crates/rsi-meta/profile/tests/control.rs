@@ -827,8 +827,19 @@ async fn degraded_same_source_is_not_suppressed_and_can_converge_on_retry() {
     assert!(!first.status().diagnostic().unwrap().contains("secret"));
 
     let second = control.reload().await.unwrap();
-    assert!(matches!(second, ReloadOutcome::Applied(_)));
+    // A watcher already queued behind the failed manual reload may perform the
+    // retry first. An unchanged response is valid only with the recovered graph.
+    assert!(
+        matches!(
+            second,
+            ReloadOutcome::Applied(_) | ReloadOutcome::Unchanged(_)
+        ),
+        "{second:?}"
+    );
     assert_eq!(second.status().health(), ProfileHealth::Converged);
+    assert!(
+        matches!(second.status().observed(), [instance] if *instance.state() == ProfileInstanceState::Active)
+    );
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     let _ = runtime.shutdown().await;
 }
