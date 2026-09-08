@@ -414,48 +414,22 @@ impl AgentKernel {
         Ok(())
     }
 
-    pub(super) async fn wait_for_durable(
-        &self,
-        session_id: &SessionId,
-        through_seq: u64,
-    ) -> Result<u64> {
-        let status = {
-            let state = lock_state(&self.inner);
-            flush_status_receiver(&state, session_id)?
-        };
+    pub(super) async fn wait_for_durable(&self, wait: DurabilityWait) -> Result<u64> {
         self.inner.flush_requested.notify_one();
-        self.wait_on_flush_status(status, through_seq).await
+        wait.wait(&self.inner.stop_worker).await
     }
 
     pub(super) async fn wait_on_flush_status(
         &self,
-        mut status: watch::Receiver<FlushStatus>,
+        status: watch::Receiver<FlushStatus>,
         through_seq: u64,
     ) -> Result<u64> {
-        let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
-        loop {
-            let current = status.borrow().clone();
-            if current.durable_seq >= through_seq {
-                return Ok(current.durable_seq);
-            }
-            if let Some(error) = current.permanent_error {
-                return Err(KernelError::Flush(error));
-            }
-            tokio::select! {
-                changed = status.changed() => {
-                    changed.map_err(|_| KernelError::Shutdown("flush status closed".into()))?;
-                }
-                () = self.inner.stop_worker.cancelled() => {
-                    return Err(KernelError::Shutdown("flush worker stopped".into()));
-                }
-                () = tokio::time::sleep_until(deadline) => {
-                    return Err(KernelError::Flush(format!(
-                        "durability wait timed out after {} seconds",
-                        DURABILITY_WAIT_TIMEOUT.as_secs()
-                    )));
-                }
-            }
+        DurabilityWait {
+            status,
+            through_seq,
         }
+        .wait(&self.inner.stop_worker)
+        .await
     }
 
     /// Retries one atomic Agent commit after draining only resident, Fact-less
@@ -477,20 +451,19 @@ impl AgentKernel {
             if !append.facts.is_empty() || append.header.is_some() {
                 continue;
             }
-            let live_seq = {
+            let wait = {
                 let state = lock_state(&self.inner);
-                state
-                    .sessions
-                    .get(&append.session_id)
-                    .map(SessionRuntime::live_seq)
-                    .transpose()
-                    .map_err(turn_kernel_error)?
-            };
-            let Some(live_seq) = live_seq.filter(|seq| *seq > append.expected_fact_seq) else {
-                continue;
+                let Some(session) = state.sessions.get(&append.session_id) else {
+                    continue;
+                };
+                let through_seq = session.live_seq().map_err(turn_kernel_error)?;
+                if through_seq <= append.expected_fact_seq {
+                    continue;
+                }
+                DurabilityWait::new(session, through_seq)
             };
             append.expected_fact_seq = self
-                .wait_for_durable(&append.session_id, live_seq)
+                .wait_for_durable(wait)
                 .await
                 .map_err(turn_kernel_error)?;
             refreshed = true;
@@ -918,7 +891,7 @@ impl AgentKernel {
         session_selection: SubmitSession,
         turn_id: TurnId,
         body: SessionFactBody,
-    ) -> TurnResult<SubmittedTurn> {
+    ) -> TurnResult<(SubmittedTurn, DurabilityWait)> {
         let session_id = session_selection.session_id().clone();
         let mut state = lock_state(&self.inner);
         if !state.accepting {
@@ -995,14 +968,18 @@ impl AgentKernel {
         );
         session.turn_order.push(turn_id.clone());
         publish_live_watermarks(session);
+        let wait = DurabilityWait::new(session, accepted_seq);
         enqueue(&mut state, session_id.clone(), turn_id.clone());
         drop(state);
         self.inner.claim_changed.notify_waiters();
-        Ok(SubmittedTurn {
-            session_id,
-            turn_id,
-            accepted_seq,
-        })
+        Ok((
+            SubmittedTurn {
+                session_id,
+                turn_id,
+                accepted_seq,
+            },
+            wait,
+        ))
     }
 
     pub(super) async fn existing_submission(
@@ -1011,7 +988,7 @@ impl AgentKernel {
         turn_id: &TurnId,
         body: &SessionFactBody,
         header_is_durable: bool,
-    ) -> TurnResult<(Option<(SubmittedTurn, bool)>, bool)> {
+    ) -> TurnResult<(Option<(SubmittedTurn, Option<DurabilityWait>)>, bool)> {
         let session_id = header.session_id();
         {
             let state = lock_state(&self.inner);
@@ -1042,7 +1019,7 @@ impl AgentKernel {
                                 turn_id: turn_id.clone(),
                                 accepted_seq: turn.accepted_seq,
                             },
-                            true,
+                            Some(DurabilityWait::new(session, turn.accepted_seq)),
                         )),
                         true,
                     ));
@@ -1079,7 +1056,7 @@ impl AgentKernel {
                     turn_id: turn_id.clone(),
                     accepted_seq,
                 },
-                false,
+                None,
             )),
             true,
         ))
@@ -1108,8 +1085,8 @@ impl AgentKernel {
             .await?;
         if let Some((receipt, pending)) = existing {
             drop(submission_admission);
-            if pending {
-                self.wait_for_durable(&receipt.session_id, receipt.accepted_seq)
+            if let Some(wait) = pending {
+                self.wait_for_durable(wait)
                     .await
                     .map_err(turn_kernel_error)?;
             }
@@ -1132,27 +1109,39 @@ impl AgentKernel {
         drop(fresh_reservation);
         drop(resume_admission);
         drop(submission_admission);
-        let receipt = result?;
-        self.wait_for_durable(&receipt.session_id, receipt.accepted_seq)
+        let (receipt, wait) = result?;
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         Ok(receipt)
     }
 }
 
-pub(super) fn flush_status_receiver(
-    state: &KernelState,
-    session_id: &SessionId,
-) -> Result<watch::Receiver<FlushStatus>> {
-    if let Some(session) = state.sessions.get(session_id) {
-        return Ok(session.flush_status.subscribe());
+impl DurabilityWait {
+    pub(super) async fn wait(mut self, stopping: &CancellationToken) -> Result<u64> {
+        let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
+        loop {
+            let current = self.status.borrow().clone();
+            if current.durable_seq >= self.through_seq {
+                return Ok(current.durable_seq);
+            }
+            if let Some(error) = current.permanent_error {
+                return Err(KernelError::Flush(error));
+            }
+            tokio::select! {
+                changed = self.status.changed() => {
+                    changed.map_err(|_| KernelError::Shutdown("flush status closed".into()))?;
+                }
+                () = stopping.cancelled() => {
+                    return Err(KernelError::Shutdown("flush worker stopped".into()));
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(KernelError::Flush(format!(
+                        "durability wait timed out after {} seconds",
+                        DURABILITY_WAIT_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+        }
     }
-    if !state.accepting {
-        return Err(KernelError::Shutdown(
-            "session was released while the Kernel was shutting down".into(),
-        ));
-    }
-    Err(KernelError::Invariant(
-        "session disappeared during flush".into(),
-    ))
 }

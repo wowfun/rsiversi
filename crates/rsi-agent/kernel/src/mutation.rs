@@ -383,16 +383,16 @@ impl AgentKernel {
     ) -> TurnResult<CancelResult> {
         let admission = self.inner.submission_admission.acquire(session_id).await?;
         self.ensure_session_loaded(session_id).await?;
-        let live_seq = {
+        let wait = {
             let state = lock_state(&self.inner);
-            state
+            let session = state
                 .sessions
                 .get(session_id)
-                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-                .live_seq()
-                .map_err(turn_kernel_error)?
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
+            DurabilityWait::new(session, session.live_seq().map_err(turn_kernel_error)?)
         };
-        self.wait_for_durable(session_id, live_seq)
+        let live_seq = wait.through_seq;
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         let (fact, turn_cancellation) = {

@@ -50,6 +50,10 @@ alongside normalized configuration; activation consumes that value. Public
 recovery constructors still validate raw caller-supplied limits.
 
 Durable observers subscribe to Session changes before their first read.
+Submission, cancellation, and flush barriers capture their exact flush-status
+receiver under the same Kernel lock as the source sequence. Completed Session
+eviction may close the sender but cannot erase an already published durable
+watermark. Waiting never looks up that Session again to recover its receipt.
 Successful Store commit watermarks notify only touched Sessions; publication
 of a new immutable Header also notifies that root's tree-membership watch.
 Watch entries exist only while subscribed, coalesce revisions without payload

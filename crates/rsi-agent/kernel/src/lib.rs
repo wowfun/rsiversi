@@ -563,6 +563,20 @@ struct FlushStatus {
     permanent_error: Option<String>,
 }
 
+struct DurabilityWait {
+    status: watch::Receiver<FlushStatus>,
+    through_seq: u64,
+}
+
+impl DurabilityWait {
+    fn new(session: &SessionRuntime, through_seq: u64) -> Self {
+        Self {
+            status: session.flush_status.subscribe(),
+            through_seq,
+        }
+    }
+}
+
 struct PreparedFlushBatch {
     session_id: SessionId,
     expected_seq: u64,

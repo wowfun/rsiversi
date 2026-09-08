@@ -444,7 +444,7 @@ impl TurnService for AgentKernel {
                 )),
             };
         }
-        let (cancel_seq, cancellation) = {
+        let (wait, cancellation) = {
             let mut state = lock_state(&self.inner);
             let session = state
                 .sessions
@@ -479,10 +479,10 @@ impl TurnService for AgentKernel {
                 .expect("validated turn exists")
                 .cancel_requested = true;
             publish_live_watermarks(session);
-            (cancel_seq, cancellation)
+            (DurabilityWait::new(session, cancel_seq), cancellation)
         };
         drop(submission_admission);
-        self.wait_for_durable(session_id, cancel_seq)
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         cancellation.cancel();
@@ -906,16 +906,15 @@ impl AgentKernel {
             .await?;
         let resume_admission = self.reserve_resume_submission(&request.session).await?;
 
-        let live_seq = {
+        let wait = {
             let state = lock_state(&self.inner);
-            state
+            let session = state
                 .sessions
                 .get(&session_id)
-                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-                .live_seq()
-                .map_err(turn_kernel_error)?
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
+            DurabilityWait::new(session, session.live_seq().map_err(turn_kernel_error)?)
         };
-        self.wait_for_durable(&session_id, live_seq)
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         {
