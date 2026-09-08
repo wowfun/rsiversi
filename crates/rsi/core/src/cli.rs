@@ -603,7 +603,7 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _validated = (operation, profile, force, detached_child);
+        let _ = (operation, profile, force, detached_child);
         Ok(Parse::HostUnsupported)
     }
 }

@@ -28,7 +28,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
+#[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
+#[cfg(target_os = "linux")]
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "linux")]
@@ -120,6 +122,7 @@ async fn run_main() -> u8 {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn prepare_standard_composition(
     parent: Option<&rsi_meta::Context>,
     paths: rsi_host::HostPaths,
