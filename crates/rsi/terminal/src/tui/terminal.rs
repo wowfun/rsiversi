@@ -479,7 +479,10 @@ mod tests {
         let Ok(mode) = std::env::var("RSI_TUI_GUARD_TEST_CHILD") else {
             return;
         };
+        let stage = std::env::var("RSI_TUI_GUARD_TEST_STAGE").unwrap();
+        std::fs::write(&stage, b"entering terminal").unwrap();
         let terminal = Terminal::enter(&tokio_util::task::TaskTracker::new()).unwrap();
+        std::fs::write(&stage, b"terminal entered").unwrap();
         if mode == "slow" {
             for revision in 1..=100 {
                 let buffer = Buffer::filled(
@@ -495,8 +498,10 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }
+        std::fs::write(&stage, b"frames submitted").unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_ne!(mode, "panic", "intentional terminal restoration probe");
+        std::fs::write(&stage, b"closing terminal").unwrap();
         tokio::time::timeout(Duration::from_secs(2), terminal.close())
             .await
             .unwrap()
@@ -504,11 +509,27 @@ mod tests {
         std::fs::write(std::env::var("RSI_TUI_GUARD_TEST_DONE").unwrap(), b"closed").unwrap();
     }
 
+    fn kill_and_reap(child: &mut dyn portable_pty::Child) {
+        child.kill().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "killed PTY child did not become waitable while draining"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn panic_restores_terminal_and_blocked_writer_does_not_prevent_exit() {
         for mode in ["panic", "slow"] {
             let directory = tempfile::tempdir().unwrap();
             let completed = directory.path().join("closed");
+            let stage = directory.path().join("stage");
             let pair = native_pty_system()
                 .openpty(PtySize {
                     rows: 24,
@@ -525,6 +546,7 @@ mod tests {
             ]);
             command.env("RSI_TUI_GUARD_TEST_CHILD", mode);
             command.env("RSI_TUI_GUARD_TEST_DONE", &completed);
+            command.env("RSI_TUI_GUARD_TEST_STAGE", &stage);
             command.env("TERM", "xterm-256color");
             eprintln!("PTY {mode}: spawning child");
             let mut child = pair.slave.spawn_command(command).unwrap();
@@ -534,12 +556,19 @@ mod tests {
                 let start = std::time::Instant::now();
                 while !completed.exists() {
                     if start.elapsed() > Duration::from_secs(5) {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        panic!("blocked output prevented terminal close");
+                        let stage = std::fs::read_to_string(&stage).unwrap_or_default();
+                        let capture = capture::PtyCapture::start(pair.master.as_ref());
+                        eprintln!("PTY slow: close timed out at {stage}; draining for teardown");
+                        kill_and_reap(child.as_mut());
+                        let output = capture.finish();
+                        panic!(
+                            "blocked output prevented terminal close at {stage}: {}",
+                            String::from_utf8_lossy(&output)
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
+                eprintln!("PTY slow: terminal close completed; checking termios before draining");
                 assert!(
                     format!("{:?}", pair.master.get_termios().unwrap().local_flags)
                         .contains("ICANON")
@@ -555,8 +584,7 @@ mod tests {
                     break status;
                 }
                 if start.elapsed() > Duration::from_secs(5) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_and_reap(child.as_mut());
                     panic!("{mode}: terminal writer prevented exit");
                 }
                 std::thread::sleep(Duration::from_millis(20));

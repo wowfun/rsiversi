@@ -71,4 +71,6 @@ source tracing and visual evidence. Pure projection, argument and controller
 tests live here; built-product CLI/PTY integration remains with the launcher.
 The terminal-restoration PTY probe bounds captured output and explicitly stops
 and joins its nonblocking reader after child exit. It never relies on the host
-PTY delivering EOF to complete fixture cleanup.
+PTY delivering EOF to complete fixture cleanup. Failure teardown starts draining
+before terminating the child, bounds its wait, and preserves a separate stage
+file even when terminal output is blocked.
