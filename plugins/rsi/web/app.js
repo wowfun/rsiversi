@@ -319,11 +319,11 @@ class Pane {
         entry.sourceKey = sourceKey;
         entry.sources.replaceChildren();
         if (block.tool) {
-          for (const [field, label] of [["arguments", "Inspect arguments"], ["result", "Inspect result"]]) {
+          for (const [field, label] of [["arguments", "Inspect arguments"], ["result", "Inspect result"], ["rejection", "Inspect rejection"]]) {
             const source = block.tool[field];
             if (source) entry.sources.append(button(label, () => this.action("inspect_source", { source }), "quiet"));
           }
-          if (!block.tool.arguments) entry.sources.append(element("span", "hint", "Intent not loaded"));
+          if (!block.tool.intent_present && block.tool.phase !== "rejected") entry.sources.append(element("span", "hint", "Intent not loaded"));
         }
       }
       const expected = previous ? previous.nextSibling : this.transcript.firstChild;

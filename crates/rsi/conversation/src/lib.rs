@@ -1,9 +1,13 @@
 //! Shared, renderer-independent conversation source semantics.
 #![forbid(unsafe_code)]
 
+mod identity;
 mod source;
+mod tool;
 mod window;
+pub use identity::BlockIdentity;
 pub use source::{FactField, FieldValue, SourceRef, select_field};
+pub use tool::{OutputRef, ToolPhase, ToolState};
 pub use window::{FieldWindow, MAXIMUM_WINDOW_BYTES, WindowError};
 
 /// Distinguishes an execution error from a failed process returned by a Tool.

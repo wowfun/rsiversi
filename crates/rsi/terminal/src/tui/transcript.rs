@@ -2,7 +2,7 @@
 use super::super::{ContentDelta, LanguageEvent, SessionFact, SessionFactBody, ToolContent};
 use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
 pub(super) use rsi_conversation::SourceRef as Source;
-use rsi_conversation::{FactField, FieldWindow, ToolOutcome};
+use rsi_conversation::{BlockIdentity, FactField, FieldWindow, ToolState};
 use std::collections::VecDeque;
 
 pub(super) const MAX_BLOCKS: usize = 512;
@@ -138,7 +138,7 @@ pub(super) struct Block {
     pub(super) discarded: bool,
     text_bytes: usize,
     map_bytes: usize,
-    status_seq: u64,
+    pub(super) tool: Option<ToolState>,
 }
 
 /// One per-render index; source lookup does not rescan all streamed pieces per cell.
@@ -179,6 +179,7 @@ impl Block {
     }
     fn metadata(&self) -> usize {
         self.key.capacity()
+            + self.tool.as_ref().map_or(0, ToolState::owned_bytes)
             + self.title.capacity()
             + self.pieces.capacity() * std::mem::size_of::<Piece>()
             + self.map_bytes
@@ -243,6 +244,10 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One exhaustive projection owns the supported Fact payload fields.
     fn project(&mut self, fact: &SessionFact) {
+        if BlockIdentity::tool(fact).is_some() {
+            self.project_tool(fact);
+            return;
+        }
         let seq = fact.seq();
         let mut add = |key: String, title: String, role, field, text: &str| {
             let source = Source { seq, field };
@@ -250,7 +255,7 @@ impl Transcript {
         };
         match fact.body() {
             SessionFactBody::TurnAccepted { turn_id, text, .. } => add(
-                format!("input:{turn_id}"),
+                BlockIdentity::TurnInput { turn: turn_id }.key(),
                 "You".into(),
                 Role::User,
                 FactField::TurnInput,
@@ -260,13 +265,23 @@ impl Transcript {
                 source, content, ..
             } => {
                 let (key, title, role) = match source {
-                    InputMessageSource::Human { message_id } => {
-                        (format!("input:{message_id}"), "You", Role::User)
-                    }
+                    InputMessageSource::Human { message_id } => (
+                        BlockIdentity::Message {
+                            message: message_id,
+                        }
+                        .key(),
+                        "You",
+                        Role::User,
+                    ),
                     InputMessageSource::Agent { message_id, .. }
-                    | InputMessageSource::Completion { message_id, .. } => {
-                        (format!("input:{message_id}"), "Agent message", Role::Status)
-                    }
+                    | InputMessageSource::Completion { message_id, .. } => (
+                        BlockIdentity::Message {
+                            message: message_id,
+                        }
+                        .key(),
+                        "Agent message",
+                        Role::Status,
+                    ),
                     _ => return,
                 };
                 for (index, content) in content.iter().enumerate() {
@@ -285,6 +300,7 @@ impl Transcript {
                 }
             }
             SessionFactBody::ModelEvent {
+                turn_id,
                 effect_id,
                 event: LanguageEvent::ContentDelta { index, delta },
                 ..
@@ -302,97 +318,21 @@ impl Transcript {
                     ContentDelta::ToolArguments(_) => return,
                 };
                 add(
-                    format!("model:{effect_id}:{index}"),
+                    BlockIdentity::Model {
+                        turn: turn_id,
+                        effect: effect_id,
+                        index: *index,
+                    }
+                    .key(),
                     title.into(),
                     role,
                     field,
                     text,
                 );
             }
-            SessionFactBody::ToolIntent {
-                effect_id,
-                name,
-                arguments,
-                ..
-            } => {
-                let key = format!("tool:{effect_id}");
-                self.add(
-                    key.clone(),
-                    &format!("{name} · running"),
-                    Role::Tool,
-                    Piece::json(
-                        Source {
-                            seq,
-                            field: FactField::ToolArguments,
-                        },
-                        arguments,
-                        0,
-                    ),
-                );
-                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                    let status = block
-                        .title
-                        .split_once(" · ")
-                        .map_or("running", |(_, status)| status);
-                    block.title = super::super::terminal_text(&format!("{name} · {status}"));
-                }
-            }
-            SessionFactBody::ToolResult {
-                effect_id, result, ..
-            } => {
-                let key = format!("tool:{effect_id}");
-                let outcome = match ToolOutcome::from_result(result) {
-                    ToolOutcome::Completed => "completed",
-                    ToolOutcome::ToolFailed => "tool failed",
-                    ToolOutcome::ProcessFailed => "command failed",
-                };
-                for (index, content) in result.content.iter().enumerate() {
-                    if let ToolContent::Text { text } = content {
-                        add(
-                            key.clone(),
-                            format!("Tool · {outcome}"),
-                            Role::Tool,
-                            FactField::ToolText {
-                                index: u16::try_from(index).expect("validated Tool content index"),
-                            },
-                            text,
-                        );
-                    }
-                }
-                if result.content.is_empty() {
-                    self.add(
-                        key.clone(),
-                        &format!("Tool · {outcome}"),
-                        Role::Tool,
-                        Piece::json(
-                            Source {
-                                seq,
-                                field: FactField::ToolValue,
-                            },
-                            &result.value,
-                            0,
-                        ),
-                    );
-                }
-                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                    if seq >= block.status_seq {
-                        let name = block.title.split(" · ").next().unwrap_or("Tool");
-                        block.title = format!("{name} · {outcome}");
-                        block.status_seq = seq;
-                    }
-                    block.outputs = ["stdout", "stderr"].map(|stream| {
-                        result
-                            .value
-                            .get(stream)?
-                            .get("full_output")?
-                            .as_str()
-                            .map(str::to_owned)
-                    });
-                }
-            }
             SessionFactBody::TurnTerminal { turn_id, outcome } => {
                 self.add(
-                    format!("outcome:{turn_id}"),
+                    BlockIdentity::Terminal { turn: turn_id }.key(),
                     "Turn result",
                     Role::Status,
                     Piece::json(
@@ -421,9 +361,101 @@ impl Transcript {
         }
     }
 
-    fn add(&mut self, key: String, title: &str, role: Role, piece: Piece) {
+    fn project_tool(&mut self, fact: &SessionFact) {
+        let key = BlockIdentity::tool(fact).expect("Tool Fact").key();
+        let index = self.block_index(key.clone(), "Tool", Role::Tool, fact.seq());
+        let block = &mut self.blocks[index];
+        let tool = if let Some(tool) = &mut block.tool {
+            tool.observe(fact);
+            tool
+        } else {
+            block
+                .tool
+                .insert(ToolState::from_fact(fact).expect("Tool Fact"))
+        };
+        let title = super::super::terminal_text(&format!(
+            "{}{}",
+            tool.title(),
+            if !tool.intent_present && tool.phase != rsi_conversation::ToolPhase::Rejected {
+                " · intent not loaded"
+            } else {
+                ""
+            }
+        ));
+        block.title.clone_from(&title);
+        block.first = block.first.min(fact.seq());
+        block.outputs = tool
+            .outputs
+            .each_ref()
+            .map(|output| output.as_ref().map(|output| output.as_str().to_owned()));
+        let source = |field| Source {
+            seq: fact.seq(),
+            field,
+        };
+        match fact.body() {
+            SessionFactBody::ToolIntent { arguments, .. } => {
+                self.add(
+                    key,
+                    &title,
+                    Role::Tool,
+                    Piece::json(source(FactField::ToolArguments), arguments, 0),
+                );
+            }
+            SessionFactBody::ToolRejected {
+                arguments,
+                rejection,
+                ..
+            } => {
+                self.add(
+                    key.clone(),
+                    &title,
+                    Role::Tool,
+                    Piece::json(source(FactField::ToolArguments), arguments, 0),
+                );
+                self.add(
+                    key,
+                    &title,
+                    Role::Tool,
+                    Piece::json(source(FactField::ToolRejection), rejection, 0),
+                );
+            }
+            SessionFactBody::ToolResult { result, .. } => {
+                let mut text_present = false;
+                for (index, content) in result.content.iter().enumerate() {
+                    if let ToolContent::Text { text } = content {
+                        text_present = true;
+                        self.add(
+                            key.clone(),
+                            &title,
+                            Role::Tool,
+                            Piece::new(
+                                source(FactField::ToolText {
+                                    index: u16::try_from(index)
+                                        .expect("validated Tool content index"),
+                                }),
+                                text,
+                                0,
+                                WINDOW,
+                            ),
+                        );
+                    }
+                }
+                if !text_present {
+                    self.add(
+                        key,
+                        &title,
+                        Role::Tool,
+                        Piece::json(source(FactField::ToolValue), &result.value, 0),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn block_index(&mut self, key: String, title: &str, role: Role, seq: u64) -> usize {
         let position = self.blocks.iter().position(|block| block.key == key);
-        let index = position.unwrap_or_else(|| {
+        position.unwrap_or_else(|| {
             self.blocks.push(Block {
                 key,
                 title: super::super::terminal_text(title),
@@ -431,14 +463,17 @@ impl Transcript {
                 pieces: VecDeque::new(),
                 collapsed: matches!(role, Role::Tool | Role::Reasoning),
                 outputs: [None, None],
-                first: piece.source.seq,
-                status_seq: piece.source.seq,
+                first: seq,
+                tool: None,
                 discarded: false,
                 text_bytes: 0,
                 map_bytes: 0,
             });
             self.blocks.len() - 1
-        });
+        })
+    }
+    fn add(&mut self, key: String, title: &str, role: Role, piece: Piece) {
+        let index = self.block_index(key, title, role, piece.source.seq);
         let block = &mut self.blocks[index];
         // Older pages arrive in ascending order too; a missing interior source
         // is distinct from replaying an already retained source.
@@ -709,6 +744,79 @@ mod tests {
             assert_eq!(piece.display_offset(anchor), Some(offset));
         }
         assert_eq!(piece.anchor(piece.text.len()).offset, raw.len());
+    }
+
+    #[test]
+    fn tool_backfill_keeps_result_status_and_exact_source_without_pairing_another_owner() {
+        use rsi_agent_session_protocol::{EffectId, TurnId};
+        use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
+        let identity = ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64)).unwrap();
+        let turn_id = TurnId::new("turn").unwrap();
+        let effect_id = EffectId::new("effect").unwrap();
+        let intent = SessionFact::new(
+            4,
+            1,
+            SessionFactBody::ToolIntent {
+                turn_id: turn_id.clone(),
+                effect_id: effect_id.clone(),
+                identity: identity.clone(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command":"exit 7"}),
+                approval: None,
+                parallel_safe: false,
+            },
+        )
+        .unwrap();
+        let started = SessionFact::new(
+            5,
+            1,
+            SessionFactBody::ToolStarted {
+                turn_id: turn_id.clone(),
+                effect_id: effect_id.clone(),
+                identity: identity.clone(),
+            },
+        )
+        .unwrap();
+        let result_body = |identity| SessionFactBody::ToolResult {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            identity,
+            result: ToolResult::new(
+                serde_json::json!({"exit_code":7,"stdout":{"full_output":"x".repeat(1024*1024)}}),
+                vec![ToolContent::Text {
+                    text: "exit status: 7".into(),
+                }],
+                false,
+            )
+            .unwrap(),
+        };
+        let result = SessionFact::new(6, 1, result_body(identity)).unwrap();
+        let mut live = Transcript::default();
+        live.apply(&intent);
+        assert_eq!(live.blocks[0].title, "bash · prepared");
+        live.apply(&started);
+        assert_eq!(live.blocks[0].title, "bash · running");
+        live.apply(&result);
+        assert_eq!(live.blocks[0].title, "bash · command failed");
+        let mut history = Transcript::default();
+        history.apply(&result);
+        history.apply_history(&intent);
+        history.apply_history(&started);
+        history.apply_history(&intent);
+        assert_eq!(history.blocks[0].title, live.blocks[0].title);
+        assert_eq!(history.blocks[0].text(), live.blocks[0].text());
+        assert_eq!(history.blocks[0].first, 4);
+        assert!(history.blocks[0].outputs[0].is_none());
+        let other =
+            ToolResultIdentity::new("other-owner", "invoke", "call", "a".repeat(64)).unwrap();
+        history.apply(&SessionFact::new(7, 1, result_body(other)).unwrap());
+        assert_eq!(history.blocks.len(), 2);
+        assert_eq!(
+            history.blocks[1].title,
+            "Tool · command failed · intent not loaded"
+        );
+        assert!(history.blocks[1].tool.as_ref().unwrap().arguments.is_none());
+        assert!(history.budgets().1 < MAX_METADATA);
     }
 
     #[test]

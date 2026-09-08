@@ -3526,6 +3526,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",

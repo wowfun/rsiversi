@@ -59,13 +59,14 @@ Both success and failure are fenced by pane and detail generation; unavailable
 sources are reported within their own detail. No full Fact or observation lease
 is retained by a detail, and detail cancellation does not cancel the Turn.
 
-Each transcript retains at most 128 blocks, 128 KiB per block and 1 MiB of text;
+Each transcript retains at most 128 blocks, 128 KiB per block, 1 MiB of owned
+text capacity and 512 KiB of metadata capacity;
 omission is visible. A history page has the same projection bounds. The view
 uses shared [conversation semantics](../conversation/README.md) for Tool outcome
 classification and bounded JSON previews; it does not serialize complete large
 arguments or result values before truncating them. The view keeps a Tool's name and argument preview when its result arrives, with distinct
-intent and result Fact sequences. Arguments occupy at most half the block so a
-result still has preview capacity; clipping never removes its exact source.
+intent and result Fact sequences. Arguments and results each occupy at most half the block; this also reserves
+room for an intent loaded after its result. Clipping never removes its exact source.
 History beginning after intent displays an explicitly missing intent rather than
 inventing a Tool name or arguments. It also marks a page whose durable prefix
 was not loaded, including the initial

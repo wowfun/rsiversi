@@ -11,6 +11,7 @@ rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-process = { path = "../../rsi-process/core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

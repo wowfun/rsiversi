@@ -1,5 +1,11 @@
 # rsi-terminal
 
+Tool cards retain shared exact lifecycle metadata with their presentation blocks.
+Suffix-only cards mark missing intent; backfill repairs the name and argument
+source without regressing the observed phase. Focused-card details offer exact
+arguments, structured result and rejection sources even when their preview was
+evicted. Completed-output IDs are validated before retention.
+
 The TUI extension-state action inspects the latest complete projection snapshot,
 with bounded per-producer detail and separate failure text. Fresh drafts subscribe
 without creating a message. A snapshot replaces the previous value and is released

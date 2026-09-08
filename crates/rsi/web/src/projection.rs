@@ -4,7 +4,7 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_turn_protocol::SessionObservation;
 use rsi_ai_protocol::{ContentDelta, LanguageEvent};
-use rsi_conversation::{FactField, FieldWindow, SourceRef, ToolOutcome};
+use rsi_conversation::{BlockIdentity, FieldWindow, ToolState};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -12,13 +12,7 @@ use std::collections::VecDeque;
 const MAX_BLOCKS: usize = 128;
 const MAX_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
-
-#[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct ToolPreview {
-    name: Option<String>,
-    arguments: Option<SourceRef>,
-    result: Option<SourceRef>,
-}
+const MAX_METADATA: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Block {
@@ -28,7 +22,9 @@ pub(crate) struct Block {
     pub text: String,
     pub clipped: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool: Option<ToolPreview>,
+    pub tool: Option<ToolState>,
+    #[serde(skip)]
+    tool_argument_bytes: usize,
     #[serde(skip)]
     first_seq: u64,
 }
@@ -60,6 +56,7 @@ impl Transcript {
                 text: String::new(),
                 clipped: false,
                 tool: None,
+                tool_argument_bytes: 0,
                 first_seq: self.seq,
             });
             self.blocks.len() - 1
@@ -74,13 +71,27 @@ impl Transcript {
         let available = MAX_BLOCK_BYTES.saturating_sub(block.text.len());
         block.text.push_str(short(text, available));
         block.clipped |= text.len() > available;
+        self.trim();
+    }
+    fn trim(&mut self) {
         while self.blocks.len() > MAX_BLOCKS
             || self
                 .blocks
                 .iter()
-                .map(|block| block.text.len())
+                .map(|block| block.text.capacity())
                 .sum::<usize>()
                 > MAX_TEXT
+            || self.blocks.capacity() * std::mem::size_of::<Block>()
+                + self
+                    .blocks
+                    .iter()
+                    .map(|block| {
+                        block.key.capacity()
+                            + block.title.capacity()
+                            + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
+                    })
+                    .sum::<usize>()
+                > MAX_METADATA
         {
             self.blocks.pop_front();
             self.omitted = true;
@@ -111,7 +122,10 @@ impl Transcript {
                         rsi_agent_session_protocol::AgentMessageSource::Human
                     );
                     self.message(
-                        &format!("input:{}", message.message_id),
+                        &BlockIdentity::Message {
+                            message: &message.message_id,
+                        }
+                        .key(),
                         if human { "user" } else { "status" },
                         if human { "You" } else { "Agent message" },
                         &message.content,
@@ -130,8 +144,78 @@ impl Transcript {
             },
         }
     }
+    fn project_tool(&mut self, fact: &SessionFact) {
+        let key = BlockIdentity::tool(fact).expect("Tool Fact").key();
+        if !self.blocks.iter().any(|block| block.key == key) {
+            self.add(key.clone(), "tool", "Tool", "", false);
+        }
+        let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) else {
+            return;
+        };
+        let old_arguments = block.tool.as_ref().and_then(|tool| tool.arguments);
+        let old_result = block.tool.as_ref().and_then(|tool| tool.result);
+        let tool = if let Some(tool) = &mut block.tool {
+            tool.observe(fact);
+            tool
+        } else {
+            block
+                .tool
+                .insert(ToolState::from_fact(fact).expect("Tool Fact"))
+        };
+        block.title = tool.title();
+        block.first_seq = block.first_seq.min(fact.seq());
+        if tool.arguments != old_arguments {
+            let arguments = match fact.body() {
+                SessionFactBody::ToolIntent { arguments, .. }
+                | SessionFactBody::ToolRejected { arguments, .. } => Some(arguments),
+                _ => None,
+            };
+            if let Some(arguments) = arguments {
+                let window = FieldWindow::json(arguments, 0, MAX_BLOCK_BYTES / 2 - 2)
+                    .expect("bounded arguments");
+                let prefix = format!("{}\n\n", window.text);
+                block
+                    .text
+                    .replace_range(..block.tool_argument_bytes, &prefix);
+                block.tool_argument_bytes = prefix.len();
+                block.clipped |= window.more;
+            }
+        }
+        if tool.result != old_result
+            && let SessionFactBody::ToolResult { result, .. } = fact.body()
+        {
+            block.text.truncate(block.tool_argument_bytes);
+            let maximum = MAX_BLOCK_BYTES / 2;
+            let mut remaining = maximum;
+            let mut has_text = false;
+            for content in &result.content {
+                if let ToolContent::Text { text } = content {
+                    has_text = true;
+                    let copied = short(text, remaining);
+                    block.text.push_str(copied);
+                    block.clipped |= copied.len() < text.len();
+                    remaining -= copied.len();
+                }
+            }
+            if !has_text {
+                let window = FieldWindow::json(&result.value, 0, maximum).expect("bounded result");
+                block.text.push_str(&window.text);
+                block.clipped |= window.more;
+            }
+        }
+        self.blocks
+            .make_contiguous()
+            .sort_by_key(|block| block.first_seq);
+        self.trim();
+    }
+
     #[allow(clippy::too_many_lines)] // One closed Fact-to-block projection preserves its common sequence fence.
     pub fn fact(&mut self, fact: &SessionFact) {
+        if BlockIdentity::tool(fact).is_some() {
+            self.seq = self.seq.max(fact.seq());
+            self.project_tool(fact);
+            return;
+        }
         if fact.seq() <= self.seq {
             return;
         }
@@ -140,7 +224,13 @@ impl Transcript {
             SessionFactBody::TurnAccepted { turn_id, text, .. } => {
                 self.active = Some(turn_id.clone());
                 self.status = "Running".into();
-                self.add(format!("input:{turn_id}"), "user", "You", text, false);
+                self.add(
+                    BlockIdentity::TurnInput { turn: turn_id }.key(),
+                    "user",
+                    "You",
+                    text,
+                    false,
+                );
             }
             SessionFactBody::MessageTurnAccepted { turn_id, .. } => {
                 self.active = Some(turn_id.clone());
@@ -157,9 +247,15 @@ impl Transcript {
                     }
                     _ => return,
                 };
-                self.message(&format!("input:{id}"), role, title, content);
+                self.message(
+                    &BlockIdentity::Message { message: id }.key(),
+                    role,
+                    title,
+                    content,
+                );
             }
             SessionFactBody::ModelEvent {
+                turn_id,
                 effect_id,
                 event: LanguageEvent::ContentDelta { index, delta },
                 ..
@@ -170,80 +266,17 @@ impl Transcript {
                     ContentDelta::ToolArguments(_) => return,
                 };
                 self.add(
-                    format!("model:{effect_id}:{index}"),
+                    BlockIdentity::Model {
+                        turn: turn_id,
+                        effect: effect_id,
+                        index: *index,
+                    }
+                    .key(),
                     role,
                     title,
                     text,
                     true,
                 );
-            }
-            SessionFactBody::ToolIntent {
-                effect_id,
-                name,
-                arguments,
-                ..
-            } => {
-                let key = format!("tool:{effect_id}");
-                let arguments = FieldWindow::json(arguments, 0, MAX_BLOCK_BYTES / 2)
-                    .expect("bounded Tool arguments");
-                self.add(
-                    key.clone(),
-                    "tool",
-                    &format!("{name} · running"),
-                    &arguments.text,
-                    false,
-                );
-                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                    block.clipped |= arguments.more;
-                    block.tool = Some(ToolPreview {
-                        name: Some(name.clone()),
-                        arguments: Some(SourceRef {
-                            seq: self.seq,
-                            field: FactField::ToolArguments,
-                        }),
-                        result: None,
-                    });
-                }
-            }
-            SessionFactBody::ToolResult {
-                effect_id, result, ..
-            } => {
-                let outcome = match ToolOutcome::from_result(result) {
-                    ToolOutcome::Completed => "completed",
-                    ToolOutcome::ToolFailed => "tool failed",
-                    ToolOutcome::ProcessFailed => "command failed",
-                };
-                let key = format!("tool:{effect_id}");
-                let previous = self.blocks.iter().find(|block| block.key == key);
-                let mut tool = previous
-                    .and_then(|block| block.tool.clone())
-                    .unwrap_or_default();
-                let title = format!("{} · {}", tool.name.as_deref().unwrap_or("Tool"), outcome);
-                if tool.arguments.is_some() {
-                    self.add(key.clone(), "tool", &title, "\n\n", true);
-                }
-                let mut first = true;
-                for content in &result.content {
-                    if let ToolContent::Text { text } = content {
-                        self.add(key.clone(), "tool", &title, text, true);
-                        first = false;
-                    }
-                }
-                if first {
-                    let value = FieldWindow::json(&result.value, 0, MAX_BLOCK_BYTES)
-                        .expect("bounded Tool result");
-                    self.add(key.clone(), "tool", &title, &value.text, true);
-                    if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                        block.clipped |= value.more;
-                    }
-                }
-                tool.result = Some(SourceRef {
-                    seq: self.seq,
-                    field: FactField::ToolValue,
-                });
-                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                    block.tool = Some(tool);
-                }
             }
             SessionFactBody::TurnTerminal { turn_id, outcome } => {
                 let (status, detail) = match outcome {
@@ -273,7 +306,7 @@ impl Transcript {
                     self.status = status.into();
                 }
                 self.add(
-                    format!("terminal:{turn_id}"),
+                    BlockIdentity::Terminal { turn: turn_id }.key(),
                     "status",
                     status,
                     &detail,
@@ -365,6 +398,14 @@ mod tests {
             assert!(suffix["tool"]["name"].is_null());
             assert!(suffix["tool"]["arguments"].is_null());
             assert_eq!(suffix["tool"]["result"]["seq"], "12");
+            let mut recovered = Transcript::default();
+            recovered.fact(&result);
+            recovered.fact(&intent);
+            recovered.fact(&intent);
+            assert_eq!(recovered.blocks.len(), 1);
+            assert_eq!(recovered.blocks[0].title, block.title);
+            assert_eq!(recovered.blocks[0].text, block.text);
+            assert_eq!(recovered.blocks[0].first_seq, 10);
         }
     }
 
@@ -419,7 +460,11 @@ mod tests {
             transcript
                 .blocks
                 .iter()
-                .filter(|block| block.key == "terminal:turn")
+                .filter(|block| block.key
+                    == BlockIdentity::Terminal {
+                        turn: &TurnId::new("turn").unwrap()
+                    }
+                    .key())
                 .count(),
             1
         );

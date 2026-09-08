@@ -557,6 +557,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
+ "rsi-process",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -678,6 +679,19 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-process"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "rsi-api-protocol",
+ "rsi-meta-contract",
+ "rsi-sandbox",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

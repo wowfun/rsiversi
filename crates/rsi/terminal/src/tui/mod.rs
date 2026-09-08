@@ -729,6 +729,11 @@ impl Client {
             Action::Detail => {
                 if let Some(block) = self.state.transcript.blocks.get(self.state.focused) {
                     let mut items = block.pieces.iter().filter(|piece| piece.omitted).take(64).map(|piece| (format!("Fact {} · field {} · first window", piece.source.seq, piece.source.field), Action::Window(piece.source, 0))).collect::<Vec<_>>();
+                    if let Some(tool) = &block.tool {
+                        for (label, source) in [("Arguments", tool.arguments), ("Result value", tool.result), ("Rejection", tool.rejection)] {
+                            if let Some(source) = source { items.push((format!("{label} · Fact {}", source.seq), Action::Window(source, 0))); }
+                        }
+                    }
                     for (stream, output) in ["stdout", "stderr"].into_iter().zip(&block.outputs) { if let Some(output) = output { items.push((format!("Full {stream}"), Action::Output(output.clone(), 0))); } }
                     self.state.open_detail(block.text());
                     if !items.is_empty() { self.state.menu = Some(Menu { title: "Source reads".into(), selected: 0, items }); }

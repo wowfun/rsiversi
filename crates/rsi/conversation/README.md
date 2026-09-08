@@ -30,6 +30,23 @@ Tool outcome classification preserves Tool-owned errors separately from nonzero
 process exits and signals. These values are presentation semantics over the
 validated result, not a new execution policy or reconstructed process authority.
 
+Shared block keys use canonical structured identities: direct Turn input and
+claimed Message input have different kinds; model blocks include Turn, effect
+and content index; Tool blocks include Turn, effect and the complete retained
+result identity. Renderers consume keys opaquely and may split a semantic block
+into presentation items. They cannot pair different Tool registrations or calls
+merely because an effect string matches.
+
+Tool metadata retains only bounded identity, name, exact sources, phase and
+validated completed-output references. Intent is prepared; only a started Fact
+means running. A rejection has arguments and rejection provenance without an
+invented intent. A suffix-only result exposes its missing intent. Older intent
+backfill repairs name and arguments without regressing the newest phase, result
+or output references. Output identities pass the Process read validator before
+being copied; arbitrary JSON strings are never retained as output authority.
+Each renderer retains this metadata with its block, charges its owned capacity
+to that renderer's budget, and drops it when the block is evicted.
+
 Tests cover exact-source mismatch, closed wire fields and lossless sequences,
 UTF-8 boundaries, large nested JSON windows and early serializer termination,
 and independent Tool/process failure classification. Application tests cover
