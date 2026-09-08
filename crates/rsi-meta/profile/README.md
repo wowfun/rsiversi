@@ -77,6 +77,14 @@ internally but publishes the complete observed graph only at attempt
 boundaries, avoiding a full graph clone after every leaf. This is bounded
 convergence, not atomic shadow-Runtime replacement.
 
+Each bound target retains the exact group isolation allocations used by its
+leaves. An unchanged group path and complete inherited isolation declaration
+reuse those allocations across reload and compensation. Retained prefix leaves
+must also match these bindings; a recreated suffix cannot silently receive a
+different identity from its retained provider. Changed ancestry or isolation
+derives a new binding. Current and compensation targets retain their own bounded
+snapshots; there is no historical allocation cache.
+
 ## Static generations
 
 `ProfileGenerationPlan` is the opaque, one-shot path for mounting one compiled

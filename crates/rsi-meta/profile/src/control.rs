@@ -401,6 +401,15 @@ impl fmt::Debug for ResolvedLeaf {
 struct ResolvedTarget {
     candidate: ProfileCandidate,
     leaves: Vec<ResolvedLeaf>,
+    bindings: BindingSnapshot,
+}
+
+type BindingSnapshot = BTreeMap<Vec<String>, Arc<GroupBinding>>;
+
+#[derive(Debug)]
+struct GroupBinding {
+    ancestry: Vec<IsolationSpec>,
+    context: Context,
 }
 
 /// Opaque one-shot plan for one static Profile generation.
@@ -673,6 +682,7 @@ struct BoundTarget {
 
 struct BoundLeaf {
     context: Context,
+    bindings: Vec<Arc<GroupBinding>>,
     prepared: Option<PreparedPlugin>,
 }
 
@@ -680,6 +690,7 @@ struct BoundLeaf {
 struct ActiveLeaf {
     resolved: ResolvedLeaf,
     handle: FiberHandle,
+    bindings: Vec<Arc<GroupBinding>>,
 }
 
 #[derive(Debug)]
@@ -863,11 +874,13 @@ impl Controller {
             candidate,
             &context,
             self.resolver.as_ref(),
+            &previous_target.bindings,
         ))?;
         let rollback = self.publish_pre_mutation_failure(bind_resolved_target(
-            previous_target,
+            previous_target.clone(),
             &context,
             self.resolver.as_ref(),
+            &previous_target.bindings,
         ))?;
         let candidate_target = candidate.target.clone();
         self.set_converging(&candidate.target);
@@ -982,7 +995,7 @@ impl Controller {
         active: &mut Vec<ActiveLeaf>,
         mut candidate: BoundTarget,
     ) -> std::result::Result<ResolvedTarget, String> {
-        let retained = retained_prefix(active, &candidate.target.leaves);
+        let retained = retained_prefix(active, &candidate);
         while active.len() > retained {
             let removed = active.pop().expect("active suffix exists");
             self.remove_active_tail(&removed);
@@ -1026,7 +1039,11 @@ impl Controller {
                     .to_string()
                 })?;
             let state = handle.snapshot().state;
-            active.push(ActiveLeaf { resolved, handle });
+            active.push(ActiveLeaf {
+                resolved,
+                handle,
+                bindings: candidate.leaves[index].bindings.clone(),
+            });
             self.append_active_tail(active.last().expect("active leaf was appended"));
             if let Some(diagnostic) =
                 settled_failure(candidate.target.leaves[index].candidate.id(), &state)
@@ -1046,9 +1063,14 @@ impl Controller {
         self.publish_locked_state(state);
     }
 
-    fn complete_unchanged(&self, target: ResolvedTarget, watch_plan: WatchPlan) -> ProfileStatus {
+    fn complete_unchanged(
+        &self,
+        mut target: ResolvedTarget,
+        watch_plan: WatchPlan,
+    ) -> ProfileStatus {
         let mut state = self.state.lock().expect("Profile state poisoned");
         let state = state.as_mut().expect("checked active state");
+        target.bindings.clone_from(&state.converged_target.bindings);
         state.target = target.clone();
         state.converged_target = target;
         state.watch_plan = watch_plan;
@@ -1581,7 +1603,11 @@ async fn apply_initial(
                 .to_string()
             })?;
         let state = handle.snapshot().state;
-        active.push(ActiveLeaf { resolved, handle });
+        active.push(ActiveLeaf {
+            resolved,
+            handle,
+            bindings: candidate.leaves[index].bindings.clone(),
+        });
         if let Some(diagnostic) =
             settled_failure(candidate.target.leaves[index].candidate.id(), &state)
         {
@@ -1631,16 +1657,21 @@ fn resolve_target(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(ResolvedTarget { candidate, leaves })
+    Ok(ResolvedTarget {
+        candidate,
+        leaves,
+        bindings: BindingSnapshot::new(),
+    })
 }
 
 fn bind_resolved_target(
     target: ResolvedTarget,
     base: &Context,
     resolver: &dyn ProfileResolver,
+    previous: &BindingSnapshot,
 ) -> Result<BoundTarget> {
     let prepared = (0..target.leaves.len()).map(|_| None).collect();
-    bind_target_parts(target, prepared, base, resolver)
+    bind_target_parts(target, prepared, base, resolver, previous)
 }
 
 fn bind_target(
@@ -1648,41 +1679,73 @@ fn bind_target(
     base: &Context,
     resolver: &dyn ProfileResolver,
 ) -> Result<BoundTarget> {
-    bind_target_parts(prepared.target, prepared.prepared, base, resolver)
+    bind_target_parts(
+        prepared.target,
+        prepared.prepared,
+        base,
+        resolver,
+        &BindingSnapshot::new(),
+    )
 }
 
 fn bind_target_parts(
-    target: ResolvedTarget,
+    mut target: ResolvedTarget,
     mut prepared: Vec<Option<PreparedPlugin>>,
     base: &Context,
     resolver: &dyn ProfileResolver,
+    previous: &BindingSnapshot,
 ) -> Result<BoundTarget> {
-    let mut contexts = BTreeMap::<Vec<String>, Context>::new();
+    let mut contexts = BindingSnapshot::new();
     let mut leaves = Vec::with_capacity(target.leaves.len());
     for (index, leaf) in target.leaves.iter().enumerate() {
         let mut context = base.clone();
+        let mut bindings = Vec::with_capacity(leaf.candidate.isolations().len());
         for (depth, isolation) in leaf.candidate.isolations().iter().enumerate() {
             let key = leaf.candidate.groups()[..=depth].to_vec();
-            if let Some(existing) = contexts.get(&key) {
-                context = existing.clone();
-                continue;
-            }
-            context = resolver.isolate(context, isolation)?;
-            contexts.insert(key, context.clone());
+            let ancestry = &leaf.candidate.isolations()[..=depth];
+            let binding = if let Some(existing) = contexts.get(&key) {
+                existing.clone()
+            } else if let Some(existing) = previous
+                .get(&key)
+                .filter(|entry| entry.ancestry == ancestry)
+            {
+                contexts.insert(key, existing.clone());
+                existing.clone()
+            } else {
+                let binding = Arc::new(GroupBinding {
+                    ancestry: ancestry.to_vec(),
+                    context: resolver.isolate(context, isolation)?,
+                });
+                contexts.insert(key, binding.clone());
+                binding
+            };
+            context = binding.context.clone();
+            bindings.push(binding);
         }
         leaves.push(BoundLeaf {
             context,
+            bindings,
             prepared: prepared[index].take(),
         });
     }
+    target.bindings = contexts;
     Ok(BoundTarget { target, leaves })
 }
 
-fn retained_prefix(active: &[ActiveLeaf], target: &[ResolvedLeaf]) -> usize {
+fn retained_prefix(active: &[ActiveLeaf], target: &BoundTarget) -> usize {
     active
         .iter()
-        .zip(target)
-        .take_while(|(active, target)| resolved_leaf_equal(&active.resolved, target))
+        .zip(&target.target.leaves)
+        .zip(&target.leaves)
+        .take_while(|((active, resolved), bound)| {
+            resolved_leaf_equal(&active.resolved, resolved)
+                && active.bindings.len() == bound.bindings.len()
+                && active
+                    .bindings
+                    .iter()
+                    .zip(&bound.bindings)
+                    .all(|(left, right)| Arc::ptr_eq(left, right))
+        })
         .count()
 }
 

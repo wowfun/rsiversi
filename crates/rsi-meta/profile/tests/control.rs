@@ -22,6 +22,36 @@ impl LocalContract for ProbeContract {
     type Service = AtomicUsize;
 }
 
+struct ProbeEvent;
+impl rsi_meta::LocalEvent for ProbeEvent {
+    const KEY: &'static str = "test.event";
+    type Value = ();
+    type Error = std::convert::Infallible;
+    type Mode = rsi_meta::Emit;
+}
+#[derive(Debug)]
+struct CountEvent(Arc<AtomicUsize>);
+impl rsi_meta::EmitEventHandler<ProbeEvent> for CountEvent {
+    fn handle(&self, (): &()) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+#[derive(Debug)]
+struct Echo;
+#[async_trait]
+impl rsi_meta::ServiceEndpoint for Echo {
+    async fn serve(
+        &self,
+        _: rsi_meta::InvocationContext,
+        mut channel: rsi_meta::ProviderChannel<'_>,
+    ) -> rsi_meta::Result<()> {
+        while let Some(message) = channel.recv().await {
+            channel.send(message).await?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct ProbeFactory {
     starts: Arc<AtomicUsize>,
@@ -46,9 +76,22 @@ impl PluginFactory for SupplyFactory {
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let counter = Arc::new(AtomicUsize::new(0));
         let supply = plan
             .context()
-            .provide_local::<ProbeContract>(Arc::new(AtomicUsize::new(0)))?;
+            .provide_local::<ProbeContract>(counter.clone())?;
+        if plan.config().get("all_lanes").and_then(Value::as_bool) == Some(true) {
+            plan.context().on_emit::<ProbeEvent, _>(
+                Arc::new(CountEvent(counter)),
+                rsi_meta::LocalEventOptions::default(),
+            )?;
+            plan.context().provide(
+                "test.portable",
+                "test.echo",
+                rsi_meta::ContractVersion(1),
+                Arc::new(Echo),
+            )?;
+        }
         plan.defer(
             "withdraw test Probe service",
             Box::new(move || {
@@ -73,6 +116,15 @@ impl PluginFactory for ProbeFactory {
             return Err(MetaError::InvalidConfig("secret rollback".to_owned()));
         }
         let prepared = PreparedActivation::new(desired.clone());
+        if mode == "bound" || mode == "bound-fail" {
+            return Ok(prepared.requiring_local::<ProbeContract>().requiring(
+                rsi_meta::Requirement::new(
+                    "test.portable",
+                    "test.echo",
+                    rsi_meta::ContractVersion(1),
+                ),
+            ));
+        }
         if mode == "pending" || mode == "pending-activate-fail" {
             return Ok(prepared.requiring_local::<ProbeContract>());
         }
@@ -81,7 +133,25 @@ impl PluginFactory for ProbeFactory {
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let mode = plan.config().get("mode").and_then(Value::as_str);
+        if matches!(mode, Some("bound" | "bound-fail")) {
+            let counter = plan.local::<ProbeContract>()?;
+            let before = counter.load(Ordering::SeqCst);
+            plan.context().dispatch_local::<ProbeEvent>(())?;
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                before + 1,
+                "consumer lost retained event listener"
+            );
+            let reply = plan
+                .inject("test.portable")
+                .unwrap()
+                .clone()
+                .invoke(rsi_meta::Message::new(b"bound".as_slice()))
+                .await?;
+            assert_eq!(reply.as_bytes(), b"bound");
+        }
         if mode == Some("activate-fail")
+            || mode == Some("bound-fail")
             || mode == Some("pending-activate-fail")
             || (mode == Some("activate-fail-once")
                 && self.fail_once.fetch_add(1, Ordering::SeqCst) == 0)
@@ -121,6 +191,14 @@ struct Resolver {
 
 impl ProfileResolver for Resolver {
     fn resolve(&self, plugin: &rsi_meta::PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
+        if plugin.as_str() == "supply" {
+            return Ok(ResolvedFactory::linked(
+                plugin.clone(),
+                "test",
+                self.mode,
+                Arc::new(SupplyFactory),
+            ));
+        }
         if plugin.as_str() != "probe" {
             return Err(rsi_meta_profile::ProfileError::UnknownPlugin {
                 plugin: plugin.clone(),
@@ -152,10 +230,13 @@ impl ProfileResolver for Resolver {
             }
             context = context.isolate_local_fresh::<ProbeContract>()?.0;
         }
-        if !isolation.events().is_empty() || !isolation.portable().is_empty() {
-            return Err(rsi_meta_profile::ProfileError::InvalidProgram(
-                "test resolver accepts only Local isolation".to_owned(),
-            ));
+        for key in isolation.events() {
+            assert_eq!(key, "test.event");
+            context = context.isolate_event_fresh::<ProbeEvent>()?.0;
+        }
+        for key in isolation.portable() {
+            assert_eq!(key, "test.portable");
+            context = context.isolate_fresh(key)?.0;
         }
         Ok(context)
     }
@@ -180,6 +261,82 @@ fn write_profile(path: &std::path::Path, mode: &str) {
         ),
     )
     .unwrap();
+}
+
+fn write_isolated_pair(path: &std::path::Path, revision: usize, mode: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"format = 1
+[[steps]]
+kind = "group"
+id = "isolated"
+[steps.isolation]
+local = ["test.local"]
+events = ["test.event"]
+portable = ["test.portable"]
+[[steps.nodes]]
+kind = "plugin"
+id = "provider"
+plugin = "supply"
+config = {{ all_lanes = true }}
+[[steps.nodes]]
+kind = "plugin"
+id = "consumer"
+plugin = "probe"
+config = {{ mode = "{mode}", revision = {revision} }}
+"#
+        ),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_isolated_pair(&path, 0, "bound");
+    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let original = control.status().observed()[0].clone();
+    let provider = || {
+        runtime.snapshot().fibers.into_iter().find(|fiber| {
+        matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == "supply")
+    }).unwrap()
+    };
+    let original_fiber = provider();
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Unchanged(_)
+    ));
+    write_isolated_pair(&path, 1, "bound");
+    let outcome = control.reload().await.unwrap();
+    assert!(matches!(outcome, ReloadOutcome::Applied(_)));
+    assert!(
+        matches!(
+            outcome.status().observed()[1].state(),
+            ProfileInstanceState::Active
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(outcome.status().observed()[0], original);
+    assert_eq!(provider(), original_fiber);
+    write_isolated_pair(&path, 2, "bound-fail");
+    let outcome = control.reload().await.unwrap();
+    assert!(
+        matches!(outcome, ReloadOutcome::RolledBack { .. }),
+        "{outcome:?}"
+    );
+    assert!(matches!(
+        outcome.status().observed()[1].state(),
+        ProfileInstanceState::Active
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 3);
+    assert_eq!(outcome.status().observed()[0], original);
+    assert_eq!(provider(), original_fiber);
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
 }
 
 async fn start(
