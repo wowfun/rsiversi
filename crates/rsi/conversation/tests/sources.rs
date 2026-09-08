@@ -212,6 +212,21 @@ fn check_fields(body: SessionFactBody, fields: &[(FactField, &str)]) {
             window.text
         );
         assert!(select_field(&fact, SourceRef { seq: 10, field }).is_none());
+        let image = rsi_conversation::MediaSource::select(&fact, source);
+        if matches!(
+            field,
+            FactField::InputImage { .. } | FactField::ToolImage { .. } | FactField::ImageOutput
+        ) {
+            let image = image.expect("exact image source");
+            assert_eq!(image.source, source);
+            assert_eq!(image.media, &media());
+            assert_eq!(image.label(), "[Image · image/png · 1×1 · 7 bytes]");
+        } else {
+            assert!(image.is_none());
+        }
+        assert!(
+            rsi_conversation::MediaSource::select(&fact, SourceRef { seq: 10, field }).is_none()
+        );
     }
 }
 fn media() -> rsi_media_protocol::MediaRef {

@@ -64,6 +64,16 @@ Both success and failure are fenced by pane and detail generation; unavailable
 sources are reported within their own detail. No full Fact or observation lease
 is retained by a detail, and detail cancellation does not cancel the Turn.
 
+Every retained non-Tool block exposes a source list. Opening it captures at most
+the shared block-index bound in one metadata-only detail; each page displays at
+most 64 references. Page tickets and pane generation prevent stale buttons from
+replacing another detail. The captured list remains stable during streaming or
+history eviction; a later exact read can still report unavailable. Only the page
+is encoded into the document view. Media cards retain metadata and exact sources;
+neither these identifiers nor a displayed URL confer Media read authority.
+Source-list rows scroll inside their own bounded region, keeping the detail title,
+close button and page controls visible across page replacement.
+
 Each transcript retains at most 128 blocks, 128 KiB per block, 1 MiB of owned
 text capacity and 512 KiB of metadata capacity;
 omission is visible. A history page has the same projection bounds. The view

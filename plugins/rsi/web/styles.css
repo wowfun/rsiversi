@@ -117,3 +117,7 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .extension-value { margin-top: 12px; }
 .extension-value pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .extension-error { color: var(--danger, #9b302c); }
+
+.block-sources .source-reference { display: block; margin-block: 0.4rem; overflow-wrap: anywhere; text-align: start; }
+
+.source-list { max-height: min(50dvh, 30rem); overflow: auto; overscroll-behavior: contain; margin-block: 1rem; }

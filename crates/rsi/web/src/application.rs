@@ -79,6 +79,15 @@ pub(crate) enum Command {
         generation: String,
         source: rsi_conversation::SourceRef,
     },
+    InspectBlock {
+        pane: u8,
+        generation: String,
+        key: String,
+    },
+    BlockSourcesPage {
+        ticket: String,
+        forward: bool,
+    },
     SourcePage {
         ticket: String,
         forward: bool,
@@ -228,6 +237,7 @@ impl WebApplication {
             "settings": details.editor,
             "detail": details.interaction,
             "source_detail": details.source,
+            "block_sources": details.block_sources,
             "notice": *self.notice.lock().expect("Web notice poisoned"),
         }))
     }

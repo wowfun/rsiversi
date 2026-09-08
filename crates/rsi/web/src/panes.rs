@@ -268,8 +268,17 @@ impl WebApplication {
             .get(usize::from(pane))
             .ok_or_else(|| "Unknown Web pane".into())
     }
+    #[allow(clippy::too_many_lines)] // Closed pane command dispatch keeps authority-bearing arguments visible together.
     pub(crate) async fn pane_command(&self, command: Command) -> Result<()> {
         match command {
+            Command::InspectBlock {
+                pane,
+                generation,
+                key,
+            } => self.inspect_block(pane, &generation, &key),
+            Command::BlockSourcesPage { ticket, forward } => {
+                self.block_sources_page(&ticket, forward)
+            }
             Command::InspectSource {
                 pane,
                 generation,

@@ -28,13 +28,63 @@ pub(crate) struct Block {
     pub tool: Option<ToolState>,
     #[serde(skip)]
     tool_argument_bytes: usize,
-    #[serde(skip)]
+    #[serde(serialize_with = "source_count")]
     sources: SourceIndex,
     #[serde(skip)]
     source_bytes: VecDeque<usize>,
     #[serde(skip)]
     first_seq: u64,
 }
+fn source_count<S: serde::Serializer>(
+    sources: &SourceIndex,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(u64::try_from(sources.len()).expect("bounded source count"))
+}
+impl Block {
+    fn refresh_tool_sources(&mut self, fact: &SessionFact) {
+        let tool = self.tool.as_ref().expect("Tool block");
+        let mut sources = SourceIndex::default();
+        for source in [tool.arguments, tool.result, tool.rejection]
+            .into_iter()
+            .flatten()
+        {
+            sources.insert(source).expect("bounded Tool provenance");
+        }
+        // Preserve current result content sources when backfilling its older intent.
+        for source in self.sources.iter().filter(|source| {
+            matches!(
+                source.field,
+                FactField::ToolText { .. } | FactField::ToolImage { .. }
+            ) && Some(source.seq) == tool.result.map(|source| source.seq)
+        }) {
+            sources.insert(source).expect("bounded Tool content");
+        }
+        if let SessionFactBody::ToolResult { result, .. } = fact.body()
+            && tool.result.is_some_and(|source| source.seq == fact.seq())
+        {
+            for (index, content) in result.content.iter().enumerate() {
+                let index = u16::try_from(index).expect("validated Tool content index");
+                let field = match content {
+                    ToolContent::Text { .. } => FactField::ToolText { index },
+                    ToolContent::Image { .. } => FactField::ToolImage { index },
+                };
+                sources
+                    .insert(SourceRef {
+                        seq: fact.seq(),
+                        field,
+                    })
+                    .expect("bounded Tool content");
+            }
+        }
+        self.sources = sources;
+    }
+
+    pub(crate) fn sources(&self) -> SourceIndex {
+        self.sources.clone()
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct Transcript {
     pub blocks: VecDeque<Block>,
@@ -117,7 +167,7 @@ impl Transcript {
         role: &'static str,
         title: &str,
         content: &[AgentMessageContent],
-        seq: Option<u64>,
+        fact: Option<&SessionFact>,
     ) {
         for (index, item) in content.iter().enumerate() {
             let text = match item {
@@ -125,13 +175,17 @@ impl Transcript {
                 AgentMessageContent::Image { .. } => "[Image]",
             };
             let key = format!("{key}:{index}");
-            if let Some(seq) = seq {
+            if let Some(fact) = fact {
+                let seq = fact.seq();
                 let index = u16::try_from(index).expect("validated input content index");
                 let field = match item {
                     AgentMessageContent::Text { .. } => FactField::InputText { index },
                     AgentMessageContent::Image { .. } => FactField::InputImage { index },
                 };
-                self.put_source(key, role, title, SourceRef { seq, field }, text);
+                let source = SourceRef { seq, field };
+                let image = rsi_conversation::MediaSource::select(fact, source)
+                    .map(rsi_conversation::MediaSource::label);
+                self.put_source(key, role, title, source, image.as_deref().unwrap_or(text));
             } else {
                 self.add(key, role, title, text, false);
             }
@@ -214,8 +268,20 @@ impl Transcript {
             let maximum = MAX_BLOCK_BYTES / 2;
             let mut remaining = maximum;
             let mut has_text = false;
-            for content in &result.content {
-                if let ToolContent::Text { text } = content {
+            for (index, content) in result.content.iter().enumerate() {
+                let source = SourceRef {
+                    seq: fact.seq(),
+                    field: FactField::ToolImage {
+                        index: u16::try_from(index).expect("validated Tool content index"),
+                    },
+                };
+                let image = rsi_conversation::MediaSource::select(fact, source)
+                    .map(rsi_conversation::MediaSource::label);
+                let text = match content {
+                    ToolContent::Text { text } => text.as_str(),
+                    ToolContent::Image { .. } => image.as_deref().expect("image content"),
+                };
+                {
                     has_text = true;
                     let copied = short(text, remaining);
                     block.text.push_str(copied);
@@ -229,6 +295,7 @@ impl Transcript {
                 block.clipped |= window.more;
             }
         }
+        block.refresh_tool_sources(fact);
         self.blocks
             .make_contiguous()
             .sort_by_key(|block| block.first_seq);
@@ -284,7 +351,29 @@ impl Transcript {
                     role,
                     title,
                     content,
-                    Some(fact.seq()),
+                    Some(fact),
+                );
+            }
+            SessionFactBody::ImageOutput {
+                turn_id,
+                effect_id,
+                index,
+                ..
+            } => {
+                let source = source(FactField::ImageOutput);
+                let image =
+                    rsi_conversation::MediaSource::select(fact, source).expect("image Fact");
+                self.put_source(
+                    BlockIdentity::Image {
+                        turn: turn_id,
+                        effect: effect_id,
+                        index: *index,
+                    }
+                    .key(),
+                    "assistant",
+                    "Image",
+                    source,
+                    &image.label(),
                 );
             }
             SessionFactBody::ModelEvent {
@@ -507,3 +596,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "projection_media_tests.rs"]
+mod media_tests;

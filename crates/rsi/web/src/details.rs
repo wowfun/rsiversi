@@ -1,10 +1,53 @@
 use crate::application::{Result, SettingsEditor};
-use rsi_conversation::{FieldWindow, SourceRef};
+use rsi_conversation::{FieldWindow, SourceIndex, SourceRef};
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const SOURCE_PAGE_BYTES: usize = 64 * 1024;
+const SOURCE_PAGE_COUNT: usize = 64;
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BlockSources {
+    pub pane: u8,
+    pub generation: String,
+    pub ticket: String,
+    pub start: usize,
+    pub total: usize,
+    pub page: Vec<SourceRef>,
+    #[serde(skip)]
+    sources: SourceIndex,
+}
+impl BlockSources {
+    pub fn new(pane: u8, generation: String, ticket: String, sources: SourceIndex) -> Self {
+        Self {
+            pane,
+            generation,
+            ticket,
+            start: 0,
+            total: sources.len(),
+            page: sources.iter().take(SOURCE_PAGE_COUNT).collect(),
+            sources,
+        }
+    }
+    pub fn page(&mut self, ticket: String, forward: bool) {
+        self.ticket = ticket;
+        self.start = if forward {
+            if self.start + self.page.len() >= self.total {
+                return;
+            }
+            self.start + self.page.len()
+        } else {
+            self.start.saturating_sub(SOURCE_PAGE_COUNT)
+        };
+        self.page = self
+            .sources
+            .iter()
+            .skip(self.start)
+            .take(SOURCE_PAGE_COUNT)
+            .collect();
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SourceDetail {
@@ -21,6 +64,7 @@ pub(crate) struct Details {
     revision: u64,
     pub stop: CancellationToken,
     pub source: Option<SourceDetail>,
+    pub block_sources: Option<BlockSources>,
     pub editor: Option<SettingsEditor>,
     pub interaction: Option<Value>,
 }
@@ -33,6 +77,7 @@ impl Details {
         self.stop.cancel();
         self.stop = CancellationToken::new();
         self.source = None;
+        self.block_sources = None;
         self.editor = None;
         self.interaction = None;
         Ok(self.revision)
@@ -53,6 +98,10 @@ impl Details {
             .source
             .as_ref()
             .is_some_and(|source| source.pane == pane && source.generation == generation)
+            || self
+                .block_sources
+                .as_ref()
+                .is_some_and(|sources| sources.pane == pane && sources.generation == generation)
             || self
                 .interaction
                 .as_ref()

@@ -135,3 +135,61 @@ async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replace
     }
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[tokio::test]
+async fn block_source_lists_are_bounded_stable_and_invalidated_with_their_pane() {
+    let (runtime, backend, app) = fixture().await;
+    let session = view(&app)["panes"][0]["session"].clone();
+    for seq in 1..=100 {
+        backend.facts.lock().unwrap().push(
+            SessionFact::new(
+                seq,
+                1,
+                SessionFactBody::ModelEvent {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                        index: 0,
+                        delta: rsi_ai_protocol::ContentDelta::Text(format!("text {seq}\n")),
+                    },
+                },
+            )
+            .unwrap(),
+        );
+    }
+    let open = json!({"action":"open","pane":0,"session":session}).to_string();
+    app.command(&open).await.unwrap();
+    let current = view(&app);
+    let pane = &current["panes"][0];
+    let block = &pane["transcript"]["blocks"][0];
+    assert_eq!(block["sources"], 100);
+    app.command(&json!({"action":"inspect_block","pane":0,"generation":pane["generation"],"key":block["key"]}).to_string()).await.unwrap();
+    let first = view(&app)["block_sources"].clone();
+    assert_eq!(first["page"].as_array().unwrap().len(), 64);
+    assert_eq!(first["page"][0]["seq"], "1");
+    assert!(first.get("sources").is_none());
+    let reads = backend.history_requests.lock().unwrap().len();
+    backend.facts.lock().unwrap().clear();
+    let next =
+        json!({"action":"block_sources_page","ticket":first["ticket"],"forward":true}).to_string();
+    app.command(&next).await.unwrap();
+    let second = view(&app)["block_sources"].clone();
+    assert_eq!(second["start"], 64);
+    assert_eq!(second["page"].as_array().unwrap().len(), 36);
+    assert_eq!(second["page"][0]["seq"], "65");
+    app.command(&next).await.unwrap();
+    assert_eq!(view(&app)["block_sources"], second, "stale page is inert");
+    assert_eq!(backend.history_requests.lock().unwrap().len(), reads);
+    app.command(
+        &json!({"action":"block_sources_page","ticket":second["ticket"],"forward":false})
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view(&app)["block_sources"]["page"], first["page"]);
+    app.command(&open).await.unwrap();
+    assert!(view(&app)["block_sources"].is_null());
+    app.command(&next).await.unwrap();
+    assert!(view(&app)["block_sources"].is_null());
+    assert!(runtime.shutdown().await.is_clean());
+}

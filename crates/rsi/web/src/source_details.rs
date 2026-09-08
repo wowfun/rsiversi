@@ -5,6 +5,54 @@ use crate::{
 use rsi_conversation::SourceRef;
 
 impl WebApplication {
+    pub(super) fn inspect_block(&self, index: u8, generation: &str, key: &str) -> Result<()> {
+        let pane = self.pane(index)?;
+        let current = pane.current.lock().expect("Web pane poisoned");
+        let attached = current
+            .as_ref()
+            .filter(|current| current.generation.to_string() == generation)
+            .ok_or("This pane changed; reopen its source list")?;
+        let sources = {
+            let state = attached
+                .renderer
+                .state
+                .lock()
+                .expect("Web renderer poisoned");
+            let transcript = state.history.as_ref().unwrap_or(&state.transcript);
+            transcript
+                .blocks
+                .iter()
+                .find(|block| block.key == key)
+                .ok_or("This block is no longer in the retained view")?
+                .sources()
+        };
+        let mut details = self.details.lock().expect("Web details poisoned");
+        let ticket = details.begin()?.to_string();
+        details.block_sources = Some(crate::details::BlockSources::new(
+            index,
+            generation.into(),
+            ticket,
+            sources,
+        ));
+        Ok(())
+    }
+
+    pub(super) fn block_sources_page(&self, ticket: &str, forward: bool) -> Result<()> {
+        let mut details = self.details.lock().expect("Web details poisoned");
+        if details
+            .block_sources
+            .as_ref()
+            .is_none_or(|sources| sources.ticket != ticket)
+        {
+            return Ok(());
+        }
+        let mut sources = details.block_sources.take().expect("current source list");
+        let ticket = details.begin()?.to_string();
+        sources.page(ticket, forward);
+        details.block_sources = Some(sources);
+        Ok(())
+    }
+
     pub(super) async fn source_page(&self, ticket: &str, forward: bool) -> Result<()> {
         let selected = {
             let details = self.details.lock().expect("Web details poisoned");

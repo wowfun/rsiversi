@@ -25,6 +25,15 @@ pub enum BlockIdentity<'a> {
         /// Provider content index.
         index: u32,
     },
+    /// One durable generated image, distinct from a Language content block.
+    Image {
+        /// Owning Turn.
+        turn: &'a TurnId,
+        /// Prepared Image effect.
+        effect: &'a EffectId,
+        /// Provider output index.
+        index: u32,
+    },
     /// One exact Tool registration and invocation.
     Tool {
         /// Owning Turn.

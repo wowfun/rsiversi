@@ -133,6 +133,27 @@ try {
       assert.doesNotMatch(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       await left.locator(".transcript").evaluate(node => { node.scrollTop = 0; });
       await page.screenshot({ path: join(report, `${name}-partial-history.png`) });
+      await left.locator(".message.assistant").filter({ hasText: "segment" }).getByRole("button", { name: "Inspect sources", exact: true }).click();
+      await page.getByRole("dialog").getByText("Block sources", { exact: true }).waitFor();
+      assert.equal(await page.locator(".source-reference").count(), 64);
+      const firstReference = await page.locator(".source-reference").first().innerText();
+      await page.getByRole("button", { name: "Next sources", exact: true }).click();
+      await page.locator(".block-sources .hint").filter({ hasText: "Sources 65–" }).waitFor();
+      assert.notEqual(await page.locator(".source-reference").first().innerText(), firstReference);
+      await page.getByRole("button", { name: "Previous sources", exact: true }).click();
+      await page.locator(".block-sources .hint").filter({ hasText: "Sources 1–" }).waitFor();
+      assert.equal(await page.locator(".source-reference").first().innerText(), firstReference);
+      assert.equal(await page.locator("#detail").evaluate(dialog => {
+        const bounds = dialog.getBoundingClientRect();
+        const heading = dialog.querySelector(".dialog-heading").getBoundingClientRect();
+        const controls = dialog.querySelector(".block-sources > .actions").getBoundingClientRect();
+        return heading.top >= bounds.top && controls.bottom <= bounds.bottom && dialog.scrollTop === 0;
+      }), true, "source-list paging keeps title and controls in view");
+      await page.screenshot({ path: join(report, `${name}-block-sources.png`) });
+      await page.locator(".source-reference").first().click();
+      await page.locator(".source-text").filter({ hasText: "segment" }).waitFor();
+      await page.getByRole("button", { name: "Close details", exact: true }).click();
+
       await left.getByRole("button", { name: "Earlier history", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "History" }).waitFor();
       assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);

@@ -57,6 +57,14 @@ entries whenever they evict a text span or Piece, choose the eviction direction,
 and charge the index's allocated capacity to their own metadata budget. A highest
 sequence watermark cannot substitute for this retained-source membership.
 
+`MediaSource` borrows only a validated immutable image reference and its exact
+closed source. Selection verifies the Fact sequence and media content kind;
+input, Tool and generated images use distinct fields. The label contains only
+canonical MIME, dimensions and byte length. It grants no byte-read authority.
+Renderers retain bounded metadata text plus the source, then read the reference
+again for a detail; they never retain image bytes or a Fact lease in the transcript.
+Generated images have their own Turn/effect/output-index block identity.
+
 Tests cover exact-source mismatch, closed wire fields and lossless sequences,
 UTF-8 boundaries, large nested JSON windows and early serializer termination,
 and independent Tool/process failure classification. Application tests cover

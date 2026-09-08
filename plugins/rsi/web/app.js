@@ -314,10 +314,11 @@ class Pane {
       if (entry.title.textContent !== block.title) entry.title.textContent = block.title;
       if (entry.text.textContent !== block.text) entry.text.textContent = block.text;
       entry.clipped.hidden = !block.clipped;
-      const sourceKey = JSON.stringify(block.tool);
+      const sourceKey = JSON.stringify([block.tool, block.sources]);
       if (sourceKey !== entry.sourceKey) {
         entry.sourceKey = sourceKey;
         entry.sources.replaceChildren();
+        if (block.sources > 0) entry.sources.append(button("Inspect sources", () => this.action("inspect_block", { key: block.key }), "quiet"));
         if (block.tool) {
           for (const [field, label] of [["arguments", "Inspect arguments"], ["result", "Inspect result"], ["rejection", "Inspect rejection"]]) {
             const source = block.tool[field];
@@ -412,6 +413,24 @@ $("settings-open").addEventListener("click", () => perform(async () => {
   showDialog("settings-prompt", "Settings", form);
 }));
 function renderDetail(next) {
+  if (next.block_sources) {
+    const detail = next.block_sources;
+    const key = `block-sources:${detail.ticket}`;
+    if (dialogKey === key) return;
+    const body = element("div", "block-sources");
+    body.append(element("p", "hint", `Sources ${detail.start + (detail.page.length ? 1 : 0)}–${detail.start + detail.page.length} of ${detail.total}`));
+    const list = element("div", "source-list");
+    for (const source of detail.page) {
+      list.append(button(`Fact ${source.seq} · ${source.field.kind}${source.field.index == null ? "" : ` ${source.field.index}`}`,
+        () => command({ action: "inspect_source", pane: detail.pane, generation: detail.generation, source }), "source-reference quiet"));
+    }
+    const actions = element("div", "actions");
+    const previous = button("Previous sources", () => command({ action: "block_sources_page", ticket: detail.ticket, forward: false }));
+    const nextPage = button("Next sources", () => command({ action: "block_sources_page", ticket: detail.ticket, forward: true }));
+    previous.disabled = detail.start === 0; nextPage.disabled = detail.start + detail.page.length >= detail.total;
+    actions.append(previous, nextPage); body.append(list, actions);
+    showDialog(key, "Block sources", body); return;
+  }
   if (next.source_detail) {
     const detail = next.source_detail;
     const key = JSON.stringify(detail);

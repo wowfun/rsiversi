@@ -302,19 +302,59 @@ impl Transcript {
                     _ => return,
                 };
                 for (index, content) in content.iter().enumerate() {
-                    if let AgentMessageContent::Text { text } = content {
-                        add(
-                            key.clone(),
-                            title.into(),
-                            role,
-                            FactField::InputText {
+                    if let AgentMessageContent::Image { media } = content {
+                        let source = Source {
+                            seq,
+                            field: FactField::InputImage {
                                 index: u16::try_from(index)
                                     .expect("validated message content index"),
                             },
-                            text,
+                        };
+                        self.add(key.clone(), title, role, Piece::json(source, media, 0));
+                    } else if let AgentMessageContent::Text { text } = content {
+                        self.add(
+                            key.clone(),
+                            title,
+                            role,
+                            Piece::new(
+                                Source {
+                                    seq,
+                                    field: FactField::InputText {
+                                        index: u16::try_from(index)
+                                            .expect("validated message content index"),
+                                    },
+                                },
+                                text,
+                                0,
+                                WINDOW,
+                            ),
                         );
                     }
                 }
+            }
+            SessionFactBody::ImageOutput {
+                turn_id,
+                effect_id,
+                index,
+                ..
+            } => {
+                let source = Source {
+                    seq,
+                    field: FactField::ImageOutput,
+                };
+                let image =
+                    rsi_conversation::MediaSource::select(fact, source).expect("image Fact");
+                self.add(
+                    BlockIdentity::Image {
+                        turn: turn_id,
+                        effect: effect_id,
+                        index: *index,
+                    }
+                    .key(),
+                    "Image",
+                    Role::Assistant,
+                    Piece::json(source, image.media, 0),
+                );
             }
             SessionFactBody::ModelEvent {
                 turn_id,
@@ -437,36 +477,60 @@ impl Transcript {
                 );
             }
             SessionFactBody::ToolResult { result, .. } => {
-                let mut text_present = false;
-                for (index, content) in result.content.iter().enumerate() {
-                    if let ToolContent::Text { text } = content {
-                        text_present = true;
-                        self.add(
-                            key.clone(),
-                            &title,
-                            Role::Tool,
-                            Piece::new(
-                                source(FactField::ToolText {
-                                    index: u16::try_from(index)
-                                        .expect("validated Tool content index"),
-                                }),
-                                text,
-                                0,
-                                WINDOW,
-                            ),
-                        );
-                    }
-                }
-                if !text_present {
-                    self.add(
-                        key,
-                        &title,
-                        Role::Tool,
-                        Piece::json(source(FactField::ToolValue), &result.value, 0),
-                    );
-                }
+                self.project_tool_result(key, &title, fact.seq(), result);
             }
             _ => {}
+        }
+    }
+
+    fn project_tool_result(
+        &mut self,
+        key: String,
+        title: &str,
+        seq: u64,
+        result: &rsi_tools_protocol::ToolResult,
+    ) {
+        let source = |field| Source { seq, field };
+        let mut text_present = false;
+        for (index, content) in result.content.iter().enumerate() {
+            if let ToolContent::Image { media } = content {
+                text_present = true;
+                self.add(
+                    key.clone(),
+                    title,
+                    Role::Tool,
+                    Piece::json(
+                        source(FactField::ToolImage {
+                            index: u16::try_from(index).expect("validated Tool content index"),
+                        }),
+                        media,
+                        0,
+                    ),
+                );
+            } else if let ToolContent::Text { text } = content {
+                text_present = true;
+                self.add(
+                    key.clone(),
+                    title,
+                    Role::Tool,
+                    Piece::new(
+                        source(FactField::ToolText {
+                            index: u16::try_from(index).expect("validated Tool content index"),
+                        }),
+                        text,
+                        0,
+                        WINDOW,
+                    ),
+                );
+            }
+        }
+        if !text_present {
+            self.add(
+                key,
+                title,
+                Role::Tool,
+                Piece::json(source(FactField::ToolValue), &result.value, 0),
+            );
         }
     }
 
@@ -929,3 +993,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "transcript_media_tests.rs"]
+mod media_tests;
