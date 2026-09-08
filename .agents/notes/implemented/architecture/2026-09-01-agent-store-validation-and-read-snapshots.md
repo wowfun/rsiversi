@@ -85,6 +85,12 @@ Facts. After clean shutdown, `sessions.sqlite3` is a complete standalone
 database; while the Store is open, backup tooling must snapshot the live SQLite
 database and its WAL consistently rather than copying one file.
 
+Cancelled asynchronous readers may leave admitted blocking work holding the
+Store's final lease. Joining the Kernel worker that cancelled that read is not
+proof that the database has closed. The owning testing guide therefore permits
+bounded waiting for this specific lease before offline verification, while
+verification failures other than a still-held writer lock remain immediate.
+
 Physical corruption in an untouched page is detected only when SQLite reads
 that page or an operator runs `rsi agent-store verify`. This is the intentional
 availability tradeoff and open is not represented as a full durability audit.

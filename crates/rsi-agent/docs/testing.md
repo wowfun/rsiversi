@@ -20,7 +20,11 @@ tampering with header or Fact rows above their framing bounds. Checkpoint-row
 tampering also proves reads reject a mismatched immutable-header fingerprint
 or a cursor beyond the durable session tail before returning opaque bytes.
 Cancelled blocking waiters retain the writer lease through actual reader,
-writer and CAS completion. Metadata scans above the validation-cache capacity
+writer and CAS completion. Tests that cancel readers during Kernel shutdown
+wait for that final lease before offline verification: a bounded wait may retry
+only `WriterLocked`, while any other verification error fails immediately.
+Kernel worker completion alone does not prove a cancelled SQLite job has closed.
+Metadata scans above the validation-cache capacity
 must not validate history. Large Fact page boundaries and count lookahead
 assert that the next JSON body is not materialized. Subtree snapshots reject
 cycles and oversized lineage; transaction guards detect children inserted after

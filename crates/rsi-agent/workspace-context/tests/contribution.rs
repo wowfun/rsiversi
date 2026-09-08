@@ -100,6 +100,24 @@ struct Fixture {
     service: Arc<dyn AgentComposition>,
     source: Arc<Source>,
 }
+
+async fn verify_closed(root: impl AsRef<std::path::Path>) {
+    // Settlement cancellation can leave an already-dispatched SQLite reader
+    // holding the writer lease. Offline verification requires its actual close.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match SqliteStore::verify(root.as_ref()) {
+                Ok(()) => break,
+                Err(rsi_agent_store_protocol::StoreError::WriterLocked) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                Err(error) => panic!("offline verification failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("the final SQLite operation released its writer lease");
+}
 fn snapshot(instructions: bool) -> WorkspaceContextSnapshot {
     WorkspaceContextSnapshot {
         complete: true,
@@ -358,7 +376,7 @@ async fn queued_direct_turns_each_invoke_only_their_own_skill_once() {
     kernel.shutdown(workers).await.unwrap();
     drop(kernel);
     drop(store);
-    SqliteStore::verify(fixture.temp.path().join("store")).unwrap();
+    verify_closed(fixture.temp.path().join("store")).await;
     fixture.close().await;
 }
 
@@ -429,7 +447,7 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
     kernel.shutdown(workers).await.unwrap();
     drop(kernel);
     drop(store);
-    SqliteStore::verify(fixture.temp.path().join("store")).unwrap();
+    verify_closed(fixture.temp.path().join("store")).await;
     fixture.close().await;
 }
 
@@ -483,7 +501,7 @@ async fn cold_sqlite_resume_uses_new_codec_generation_without_replaying_workspac
             2
         );
         drop(store);
-        SqliteStore::verify(&root).unwrap();
+        verify_closed(&root).await;
         if !resumed {
             fs::write(&fixture.profile, source_program("new-generation")).unwrap();
         }
@@ -532,7 +550,7 @@ async fn initial_empty_workspace_does_not_emit_replacement_or_tombstone() {
     kernel.shutdown(workers).await.unwrap();
     drop(kernel);
     drop(store);
-    SqliteStore::verify(fixture.temp.path().join("store")).unwrap();
+    verify_closed(fixture.temp.path().join("store")).await;
     fixture.close().await;
 }
 
@@ -704,6 +722,6 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
     kernel.shutdown(workers).await.unwrap();
     drop(kernel);
     drop(store);
-    SqliteStore::verify(fixture.temp.path().join("store")).unwrap();
+    verify_closed(fixture.temp.path().join("store")).await;
     fixture.close().await;
 }
