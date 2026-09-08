@@ -109,7 +109,7 @@ plugin = "rsi.application.cli"
 TOML
 ```
 
-For an opt-in DeepSeek session, configure its declared route:
+For an opt-in DeepSeek session, configure its declared Responses route:
 
 ```bash
 mkdir -p "$tui_dev/config/rsi/host-profiles/dev"
@@ -122,8 +122,9 @@ plugin = "rsi.ai.provider.deepseek"
 [steps.config]
 deployment = "dev-deepseek"
 endpoint = "https://api.deepseek.com"
+protocol = "responses"
 credential = { owner = "rsi.ai.provider.deepseek", slot = "default" }
-[steps.config.language_models.deepseek-chat]
+[steps.config.language_models.deepseek-v4-flash]
 context_window_tokens = 128000
 default_output_reserve_tokens = 8192
 max_output_reserve_tokens = 16384
@@ -131,7 +132,7 @@ TOML
 cat > "$tui_dev/config/rsi/settings.json" <<'JSON'
 {
   "rsi.agent": {
-    "default_model": {"deployment": "dev-deepseek", "model": "deepseek-chat"},
+    "default_model": {"deployment": "dev-deepseek", "model": "deepseek-v4-flash"},
     "turn_budget": {
       "maximum_elapsed_ms": 360000,
       "maximum_provider_attempts": 32,

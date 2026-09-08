@@ -23,17 +23,21 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
             rsi_ai_protocol::ImageToolResultCapability::Yes(
                 rsi_ai_protocol::ImageToolResultMode::FunctionOutput,
             ),
-            vec![
-                rsi_ai_protocol::ProviderExtensionFormat::new("openai.responses.replay", 0)
-                    .expect("static OpenAI replay extension is valid"),
-            ],
+            if self.config.responses_state == ResponsesState::Stateless {
+                Vec::new()
+            } else {
+                vec![
+                    rsi_ai_protocol::ProviderExtensionFormat::new("openai.responses.replay", 0)
+                        .expect("static OpenAI replay extension is valid"),
+                ]
+            },
         )
         .expect("static OpenAI Responses profile is valid"))
     }
 
     fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
         self.config.model_limits(model)?;
-        validate_responses_request(request)
+        validate_responses_request(request, self.config.responses_state)
     }
 
     fn prepare(
@@ -51,11 +55,20 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
         Box::pin(async move {
             Ok(Prepared::new(snapshot, move |abort| {
                 Box::pin(async move {
-                    let body =
-                        responses_request(&context, &model, &request, true, false, abort.clone())
-                            .await?;
-                    let outgoing =
-                        authorized_json_request(&context, config.url("/v1/responses"), body)?;
+                    let body = responses_request(
+                        &context,
+                        &model,
+                        &request,
+                        &config,
+                        false,
+                        abort.clone(),
+                    )
+                    .await?;
+                    let outgoing = authorized_json_request(
+                        &context,
+                        config.url(&config.responses_path),
+                        body,
+                    )?;
                     let response = transport
                         .execute(outgoing, abort.cancellation_token())
                         .await
@@ -63,11 +76,14 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
                     if !(200..300).contains(&response.status) {
                         return Err(http_failure(response.status, response.body).await);
                     }
-                    Ok(translate_responses(decode_sse(
-                        response.body,
-                        SseTermination::Eof,
-                        MAX_DEFERRED_CONTROL_BODY_BYTES,
-                    )))
+                    Ok(translate_responses(
+                        decode_sse(
+                            response.body,
+                            SseTermination::Eof,
+                            MAX_DEFERRED_CONTROL_BODY_BYTES,
+                        ),
+                        config.responses_state,
+                    ))
                 })
             }))
         })
@@ -79,6 +95,9 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
         model: String,
         request: LanguageRequest,
     ) -> AdapterFuture<Result<Prepared<DeferredLanguageAdapterHandle>, AiError>> {
+        if self.config.responses_state == ResponsesState::Stateless {
+            return Box::pin(async { Err(stateless_operation_error()) });
+        }
         if let Err(error) = self.validate_request(&model, &request) {
             return Box::pin(async move { Err(error) });
         }
@@ -89,10 +108,13 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
             Ok(Prepared::new(snapshot.clone(), move |abort| {
                 Box::pin(async move {
                     let body =
-                        responses_request(&context, &model, &request, false, true, abort.clone())
+                        responses_request(&context, &model, &request, &config, true, abort.clone())
                             .await?;
-                    let outgoing =
-                        authorized_json_request(&context, config.url("/v1/responses"), body)?;
+                    let outgoing = authorized_json_request(
+                        &context,
+                        config.url(&config.responses_path),
+                        body,
+                    )?;
                     let response = transport
                         .execute(outgoing, abort.cancellation_token())
                         .await
@@ -137,6 +159,9 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
         context: PrepareContext,
         checkpoint: DeferredLanguageCheckpoint,
     ) -> AdapterFuture<Result<DeferredLanguageAdapterHandle, AiError>> {
+        if self.config.responses_state == ResponsesState::Stateless {
+            return Box::pin(async { Err(stateless_operation_error()) });
+        }
         let config = self.config.clone();
         let transport = Arc::clone(&self.transport);
         Box::pin(async move {
@@ -159,7 +184,22 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
     }
 }
 
-fn validate_responses_request(request: &LanguageRequest) -> Result<(), AiError> {
+fn stateless_operation_error() -> AiError {
+    ai_error(
+        ErrorKind::Unsupported,
+        ErrorPhase::Prepare,
+        DispatchStatus::NotStarted,
+        "stateless Responses does not support stored or background operations",
+    )
+}
+
+fn validate_responses_request(
+    request: &LanguageRequest,
+    state: ResponsesState,
+) -> Result<(), AiError> {
+    if state == ResponsesState::Stateless && !request.extensions().is_empty() {
+        return Err(stateless_operation_error());
+    }
     if request.settings().seed().is_some() || !request.settings().stop().is_empty() {
         return Err(ai_error(
             ErrorKind::Unsupported,
@@ -185,6 +225,7 @@ fn validate_responses_request(request: &LanguageRequest) -> Result<(), AiError> 
             MessageRole::Assistant => {
                 for content in message.content() {
                     match content {
+                        MessageContent::Reasoning { .. } if state == ResponsesState::Stateless => {}
                         MessageContent::Reasoning { .. } => {
                             return Err(ai_error(
                                 ErrorKind::Unsupported,
@@ -297,9 +338,11 @@ impl DeferredLanguageOperation for OpenAiDeferredOperation {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .operation_id()
             .to_owned();
-        let url = self
-            .config
-            .url(&format!("/v1/responses/{}", encoded_path(&operation_id)));
+        let url = self.config.url(&format!(
+            "{}/{}",
+            self.config.responses_path,
+            encoded_path(&operation_id)
+        ));
         let outgoing = authorized_control_request(&self.context, Method::GET, url)?;
         let response = self
             .transport
@@ -337,7 +380,8 @@ impl DeferredLanguageOperation for OpenAiDeferredOperation {
         }
         let operation_id = checkpoint.operation_id().to_owned();
         let mut url = self.config.url(&format!(
-            "/v1/responses/{}?stream=true",
+            "{}/{}?stream=true",
+            self.config.responses_path,
             encoded_path(&operation_id)
         ));
         if let Some(sequence) = checkpoint.sequence_number() {
@@ -370,7 +414,8 @@ impl DeferredLanguageOperation for OpenAiDeferredOperation {
     async fn cancel(&mut self, abort: AbortSignal) -> Result<DeferredStatus, AiError> {
         let operation_id = self.checkpoint().operation_id().to_owned();
         let url = self.config.url(&format!(
-            "/v1/responses/{}/cancel",
+            "{}/{}/cancel",
+            self.config.responses_path,
             encoded_path(&operation_id)
         ));
         let outgoing = authorized_control_request(&self.context, Method::POST, url)?;
@@ -534,7 +579,7 @@ async fn responses_request(
     context: &PrepareContext,
     model: &str,
     request: &LanguageRequest,
-    stream: bool,
+    config: &OpenAiConfig,
     background: bool,
     abort: AbortSignal,
 ) -> Result<JsonRequestBody, AiError> {
@@ -557,7 +602,13 @@ async fn responses_request(
                 let input_index = input.len();
                 let role = match message.role() {
                     MessageRole::System => "system",
-                    MessageRole::Developer => "developer",
+                    MessageRole::Developer => {
+                        if config.responses_developer_role == MessageRole::System {
+                            "system"
+                        } else {
+                            "developer"
+                        }
+                    }
                     MessageRole::User => "user",
                     MessageRole::Assistant | MessageRole::Tool => unreachable!(),
                 };
@@ -629,6 +680,12 @@ async fn responses_request(
                                     "arguments":call.arguments,
                                 }));
                             }
+                        }
+                        MessageContent::Reasoning {
+                            text: reasoning, ..
+                        } if config.responses_state == ResponsesState::Stateless => {
+                            push_responses_assistant_text(&mut input, &mut text);
+                            input.push(json!({"type":"reasoning", "content":[{"type":"reasoning_text", "text":reasoning}]}));
                         }
                         MessageContent::Reasoning { .. } => {
                             return Err(ai_error(
@@ -718,7 +775,7 @@ async fn responses_request(
     let mut body = Map::from_iter([
         ("model".to_owned(), Value::String(model.to_owned())),
         ("input".to_owned(), Value::Array(input)),
-        ("stream".to_owned(), Value::Bool(stream)),
+        ("stream".to_owned(), Value::Bool(!background)),
     ]);
     if background {
         body.insert("background".to_owned(), Value::Bool(true));
@@ -876,6 +933,7 @@ struct StoredResponsesParser {
 
 #[derive(Debug)]
 struct ResponsesParser {
+    state: ResponsesState,
     next_index: u32,
     open: BTreeMap<String, OpenBlock>,
     saw_tool: bool,
@@ -886,6 +944,7 @@ struct ResponsesParser {
 impl Default for ResponsesParser {
     fn default() -> Self {
         Self {
+            state: ResponsesState::Stored,
             next_index: 0,
             open: BTreeMap::new(),
             saw_tool: false,
@@ -956,6 +1015,7 @@ impl ResponsesParser {
         }
         Ok(Self {
             next_index: stored.next_index,
+            state: ResponsesState::Stored,
             open,
             saw_tool: stored.saw_tool,
             provider_state: state.clone(),
@@ -1004,6 +1064,7 @@ impl ResponsesParser {
         match kind {
             "response.output_text.delta"
             | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
             | "response.refusal.delta" => {
                 let item_id =
                     required_response_string(event, "item_id", "OpenAI text delta has no item_id")?;
@@ -1249,6 +1310,7 @@ impl ResponsesParser {
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
             | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.done"
             | "response.function_call_arguments.done"
             | "response.custom_tool_call_input.done"
             | "response.web_search_call.in_progress"
@@ -1281,29 +1343,33 @@ impl ResponsesParser {
                 usage: responses_usage(usage),
             });
         }
-        let replay = response
-            .get("id")
-            .and_then(Value::as_str)
-            .map(|id| {
-                if id.is_empty() {
-                    return Err(ai_error(
-                        ErrorKind::OutputValidation,
-                        ErrorPhase::Stream,
-                        DispatchStatus::Dispatched,
-                        "OpenAI response id is outside replay-state bounds",
-                    ));
-                }
-                ProviderExtension::new("openai.responses.replay", 0, json!({"response_id":id}))
-                    .map_err(|_| {
-                        ai_error(
+        let replay = if self.state == ResponsesState::Stateless {
+            None
+        } else {
+            response
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| {
+                    if id.is_empty() {
+                        return Err(ai_error(
                             ErrorKind::OutputValidation,
                             ErrorPhase::Stream,
                             DispatchStatus::Dispatched,
                             "OpenAI response id is outside replay-state bounds",
-                        )
-                    })
-            })
-            .transpose()?;
+                        ));
+                    }
+                    ProviderExtension::new("openai.responses.replay", 0, json!({"response_id":id}))
+                        .map_err(|_| {
+                            ai_error(
+                                ErrorKind::OutputValidation,
+                                ErrorPhase::Stream,
+                                DispatchStatus::Dispatched,
+                                "OpenAI response id is outside replay-state bounds",
+                            )
+                        })
+                })
+                .transpose()?
+        };
         output.push(LanguageEvent::Finished { reason, replay });
         Ok(())
     }
@@ -1438,9 +1504,12 @@ fn citation_source_id(item_id: &str, annotation_index: u64) -> String {
     format!("openai-source-{hash:016x}-{annotation_index}")
 }
 
-fn translate_responses(mut input: rsi_ai_transport::SseStream) -> LanguageAdapterStream {
+fn translate_responses(
+    mut input: rsi_ai_transport::SseStream,
+    state: ResponsesState,
+) -> LanguageAdapterStream {
     Box::pin(stream! {
-        let mut parser = ResponsesParser::default();
+        let mut parser = ResponsesParser { state, ..ResponsesParser::default() };
         while let Some(payload) = input.next().await {
             let payload = match payload {
                 Ok(payload) => payload,
@@ -1650,6 +1719,44 @@ fn deferred_transport_error(error: TransportError, phase: ErrorPhase) -> AiError
 mod tests {
     use super::*;
 
+    #[test]
+    fn stateless_history_rejects_response_identity_and_stored_history_rejects_plain_reasoning() {
+        let replay =
+            LanguageRequest::new(vec![rsi_ai_protocol::Message::user_text("next").unwrap()])
+                .unwrap()
+                .with_extensions(vec![
+                    ProviderExtension::new(
+                        "openai.responses.replay",
+                        0,
+                        json!({"response_id":"old"}),
+                    )
+                    .unwrap(),
+                ])
+                .unwrap();
+        assert!(validate_responses_request(&replay, ResponsesState::Stored).is_ok());
+        assert_eq!(
+            validate_responses_request(&replay, ResponsesState::Stateless)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+        let plain = LanguageRequest::new(vec![
+            rsi_ai_protocol::Message::assistant(vec![MessageContent::Reasoning {
+                text: "plain".into(),
+                evidence: None,
+            }])
+            .unwrap(),
+        ])
+        .unwrap();
+        assert!(validate_responses_request(&plain, ResponsesState::Stateless).is_ok());
+        assert_eq!(
+            validate_responses_request(&plain, ResponsesState::Stored)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+    }
+
     fn deferred_test_checkpoint() -> DeferredLanguageCheckpoint {
         DeferredLanguageCheckpoint::new(
             rsi_ai_protocol::PreparedCallSnapshot {
@@ -1818,7 +1925,7 @@ mod tests {
         let stalled = futures_util::stream::pending();
         let body: ByteStream = Box::pin(first.chain(stalled));
         let input = decode_sse(body, SseTermination::Eof, MAX_DEFERRED_CONTROL_BODY_BYTES);
-        let mut events = translate_responses(input);
+        let mut events = translate_responses(input, ResponsesState::Stored);
         assert!(matches!(
             tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
                 .await

@@ -906,6 +906,7 @@ plugin = "rsi.ai.provider.deepseek"
 [steps.config]
 deployment = "live-deepseek"
 endpoint = "https://api.deepseek.com"
+protocol = "responses"
 credential = {{ owner = "rsi.ai.provider.deepseek", slot = "default" }}
 [steps.config.language_models.{model}]
 context_window_tokens = 128000

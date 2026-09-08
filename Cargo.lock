@@ -2975,6 +2975,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hex",
+ "rsi-ai-openai",
  "rsi-ai-openai-compatible",
  "rsi-ai-protocol",
  "rsi-ai-provider",
