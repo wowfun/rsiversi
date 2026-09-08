@@ -173,14 +173,13 @@ fn remove_stale_socket_after_failed_probe(path: &Path) -> Result<(), ServiceHost
 }
 
 fn probe_socket(path: &Path) -> io::Result<()> {
-    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
-    let socket = rustix::net::socket_with(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
-        None,
-    )?;
-    Ok(rustix::net::connect(&socket, &SocketAddrUnix::new(path)?)?)
+    // Tokio creates a nonblocking, close-on-exec socket on every supported Unix,
+    // including systems without atomic SOCK_NONBLOCK/SOCK_CLOEXEC flags.
+    let socket = tokio::net::UnixSocket::new_stream()?;
+    Ok(rustix::net::connect(
+        &socket,
+        &rustix::net::SocketAddrUnix::new(path)?,
+    )?)
 }
 
 #[cfg(all(test, target_os = "linux"))]

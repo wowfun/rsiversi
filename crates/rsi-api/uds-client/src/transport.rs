@@ -25,6 +25,9 @@ pub(crate) struct LocalTransport {
 fn lost() -> ApiError {
     ApiError::Backend("local API response was lost".into())
 }
+fn protocol_failure(error: &hyper::Error) -> ApiError {
+    ApiError::Backend(format!("local API response was lost: {error:?}"))
+}
 fn uncertain(error: ApiError, mutation: bool) -> ApiError {
     if mutation {
         ApiError::OutcomeUnknown
@@ -63,11 +66,11 @@ impl ConnectionTransport for LocalTransport {
             let response = sender.send_request(request);
             tokio::pin!(response);
             tokio::select! { biased;
-                response = &mut response => response.map_err(|_| uncertain(lost(), mutation)),
+                response = &mut response => response.map_err(|error| uncertain(protocol_failure(&error), mutation)),
                 result = &mut connection => {
                     ended = true;
-                    result.map_err(|_| uncertain(lost(), mutation))?;
-                    response.await.map_err(|_| uncertain(lost(), mutation))
+                    result.map_err(|error| uncertain(protocol_failure(&error), mutation))?;
+                    response.await.map_err(|error| uncertain(protocol_failure(&error), mutation))
                 },
             }
         };

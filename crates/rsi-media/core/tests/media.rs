@@ -158,8 +158,19 @@ async fn one_valid_input_must_fit_the_generation_source_gate() {
     assert!(runtime.shutdown().await.is_complete());
 }
 
-#[tokio::test]
-async fn concurrent_valid_sources_report_transient_admission_pressure() {
+#[test]
+fn concurrent_valid_sources_report_transient_admission_pressure() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(source_admission_pressure());
+}
+
+async fn source_admission_pressure() {
+    use std::future::poll_fn;
+    use std::task::Poll;
     let image = ImageBuffer::from_pixel(1, 1, Rgba([1, 2, 3, 255]));
     let mut png = Vec::new();
     image::DynamicImage::ImageRgba8(image)
@@ -192,15 +203,31 @@ async fn concurrent_valid_sources_report_transient_admission_pressure() {
     let media = runtime.root().lookup_local::<MediaContract>().unwrap();
     let source: bytes::Bytes = bytes::Bytes::from(png);
 
-    let (first, second) = tokio::join!(
-        media.import_image(source.clone()),
-        media.import_image(source)
-    );
-    let outcomes = [first, second];
-    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
-    assert!(outcomes.iter().any(
-        |result| matches!(result, Err(MediaError::AdmissionFull(message)) if message.contains("source-byte"))
+    // Hold the sole codec worker until both calls have reached source admission.
+    // Dropping release also unblocks it if an assertion unwinds.
+    let (release, waiting) = std::sync::mpsc::channel::<()>();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let blocker = tokio::task::spawn_blocking(move || {
+        let _ = started.send(());
+        let _ = waiting.recv();
+    });
+    ready.await.unwrap();
+
+    let mut first = media.import_image(source.clone());
+    poll_fn(|cx| {
+        assert!(first.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(
+        media.import_image(source.clone()).await,
+        Err(MediaError::AdmissionFull(message)) if message.contains("source-byte")
     ));
+    drop(release);
+    blocker.await.unwrap();
+    first.await.unwrap();
+    // Pressure is temporary; the same valid source is admitted after release.
+    media.import_image(source).await.unwrap();
 
     drop(media);
     assert!(service.dispose().await.is_clean());
