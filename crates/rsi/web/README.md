@@ -82,6 +82,15 @@ bridge permits one view delivery at a time, acknowledged after rendering. Whole
 valid API Facts and history pages remain possible transient allocations under
 their independent domain/transport budgets; UI text limits are not RSS limits.
 
+Text spans use the shared bounded exact-source index. Duplicate delivery is
+ignored only while that source is retained; missing interior text is inserted in
+source order. Evicting a span removes its source membership and byte-length
+metadata together. A bounded single-field preview stays UTF-8 aligned; admitting
+newer or older spans evicts from the opposite end and marks omitted content.
+Accepted control previews reconcile to their entered Message fields, while direct
+Turn input keeps a distinct identity. Older backfill cannot regress the current
+Turn's status. The highest Fact sequence remains a cursor, not a duplicate set.
+
 Login consumes a device registration receipt; the token is exchanged through
 the existing same-origin HttpOnly cookie owner and is not persisted in browser
 storage. Closing an application drains Worker-owned requests and surfaces and

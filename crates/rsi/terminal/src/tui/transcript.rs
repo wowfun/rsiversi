@@ -2,7 +2,10 @@
 use super::super::{ContentDelta, LanguageEvent, SessionFact, SessionFactBody, ToolContent};
 use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
 pub(super) use rsi_conversation::SourceRef as Source;
-use rsi_conversation::{BlockIdentity, FactField, FieldWindow, ToolState};
+use rsi_conversation::{
+    BlockIdentity, FactField, FieldWindow, MAXIMUM_BLOCK_SOURCES, SourceAdmission, SourceIndex,
+    ToolState,
+};
 use std::collections::VecDeque;
 
 pub(super) const MAX_BLOCKS: usize = 512;
@@ -132,6 +135,7 @@ pub(super) struct Block {
     pub(super) title: String,
     pub(super) role: Role,
     pub(super) pieces: VecDeque<Piece>,
+    sources: SourceIndex,
     pub(super) collapsed: bool,
     pub(super) outputs: [Option<String>; 2],
     pub(super) first: u64,
@@ -155,6 +159,18 @@ impl AnchorIndex<'_> {
 }
 
 impl Block {
+    fn evict_piece(&mut self, back: bool) -> bool {
+        let Some(last) = self.pieces.len().checked_sub(1) else {
+            return false;
+        };
+        let position = if back { last } else { 0 };
+        let piece = self.pieces.remove(position).expect("retained piece");
+        assert_eq!(self.sources.remove(position), Some(piece.source));
+        self.text_bytes -= piece.text.capacity();
+        self.map_bytes -= piece.metadata();
+        self.discarded = true;
+        true
+    }
     pub(super) fn anchor_index(&self) -> AnchorIndex<'_> {
         let mut offset = 0;
         AnchorIndex(
@@ -179,6 +195,7 @@ impl Block {
     }
     fn metadata(&self) -> usize {
         self.key.capacity()
+            + self.sources.owned_bytes()
             + self.tool.as_ref().map_or(0, ToolState::owned_bytes)
             + self.title.capacity()
             + self.pieces.capacity() * std::mem::size_of::<Piece>()
@@ -461,6 +478,7 @@ impl Transcript {
                 title: super::super::terminal_text(title),
                 role,
                 pieces: VecDeque::new(),
+                sources: SourceIndex::default(),
                 collapsed: matches!(role, Role::Tool | Role::Reasoning),
                 outputs: [None, None],
                 first: seq,
@@ -475,13 +493,7 @@ impl Transcript {
     fn add(&mut self, key: String, title: &str, role: Role, piece: Piece) {
         let index = self.block_index(key, title, role, piece.source.seq);
         let block = &mut self.blocks[index];
-        // Older pages arrive in ascending order too; a missing interior source
-        // is distinct from replaying an already retained source.
-        if block
-            .pieces
-            .binary_search_by_key(&piece.source, |piece| piece.source)
-            .is_ok()
-        {
+        if block.sources.position(piece.source).is_some() {
             return;
         }
         let old = block
@@ -489,25 +501,22 @@ impl Transcript {
             .back()
             .is_some_and(|last| piece.source < last.source);
         while !block.pieces.is_empty()
-            && (block.text_bytes + piece.text.capacity() > WINDOW || block.pieces.len() >= 4096)
+            && (block.text_bytes + piece.text.capacity() > WINDOW
+                || block.sources.len() >= MAXIMUM_BLOCK_SOURCES)
         {
-            let removed = if old {
-                block.pieces.pop_back()
-            } else {
-                block.pieces.pop_front()
-            }
-            .expect("nonempty pieces");
-            block.text_bytes -= removed.text.capacity();
-            block.map_bytes -= removed.metadata();
-            block.discarded = true;
+            block.evict_piece(old);
             self.earlier = true;
         }
         block.text_bytes += piece.text.capacity();
         block.map_bytes += piece.metadata();
         block.first = block.first.min(piece.source.seq);
-        let position = block
-            .pieces
-            .partition_point(|retained| retained.source < piece.source);
+        let SourceAdmission::Inserted(position) = block
+            .sources
+            .insert(piece.source)
+            .expect("bounded valid presentation source")
+        else {
+            unreachable!("duplicate checked before admission")
+        };
         block.pieces.insert(position, piece);
     }
 
@@ -528,15 +537,7 @@ impl Transcript {
             self.earlier |= !older;
             if self.blocks.len() == 1 {
                 let block = &mut self.blocks[0];
-                if let Some(piece) = if older {
-                    block.pieces.pop_back()
-                } else {
-                    block.pieces.pop_front()
-                } {
-                    block.text_bytes -= piece.text.capacity();
-                    block.map_bytes -= piece.metadata();
-                    block.discarded = true;
-                }
+                block.evict_piece(older);
                 block.pieces.shrink_to_fit();
             } else {
                 self.blocks
@@ -723,6 +724,16 @@ mod tests {
             text <= MAX_TEXT && metadata <= MAX_METADATA && transcript.blocks.len() <= MAX_BLOCKS
         );
         assert!(!transcript.blocks.last().unwrap().text().is_empty());
+        for block in &transcript.blocks {
+            assert_eq!(
+                block.sources.iter().collect::<Vec<_>>(),
+                block
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.source)
+                    .collect::<Vec<_>>()
+            );
+        }
         assert!(transcript.earlier);
     }
 

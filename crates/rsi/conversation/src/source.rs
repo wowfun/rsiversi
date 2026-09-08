@@ -90,7 +90,7 @@ impl std::fmt::Display for FactField {
 }
 
 /// Attachment-local exact source; the caller separately owns its Session binding.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceRef {
     /// Positive durable sequence, serialized without JavaScript number conversion.
@@ -99,10 +99,44 @@ pub struct SourceRef {
     /// Variant-checked payload selection.
     pub field: FactField,
 }
+impl Ord for SourceRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.seq
+            .cmp(&other.seq)
+            .then_with(|| order(self.field).cmp(&order(other.field)))
+    }
+}
+impl PartialOrd for SourceRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+fn order(field: FactField) -> (u8, u16, u8) {
+    match field {
+        FactField::TurnInput => (0, 0, 0),
+        FactField::InputText { index } => (1, index, 0),
+        FactField::InputImage { index } => (1, index, 1),
+        FactField::ModelText => (2, 0, 0),
+        FactField::ModelReasoning => (3, 0, 0),
+        FactField::ModelToolArguments => (4, 0, 0),
+        FactField::ModelFailure => (5, 0, 0),
+        FactField::ModelSnapshot => (6, 0, 0),
+        FactField::ToolArguments => (7, 0, 0),
+        FactField::ToolRejection => (8, 0, 0),
+        FactField::ToolValue => (9, 0, 0),
+        FactField::ToolText { index } => (10, index, 0),
+        FactField::ToolImage { index } => (10, index, 1),
+        FactField::TurnOutcome => (11, 0, 0),
+        FactField::ImageOutput => (12, 0, 0),
+    }
+}
 mod decimal {
     use serde::{Deserialize, Deserializer, Serializer};
     #[allow(clippy::trivially_copy_pass_by_ref)] // Serde field hooks receive a borrowed field.
     pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        if *value == 0 {
+            return Err(serde::ser::Error::custom("invalid positive Fact sequence"));
+        }
         serializer.collect_str(value)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {

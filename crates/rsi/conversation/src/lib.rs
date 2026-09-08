@@ -2,10 +2,12 @@
 #![forbid(unsafe_code)]
 
 mod identity;
+mod index;
 mod source;
 mod tool;
 mod window;
 pub use identity::BlockIdentity;
+pub use index::{MAXIMUM_BLOCK_SOURCES, SourceAdmission, SourceIndex, SourceIndexError};
 pub use source::{FactField, FieldValue, SourceRef, select_field};
 pub use tool::{OutputRef, ToolPhase, ToolState};
 pub use window::{FieldWindow, MAXIMUM_WINDOW_BYTES, WindowError};

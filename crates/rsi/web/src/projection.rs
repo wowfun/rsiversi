@@ -1,10 +1,13 @@
+#[path = "spans.rs"]
+mod spans;
+
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentMessageContent, InputMessageSource, SessionFact, SessionFactBody,
     TurnId,
 };
 use rsi_agent_turn_protocol::SessionObservation;
 use rsi_ai_protocol::{ContentDelta, LanguageEvent};
-use rsi_conversation::{BlockIdentity, FieldWindow, ToolState};
+use rsi_conversation::{BlockIdentity, FactField, FieldWindow, SourceIndex, SourceRef, ToolState};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -25,6 +28,10 @@ pub(crate) struct Block {
     pub tool: Option<ToolState>,
     #[serde(skip)]
     tool_argument_bytes: usize,
+    #[serde(skip)]
+    sources: SourceIndex,
+    #[serde(skip)]
+    source_bytes: VecDeque<usize>,
     #[serde(skip)]
     first_seq: u64,
 }
@@ -57,11 +64,16 @@ impl Transcript {
                 clipped: false,
                 tool: None,
                 tool_argument_bytes: 0,
+                sources: SourceIndex::default(),
+                source_bytes: VecDeque::new(),
                 first_seq: self.seq,
             });
             self.blocks.len() - 1
         });
         let block = &mut self.blocks[index];
+        if !block.sources.is_empty() {
+            return;
+        }
         block.title = short(title, 512).into();
         if !append {
             block.text.clear();
@@ -89,6 +101,8 @@ impl Transcript {
                         block.key.capacity()
                             + block.title.capacity()
                             + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
+                            + block.sources.owned_bytes()
+                            + block.source_bytes.capacity() * std::mem::size_of::<usize>()
                     })
                     .sum::<usize>()
                 > MAX_METADATA
@@ -103,13 +117,24 @@ impl Transcript {
         role: &'static str,
         title: &str,
         content: &[AgentMessageContent],
+        seq: Option<u64>,
     ) {
         for (index, item) in content.iter().enumerate() {
             let text = match item {
                 AgentMessageContent::Text { text } => text.as_str(),
                 AgentMessageContent::Image { .. } => "[Image]",
             };
-            self.add(format!("{key}:{index}"), role, title, text, false);
+            let key = format!("{key}:{index}");
+            if let Some(seq) = seq {
+                let index = u16::try_from(index).expect("validated input content index");
+                let field = match item {
+                    AgentMessageContent::Text { .. } => FactField::InputText { index },
+                    AgentMessageContent::Image { .. } => FactField::InputImage { index },
+                };
+                self.put_source(key, role, title, SourceRef { seq, field }, text);
+            } else {
+                self.add(key, role, title, text, false);
+            }
         }
     }
     pub fn observation(&mut self, update: &SessionObservation) {
@@ -129,6 +154,7 @@ impl Transcript {
                         if human { "user" } else { "status" },
                         if human { "You" } else { "Agent message" },
                         &message.content,
+                        None,
                     );
                 }
                 AgentControlRecordBody::MessageDiscarded { message_id, reason } => {
@@ -216,25 +242,31 @@ impl Transcript {
             self.project_tool(fact);
             return;
         }
-        if fact.seq() <= self.seq {
-            return;
-        }
-        self.seq = fact.seq();
+        let latest = fact.seq() > self.seq;
+        self.seq = self.seq.max(fact.seq());
+        let source = |field| SourceRef {
+            seq: fact.seq(),
+            field,
+        };
         match fact.body() {
             SessionFactBody::TurnAccepted { turn_id, text, .. } => {
-                self.active = Some(turn_id.clone());
-                self.status = "Running".into();
-                self.add(
+                if latest {
+                    self.active = Some(turn_id.clone());
+                    self.status = "Running".into();
+                }
+                self.put_source(
                     BlockIdentity::TurnInput { turn: turn_id }.key(),
                     "user",
                     "You",
+                    source(FactField::TurnInput),
                     text,
-                    false,
                 );
             }
             SessionFactBody::MessageTurnAccepted { turn_id, .. } => {
-                self.active = Some(turn_id.clone());
-                self.status = "Running".into();
+                if latest {
+                    self.active = Some(turn_id.clone());
+                    self.status = "Running".into();
+                }
             }
             SessionFactBody::InputMessageEntered {
                 source, content, ..
@@ -252,6 +284,7 @@ impl Transcript {
                     role,
                     title,
                     content,
+                    Some(fact.seq()),
                 );
             }
             SessionFactBody::ModelEvent {
@@ -260,12 +293,16 @@ impl Transcript {
                 event: LanguageEvent::ContentDelta { index, delta },
                 ..
             } => {
-                let (role, title, text) = match delta {
-                    ContentDelta::Text(text) => ("assistant", "Assistant", text),
-                    ContentDelta::Reasoning(text) => ("reasoning", "Reasoning", text),
+                let (role, title, text, field) = match delta {
+                    ContentDelta::Text(text) => {
+                        ("assistant", "Assistant", text, FactField::ModelText)
+                    }
+                    ContentDelta::Reasoning(text) => {
+                        ("reasoning", "Reasoning", text, FactField::ModelReasoning)
+                    }
                     ContentDelta::ToolArguments(_) => return,
                 };
-                self.add(
+                self.put_source(
                     BlockIdentity::Model {
                         turn: turn_id,
                         effect: effect_id,
@@ -274,8 +311,8 @@ impl Transcript {
                     .key(),
                     role,
                     title,
+                    source(field),
                     text,
-                    true,
                 );
             }
             SessionFactBody::TurnTerminal { turn_id, outcome } => {
@@ -301,16 +338,16 @@ impl Transcript {
                         ..
                     } => ("Budget exceeded", format!("{consumed} / {limit}")),
                 };
-                if self.active.as_ref().is_none_or(|active| active == turn_id) {
+                if latest && self.active.as_ref().is_none_or(|active| active == turn_id) {
                     self.active = None;
                     self.status = status.into();
                 }
-                self.add(
+                self.put_source(
                     BlockIdentity::Terminal { turn: turn_id }.key(),
                     "status",
                     status,
+                    source(FactField::TurnOutcome),
                     &detail,
-                    false,
                 );
             }
             _ => {}

@@ -47,6 +47,16 @@ being copied; arbitrary JSON strings are never retained as output authority.
 Each renderer retains this metadata with its block, charges its owned capacity
 to that renderer's budget, and drops it when the block is evicted.
 
+Each block's `SourceIndex` retains at most 4,096 exact source identities, ordered
+by Fact sequence and semantic content position. Text/image fields of one ordered
+content array interleave by their original index. An exact duplicate returns its
+existing position, including at capacity; a missing interior source is a distinct
+insertion. Zero sequence and excess count are rejected without changing the index.
+The index retains neither text nor Facts. Renderers remove corresponding source
+entries whenever they evict a text span or Piece, choose the eviction direction,
+and charge the index's allocated capacity to their own metadata budget. A highest
+sequence watermark cannot substitute for this retained-source membership.
+
 Tests cover exact-source mismatch, closed wire fields and lossless sequences,
 UTF-8 boundaries, large nested JSON windows and early serializer termination,
 and independent Tool/process failure classification. Application tests cover
