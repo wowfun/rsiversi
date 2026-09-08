@@ -92,6 +92,7 @@ const BASH_PRODUCER_FACTORY: &str = "rsi.shell.bash.producer";
 const BASH_TOOL_FACTORY: &str = "rsi.shell.bash.tool";
 const JOBS_TOOLS_FACTORY: &str = "rsi.jobs.tools";
 const AGENT_TOOLS_FACTORY: &str = "rsi.agent.tools";
+const CONTEXT_BUILDER_FACTORY: &str = "rsi.agent.context.default";
 const WORKSPACE_CONTEXT_FACTORY: &str = "rsi.agent.workspace-context.local";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
 const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
@@ -190,6 +191,10 @@ fn standard_agent_addon(
     )?;
     register(JOBS_TOOLS_FACTORY, Arc::new(JobsToolsFactory))?;
     register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
+    register(
+        CONTEXT_BUILDER_FACTORY,
+        Arc::new(rsi_agent_context::DefaultContextBuilderFactory),
+    )?;
     if let Some(coding) = coding_tools {
         register(
             OUTPUT_READ_FACTORY,
@@ -198,6 +203,9 @@ fn standard_agent_addon(
         register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
         register(APPLY_PATCH_FACTORY, Arc::new(coding.apply_patch.clone()))?;
     }
+    builder.register_local_contract_at::<rsi_agent_context::ModelContextBuilderContract>(
+        AddonScope::Agent,
+    )?;
     builder.build()
 }
 
@@ -1698,6 +1706,7 @@ mod tests {
                 .map(|leaf| leaf.plugin().as_str())
                 .collect::<Vec<_>>(),
             [
+                CONTEXT_BUILDER_FACTORY,
                 OUTPUT_READ_FACTORY,
                 BASH_TOOL_FACTORY,
                 JOBS_TOOLS_FACTORY,
@@ -1715,6 +1724,7 @@ mod tests {
                 .map(|leaf| leaf.plugin().as_str())
                 .collect::<Vec<_>>(),
             [
+                CONTEXT_BUILDER_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
                 QUESTION_TOOLS_FACTORY

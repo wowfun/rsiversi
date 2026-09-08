@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
 };
+use rsi_agent_context::{ModelContextBuilder, ModelContextBuilderContract};
 use rsi_agent_presets::{AgentPresetCatalog, AgentPresetId, PresetError};
 use rsi_meta::{
     ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberState, MetaError, PluginFactory,
@@ -325,6 +326,7 @@ struct Generation {
     preset_id: AgentPresetId,
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
+    context_builder: Arc<dyn ModelContextBuilder>,
     owner: Arc<GenerationOwner>,
 }
 
@@ -344,6 +346,7 @@ impl Generation {
             self.preset_id.clone(),
             self.source_digest.clone(),
             Arc::clone(&self.tools),
+            Arc::clone(&self.context_builder),
             self.owner.clone(),
         )
     }
@@ -373,6 +376,7 @@ struct UnpublishedGeneration {
     stage: Option<Box<dyn ToolCatalogStage>>,
     scope: Option<ScopeHandle>,
     tools: Option<Arc<dyn ToolRuntime>>,
+    context_builder: Option<Arc<dyn ModelContextBuilder>>,
     singleflight: Option<OwnedMutexGuard<()>>,
     build_slot: Option<OwnedSemaphorePermit>,
     state: Weak<CompositionState>,
@@ -403,6 +407,7 @@ impl UnpublishedGeneration {
             stage: Some(stage),
             scope: Some(scope),
             tools: None,
+            context_builder: None,
             singleflight: Some(singleflight),
             build_slot: Some(build_slot),
             state: owner_state,
@@ -423,16 +428,34 @@ impl UnpublishedGeneration {
             .expect("unpublished Agent generation owns its Scope")
     }
 
-    fn seal(&mut self) -> rsi_tools_protocol::Result<()> {
+    fn seal(
+        &mut self,
+        context: &Context,
+        preset_id: &AgentPresetId,
+    ) -> rsi_agent_composition_protocol::Result<()> {
+        let builder = context
+            .lookup_local::<ModelContextBuilderContract>()
+            .ok_or_else(|| unavailable(preset_id, "Agent Profile requires one context builder"))?;
         let stage = self
             .stage
             .take()
             .expect("unsealed Agent generation owns its Tool stage");
-        self.tools = Some(stage.seal()?);
+        self.tools = Some(
+            stage
+                .seal()
+                .map_err(|_| unavailable(preset_id, "Tool catalog sealing failed"))?,
+        );
+        self.context_builder = Some(builder);
         Ok(())
     }
 
-    fn into_published_parts(mut self) -> (Arc<dyn ToolRuntime>, ScopeHandle) {
+    fn into_published_parts(
+        mut self,
+    ) -> (
+        Arc<dyn ToolRuntime>,
+        Arc<dyn ModelContextBuilder>,
+        ScopeHandle,
+    ) {
         let tools = self
             .tools
             .take()
@@ -441,9 +464,13 @@ impl UnpublishedGeneration {
             .scope
             .take()
             .expect("published Agent generation owns its Scope");
+        let context_builder = self
+            .context_builder
+            .take()
+            .expect("published Agent generation has a context builder");
         drop(self.singleflight.take());
         drop(self.build_slot.take());
-        (tools, scope)
+        (tools, context_builder, scope)
     }
 
     async fn rollback(mut self) -> bool {
@@ -690,13 +717,14 @@ impl CompositionState {
             .meta()
             .clone()
             .isolate_local_fresh::<ToolRegistrarContract>()
+            .and_then(|(context, _)| context.isolate_local_fresh::<ModelContextBuilderContract>())
         {
             Ok((context, _isolation)) => context,
             Err(_error) => {
                 let _clean = unpublished.rollback().await;
                 return Err(unavailable(
                     preset_id,
-                    "Agent Tool registrar isolation failed",
+                    "Agent contribution isolation failed",
                 ));
             }
         };
@@ -749,12 +777,9 @@ impl CompositionState {
             return Err(self.cancelled_build_error(preset_id));
         }
 
-        match unpublished.seal() {
-            Ok(()) => {}
-            Err(_error) => {
-                let _clean = unpublished.rollback().await;
-                return Err(unavailable(preset_id, "Tool catalog sealing failed"));
-            }
+        if let Err(error) = unpublished.seal(&generation_context, preset_id) {
+            let _clean = unpublished.rollback().await;
+            return Err(error);
         }
         if cancellation.is_cancelled() {
             let _clean = unpublished.rollback().await;
@@ -817,7 +842,7 @@ impl CompositionState {
             if let Some(error) = rejection {
                 Err((error, unpublished))
             } else {
-                let (tools, scope) = unpublished.into_published_parts();
+                let (tools, context_builder, scope) = unpublished.into_published_parts();
                 inner.next_scope += 1;
                 let record = Arc::new(ScopeRecord {
                     id: inner.next_scope,
@@ -833,6 +858,7 @@ impl CompositionState {
                     preset_id,
                     source_digest,
                     tools,
+                    context_builder,
                     owner,
                 });
                 let previous = row

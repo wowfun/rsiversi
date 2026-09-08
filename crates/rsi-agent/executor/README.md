@@ -3,7 +3,7 @@
 Ordinary executor plugin over exact Turn execution/finalization, Language,
 Image, Media, Approval, Sandbox, and Jobs Local contracts. Tool authority is
 not a standing executor dependency: each exact claim supplies its resident
-Agent-composition pin and immutable Tool catalog. Definitions, prepare,
+Agent-composition pin, immutable Tool catalog and unique ModelContextBuilder. Definitions, prepare,
 retained-result recovery, and commit all use that one catalog. Any admitted
 Tool retained past the main driver future carries a clone of the generation
 pin, so teardown cannot destroy the catalog or its hidden Scope while delayed
@@ -11,6 +11,16 @@ work is settling. Every provider or Tool attempt is
 prepared, recorded, flushed, marked started, flushed again, and only then
 invoked. Image outputs enter Media and each ref is durably flushed before the
 stream advances; later failure preserves those refs in `partial_failed`.
+
+The claim's selected builder opens the execution cursor. Checkpoint requests
+retain that exact pin before terminal settlement and release it after queued or
+in-flight maintenance completes. Maintenance opens the same builder against
+canonical pages; execution uses claim-visible pages and their scan horizons.
+Both preserve fork seed boundaries. The Context module owns cache identity,
+payload validation and encoding; Executor also compares the resulting position
+with independent Store metadata and enforces the claim's acceptance fence.
+An incompatible cache is optional and triggers replay. There is no default
+builder fallback or independent latest-generation lookup in the executor.
 For one parallel-safe run, the executor publishes the complete source-ordered
 intent batch and crosses one durability barrier, then publishes the matching
 source-ordered start batch and crosses one durability barrier before invoking

@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 async-trait.workspace = true
+rsi-agent-context = { path = "../context" }
 rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-agent-presets = { path = "../presets" }
 rsi-meta = { path = "../../rsi-meta/core" }

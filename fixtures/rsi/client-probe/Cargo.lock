@@ -357,9 +357,27 @@ name = "rsi-agent-composition-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-agent-context",
  "rsi-agent-session-protocol",
  "rsi-meta-contract",
  "rsi-tools-protocol",
+ "thiserror",
+]
+
+[[package]]
+name = "rsi-agent-context"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
 ]
 

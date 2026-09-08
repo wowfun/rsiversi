@@ -11,7 +11,8 @@ Fact-to-model projection and compaction. Executor owns effect ordering across
 Language, Image, and Tool calls plus pre-terminal finalization. SQLite is one Store plugin, while testkit supplies a
 deterministic memory implementation. Presets contribute bounded Profile
 sources. Composition builds immutable standing Agent generations inside the
-same Runtime, and session or draft pins keep their exact Tool catalog alive
+same Runtime, and session or draft pins keep their exact Tool catalog and
+selected model-context builder alive
 without exposing provider catalogs to Kernel or Executor.
 Workspace Context owns bounded trust-aware instruction and skill discovery;
 Kernel alone turns complete snapshots into durable input Facts. Agent Tools owns

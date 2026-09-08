@@ -1633,6 +1633,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();
@@ -1705,6 +1706,7 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();

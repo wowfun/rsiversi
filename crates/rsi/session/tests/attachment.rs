@@ -201,6 +201,7 @@ impl AgentComposition for AvailableComposition {
             preset_id.clone(),
             "a".repeat(64),
             Arc::new(EmptyTools),
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             Arc::new(()),
         )
     }
@@ -1875,6 +1876,7 @@ impl AgentComposition for PinTracker {
             preset.clone(),
             "a".repeat(64),
             Arc::new(EmptyTools),
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             Arc::new(TrackedLease(self.0.clone())),
         )
     }

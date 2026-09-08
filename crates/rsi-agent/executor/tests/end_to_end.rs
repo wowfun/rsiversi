@@ -4,7 +4,7 @@ use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
     PreparedFreshSession,
 };
-use rsi_agent_context::{ContextFold, ContextLimits};
+use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_executor::ExecutorFactory;
 use rsi_agent_kernel::KernelFactory;
 use rsi_agent_session_protocol::{
@@ -1133,6 +1133,7 @@ struct CompositionFixture {
     pin: Mutex<Option<AgentCompositionPin>>,
     owner_drops: Arc<AtomicUsize>,
     panic_on_commit: Mutex<Option<Arc<Notify>>>,
+    context_builder: Mutex<Arc<dyn rsi_agent_context::ModelContextBuilder>>,
 }
 
 #[async_trait]
@@ -1178,6 +1179,7 @@ impl AgentComposition for CompositionFixture {
             preset_id.clone(),
             "b".repeat(64),
             tools,
+            self.context_builder.lock().unwrap().clone(),
             Arc::new(GenerationOwner(Arc::clone(&self.owner_drops))),
         )?;
         *current = Some(pin.clone());
@@ -1209,6 +1211,9 @@ impl PluginFactory for CompositionFixtureFactory {
             pin: Mutex::new(None),
             owner_drops: Arc::new(AtomicUsize::new(0)),
             panic_on_commit: Mutex::new(None),
+            context_builder: Mutex::new(Arc::new(
+                rsi_agent_context::DefaultContextBuilder::default(),
+            )),
         });
         *self.installed.lock().unwrap() = Some(Arc::clone(&fixture));
         let service: Arc<dyn AgentComposition> = fixture;
@@ -1601,6 +1606,8 @@ impl TurnFinalizer for HangingFinalizer {
 
 #[path = "end_to_end/budgets_and_recovery.rs"]
 mod budgets_and_recovery;
+#[path = "end_to_end/context_builder.rs"]
+mod context_builder;
 #[path = "end_to_end/image_and_shutdown.rs"]
 mod image_and_shutdown;
 #[path = "end_to_end/pool.rs"]

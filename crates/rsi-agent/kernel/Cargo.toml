@@ -26,6 +26,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-agent-context = { path = "../context" }
 rsi-agent-store-sqlite = { path = "../store-sqlite" }
 tempfile.workspace = true
 rsi-agent-testkit = { path = "../testkit" }

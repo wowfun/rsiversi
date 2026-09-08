@@ -11,7 +11,7 @@ use checkpoint::{CheckpointRequest, CheckpointScheduler, run_checkpoint_writer};
 use async_trait::async_trait;
 use futures_util::{FutureExt as _, StreamExt as _, future::join_all};
 use rsi_agent_composition_protocol::AgentCompositionPin;
-use rsi_agent_context::{ContextFold, ContextLimits};
+use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_session_protocol::{
     BudgetDimension, EffectId, EffectKind, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, SessionFact,
     SessionFactBody, SessionId, TurnId, TurnOutcome,
@@ -212,13 +212,6 @@ impl ExecutorConfig {
             )));
         }
         Ok(())
-    }
-
-    fn limits(&self) -> ContextLimits {
-        ContextLimits {
-            max_messages: self.max_context_messages,
-            max_bytes: self.max_context_bytes,
-        }
     }
 
     const fn durability_wait(&self) -> Duration {

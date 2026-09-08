@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+rsi-agent-context = { path = "../context" }
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }

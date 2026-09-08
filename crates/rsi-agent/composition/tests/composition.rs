@@ -398,7 +398,12 @@ fn test_compiler(temp: &TempDir) -> AgentPresetProfileCompiler {
     .unwrap();
     AgentPresetProfileCompiler::new(
         ProfileCompiler::new(environment, ProfileLimits::default()),
-        ["test.contribution", "test.blocking", "test.unknown"],
+        [
+            "test.contribution",
+            "test.blocking",
+            "test.unknown",
+            "test.context",
+        ],
     )
 }
 
@@ -436,7 +441,7 @@ impl BuildFixture {
             fs::create_dir(&preset).unwrap();
             fs::write(
                 preset.join(COMPOSITION_FILE),
-                "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"block\"\nplugin = \"test.blocking\"\n",
+                "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"test.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"block\"\nplugin = \"test.blocking\"\n",
             )
             .unwrap();
             ids.push(id);
@@ -449,14 +454,17 @@ impl BuildFixture {
         )
         .unwrap();
         let gate = Arc::new(BuildGate::default());
-        let contributions = AgentContributionCatalog::new([ResolvedFactory::linked(
-            "test.blocking",
-            "test-revision",
-            UpdateMode::Replayable,
-            Arc::new(BlockingFactory {
-                gate: Arc::clone(&gate),
-            }),
-        )])
+        let contributions = AgentContributionCatalog::new([
+            ResolvedFactory::linked(
+                "test.blocking",
+                "test-revision",
+                UpdateMode::Replayable,
+                Arc::new(BlockingFactory {
+                    gate: Arc::clone(&gate),
+                }),
+            ),
+            context_factory(),
+        ])
         .unwrap();
         let (runtime, tools_fiber, composition_fiber, service) =
             activate_composition(presets, contributions).await;
@@ -498,14 +506,17 @@ impl Fixture {
         )
         .unwrap();
         let probe = Arc::new(Probe::default());
-        let contributions = AgentContributionCatalog::new([ResolvedFactory::linked(
-            "test.contribution",
-            "test-revision",
-            UpdateMode::Replayable,
-            Arc::new(ProbeFactory {
-                probe: Arc::clone(&probe),
-            }),
-        )])
+        let contributions = AgentContributionCatalog::new([
+            ResolvedFactory::linked(
+                "test.contribution",
+                "test-revision",
+                UpdateMode::Replayable,
+                Arc::new(ProbeFactory {
+                    probe: Arc::clone(&probe),
+                }),
+            ),
+            context_factory(),
+        ])
         .unwrap();
         let (runtime, tools_fiber, composition_fiber, service) =
             activate_composition(presets, contributions).await;
@@ -535,13 +546,13 @@ impl Fixture {
 
 fn profile(marker: &str) -> String {
     format!(
-        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"probe\"\nplugin = \"test.contribution\"\nconfig = {{ marker = \"{marker}\" }}\n"
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"test.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"probe\"\nplugin = \"test.contribution\"\nconfig = {{ marker = \"{marker}\" }}\n"
     )
 }
 
 fn failing_profile(marker: &str) -> String {
     format!(
-        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"probe\"\nplugin = \"test.contribution\"\nconfig = {{ marker = \"{marker}\", fail = true }}\n"
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"test.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"probe\"\nplugin = \"test.contribution\"\nconfig = {{ marker = \"{marker}\", fail = true }}\n"
     )
 }
 
@@ -620,6 +631,50 @@ async fn concurrent_same_digest_pins_build_one_generation() {
     );
 
     drop(pins);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn generation_requires_an_explicit_context_builder() {
+    let fixture = Fixture::new("format = 1\n").await;
+    fixture
+        .runtime
+        .root()
+        .apply(context_factory(), ConfigValue::Null)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .runtime
+            .root()
+            .lookup_local::<rsi_agent_context::ModelContextBuilderContract>()
+            .is_some()
+    );
+    let rejected = fixture.service.pin(&fixture.id).await.is_err();
+    fixture.stop().await;
+    assert!(
+        rejected,
+        "an Agent generation without a context builder became current"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_context_builder_rolls_back_candidate_and_preserves_current_pin() {
+    let fixture = Fixture::new(&profile("a")).await;
+    let original = fixture.service.pin(&fixture.id).await.unwrap();
+    fixture.replace_source(&format!(
+        "{}\n[[steps]]\nkind = \"plugin\"\nid = \"duplicate-context\"\nplugin = \"test.context\"\n",
+        profile("b")
+    ));
+    assert!(fixture.service.pin(&fixture.id).await.is_err());
+    assert_eq!(fixture.probe.active("b"), 0);
+    assert_eq!(fixture.probe.active("a"), 1);
+    assert_eq!(
+        original.context_builder().identity().id(),
+        "rsi.agent.context.default"
+    );
+    assert_eq!(original.tools().definitions()[0].name(), "probe-a");
+    drop(original);
     fixture.stop().await;
 }
 
@@ -816,7 +871,7 @@ async fn superseded_generation_is_disposed_after_its_last_pin_drops() {
 #[tokio::test]
 async fn unknown_factory_is_rejected_before_any_runtime_mutation() {
     let fixture = Fixture::new(
-        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"unknown\"\nplugin = \"test.unknown\"\n",
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"test.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"unknown\"\nplugin = \"test.unknown\"\n",
     )
     .await;
     let before = fixture.runtime.snapshot();
@@ -867,4 +922,13 @@ async fn provider_shutdown_waits_for_the_last_external_pin_before_disposing_its_
     drop(fixture.service);
     let _cleanup = fixture.tools_fiber.dispose().await;
     let _shutdown = fixture.runtime.shutdown().await;
+}
+
+fn context_factory() -> ResolvedFactory {
+    ResolvedFactory::linked(
+        "test.context",
+        "v1",
+        UpdateMode::RestartRequired,
+        Arc::new(rsi_agent_context::DefaultContextBuilderFactory),
+    )
 }

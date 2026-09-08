@@ -143,7 +143,11 @@ included in the frozen identity. No runtime JavaScript discovery is implied.
 
 `StandardComposition::with_addons` carries the same immutable declarations into
 preview and embedded/daemon startup. The Agent compiler and contribution catalog
-are derived from the declared Agent factories, including the built-in tools.
+are derived from the declared Agent factories, including the built-in tools and
+default model-context builder. Agent Profiles explicitly select one builder;
+the standard preset selects `rsi.agent.context.default`. Custom presets can
+select another declared builder. Missing or conflicting selections fail before
+the Agent generation becomes current.
 Every resulting Host catalog freezes before activation and rejects duplicate
 factory/fragment identities, including collisions with built-ins. Exact repeated
 marker declarations are shared; two Rust marker types claiming the same key are

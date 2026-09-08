@@ -20,7 +20,7 @@ SQLite Store --Local--> Kernel --Local Turn service--> callers
                             |
                     executor registration and claims
                             |
-            Agent composition pin -> immutable Tool catalog
+            Agent composition pin -> immutable Tools and context builder
                             |
           Preset Profile contributions over global providers
 ```
@@ -84,7 +84,8 @@ draft leaves no durable session.
 Agent composition resolves one preset source digest into a standing child Scope
 inside the existing Runtime. It starts an unpublished Tool catalog stage,
 activates the preset's allowlisted contribution Profile, requires every child
-Fiber to become Active, seals the exact catalog, and only then publishes the
+Fiber to become Active, requires one explicitly selected context builder, seals
+the exact Tool catalog, and only then publishes the
 generation. Candidate failure disposes the complete stage and never replaces a
 healthy current generation. Construction is single-flight per preset identity
 and source digest. A superseded generation remains alive while a draft,

@@ -48,7 +48,11 @@ impl Driver {
             }
         });
         let limits = self.context_limits();
-        let mut fold = match ContextFold::with_limits(claim.header().clone(), limits) {
+        let mut fold = match ModelContextState::open(
+            composition.context_builder(),
+            claim.header().clone(),
+            limits,
+        ) {
             Ok(fold) => fold,
             Err(error) => {
                 deadline_task.abort();
@@ -83,7 +87,7 @@ impl Driver {
                 .await
                 .is_ok()
             {
-                self.request_checkpoint(&claim);
+                self.request_checkpoint(&claim, &composition);
                 self.retire_tracked_tools(&claim, stop);
             }
             let _ignored = self.turns.release(&claim);
@@ -130,13 +134,13 @@ impl Driver {
             Ok(()) | Err(DriveFailure::Stopped) => {}
             Err(DriveFailure::Turn(outcome)) => {
                 if self.finish(claim, job_scope, outcome).await.is_ok() {
-                    self.request_checkpoint(claim);
+                    self.request_checkpoint(claim, composition);
                     self.retire_tracked_tools(claim, stop);
                 }
             }
             Err(DriveFailure::SettledTool { outcome, identity }) => {
                 if self.finish(claim, job_scope, outcome).await.is_ok() {
-                    self.request_checkpoint(claim);
+                    self.request_checkpoint(claim, composition);
                     let _ignored = composition.tools().commit(&identity);
                     self.clear_tracked_tool(claim, &identity);
                     self.retire_tracked_tools(claim, stop);
@@ -152,7 +156,7 @@ impl Driver {
                     .await
                     .is_ok()
                 {
-                    self.request_checkpoint(claim);
+                    self.request_checkpoint(claim, composition);
                     self.retire_tracked_tools(claim, stop);
                 }
             }
@@ -174,7 +178,7 @@ impl Driver {
                 .await
                 .is_ok()
                 {
-                    self.request_checkpoint(claim);
+                    self.request_checkpoint(claim, composition);
                     self.retire_tracked_tools(claim, stop);
                 }
             }
@@ -189,7 +193,7 @@ impl Driver {
                     .await
                     .is_ok()
                 {
-                    self.request_checkpoint(claim);
+                    self.request_checkpoint(claim, composition);
                     let _ignored = composition.tools().commit(&identity);
                     self.clear_tracked_tool(claim, &identity);
                     self.retire_tracked_tools(claim, stop);
@@ -208,7 +212,7 @@ impl Driver {
                     .await
                     .is_ok()
                 {
-                    self.request_checkpoint(claim);
+                    self.request_checkpoint(claim, composition);
                     self.retire_tracked_tools(claim, stop);
                 }
             }
@@ -221,7 +225,7 @@ impl Driver {
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
         stop: &CancellationToken,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
     ) -> std::result::Result<(), DriveFailure> {
         let state = self.load_claim(claim, fold).await?;
         if state.terminal {
@@ -275,7 +279,7 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         model: ModelRef,
         turn_policy: ResolvedTurnPolicy,
         stop: &CancellationToken,
@@ -436,7 +440,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         effects: Vec<ResumeEffect>,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
@@ -476,7 +480,7 @@ impl Driver {
     pub(super) async fn run_image(
         &self,
         claim: &TurnClaim,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         model: ModelRef,
         request: ImageRequest,
         stop: &CancellationToken,
@@ -547,7 +551,7 @@ impl Driver {
 
     pub(super) async fn consume_image_stream(
         &self,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         attempt: ImageStreamContext<'_>,
         mut stream: rsi_ai_protocol::ImageStream,
     ) -> std::result::Result<(), DriveFailure> {
@@ -646,7 +650,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         model: &ModelRef,
         retry_attempt: u8,
         cancellation: &CancellationToken,
@@ -654,7 +658,7 @@ impl Driver {
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
         self.sync_fold(claim, fold).await?;
         let request = fold
-            .request(self.config.limits(), composition.tools().definitions())
+            .build(composition.tools().definitions())
             .map_err(|error| failed("context.projection", error.to_string()))?;
         let prepared = self
             .language
@@ -720,7 +724,7 @@ impl Driver {
 
     pub(super) async fn consume_model_stream(
         &self,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         attempt: ModelStreamContext<'_>,
         mut stream: rsi_ai_protocol::LanguageStream,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
@@ -817,7 +821,7 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         call: ModelToolCall,
         scheduling: ToolScheduling,
         turn_policy: ResolvedTurnPolicy,
@@ -881,7 +885,7 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         calls: Vec<ModelToolCall>,
         turn_policy: ResolvedTurnPolicy,
         cancellation: &CancellationToken,
@@ -1020,7 +1024,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         pending: PendingToolEffect,
     ) -> std::result::Result<PreparedToolEffect, DriveFailure> {
         let PendingToolEffect {
@@ -1072,7 +1076,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         pending: Vec<PendingToolEffect>,
     ) -> std::result::Result<Vec<PreparedToolEffect>, DriveFailure> {
         let mut intents = Vec::with_capacity(pending.len());
@@ -1125,7 +1129,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         effect_id: EffectId,
         identity: ToolResultIdentity,
         result: ToolResult,
@@ -1366,7 +1370,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         effect_id: EffectId,
         identity: ToolResultIdentity,
         stop: &CancellationToken,
@@ -1438,7 +1442,7 @@ impl Driver {
     pub(super) async fn record_model_failure(
         &self,
         claim: &TurnClaim,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         effect_id: &EffectId,
         error: rsi_ai_protocol::AiError,
     ) -> std::result::Result<(), DriveFailure> {
@@ -1594,16 +1598,18 @@ impl Driver {
             .await;
     }
 
-    pub(super) fn request_checkpoint(&self, claim: &TurnClaim) {
-        let _ignored = self
-            .checkpoints
-            .schedule(CheckpointRequest::new(claim.clone(), self.context_limits()));
+    pub(super) fn request_checkpoint(&self, claim: &TurnClaim, composition: &AgentCompositionPin) {
+        let _ignored = self.checkpoints.schedule(CheckpointRequest::new(
+            claim.clone(),
+            self.context_limits(),
+            composition.clone(),
+        ));
     }
 
     pub(super) async fn publish_apply(
         &self,
         claim: &TurnClaim,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
         bodies: Vec<SessionFactBody>,
     ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
         let facts = publish_nonterminal_with_capacity_retry(
@@ -1615,15 +1621,15 @@ impl Driver {
         .await?;
         if facts
             .first()
-            .is_some_and(|fact| fact.seq() != fold.through_seq() + 1)
+            .is_some_and(|fact| fact.seq() != fold.position().through_seq + 1)
         {
             self.sync_fold(claim, fold).await?;
         }
         if let Some(unapplied) = facts
             .iter()
-            .position(|fact| fact.seq() > fold.through_seq())
+            .position(|fact| fact.seq() > fold.position().through_seq)
         {
-            fold.apply(&facts[unapplied..])
+            fold.ingest(ContextPage::Canonical(&facts[unapplied..]))
                 .map_err(|error| failed("context.incremental", error.to_string()))?;
         }
         Ok(facts)
@@ -1664,10 +1670,10 @@ impl Driver {
     pub(super) async fn sync_fold(
         &self,
         claim: &TurnClaim,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
     ) -> std::result::Result<(), DriveFailure> {
         loop {
-            let after_seq = fold.through_seq();
+            let after_seq = fold.position().through_seq;
             let page = self
                 .turns
                 .read_facts(
@@ -1680,15 +1686,18 @@ impl Driver {
             if page.through_seq == after_seq {
                 return Ok(());
             }
-            fold.apply_page(&page.facts, page.through_seq)
-                .map_err(|error| failed("context.incremental", error.to_string()))?;
+            fold.ingest(ContextPage::ClaimVisible {
+                facts: &page.facts,
+                through_seq: page.through_seq,
+            })
+            .map_err(|error| failed("context.incremental", error.to_string()))?;
         }
     }
 
     pub(super) async fn load_claim(
         &self,
         claim: &TurnClaim,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
     ) -> std::result::Result<ScannedTurn, DriveFailure> {
         let mut state = ScannedTurn::default();
         let mut cursor = 0;
@@ -1696,13 +1705,9 @@ impl Driver {
         if let Ok(Some(checkpoint)) = self.turns.read_context_checkpoint(claim.session_id()).await
             && checkpoint.through_seq < claim.accepted_seq()
             && checkpoint.through_seq <= claim.live_seq()
-            && let Ok(restored) = ContextFold::from_checkpoint(
-                claim.header().clone(),
-                self.context_limits(),
-                &checkpoint.bytes,
-            )
-            && restored.through_seq() == checkpoint.through_seq
-            && restored.fact_prefix_sha256() == checkpoint.fact_prefix_sha256
+            && let Ok(restored) = fold.restored(&checkpoint.bytes)
+            && restored.position().through_seq == checkpoint.through_seq
+            && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
             && claim
                 .header()
                 .fingerprint()
@@ -1729,8 +1734,11 @@ impl Driver {
                 return Ok(state);
             }
             cursor = page.through_seq;
-            fold.apply_page(&page.facts, page.through_seq)
-                .map_err(|error| failed("context.invalid", error.to_string()))?;
+            fold.ingest(ContextPage::ClaimVisible {
+                facts: &page.facts,
+                through_seq: page.through_seq,
+            })
+            .map_err(|error| failed("context.invalid", error.to_string()))?;
             scan_turn(claim, &mut state, &page.facts)
                 .map_err(|message| failed("executor.invalid_history", message))?;
         }
@@ -1739,7 +1747,7 @@ impl Driver {
     pub(super) async fn load_fork_seed(
         &self,
         claim: &TurnClaim,
-        fold: &mut ContextFold,
+        fold: &mut ModelContextState,
     ) -> std::result::Result<(), DriveFailure> {
         let Some(origin) = claim.header().fork_origin() else {
             return Ok(());
@@ -1770,11 +1778,11 @@ impl Driver {
                 }
                 break;
             }
-            fold.apply_seed_page(&page.facts)
+            fold.ingest(ContextPage::ForkSeed(&page.facts))
                 .map_err(|error| failed("context.invalid_fork", error.to_string()))?;
             cursor = page.through_parent_seq;
         }
-        fold.finish_seed()
+        fold.ingest(ContextPage::FinishSeed)
             .map_err(|error| failed("context.invalid_fork", error.to_string()))
     }
 }

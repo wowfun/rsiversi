@@ -4,17 +4,16 @@ name: Generation-pinned Agent contributions and durable domain state
 
 ## Problem
 
-Execution/checkpoint construct ContextFold directly. Workspace context has
-dedicated Kernel branches. Fact-only budgets and fork boundaries cannot account
+Workspace context has dedicated Kernel branches. Fact-only budgets and fork boundaries cannot account
 for plugin control records or establish historical domain state.
 
 ## Proposal
 
-First extract an Agent-owned ModelContextBuilder wrapping ContextFold; execution
-and checkpoint retain the same pin. Context-owned cache envelopes bind builder,
-configuration, limits, Header, and Fact prefix. Store keeps one bounded slot.
+The [model-context builder decision](../../implemented/architecture/2026-09-08-model-context-builder.md)
+owns context selection, exact execution/maintenance pinning and cache envelopes.
+This proposal begins at the authoritative durable-state boundary.
 
-Then introduce typed complete domain state in Session controls. Kernel admits
+Introduce typed complete domain state in Session controls. Kernel admits
 validated proposals, revision CAS, and receipts. GeneratedRecords/Bytes charge
 Facts and Turn-attributed domain controls; user commands and baselines use
 separate bounded admission. Plugins cannot select their charging class.
@@ -31,8 +30,8 @@ use stable composition positions.
 ## Alternatives considered
 
 Arbitrary JSON writers bypass domain validation; separate Storage creates dual
-authority. Sampling time inside a builder loses provenance. ContextFold already
-rejects different-limit checkpoints, so a new Store key is not a safety repair.
+authority. Sampling time inside a builder loses provenance. Cache-envelope
+compatibility cannot replace an explicit authoritative Store schema cutover.
 
 ## Acceptance criteria
 

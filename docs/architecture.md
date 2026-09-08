@@ -35,8 +35,9 @@ Store contracts, the Agent Kernel, context construction, execution, and
 Store adapters. It also owns bounded preset discovery/authoring and immutable
 per-preset composition generations. Global providers create unpublished Tool
 catalog stages; Agent-only contribution plugins register through a write-only
-registrar, and one sealed catalog plus its hidden Scope form the exact
-generation pin retained by drafts, resident sessions, and delayed Tool work.
+registrar. The sealed catalog, selected context builder and hidden Scope form
+the exact generation pin retained by drafts, resident sessions, delayed Tool
+work and checkpoint maintenance.
 Runtime-composed implementations are independent ordinary plugins; protocol
 and test-support packages are libraries.
 

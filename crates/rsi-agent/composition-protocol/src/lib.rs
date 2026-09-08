@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
+use rsi_agent_context::ModelContextBuilder;
 use rsi_agent_session_protocol::{AgentPresetId, SessionHeader};
 use rsi_meta_contract::LocalContract;
 use rsi_tools_protocol::ToolRuntime;
@@ -22,6 +23,7 @@ pub struct AgentCompositionPin {
     preset_id: AgentPresetId,
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
+    context_builder: Arc<dyn ModelContextBuilder>,
     _owner: Arc<dyn AgentGenerationOwner>,
 }
 
@@ -36,6 +38,7 @@ impl AgentCompositionPin {
         preset_id: AgentPresetId,
         source_digest: impl Into<String>,
         tools: Arc<dyn ToolRuntime>,
+        context_builder: Arc<dyn ModelContextBuilder>,
         owner: Arc<dyn AgentGenerationOwner>,
     ) -> Result<Self> {
         let source_digest = source_digest.into();
@@ -52,6 +55,7 @@ impl AgentCompositionPin {
             preset_id,
             source_digest,
             tools,
+            context_builder,
             _owner: owner,
         })
     }
@@ -70,6 +74,11 @@ impl AgentCompositionPin {
     pub fn tools(&self) -> Arc<dyn ToolRuntime> {
         Arc::clone(&self.tools)
     }
+
+    /// Returns the unique immutable context builder from this exact generation.
+    pub fn context_builder(&self) -> Arc<dyn ModelContextBuilder> {
+        Arc::clone(&self.context_builder)
+    }
 }
 
 impl fmt::Debug for AgentCompositionPin {
@@ -79,6 +88,7 @@ impl fmt::Debug for AgentCompositionPin {
             .field("preset_id", &self.preset_id)
             .field("source_digest", &self.source_digest)
             .field("tools", &"<immutable Tool Runtime>")
+            .field("context_builder", self.context_builder.identity())
             .finish_non_exhaustive()
     }
 }

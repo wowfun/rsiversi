@@ -974,6 +974,7 @@ fn test_pin_with_digest(preset_id: &AgentPresetId, digit: char) -> AgentComposit
         preset_id.clone(),
         digit.to_string().repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         Arc::new(()),
     )
     .unwrap()
@@ -1027,6 +1028,7 @@ impl AgentComposition for DropTrackingComposition {
             preset_id.clone(),
             "a".repeat(64),
             Arc::new(EmptyTools),
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             Arc::new(DropOwner(Arc::clone(&self.drops))),
         )
     }

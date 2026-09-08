@@ -42,6 +42,7 @@ getrandom.workspace = true
 hex.workspace = true
 rsi-agent-executor = { path = "../../rsi-agent/executor" }
 rsi-agent-composition = { path = "../../rsi-agent/composition" }
+rsi-agent-context = { path = "../../rsi-agent/context" }
 rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
 rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
 rsi-agent-presets = { path = "../../rsi-agent/presets" }

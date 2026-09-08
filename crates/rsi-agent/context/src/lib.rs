@@ -4,6 +4,15 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod builder;
+mod default_provider;
+
+pub use builder::{
+    ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ModelContextBuilder,
+    ModelContextBuilderContract, ModelContextCursor, ModelContextState,
+};
+pub use default_provider::{DefaultContextBuilder, DefaultContextBuilderFactory};
+
 use rsi_agent_session_protocol::{
     AgentMessageContent, EMPTY_FACT_PREFIX_DIGEST, EffectId, InputMessageSource, SessionFact,
     SessionFactBody, SessionHeader, TurnId, advance_fact_prefix_digest,

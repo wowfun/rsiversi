@@ -12,6 +12,9 @@ use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
 use serde_json::json;
 
+#[path = "projection/builders.rs"]
+mod builders;
+
 fn header(system: &str) -> SessionHeader {
     SessionHeader::new(
         SessionId::new("session-1").unwrap(),

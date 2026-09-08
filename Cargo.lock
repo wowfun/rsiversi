@@ -2579,6 +2579,7 @@ dependencies = [
  "portable-pty",
  "rsi-agent-composition",
  "rsi-agent-composition-protocol",
+ "rsi-agent-context",
  "rsi-agent-executor",
  "rsi-agent-kernel",
  "rsi-agent-presets",
@@ -2673,6 +2674,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
+ "rsi-agent-context",
  "rsi-agent-presets",
  "rsi-meta",
  "rsi-meta-profile",
@@ -2690,6 +2692,7 @@ name = "rsi-agent-composition-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-agent-context",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-meta-contract",
@@ -2705,10 +2708,12 @@ dependencies = [
 name = "rsi-agent-context"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "hex",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
+ "rsi-meta",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -2757,6 +2762,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rsi-agent-composition-protocol",
+ "rsi-agent-context",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",
@@ -3866,6 +3872,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "rsi-agent-composition-protocol",
+ "rsi-agent-context",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",

@@ -463,6 +463,7 @@ async fn shutdown_releases_resident_generation_pins_while_service_handles_escape
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();

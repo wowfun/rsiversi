@@ -107,6 +107,15 @@ Composition tests also run beneath explicit service Local isolation. Generation
 contributions must inherit that mapping while their pins remain independent of
 composition-provider retirement; acquiring a fresh Runtime root would violate it.
 
+Context builder tests compare the default provider's requests with the existing
+fold, reject cross-builder/config/version/header/limit caches before provider
+restore, and preserve state after failed restoration. A second provider adds a
+distinct deterministic request marker and its own checkpoint payload framing;
+the executor test replaces the composition catalog after Session admission and
+proves both execution and delayed maintenance retain the admitted builder.
+Composition tests reject an absent builder despite an ancestor supply, reject
+duplicates with complete candidate cleanup, and preserve the prior pin.
+
 Context tests fold real Facts and prove deterministic compaction, complete-turn
 removal, tool call/result adjacency, Media references, and hard byte/message
 bounds. Fork tests reject child Facts until the complete balanced seed interval

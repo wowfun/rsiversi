@@ -795,7 +795,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     });
     let turns: Arc<dyn TurnExecution> = fixture.clone();
     let scheduler = Arc::new(CheckpointScheduler::new());
-    let request = CheckpointRequest::new(claim.clone(), ContextLimits::default());
+    let request = CheckpointRequest::new(claim.clone(), ContextLimits::default(), context_pin());
     assert_eq!(
         scheduler.schedule(request.clone()),
         checkpoint::ScheduleOutcome::Scheduled
@@ -814,15 +814,16 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     let writes = fixture.writes.lock().unwrap();
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].through_seq, 3);
-    let restored = ContextFold::from_checkpoint(
+    let mut restored = ModelContextState::open(
+        context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
-        &writes[0].bytes,
     )
     .unwrap();
-    assert_eq!(restored.through_seq(), 3);
+    restored.restore(&writes[0].bytes).unwrap();
+    assert_eq!(restored.position().through_seq, 3);
     assert!(
-        serde_json::to_string(&restored.project(ContextLimits::default()).unwrap().messages)
+        serde_json::to_string(&restored.build(Vec::new()).unwrap().messages())
             .unwrap()
             .contains("queued task")
     );
@@ -849,6 +850,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
         scheduler.schedule(CheckpointRequest::new(
             claim.clone(),
             ContextLimits::default(),
+            context_pin(),
         )),
         checkpoint::ScheduleOutcome::Scheduled
     );
@@ -862,15 +864,14 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
     let writes = fixture.writes.lock().unwrap();
     assert_eq!(writes.len(), 1);
     let checkpoint = &writes[0];
-    let restored = ContextFold::from_checkpoint(
+    let mut restored = ModelContextState::open(
+        context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
-        &checkpoint.bytes,
     )
     .unwrap();
-    let messages =
-        serde_json::to_string(&restored.project(ContextLimits::default()).unwrap().messages)
-            .unwrap();
+    restored.restore(&checkpoint.bytes).unwrap();
+    let messages = serde_json::to_string(&restored.build(Vec::new()).unwrap().messages()).unwrap();
     assert!(messages.contains("inherited task"));
     assert!(messages.contains("child task"));
     assert_eq!(checkpoint.through_seq, 2);
@@ -961,4 +962,52 @@ fn retained_tool_deadline_is_bounded_during_factory_preparation() {
             .expect_err("unbounded retained Tool deadline");
         assert!(error.to_string().contains("retained_tool_wait_ms"));
     }
+}
+
+#[derive(Debug)]
+struct EmptyTools;
+
+#[async_trait]
+impl rsi_tools_protocol::ToolRuntime for EmptyTools {
+    fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
+        Vec::new()
+    }
+
+    fn prepare(
+        &self,
+        _invocation_id: &str,
+        call: ToolCall,
+    ) -> rsi_tools_protocol::Result<Box<dyn PreparedToolCall>> {
+        Err(rsi_tools_protocol::ToolError::Unknown(call.name))
+    }
+
+    fn query(
+        &self,
+        _identity: &ToolResultIdentity,
+    ) -> rsi_tools_protocol::Result<RetainedToolResult> {
+        Ok(RetainedToolResult::Absent)
+    }
+
+    async fn wait(
+        &self,
+        _identity: &ToolResultIdentity,
+        _cancellation: CancellationToken,
+    ) -> rsi_tools_protocol::Result<RetainedToolResult> {
+        Ok(RetainedToolResult::Absent)
+    }
+
+    fn commit(&self, _identity: &ToolResultIdentity) -> rsi_tools_protocol::Result<()> {
+        Err(rsi_tools_protocol::ToolError::InvalidInput("absent".into()))
+    }
+}
+
+pub(super) fn context_pin() -> AgentCompositionPin {
+    AgentCompositionPin::new(
+        rsi_agent_session_protocol::AgentPresetId::new("test-agent").unwrap(),
+        "a".repeat(64),
+        Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        Arc::new(()),
+    )
+    .unwrap()
 }

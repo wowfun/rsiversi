@@ -3,7 +3,9 @@
 This package owns the process-local interface between Agent composition,
 session drafts, Kernel, and Executor. An `AgentCompositionPin` carries one
 validated preset identity, one exact Profile source digest, one immutable Tool
-Runtime, and opaque lifetime ownership for the standing generation. Consumers
+Runtime, one immutable ModelContextBuilder, and opaque lifetime ownership for
+the standing generation. Execution and delayed checkpoint maintenance retain
+that same pin; maintenance never resolves a newer builder independently. Consumers
 cannot obtain a registrar, Profile resolver, Scope, or provider catalog from a
 pin.
 
