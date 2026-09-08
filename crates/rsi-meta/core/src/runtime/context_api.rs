@@ -758,6 +758,7 @@ impl Fiber {
                 generation,
             }),
             setup_effect: None,
+            child_position: None,
             isolation: Arc::clone(&self.base_context.isolation),
             local_isolation: Arc::clone(&self.base_context.local_isolation),
             event_isolation: Arc::clone(&self.base_context.event_isolation),

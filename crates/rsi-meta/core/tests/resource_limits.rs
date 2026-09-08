@@ -237,6 +237,7 @@ fn duplicate_prepared_requirement_diagnostic_names_the_service() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The complete closed limit matrix stays adjacent to its construction invariant.
 fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panicking() {
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -289,6 +290,7 @@ fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panickin
 
     topology_candidates!(
         maximum_fibers,
+        maximum_composition_positions,
         maximum_fiber_depth,
         maximum_services,
         maximum_dependency_edges,

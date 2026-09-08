@@ -122,11 +122,22 @@ misses and rejected writes are explicitly non-fatal. The seam carries the
 Context-computed Fact-prefix digest separately from the opaque bytes so restore
 can require both views to agree.
 
-The Kernel-owned finalization registry snapshots effect-owned hooks in
-registration order and starts the complete snapshot concurrently. A hook
+The Kernel-owned finalization registry accepts an exact-generation
+`RegistrationContext` and installs undo before publication. Loading registrations
+join setup rollback; Active registrations own dynamic effects. At most 64 hooks
+may be registered. The Kernel factory binds the registry to its Runtime; a
+standalone Kernel binds on its first successful registration. This identity
+persists until Kernel shutdown and never combines different Runtimes.
+
+The registry reuses an immutable membership/order snapshot while both are
+unchanged. Child declaration positions determine precedence; rebuilding at the
+same position preserves precedence, and reorder changes no Fiber generation.
+Retirement removes a hook from new snapshots; an already captured invocation
+keeps its complete snapshot. Hooks run without registry or lifecycle locks.
+The registry starts that complete snapshot concurrently. A hook
 receives the exact turn identities and its opaque Jobs scope authority. Each
 hook returns an optional completion blocker; panics and errors are isolated,
-and the registry selects the first cleanup error or blocker by registration
+and the registry selects the first cleanup error or blocker by declaration
 order only after every hook settles. The executor applies one deadline to the
 complete snapshot. Timeout outranks cleanup error, which outranks a completion
 blocker, which outranks the original outcome. Cleanup failure replaces every

@@ -12,6 +12,14 @@ rollback order, resource reclamation and an intentional fatal Worker trap.
 It also installs two Host-prepared child Profiles in one Runtime, with independent
 Local isolation and controls. Disposing either child leaves the other child and
 the parent's services active.
+Ordered-contribution probes activate in reverse declaration order, exercise both
+listener lanes, reorder without generation changes, rebuild one contributor at
+its original position, retain old snapshots, and reclaim exact Scope registrations.
+The Profile-owned namespace scenario also runs unchanged here: includes share
+named Local/event/Portable bindings, while two static wrappers remain independent
+and retiring one leaves the other callable. Immutable browser Profile sources
+exercise unchanged reload; native file replacement exercises selective reload in
+the owning Profile tests.
 
 Run `npm ci`, `npx playwright install chromium firefox`, then `npm test` here.
 The root Rust toolchain needs `wasm32-unknown-unknown`; the wasm-bindgen CLI must

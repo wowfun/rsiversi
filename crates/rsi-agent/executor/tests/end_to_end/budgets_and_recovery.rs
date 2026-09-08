@@ -465,8 +465,14 @@ async fn hanging_finalizer_becomes_a_durable_bounded_failure() {
         .lookup_local::<TurnFinalizationContract>()
         .unwrap();
     let entered = Arc::new(Notify::new());
+    let (finalizer_owner, finalizer_context) =
+        rsi_agent_testkit::activate_contribution_owner(&stack.runtime.root())
+            .await
+            .unwrap();
+    let credential = finalizer_context.registration_context().unwrap();
     let finalizer_lease = finalization
         .register(
+            &credential,
             "hanging-test-finalizer".into(),
             Arc::new(HangingFinalizer {
                 entered: Arc::clone(&entered),
@@ -488,6 +494,7 @@ async fn hanging_finalizer_becomes_a_durable_bounded_failure() {
     ));
 
     drop(finalizer_lease);
+    assert!(finalizer_owner.dispose().await.is_clean());
     drop(finalization);
     stack.dispose(language_fiber, executor_fiber).await;
 }

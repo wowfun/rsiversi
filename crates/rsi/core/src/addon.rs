@@ -61,6 +61,7 @@ struct Factory {
 }
 
 type RegisterMarker = fn(&mut HostBuilder) -> rsi_host::Result<()>;
+type RegisterAgentMarker = fn(&mut AgentContributionCatalog) -> rsi_meta_profile::Result<()>;
 
 #[derive(Clone, Debug)]
 struct Marker {
@@ -68,6 +69,7 @@ struct Marker {
     lane: &'static str,
     key: &'static str,
     register: RegisterMarker,
+    register_agent: RegisterAgentMarker,
 }
 
 #[derive(Clone, Debug)]
@@ -233,12 +235,18 @@ impl StandardAddonBuilder {
         &mut self,
         scope: AddonScope,
     ) -> rsi_host::Result<&mut Self> {
-        self.marker(scope, "local", C::KEY, |builder| {
-            if !builder.has_local_contract::<C>() {
-                builder.register_local_contract::<C>()?;
-            }
-            Ok(())
-        })
+        self.marker(
+            scope,
+            "local",
+            C::KEY,
+            |builder| {
+                if !builder.has_local_contract::<C>() {
+                    builder.register_local_contract::<C>()?;
+                }
+                Ok(())
+            },
+            AgentContributionCatalog::register_local_contract::<C>,
+        )
     }
 
     /// Declares an exact event marker in a selected composition role.
@@ -246,12 +254,18 @@ impl StandardAddonBuilder {
         &mut self,
         scope: AddonScope,
     ) -> rsi_host::Result<&mut Self> {
-        self.marker(scope, "event", E::KEY, |builder| {
-            if !builder.has_local_event::<E>() {
-                builder.register_local_event::<E>()?;
-            }
-            Ok(())
-        })
+        self.marker(
+            scope,
+            "event",
+            E::KEY,
+            |builder| {
+                if !builder.has_local_event::<E>() {
+                    builder.register_local_event::<E>()?;
+                }
+                Ok(())
+            },
+            AgentContributionCatalog::register_local_event::<E>,
+        )
     }
 
     fn marker(
@@ -260,6 +274,7 @@ impl StandardAddonBuilder {
         lane: &'static str,
         key: &'static str,
         register: RegisterMarker,
+        register_agent: RegisterAgentMarker,
     ) -> rsi_host::Result<&mut Self> {
         if self.addon.markers.len() >= HostLimits::default().maximum_local_contracts {
             return Err(capacity(
@@ -272,6 +287,7 @@ impl StandardAddonBuilder {
             lane,
             key,
             register,
+            register_agent,
         });
         Ok(self)
     }
@@ -491,7 +507,7 @@ impl StandardAddonSet {
     }
 
     pub(crate) fn agent_catalog(&self) -> rsi_host::Result<AgentContributionCatalog> {
-        AgentContributionCatalog::new(
+        let mut catalog = AgentContributionCatalog::new(
             self.addons
                 .iter()
                 .flat_map(|addon| addon.factories.values())
@@ -505,7 +521,17 @@ impl StandardAddonSet {
                     )
                 }),
         )
-        .map_err(|error| HostError::Bootstrap(error.to_string()))
+        .map_err(|error| HostError::Bootstrap(error.to_string()))?;
+        for marker in self
+            .addons
+            .iter()
+            .flat_map(|addon| &addon.markers)
+            .filter(|marker| marker.scope == AddonScope::Agent)
+        {
+            (marker.register_agent)(&mut catalog)
+                .map_err(|error| HostError::Bootstrap(error.to_string()))?;
+        }
+        Ok(catalog)
     }
 
     pub(crate) fn digest(&self) -> rsi_host::Result<String> {

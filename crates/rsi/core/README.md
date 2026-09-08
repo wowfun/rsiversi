@@ -72,6 +72,10 @@ generation and are never replayed across reload. During replacement, unavailable
 capabilities reject new calls. The process owner, EndpointId, HostEpoch and local
 launch identity remain stable across a supported Profile reload; connection
 description is therefore independent of listener replacement.
+Changing only the Agent executor retains the independent API registry and local
+listener under exact Profile convergence. It produces no listener replacement or
+intermediate final listener diagnostic; the retained listener reports its final
+diagnostics at shutdown.
 
 `rsi --profile NAME [application arguments]` selects one named Application
 Profile. The built-in `headless` application accepts one positional task or

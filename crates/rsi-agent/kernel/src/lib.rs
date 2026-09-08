@@ -355,9 +355,7 @@ struct KernelState {
     fresh_reservations: BTreeSet<SessionId>,
     executors: BTreeMap<String, u64>,
     next_executor_registration: u64,
-    finalizers: BTreeMap<u64, FinalizerEntry>,
-    finalizer_names: BTreeSet<String>,
-    next_finalizer_registration: u64,
+    finalizers: finalization::Registry,
     tree_lanes: BTreeMap<SessionId, Weak<Semaphore>>,
     next_claim: u64,
     claim_queue: VecDeque<(SessionId, TurnId)>,
@@ -500,12 +498,6 @@ impl SessionLoad {
             self.completed.notify_waiters();
         }
     }
-}
-
-#[derive(Clone)]
-struct FinalizerEntry {
-    name: String,
-    finalizer: Arc<dyn TurnFinalizer>,
 }
 
 struct SessionRuntime {
@@ -821,6 +813,7 @@ fn apply_committed_flush(
 mod admission;
 mod elapsed;
 mod execution;
+mod finalization;
 mod human_wait;
 mod lifecycle;
 mod notifications;
@@ -994,6 +987,7 @@ impl PluginFactory for KernelFactory {
         )
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
+        lock_state(&kernel.inner).finalizers.runtime = Some(plan.context().runtime_identity());
         let worker = kernel.start_workers();
         let turns: Arc<dyn TurnService> = Arc::new(kernel.clone());
         let execution: Arc<dyn TurnExecution> = Arc::new(kernel.clone());

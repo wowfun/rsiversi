@@ -56,7 +56,7 @@ impl rsi_meta::PluginFactory for ApprovalBrokerFactory {
         )?;
         let lease = plan
             .local::<rsi_approval_protocol::ApprovalAnswerersContract>()?
-            .register(broker.clone())
+            .register(&plan.context().registration_context()?, broker.clone())
             .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
         plan.defer(
             "unregister approval broker",

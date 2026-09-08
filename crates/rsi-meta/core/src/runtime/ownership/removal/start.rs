@@ -1,7 +1,8 @@
 use super::super::super::{Runtime, drop_catching_unwind};
-use super::EventRemoval;
+use super::{RegistrationRemoval, RemovalAction};
+use std::sync::atomic::Ordering;
 
-impl EventRemoval {
+impl RegistrationRemoval {
     pub(in super::super) fn claim_detached_report(&self) {
         let failure = {
             let mut state = self
@@ -21,7 +22,7 @@ impl EventRemoval {
         }
     }
 
-    pub(in super::super) fn start(&self) -> bool {
+    pub(in crate::runtime) fn start(&self) -> bool {
         let won = {
             let mut state = self
                 .state
@@ -31,6 +32,7 @@ impl EventRemoval {
                 false
             } else {
                 state.started = true;
+                self.admitting.store(false, Ordering::Release);
                 true
             }
         };
@@ -38,18 +40,30 @@ impl EventRemoval {
             return false;
         }
         let runtime = self.runtime.upgrade().map(|inner| Runtime { inner });
-        let result = runtime.as_ref().map_or(Ok(false), |runtime| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                runtime.remove_local_listener_entry(self.owner, self.id)
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &self.action {
+                RemovalAction::Listener(id) => Ok(runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.remove_local_listener_entry(self.owner, *id))),
+                RemovalAction::Local(undo) => {
+                    let undo = undo
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    undo.map_or(Ok(false), |undo| undo().map(|()| true))
+                }
             }))
             .map_err(|payload| {
                 if drop_catching_unwind(payload) {
-                    "Local event listener removal and panic payload destruction panicked".to_owned()
+                    "Local registration removal and panic payload destruction panicked".to_owned()
                 } else {
-                    "Local event listener removal panicked".to_owned()
+                    "Local registration removal panicked".to_owned()
                 }
             })
-        });
+            .and_then(std::convert::identity)
+            .map_err(|error| {
+                crate::runtime::diagnostics::bound_owned(error, self.maximum_diagnostic_bytes)
+            });
         let detached_failure = {
             let mut state = self
                 .state
@@ -72,7 +86,7 @@ impl EventRemoval {
         if result.is_err()
             && let Some(runtime) = runtime
         {
-            runtime.mark_terminal_owned("Local event listener removal panicked");
+            runtime.mark_terminal_owned("Local registration removal failed");
         }
         true
     }

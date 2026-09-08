@@ -115,6 +115,7 @@ impl DetachedCapability {
                 runtime: Runtime { inner },
                 owner: self.holder.owner,
                 setup_effect: None,
+                child_position: None,
                 isolation: Arc::clone(&self.holder.isolation),
                 local_isolation: Arc::clone(&self.holder.local_isolation),
                 event_isolation: Arc::clone(&self.holder.event_isolation),

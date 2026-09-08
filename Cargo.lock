@@ -2883,6 +2883,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-jobs",
+ "rsi-meta",
  "rsi-meta-contract",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -3354,6 +3355,7 @@ name = "rsi-approval-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-meta",
  "rsi-meta-contract",
  "rsi-workspace-path",
  "serde",

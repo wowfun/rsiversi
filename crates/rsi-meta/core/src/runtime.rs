@@ -24,7 +24,14 @@ mod admission;
 mod attempts;
 mod call_identity;
 mod capabilities;
+mod registration;
+pub use registration::{RegistrationContext, RegistrationLease, RegistrationPosition};
+mod composition_order;
 mod configuration;
+pub use composition_order::{
+    ChildPosition, RegistrationOrderSnapshot, RegistrationRank, RuntimeIdentity,
+};
+use composition_order::{CompositionOrder, PositionOccupancy};
 mod context_api;
 mod context_scope;
 mod diagnostics;
@@ -62,7 +69,7 @@ use local_event_registry::{LocalEventListeners, LocalEventSlot, LocalListenerLoc
 pub(crate) use local_services::LocalBinding;
 pub use local_services::LocalSupplyHandle;
 use local_services::{LocalSlot, LocalSupplyEntry};
-pub(crate) use ownership::EventOwnership;
+pub(crate) use ownership::RegistrationOwnership;
 pub(crate) use panic_containment::{contain_panic_result, drop_catching_unwind};
 use pending_report::PendingReportBuilder;
 pub use preparation::PreparedPlugin;
@@ -95,6 +102,8 @@ impl fmt::Debug for Runtime {
 }
 
 struct RuntimeInner {
+    composition_order: Arc<CompositionOrder>,
+    empty_local_event_bindings: std::sync::OnceLock<Arc<crate::local_events::LocalEventBindings>>,
     execution: crate::Execution,
     limits: ValidatedRuntimeLimits,
     resources: RuntimeResources,
@@ -114,6 +123,7 @@ struct RuntimeInner {
     next_generation: AtomicU64,
     next_isolation: AtomicU64,
     next_listener: AtomicU64,
+    next_registration: AtomicU64,
     next_capability_entry: AtomicU64,
     next_call: AtomicU64,
     next_effect: AtomicU64,
@@ -170,6 +180,7 @@ struct Fiber {
 }
 
 struct FiberData {
+    position: Option<PositionOccupancy>,
     identity: FactoryIdentity,
     update_mode: UpdateMode,
     factory: Option<RetainedFactory>,
@@ -348,7 +359,7 @@ struct ShutdownRunState {
     failed: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Owner {
     fiber: FiberId,
     generation: FiberGeneration,
@@ -374,6 +385,7 @@ pub(crate) struct ContextScope {
 /// Immutable scoped capability used to apply plugins and access owned resources.
 #[derive(Clone)]
 pub struct Context {
+    child_position: Option<ChildPosition>,
     runtime: Runtime,
     owner: Option<Owner>,
     setup_effect: Option<EffectScope>,
@@ -455,6 +467,11 @@ impl Runtime {
         ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                empty_local_event_bindings: std::sync::OnceLock::new(),
+                composition_order: CompositionOrder::new(
+                    limits.topology.maximum_composition_positions,
+                    limits.topology.maximum_effects,
+                ),
                 execution,
                 limits,
                 resources,
@@ -486,6 +503,7 @@ impl Runtime {
                 next_generation: AtomicU64::new(0),
                 next_isolation: AtomicU64::new(0),
                 next_listener: AtomicU64::new(0),
+                next_registration: AtomicU64::new(0),
                 next_capability_entry: AtomicU64::new(0),
                 next_call: AtomicU64::new(0),
                 next_effect: AtomicU64::new(0),
@@ -501,6 +519,7 @@ impl Runtime {
         Context {
             runtime: self.clone(),
             owner: None,
+            child_position: None,
             setup_effect: None,
             isolation: Arc::new(BTreeMap::new()),
             local_isolation: Arc::new(BTreeMap::new()),
@@ -652,6 +671,11 @@ impl Runtime {
             .collect::<Vec<_>>();
 
         let id = self.next_fiber_id()?;
+        let position = match &parent.child_position {
+            Some(position) => position.clone(),
+            None => parent.child_position()?,
+        };
+        let position = position.claim(self, parent.owner, id)?;
         let initial = FiberSnapshot {
             id,
             generation: FiberGeneration(0),
@@ -681,6 +705,7 @@ impl Runtime {
             disposal: Arc::new(DisposalRun::default()),
             cleanup_phase: Mutex::new(CleanupPhase::Scheduled),
             data: Mutex::new(FiberData {
+                position: Some(position),
                 identity,
                 update_mode,
                 factory: Some(factory),

@@ -4,10 +4,12 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+mod contributions;
 mod scope;
 mod scoped_layers;
 mod store;
 
+pub use contributions::ScopedContributions;
 pub use scope::{ScopeError, ScopeHandle, ScopeKey, ScopeParentBinding, ScopeRoot, ScopedContext};
 pub use scoped_layers::{LayerContext, MutationError, ScopeLayer, ScopedLayers};
 pub use store::{AnonymousEntries, NamedEntries, ScopeUndo};

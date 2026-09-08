@@ -10,6 +10,7 @@ publish = false
 rsi-workspace-path = { path = "../../rsi-workspace/path" }
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

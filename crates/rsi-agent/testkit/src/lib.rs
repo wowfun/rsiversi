@@ -134,9 +134,11 @@ impl MemoryStore {
     }
 }
 
+mod contribution;
 mod memory_store;
 mod store_contract;
 
+pub use contribution::activate_contribution_owner;
 pub use store_contract::assert_mechanical_store_contract;
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.

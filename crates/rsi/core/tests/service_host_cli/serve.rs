@@ -2,7 +2,7 @@ use super::*;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn foreground_host_reload_keeps_process_and_emits_replacement_diagnostics() {
+async fn foreground_host_executor_reload_retains_listener_and_emits_one_final_diagnostic() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
     let mut child = fixture
         .tokio_command()
@@ -26,7 +26,7 @@ async fn foreground_host_reload_keeps_process_and_emits_replacement_diagnostics(
     .await
     .unwrap();
     for maximum in [3, 2] {
-        replace_executor_and_wait(&fixture, &mut child, maximum).await;
+        reload_executor_and_keep_listener(&fixture, &mut child, maximum);
         fixture.assert_success(&["--profile", "devices", "list"]);
     }
     fixture.assert_success(&["host", "stop"]);
@@ -40,7 +40,7 @@ async fn foreground_host_reload_keeps_process_and_emits_replacement_diagnostics(
         .lines()
         .filter(|line| line.starts_with("Service Host diagnostics final=true"))
         .collect();
-    assert_eq!(finals.len(), 3, "{stderr}");
+    assert_eq!(finals.len(), 1, "{stderr}");
     for line in finals {
         let accepted: u64 = line
             .split_whitespace()
@@ -169,9 +169,9 @@ async fn verify_serve(fixture: &CliFixture, child: &mut tokio::process::Child) {
     check_device_management(fixture, address, &format!("http://{address}")).await;
     fixture.assert_success(&["host", "status"]);
     fixture.assert_success(&["host", "reload"]);
-    replace_executor_and_wait(fixture, child, 3).await;
+    reload_executor_and_keep_listener(fixture, child, 3);
     check_device_management(fixture, address, &format!("http://{address}")).await;
-    replace_executor_and_wait(fixture, child, 2).await;
+    reload_executor_and_keep_listener(fixture, child, 2);
     check_device_management(fixture, address, &format!("http://{address}")).await;
     let mut client = JsonClient::start(fixture, &["--session-id", "after-serve-reload"]);
     client.send("hello through the shared Service Host\n").await;
@@ -179,7 +179,7 @@ async fn verify_serve(fixture: &CliFixture, child: &mut tokio::process::Child) {
     client.finish().await;
 }
 
-async fn replace_executor_and_wait(
+fn reload_executor_and_keep_listener(
     fixture: &CliFixture,
     child: &mut tokio::process::Child,
     maximum_active_turns: usize,
@@ -208,32 +208,16 @@ async fn replace_executor_and_wait(
     let original = source.split("\n# reload fixture\n").next().unwrap();
     std::fs::write(&path, format!("{original}\n# reload fixture\n[[steps]]\nkind = \"patch\"\ntarget = \"rsi-agent-executor\"\nconfig = {{ executor_id = \"rsi-agent-executor\", maximum_active_turns = {maximum_active_turns} }}\n")).unwrap();
     fixture.assert_success(&["host", "reload"]);
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                let mut stderr = String::new();
-                child
-                    .stderr
-                    .take()
-                    .unwrap()
-                    .read_to_string(&mut stderr)
-                    .await
-                    .unwrap();
-                panic!("service exited during listener replacement: {status}: {stderr}");
-            }
-            if std::fs::metadata(socket).is_ok_and(|current| current.ino() != previous_inode)
-                && fixture
-                    .run(&["host", "status"])
-                    .stdout
-                    .starts_with(b"running\t")
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("replacement listener never became ready");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "service stopped after executor reload"
+    );
+    assert_eq!(
+        std::fs::metadata(socket).unwrap().ino(),
+        previous_inode,
+        "executor reload replaced an independent listener"
+    );
+    fixture.assert_success(&["host", "status"]);
     assert_eq!(
         std::fs::read(metadata_path).unwrap(),
         owner,

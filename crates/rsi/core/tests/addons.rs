@@ -291,7 +291,7 @@ async fn preset_management_uses_actual_agent_declarations_and_rejects_a_mismatch
     );
     let system = root.path().join("presets");
     std::fs::create_dir_all(system.join("standard")).unwrap();
-    std::fs::write(system.join("standard/agent.profile.toml"), "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'fixture'\nplugin = 'fixture.counter'\nconfig = { value = 7 }\n").unwrap();
+    std::fs::write(system.join("standard/agent.profile.toml"), "format = 1\n[[steps]]\nkind = 'group'\nid = 'private'\n[steps.isolation]\nlocal = [{ key = 'fixture.addon.counter', label = 'agent-private' }]\n[[steps.nodes]]\nkind = 'plugin'\nid = 'fixture'\nplugin = 'fixture.counter'\nconfig = { value = 7 }\n").unwrap();
     let manager = AgentPresetManager::open_standard(&extended, &system)
         .await
         .unwrap();

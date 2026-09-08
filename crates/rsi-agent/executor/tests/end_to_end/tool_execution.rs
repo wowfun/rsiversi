@@ -610,8 +610,17 @@ async fn finalizer_failure_wins_before_any_budget_marker_is_published() {
         .root()
         .lookup_local::<TurnFinalizationContract>()
         .unwrap();
+    let (finalizer_owner, finalizer_context) =
+        rsi_agent_testkit::activate_contribution_owner(&stack.runtime.root())
+            .await
+            .unwrap();
+    let credential = finalizer_context.registration_context().unwrap();
     let finalizer_lease = finalization
-        .register("failing-test-finalizer".into(), Arc::new(FailingFinalizer))
+        .register(
+            &credential,
+            "failing-test-finalizer".into(),
+            Arc::new(FailingFinalizer),
+        )
         .unwrap();
     let executor_fiber = stack.activate_executor("executor-finalizer-budget").await;
     let budget = TurnBudget::new(1_800_000, 1, 256, 65_536, 67_108_864).unwrap();
@@ -637,6 +646,7 @@ async fn finalizer_failure_wins_before_any_budget_marker_is_published() {
     );
 
     drop(finalizer_lease);
+    assert!(finalizer_owner.dispose().await.is_clean());
     drop(finalization);
     drop(tool_lease);
     drop(tools);
@@ -661,8 +671,14 @@ async fn completion_blocker_replaces_only_an_otherwise_successful_outcome() {
         .root()
         .lookup_local::<TurnFinalizationContract>()
         .unwrap();
+    let (finalizer_owner, finalizer_context) =
+        rsi_agent_testkit::activate_contribution_owner(&stack.runtime.root())
+            .await
+            .unwrap();
+    let credential = finalizer_context.registration_context().unwrap();
     let finalizer_lease = finalization
         .register(
+            &credential,
             "completion-blocker".into(),
             Arc::new(CompletionBlockerFinalizer),
         )
@@ -679,6 +695,7 @@ async fn completion_blocker_replaces_only_an_otherwise_successful_outcome() {
     );
 
     drop(finalizer_lease);
+    assert!(finalizer_owner.dispose().await.is_clean());
     drop(finalization);
     stack.dispose(language_fiber, executor_fiber).await;
 }

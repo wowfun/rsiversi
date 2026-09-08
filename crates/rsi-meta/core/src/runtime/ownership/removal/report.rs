@@ -1,7 +1,7 @@
 use super::super::super::{CleanupReport, Runtime};
-use super::{EventRemoval, RemovalResult};
+use super::{RegistrationRemoval, RemovalResult};
 
-impl EventRemoval {
+impl RegistrationRemoval {
     pub(in super::super) fn report(&self, result: &RemovalResult) -> CleanupReport {
         let mut report = CleanupReport::default();
         if let Err(error) = result {

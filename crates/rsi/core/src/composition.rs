@@ -1591,7 +1591,11 @@ impl PluginFactory for SessionJobsFinalizerFactory {
         });
         let lease = plan
             .local::<TurnFinalizationContract>()?
-            .register("rsi.session.jobs".into(), finalizer)
+            .register(
+                &plan.context().registration_context()?,
+                "rsi.session.jobs".into(),
+                finalizer,
+            )
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(
             "withdraw Session Jobs finalizer",

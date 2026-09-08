@@ -162,6 +162,24 @@ further mutation. The transaction can reverse only mutations whose undo was
 successfully registered; code that performs an external side effect before
 registering cleanup remains responsible for that unowned interval.
 
+`Context::registration_context` issues a narrow Local registrar credential for
+one exact non-root generation. It cannot apply children, resolve dependencies,
+provide services, or impersonate another Context. Local registrars install exact
+undo through this credential before publishing a contribution. Loading joins
+the existing setup transaction; Active uses one dynamic effect. Publication
+validates the current generation and serializes with exact removal. The bounded
+publication closure only mutates the owning registrar and never invokes plugin
+callbacks or waits. Business callbacks run after capturing a snapshot and
+releasing all registrar and lifecycle locks.
+
+The returned registration lease closes new admission immediately when disposed
+or dropped. Generation retirement uses the same exact removal, and retained
+registration tokens observe that closure. Registrars check token liveness when
+capturing new work; an already captured dispatch keeps its documented snapshot
+semantics. Synchronous undo is contained and owned by the same effect record,
+including failure reporting. Registration order tokens retain position and an
+owner-local ordering tie-break, without granting mutation authority.
+
 `InvocationContext::caller_effect` lets a service implement an operation on
 behalf of its exact caller generation. Contributions made through that handle
 retire with the caller, not the provider. The handle is generation-fenced and
@@ -310,9 +328,32 @@ disposed; disposal removes it from future snapshots. A once binding still
 requires its exact atomic claim and cannot run twice across concurrent
 dispatches.
 
-The registry preserves append/prepend order with stable internal ordering keys;
-exact-handle removal uses the listener identity's indexed location and never
-shifts the remaining slot membership.
+The registry orders listeners by their owning composition position, then by
+registration order within that exact position. The prepend lane precedes append
+and reverses declaration order; append follows declaration order. One dispatch
+captures immutable membership and ranks before calling any listener. Unchanged
+membership/order reuses the same sorted snapshot. Exact-handle removal remains
+indexed by listener identity.
+
+`Context::child_position` reserves an opaque stable identity for one direct
+child. `with_child_position` derives a Context selecting that identity for apply;
+an ordinary apply reserves its position at admission. At most one live Fiber may
+occupy a position. Rebuilding after disposal may reuse it. Positions belong to
+one Runtime and exact parent generation; another parent or stale generation
+cannot apply or reorder them. `reorder_children` atomically publishes ranks for
+that parent's positions, placing explicitly listed positions first and retaining
+the relative order of omitted positions afterward. It never changes Fiber or
+registration generations. Descendant order follows the complete position path.
+Ordinary concurrent child admission or registration inside a single plugin does
+not promise deterministic order across runs.
+
+The Runtime bounds simultaneously retained position identities separately from
+Fiber capacity. A position retains only bounded composition metadata and its
+ancestor positions, not execution admission or a Runtime reference. Explicit
+position handles can therefore outlive shutdown as stale metadata. Last-owner
+release removes the exact order entry; there is no historical position table.
+Candidate and compensation handles may coexist without reserving candidate
+Fibers. Rank publication does not introduce another lifecycle graph.
 
 Local callbacks execute directly. Runtime does not add a common deadline,
 spawn, cancellation token, call identity, or dispatch resource tracker. Errors,
@@ -354,6 +395,23 @@ entries. Overlay resolution retains shared entry values and clones only the
 final visible owned snapshot. Exact `peek` validates only root identity and does not walk ancestry;
 reads never create a layer. `NamedEntries` and
 `AnonymousEntries` preserve insertion order and exact independent ownership.
+Explicit ordered contributions use `ScopedContributions` instead. Its owner
+supplies one Runtime identity, one ScopeRoot and a total live-entry bound.
+Registration takes the caller's narrow `RegistrationContext` and an explicit
+optional scope key; the key selects visibility and grants no generation
+authority. Both Runtime and scope-root mismatches reject before publication.
+Loading joins setup undo and Active owns a dynamic effect. Each entry is
+removed by its exact lease or generation retirement.
+
+An ordered contribution snapshot includes global entries, then matching
+ancestors from farthest to nearest. Each layer follows current composition
+declaration order; this does not change named overlay replacement. Snapshot
+capture retains one immutable Arc, and business callbacks run after capture.
+The table caches only its last bounded selection, avoiding a history of queried
+scope keys. Unchanged membership, ancestry and effective order reuse that Arc,
+including after an unrelated order publication. Reparenting affects the next
+capture; existing snapshots keep their selected values. Entry removal also
+releases its exact scope reference, and query-only reads create no layer.
 Each product store declares its maximum simultaneously retained exact-scope
 layers. An existing key remains usable at saturation, while a new key fails
 before factory execution; a cleanup failure may consume capacity but cannot

@@ -39,8 +39,14 @@ released. Provider shutdown stops admission, cancels and joins unpublished
 builds, removes its current-generation owners, and waits for every external pin
 to release before disposing and joining the corresponding Scope.
 
-`AgentContributionCatalog` exposes only exact immutable `ResolvedFactory`
-values selected by the application. `AgentCompositionFactory` is an ordinary
+`AgentContributionCatalog` holds exact `ResolvedFactory` values and nominal
+Local/event markers selected by the application. Marker declaration is explicit,
+bounded to 4,096 entries per lane, and frozen when the catalog enters the
+composition factory. Repeating the same nominal marker is idempotent; assigning
+the same key to another marker is rejected. Profile owns fresh/named allocation
+and generation namespaces; the catalog performs only nominal resolution.
+Standard Agent addon marker declarations populate this same catalog.
+`AgentCompositionFactory` is an ordinary
 Meta plugin: its constructor receives the concrete preset catalog, compiler,
 allowlist, and Scope root, while activation requires the existing
 `ToolCatalogProviderContract` and explicit `AgentGenerationRootContract`.

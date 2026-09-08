@@ -11,7 +11,7 @@ use rsi_workspace_protocol::WorkspaceRegistry;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_reload_replaces_listener_diagnostics_and_preserves_owner_and_retained_clients() {
+async fn daemon_executor_reload_preserves_listener_diagnostics_owner_and_retained_clients() {
     let fixture = fixture("http://127.0.0.1:1");
     let mut daemon = super::DaemonFixture::new(&fixture).await;
     let identity = daemon.running.connection_description().unwrap();
@@ -25,16 +25,9 @@ async fn daemon_reload_replaces_listener_diagnostics_and_preserves_owner_and_ret
             outcome,
             rsi_host::ReloadOutcome::Applied(_) | rsi_host::ReloadOutcome::Unchanged(_)
         ));
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            daemon.diagnostics.changed(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
         assert!(!daemon.task.is_finished());
         assert_eq!(daemon.running.connection_description().unwrap(), identity);
-        let retired = previous.snapshot();
+        let before = previous.snapshot();
         assert_eq!(client.list_models(None, 16).await.unwrap().models.len(), 1);
         assert!(
             daemon
@@ -44,10 +37,13 @@ async fn daemon_reload_replaces_listener_diagnostics_and_preserves_owner_and_ret
                 .accepted_connections
                 > 0
         );
-        assert_eq!(
-            previous.snapshot(),
-            retired,
-            "retired listener counters changed"
+        assert!(
+            previous.snapshot().accepted_connections > before.accepted_connections,
+            "the retained diagnostic must observe new calls on the same listener"
+        );
+        assert!(
+            !daemon.diagnostics.has_changed().unwrap(),
+            "executor reload replaced listener diagnostics"
         );
     }
     std::fs::write(

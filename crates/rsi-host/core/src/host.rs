@@ -8,9 +8,7 @@ use rsi_meta::{
     LocalEventKey, PluginId, ResolvedFactory, Runtime, RuntimeSnapshot, ShutdownOutcome,
     UpdateMode,
 };
-use rsi_meta_profile::{
-    IsolationSpec, ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileResolver,
-};
+use rsi_meta_profile::{ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileResolver};
 use sha2::{Digest as _, Sha256};
 use std::any::TypeId;
 use std::collections::BTreeMap;
@@ -63,29 +61,22 @@ impl ProfileResolver for LinkedCatalog {
         ))
     }
 
-    fn isolate(
-        &self,
-        mut context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        for key in isolation.local() {
-            let stable = LocalContractKey::new(key.clone());
-            let contract = self.local_contracts.get(&stable).copied().ok_or_else(|| {
-                rsi_meta_profile::ProfileError::UnknownLocalContract { key: key.clone() }
-            })?;
-            context = context.isolate_local_type_fresh(contract, key)?.0;
-        }
-        for key in isolation.events() {
-            let stable = LocalEventKey::new(key.clone());
-            let event = self.local_events.get(&stable).copied().ok_or_else(|| {
-                rsi_meta_profile::ProfileError::UnknownLocalEvent { key: key.clone() }
-            })?;
-            context = context.isolate_event_type_fresh(event, key)?.0;
-        }
-        for key in isolation.portable() {
-            context = context.isolate_fresh(key)?.0;
-        }
-        Ok(context)
+    fn local_contract_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
+        self.local_contracts
+            .get(&LocalContractKey::new(key))
+            .copied()
+            .ok_or_else(|| rsi_meta_profile::ProfileError::UnknownLocalContract {
+                key: key.to_owned(),
+            })
+    }
+
+    fn local_event_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
+        self.local_events
+            .get(&LocalEventKey::new(key))
+            .copied()
+            .ok_or_else(|| rsi_meta_profile::ProfileError::UnknownLocalEvent {
+                key: key.to_owned(),
+            })
     }
 }
 
@@ -386,6 +377,7 @@ fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
         maximum_steps,
         maximum_nodes,
         maximum_group_depth,
+        maximum_isolation_bindings,
         maximum_identifier_bytes: maximum_profile_identifier_bytes,
         maximum_expression_operations,
         maximum_expression_depth,
@@ -403,6 +395,10 @@ fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
         (b"profile.maximum-steps", *maximum_steps),
         (b"profile.maximum-nodes", *maximum_nodes),
         (b"profile.maximum-group-depth", *maximum_group_depth),
+        (
+            b"profile.maximum-isolation-bindings",
+            *maximum_isolation_bindings,
+        ),
         (
             b"profile.maximum-identifier-bytes",
             *maximum_profile_identifier_bytes,
@@ -454,6 +450,7 @@ fn hash_runtime_limits(digest: &mut Sha256, limits: &rsi_meta::RuntimeLimits) {
 fn hash_runtime_topology_limits(digest: &mut Sha256, topology: &rsi_meta::TopologyLimits) {
     let &rsi_meta::TopologyLimits {
         maximum_fibers,
+        maximum_composition_positions,
         maximum_fiber_depth,
         maximum_services,
         maximum_dependency_edges,
@@ -471,6 +468,10 @@ fn hash_runtime_topology_limits(digest: &mut Sha256, topology: &rsi_meta::Topolo
     } = topology;
     for (name, value) in [
         (b"runtime.maximum-fibers".as_slice(), maximum_fibers),
+        (
+            b"runtime.maximum-composition-positions",
+            maximum_composition_positions,
+        ),
         (b"runtime.maximum-fiber-depth", maximum_fiber_depth),
         (b"runtime.maximum-services", maximum_services),
         (

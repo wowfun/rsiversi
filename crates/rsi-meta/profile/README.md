@@ -34,8 +34,18 @@ file watcher; manual reload rechecks the same immutable program.
 Nodes are declarative groups or plugin leaves. `InstanceId` is unique across
 the complete tree; one `PluginId` may appear at several leaves. Groups own
 enabled state and exact Local, event, and Portable isolation declarations for
-their descendants. Reparenting or changing a group's isolation retires and
-recreates those descendants.
+their descendants. Each lane accepts a fresh contract key string or
+`{ key = "contract.key", label = "shared-label" }`. A key occurs at most once
+per lane in a group. Contract keys and labels obey the identifier bound; the
+complete resulting tree has at most `maximum_isolation_bindings` declarations
+(16,384 by default), including disabled groups. Compiled leaves and target
+snapshots share immutable lane storage; fanout does not duplicate every key and
+label string per descendant.
+
+Named labels share only inside one Profile activation. Its opaque namespace is
+the Runtime identity plus the owning wrapper FiberId and generation. Reload
+preserves that namespace; another controlled or static wrapper has another
+namespace. Configuration never supplies or persists this identity.
 
 A patch either appends nodes to a group, replaces a leaf's entire config,
 changes enabled state with group cascading, or replaces a group's complete
@@ -59,10 +69,11 @@ values never appear in diagnostics.
 Every startup or reload rereads immutable sources and rebuilds the candidate
 from an empty tree. Parse, source bounds, expression evaluation, identity and
 patch checks, factory resolution, context/isolation derivation, and watcher
-capture complete before Runtime mutation begins. Equality and restart checks
+capture complete before retiring or applying child Fibers. Position preflight
+reserves only bounded composition metadata, without execution admission. Equality and restart checks
 therefore reserve no duplicate Fibers. Replayable convergence prepares and
-applies only the next leaf after prior capacity has been released; rollback
-does the same for the previous suffix. This keeps reload possible at the exact
+applies only the next changed or new leaf after prior capacity has been released;
+rollback does the same for the retired members. This keeps reload possible at the exact
 Runtime Fiber ceiling instead of requiring a shadow copy of either graph. A
 prepared leaf may commit as Pending when its declared dependencies are absent.
 
@@ -77,13 +88,23 @@ internally but publishes the complete observed graph only at attempt
 boundaries, avoiding a full graph clone after every leaf. This is bounded
 convergence, not atomic shadow-Runtime replacement.
 
-Each bound target retains the exact group isolation allocations used by its
-leaves. An unchanged group path and complete inherited isolation declaration
-reuse those allocations across reload and compensation. Retained prefix leaves
-must also match these bindings; a recreated suffix cannot silently receive a
-different identity from its retained provider. Changed ancestry or isolation
-derives a new binding. Current and compensation targets retain their own bounded
-snapshots; there is no historical allocation cache.
+Each group stores only its own binding delta. Effective bindings overlay that
+delta on inherited bindings. Fresh allocation keys contain the namespace, group
+InstanceId, lane and contract key; named keys contain the namespace, lane,
+contract key and label. The resolver maps nominal Local/event keys through its
+frozen catalog, while Profile owns allocation and inheritance. Current,
+candidate and compensation targets keep their exact allocations alive; weak
+lookup entries are pruned during binding, with no historical allocation owner.
+
+Leaf retention compares InstanceId, FactoryIdentity, UpdateMode, evaluated
+configuration and effective bindings. Group moves alone do not require a new
+generation. A leaf's stable ChildPosition survives rebuild; pure reorder only
+publishes the new position ranks. Convergence retires changed/removed leaves in
+reverse old order, publishes the candidate order, then prepares and applies new
+members in new order. Compensation removes failed candidate members, restores
+old bindings/order and reconstructs only members this attempt retired. A retained
+member may still participate in ordinary Meta dependency convergence. There is
+no prefix/suffix fallback or cross-registry atomicity claim.
 
 ## Static generations
 

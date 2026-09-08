@@ -388,6 +388,7 @@ dependencies = [
  "rsi-host",
  "rsi-meta",
  "rsi-meta-execution",
+ "rsi-meta-profile",
  "rsi-meta-scope",
  "serde_json",
  "tokio",

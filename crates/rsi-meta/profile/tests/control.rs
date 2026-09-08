@@ -1,15 +1,16 @@
 use async_trait::async_trait;
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Context, FiberState, LocalContract, MetaError, PluginFactory,
+    ActivationPlan, ConfigValue, FiberState, LocalContract, MetaError, PluginFactory,
     PreparedActivation, ResolvedFactory, Runtime, RuntimeLimits, TopologyLimits, UpdateMode,
 };
 use rsi_meta_profile::{
-    IsolationSpec, ProfileBootstrap, ProfileControlContract, ProfileEnvironment, ProfileHealth,
+    ProfileBootstrap, ProfileControlContract, ProfileEnvironment, ProfileHealth,
     ProfileInstanceState, ProfileLimits, ProfileProgram, ProfileResolver, ReloadOutcome,
     WatcherHealth,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +32,20 @@ impl rsi_meta::LocalEvent for ProbeEvent {
     type Value = ();
     type Error = std::convert::Infallible;
     type Mode = rsi_meta::Emit;
+}
+struct OrderEvent;
+impl rsi_meta::LocalEvent for OrderEvent {
+    const KEY: &'static str = "test.order";
+    type Value = Arc<Mutex<Vec<String>>>;
+    type Error = std::convert::Infallible;
+    type Mode = rsi_meta::Emit;
+}
+#[derive(Debug)]
+struct OrderHandler(String);
+impl rsi_meta::EmitEventHandler<OrderEvent> for OrderHandler {
+    fn handle(&self, order: &Arc<Mutex<Vec<String>>>) {
+        order.lock().unwrap().push(self.0.clone());
+    }
 }
 #[derive(Debug)]
 struct CountEvent(Arc<AtomicUsize>);
@@ -135,6 +150,12 @@ impl PluginFactory for ProbeFactory {
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        if let Some(id) = plan.config().get("order").and_then(Value::as_str) {
+            plan.context().on_emit::<OrderEvent, _>(
+                Arc::new(OrderHandler(id.into())),
+                rsi_meta::LocalEventOptions::default(),
+            )?;
+        }
         let mode = plan.config().get("mode").and_then(Value::as_str);
         if matches!(mode, Some("bound" | "bound-fail")) {
             let counter = plan.local::<ProbeContract>()?;
@@ -220,28 +241,23 @@ impl ProfileResolver for Resolver {
         ))
     }
 
-    fn isolate(
-        &self,
-        mut context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        for key in isolation.local() {
-            if key != ProbeContract::KEY {
-                return Err(rsi_meta_profile::ProfileError::UnknownLocalContract {
-                    key: key.clone(),
-                });
-            }
-            context = context.isolate_local_fresh::<ProbeContract>()?.0;
+    fn local_contract_type(&self, key: &str) -> rsi_meta_profile::Result<std::any::TypeId> {
+        if key == ProbeContract::KEY {
+            Ok(std::any::TypeId::of::<ProbeContract>())
+        } else {
+            Err(rsi_meta_profile::ProfileError::UnknownLocalContract {
+                key: key.to_owned(),
+            })
         }
-        for key in isolation.events() {
-            assert_eq!(key, "test.event");
-            context = context.isolate_event_fresh::<ProbeEvent>()?.0;
+    }
+    fn local_event_type(&self, key: &str) -> rsi_meta_profile::Result<std::any::TypeId> {
+        if key == "test.event" {
+            Ok(std::any::TypeId::of::<ProbeEvent>())
+        } else {
+            Err(rsi_meta_profile::ProfileError::UnknownLocalEvent {
+                key: key.to_owned(),
+            })
         }
-        for key in isolation.portable() {
-            assert_eq!(key, "test.portable");
-            context = context.isolate_fresh(key)?.0;
-        }
-        Ok(context)
     }
 }
 
@@ -344,6 +360,246 @@ async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_bin
     clock.finish().await;
 }
 
+fn write_ordered(path: &std::path::Path, ids: &[(&str, usize)]) {
+    let mut source = "format = 1\n".to_owned();
+    for (id, revision) in ids {
+        write!(source,
+                "[[steps]]\nkind = \"plugin\"\nid = \"{id}\"\nplugin = \"probe\"\nconfig = {{ revision = {revision}, order = \"{id}\" }}\n"
+            ).unwrap();
+    }
+    std::fs::write(path, source).unwrap();
+}
+
+#[tokio::test]
+async fn exact_reload_reorders_and_replaces_only_the_changed_middle_leaf() {
+    let clock = manual_clock::hold().await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    let write = |ids: &[(&str, usize)]| write_ordered(&path, ids);
+    write(&[("a", 0), ("b", 0), ("c", 0)]);
+    let limited = Runtime::new(RuntimeLimits {
+        topology: TopologyLimits {
+            maximum_fibers: 4,
+            maximum_composition_positions: 5,
+            ..TopologyLimits::default()
+        },
+        ..RuntimeLimits::default()
+    })
+    .unwrap();
+    let (runtime, handle, control, starts) = start_in_runtime(
+        limited,
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+    )
+    .await;
+    let dispatch = || {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .root()
+            .dispatch_local::<OrderEvent>(order.clone())
+            .unwrap();
+        order.lock().unwrap().clone()
+    };
+    assert_eq!(dispatch(), ["a", "b", "c"]);
+    let original = runtime.snapshot().fibers;
+    write(&[("c", 0), ("b", 0), ("a", 0)]);
+    let outcome = control.reload().await.unwrap();
+    assert!(matches!(outcome, ReloadOutcome::Applied(_)), "{outcome:?}");
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        3,
+        "reorder must keep all generations"
+    );
+    assert_eq!(runtime.snapshot().fibers, original);
+    assert_eq!(dispatch(), ["c", "b", "a"]);
+    assert_eq!(
+        outcome
+            .status()
+            .observed()
+            .iter()
+            .map(|row| row.id().as_str())
+            .collect::<Vec<_>>(),
+        ["c", "b", "a"]
+    );
+    write(&[("c", 0), ("b", 1), ("a", 0)]);
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Applied(_)
+    ));
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        4,
+        "changing b must retain c and a"
+    );
+    assert_eq!(dispatch(), ["c", "b", "a"]);
+    write(&[("c", 0), ("b", 2), ("a", 0)]);
+    let failed = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("revision = 2", "revision = 2, mode = \"activate-fail\"");
+    std::fs::write(&path, failed).unwrap();
+    let outcome = control.reload().await.unwrap();
+    assert!(
+        matches!(outcome, ReloadOutcome::RolledBack { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 5);
+    assert_eq!(dispatch(), ["c", "b", "a"]);
+    for revision in 0..32 {
+        let middle = format!("new-{revision}");
+        write(&[("c", 0), (&middle, 0), ("a", 0)]);
+        assert!(matches!(
+            control.reload().await.unwrap(),
+            ReloadOutcome::Applied(_)
+        ));
+        assert_eq!(dispatch(), ["c", &middle, "a"]);
+        assert_eq!(runtime.snapshot().fibers.len(), 4);
+    }
+    assert_eq!(starts.load(Ordering::SeqCst), 37);
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
+    clock.finish().await;
+}
+
+#[tokio::test]
+async fn restart_required_leaves_can_reorder_without_preparing_or_changing_generations() {
+    let clock = manual_clock::hold().await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_ordered(&path, &[("a", 0), ("b", 0)]);
+    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::RestartRequired).await;
+    let original = runtime.snapshot().fibers;
+    write_ordered(&path, &[("b", 0), ("a", 0)]);
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Applied(_)
+    ));
+    assert_eq!(runtime.snapshot().fibers, original);
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    write_ordered(&path, &[("b", 1), ("a", 0)]);
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::RestartRequired(_)
+    ));
+    assert_eq!(runtime.snapshot().fibers, original);
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+    clock.finish().await;
+}
+
+fn named_pair_source(label: &str, mode: &str) -> String {
+    let mut source = "format = 1\n".to_owned();
+    for (group, id, plugin, config) in [
+        (
+            "providers",
+            "provider",
+            "supply",
+            "{ all_lanes = true }".to_owned(),
+        ),
+        (
+            "consumers",
+            "consumer",
+            "probe",
+            format!("{{ mode = \"{mode}\" }}"),
+        ),
+    ] {
+        write!(
+            source,
+            r#"
+[[steps]]
+kind = "group"
+id = "{group}"
+[steps.isolation]
+local = [{{ key = "test.local", label = "{label}" }}]
+events = [{{ key = "test.event", label = "{label}" }}]
+portable = [{{ key = "test.portable", label = "{label}" }}]
+[[steps.nodes]]
+kind = "plugin"
+id = "{id}"
+plugin = "{plugin}"
+config = {config}
+"#
+        )
+        .unwrap();
+    }
+    source
+}
+
+#[tokio::test]
+async fn named_groups_share_all_lanes_and_compensation_restores_exact_allocations() {
+    let clock = manual_clock::hold().await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    std::fs::write(&path, named_pair_source("shared", "bound")).unwrap();
+    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    std::fs::write(&path, named_pair_source("other", "bound")).unwrap();
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Applied(_)
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    std::fs::write(&path, named_pair_source("failed", "bound-fail")).unwrap();
+    let outcome = control.reload().await.unwrap();
+    assert!(
+        matches!(outcome, ReloadOutcome::RolledBack { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 3);
+    assert!(
+        outcome
+            .status()
+            .observed()
+            .iter()
+            .all(|leaf| matches!(leaf.state(), ProfileInstanceState::Active))
+    );
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
+    clock.finish().await;
+}
+
+#[tokio::test]
+async fn overridden_ancestor_changes_and_group_moves_preserve_effective_fresh_bindings() {
+    let clock = manual_clock::hold().await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    let write = |parent: &str, label: &str| {
+        write_isolated_pair(&path, 0, "bound");
+        let inner = std::fs::read_to_string(&path)
+            .unwrap()
+            .replacen("format = 1\n", "", 1)
+            .replace("[[steps]]", "[[steps.nodes]]")
+            .replace("[steps.isolation]", "[steps.nodes.isolation]")
+            .replace(
+                "[[steps.nodes]]\nkind = \"plugin\"",
+                "[[steps.nodes.nodes]]\nkind = \"plugin\"",
+            );
+        std::fs::write(&path, format!(
+            "format = 1\n[[steps]]\nkind = \"group\"\nid = \"{parent}\"\n[steps.isolation]\nlocal = [{{key = \"test.local\", label = \"{label}\"}}]\n{inner}"
+        )).unwrap();
+    };
+    write("outer", "one");
+    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    let original = runtime.snapshot().fibers;
+    write("outer", "two");
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Unchanged(_)
+    ));
+    write("moved", "three");
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Unchanged(_)
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.snapshot().fibers, original);
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
+    clock.finish().await;
+}
+
 async fn start(
     root: &std::path::Path,
     mode: UpdateMode,
@@ -380,7 +636,21 @@ async fn start_with_limits_and_cleanup_gate(
     Arc<dyn rsi_meta_profile::ProfileControl>,
     Arc<AtomicUsize>,
 ) {
-    let runtime = Runtime::default();
+    start_in_runtime(Runtime::default(), root, mode, limits, cleanup_gate).await
+}
+
+async fn start_in_runtime(
+    runtime: Runtime,
+    root: &std::path::Path,
+    mode: UpdateMode,
+    limits: ProfileLimits,
+    cleanup_gate: Option<Arc<CleanupGate>>,
+) -> (
+    Runtime,
+    rsi_meta::FiberHandle,
+    Arc<dyn rsi_meta_profile::ProfileControl>,
+    Arc<AtomicUsize>,
+) {
     let starts = Arc::new(AtomicUsize::new(0));
     let resolver = Arc::new(Resolver {
         starts: Arc::clone(&starts),

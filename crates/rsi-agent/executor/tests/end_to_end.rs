@@ -374,6 +374,7 @@ impl TurnExecution for FailingClaimFixture {
 impl TurnFinalization for FailingClaimFixture {
     fn register(
         &self,
+        _credential: &rsi_meta::RegistrationContext,
         _name: String,
         _finalizer: Arc<dyn TurnFinalizer>,
     ) -> FinalizationResult<TurnFinalizerLease> {

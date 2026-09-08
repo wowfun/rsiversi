@@ -203,6 +203,8 @@ next output is accepted. A tail failure records `partial_failed` with every
 already-durable ref; retries are separate turns and never overwrite refs.
 
 The Kernel also owns an ordered effect-owned pre-terminal finalizer registry.
+Its hooks use Meta's exact-generation Local registration credential and stable
+composition positions, following the [finalization contract](../turn-protocol/README.md).
 The executor runs its snapshot before the sole terminal Fact and applies its
 validated finalization deadline to the complete call. Deadline expiry becomes
 the turn's durable finalization failure; it releases the executor waiter but

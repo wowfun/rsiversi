@@ -15,6 +15,10 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use wasm_bindgen::prelude::*;
 
+mod composition;
+#[path = "../../../../crates/rsi-meta/profile/tests/namespaces.rs"]
+mod profile_namespace_probe;
+
 struct CounterContract;
 impl LocalContract for CounterContract {
     const KEY: &'static str = "probe.counter";
@@ -234,18 +238,21 @@ pub async fn run_probe() -> Result<String, JsValue> {
     execution_probe(&execution).await;
     lifecycle_probe(execution.clone()).await;
     profile_probe(execution.clone()).await;
-    child_profiles_probe(execution).await;
+    child_profiles_probe(execution.clone()).await;
+    composition::probe(execution.clone()).await;
+    profile_namespace_probe::namespace_scenario(Runtime::with_execution(Default::default(), execution).unwrap()).await;
     let timers = rsi_meta_execution::browser_resource_snapshot();
     assert_eq!(timers.pending_timers, 0);
     assert_eq!(timers.active_alarms, 0);
     Ok(serde_json::json!({
         "status": "passed", "pending_timers": timers.pending_timers,
         "active_alarms": timers.active_alarms,
-        "cases": ["timer cancellation", "detached task", "detached preparation",
+        "cases": ["named isolation includes", "static namespace independence", "timer cancellation", "detached task", "detached preparation",
             "clock expiry", "non-yielding late result", "activation", "withdrawal",
             "wait cancellation", "rollback order", "shutdown resources",
             "Profile bundle and Rhai", "Profile reload without files",
-            "child Profile isolation and disposal"]
+            "child Profile isolation and disposal", "declaration order and prepend",
+            "registration snapshot and selective rebuild", "Scope contribution cleanup"]
     })
     .to_string())
 }
@@ -331,7 +338,9 @@ async fn child_profiles_probe(execution: Execution) {
             )
             .unwrap();
         let host = builder.build().unwrap();
-        let context = host.isolate_local_context(scope.context().meta().clone()).unwrap();
+        let context = host
+            .isolate_local_context(scope.context().meta().clone())
+            .unwrap();
         let bootstrap = host
             .prepare_in(
                 &runtime,

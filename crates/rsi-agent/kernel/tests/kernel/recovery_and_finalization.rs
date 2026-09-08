@@ -1,5 +1,133 @@
 use super::*;
 
+#[derive(Debug)]
+struct NamedFailure(&'static str);
+
+#[async_trait]
+impl TurnFinalizer for NamedFailure {
+    async fn finalize(
+        &self,
+        _: &TurnFinalizationContext,
+    ) -> rsi_agent_turn_protocol::FinalizationResult<TurnFinalizationReport> {
+        Err(TurnFinalizationError::Failed {
+            code: self.0.into(),
+            message: self.0.into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn finalizer_reorder_changes_adjudication_without_restarting_contributors() {
+    let runtime = Runtime::default();
+    let root = runtime.root();
+    let first_position = root.child_position().unwrap();
+    let second_position = root.child_position().unwrap();
+    let (first, first_context) = rsi_agent_testkit::activate_contribution_owner(
+        &root.with_child_position(&first_position).unwrap(),
+    )
+    .await
+    .unwrap();
+    let (second, second_context) = rsi_agent_testkit::activate_contribution_owner(
+        &root.with_child_position(&second_position).unwrap(),
+    )
+    .await
+    .unwrap();
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let _second_lease = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &second_context.registration_context().unwrap(),
+        "second".into(),
+        Arc::new(NamedFailure("second")),
+    )
+    .unwrap();
+    let first_lease = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &first_context.registration_context().unwrap(),
+        "first".into(),
+        Arc::new(NamedFailure("first")),
+    )
+    .unwrap();
+    let context = TurnFinalizationContext {
+        session_id: SessionId::new("session-order").unwrap(),
+        turn_id: TurnId::new("turn-order").unwrap(),
+        job_scope: None,
+    };
+    let check = async |name: &str| {
+        assert_eq!(
+            rsi_agent_turn_protocol::TurnFinalization::finalize(&kernel, &context).await,
+            Err(TurnFinalizationError::Failed {
+                code: name.into(),
+                message: name.into()
+            }),
+        );
+    };
+    check("first").await;
+    let original = second.snapshot().generation;
+    root.reorder_children(&[second_position.clone(), first_position.clone()])
+        .unwrap();
+    check("second").await;
+    assert!(first.dispose().await.is_clean());
+    let (_, replacement) = rsi_agent_testkit::activate_contribution_owner(
+        &root.with_child_position(&first_position).unwrap(),
+    )
+    .await
+    .unwrap();
+    let _replacement_lease = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &replacement.registration_context().unwrap(),
+        "first".into(),
+        Arc::new(NamedFailure("replacement")),
+    )
+    .unwrap();
+    drop(first_lease);
+    root.reorder_children(&[first_position, second_position])
+        .unwrap();
+    check("replacement").await;
+    assert_eq!(second.snapshot().generation, original);
+    assert!(first_context.registration_context().is_err());
+    assert!(second.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn finalizer_registry_rejects_foreign_runtime_capacity_and_shutdown() {
+    let runtime = Runtime::default();
+    let other = Runtime::default();
+    let (_, owner) = rsi_agent_testkit::activate_contribution_owner(&runtime.root())
+        .await
+        .unwrap();
+    let (_, foreign) = rsi_agent_testkit::activate_contribution_owner(&other.root())
+        .await
+        .unwrap();
+    let credential = owner.registration_context().unwrap();
+    let foreign = foreign.registration_context().unwrap();
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let register = |credential: &rsi_meta::RegistrationContext, name: String| {
+        rsi_agent_turn_protocol::TurnFinalization::register(
+            &kernel,
+            credential,
+            name,
+            Arc::new(NamedFailure("failure")),
+        )
+    };
+    let mut leases = vec![register(&credential, "first".into()).unwrap()];
+    assert!(register(&foreign, "foreign".into()).is_err());
+    for i in 1..rsi_agent_turn_protocol::MAXIMUM_TURN_FINALIZERS {
+        leases.push(register(&credential, format!("hook-{i}")).unwrap());
+    }
+    assert!(register(&credential, "overflow".into()).is_err());
+    drop(leases.pop());
+    leases.push(register(&credential, "replacement".into()).unwrap());
+    drop(leases);
+    // Emptying a live registry does not transfer it to another Runtime.
+    assert!(register(&foreign, "foreign".into()).is_err());
+    let worker = kernel.start_workers();
+    kernel.shutdown(worker).await.unwrap();
+    assert!(register(&credential, "after-shutdown".into()).is_err());
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(other.shutdown().await.is_clean());
+}
+
 #[tokio::test]
 async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_requeues_it() {
     let store = Arc::new(MemoryStore::new());
@@ -431,6 +559,11 @@ async fn ordinary_factory_waits_for_store_and_withdraws_all_turn_contracts() {
 
 #[tokio::test]
 async fn finalizers_are_effect_owned_concurrent_and_resolve_failures_by_registration_order() {
+    let runtime = Runtime::default();
+    let (_owner, owner_context) = rsi_agent_testkit::activate_contribution_owner(&runtime.root())
+        .await
+        .unwrap();
+    let credential = owner_context.registration_context().unwrap();
     let kernel = kernel(Arc::new(MemoryStore::new())).await;
     let calls = Arc::new(Mutex::new(Vec::new()));
     let make = |name, fail| {
@@ -442,18 +575,21 @@ async fn finalizers_are_effect_owned_concurrent_and_resolve_failures_by_registra
     };
     let first = rsi_agent_turn_protocol::TurnFinalization::register(
         &kernel,
+        &credential,
         "first".into(),
         make("first", false),
     )
     .unwrap();
     let failing = rsi_agent_turn_protocol::TurnFinalization::register(
         &kernel,
+        &credential,
         "failing".into(),
         make("failing", true),
     )
     .unwrap();
     let _never = rsi_agent_turn_protocol::TurnFinalization::register(
         &kernel,
+        &credential,
         "never".into(),
         make("never", false),
     )
@@ -461,6 +597,7 @@ async fn finalizers_are_effect_owned_concurrent_and_resolve_failures_by_registra
     assert!(matches!(
         rsi_agent_turn_protocol::TurnFinalization::register(
             &kernel,
+            &credential,
             "first".into(),
             make("duplicate", false)
         ),
@@ -489,6 +626,7 @@ async fn finalizers_are_effect_owned_concurrent_and_resolve_failures_by_registra
     drop(failing);
     let _replacement = rsi_agent_turn_protocol::TurnFinalization::register(
         &kernel,
+        &credential,
         "failing".into(),
         make("replacement", false),
     )
@@ -508,10 +646,16 @@ async fn finalizers_are_effect_owned_concurrent_and_resolve_failures_by_registra
     let mut observed = calls.lock().unwrap().clone();
     observed.sort_unstable();
     assert_eq!(observed, vec!["never", "replacement"]);
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
 async fn finalizer_snapshot_starts_every_hook_before_waiting_and_contains_panics() {
+    let runtime = Runtime::default();
+    let (_owner, owner_context) = rsi_agent_testkit::activate_contribution_owner(&runtime.root())
+        .await
+        .unwrap();
+    let credential = owner_context.registration_context().unwrap();
     let kernel = kernel(Arc::new(MemoryStore::new())).await;
     let entered = Arc::new(AtomicUsize::new(0));
     let entered_changed = Arc::new(Notify::new());
@@ -524,15 +668,27 @@ async fn finalizer_snapshot_starts_every_hook_before_waiting_and_contains_panics
             fail,
         }) as Arc<dyn TurnFinalizer>
     };
-    let one =
-        rsi_agent_turn_protocol::TurnFinalization::register(&kernel, "one".into(), make(false))
-            .unwrap();
-    let two =
-        rsi_agent_turn_protocol::TurnFinalization::register(&kernel, "two".into(), make(true))
-            .unwrap();
-    let three =
-        rsi_agent_turn_protocol::TurnFinalization::register(&kernel, "three".into(), make(false))
-            .unwrap();
+    let one = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &credential,
+        "one".into(),
+        make(false),
+    )
+    .unwrap();
+    let two = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &credential,
+        "two".into(),
+        make(true),
+    )
+    .unwrap();
+    let three = rsi_agent_turn_protocol::TurnFinalization::register(
+        &kernel,
+        &credential,
+        "three".into(),
+        make(false),
+    )
+    .unwrap();
     let context = TurnFinalizationContext {
         session_id: SessionId::new("session-concurrent-finalizers").unwrap(),
         turn_id: TurnId::new("turn-concurrent-finalizers").unwrap(),
@@ -555,22 +711,31 @@ async fn finalizer_snapshot_starts_every_hook_before_waiting_and_contains_panics
     })
     .await
     .expect("all finalizers must start concurrently");
+    drop((one, two, three));
+    assert!(
+        rsi_agent_turn_protocol::TurnFinalization::finalize(&kernel, &context)
+            .await
+            .unwrap()
+            .completion_blocker()
+            .is_none()
+    );
     release.notify_waiters();
     assert!(matches!(
         finalization.await.unwrap(),
         Err(TurnFinalizationError::Failed { code, .. }) if code == "test.concurrent_failure"
     ));
 
-    drop((one, two, three));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let _panic = rsi_agent_turn_protocol::TurnFinalization::register(
         &kernel,
+        &credential,
         "panic".into(),
         Arc::new(PanickingFinalizer),
     )
     .unwrap();
     let _after = rsi_agent_turn_protocol::TurnFinalization::register(
         &kernel,
+        &credential,
         "after-panic".into(),
         Arc::new(RecordingFinalizer {
             name: "after-panic",
@@ -584,4 +749,5 @@ async fn finalizer_snapshot_starts_every_hook_before_waiting_and_contains_panics
         Err(TurnFinalizationError::Failed { code, .. }) if code == "turn.finalizer_panic"
     ));
     assert_eq!(*calls.lock().unwrap(), vec!["after-panic"]);
+    assert!(runtime.shutdown().await.is_clean());
 }

@@ -15,12 +15,13 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberState, MetaError, PluginFactory,
     PluginId, PreparedActivation, ResolvedFactory, UpdateMode,
 };
-use rsi_meta_profile::{IsolationSpec, ProfileError, ProfileGenerationPlan, ProfileResolver};
+use rsi_meta_profile::{ProfileError, ProfileGenerationPlan, ProfileResolver};
 use rsi_meta_scope::{ScopeHandle, ScopeRoot};
 use rsi_tools_protocol::{
     ToolCatalogProvider, ToolCatalogProviderContract, ToolCatalogStage, ToolRegistrar,
     ToolRegistrarContract, ToolRuntime,
 };
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
@@ -31,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 pub const MAXIMUM_CONCURRENT_BUILDS: usize = 8;
 /// Maximum preset rows retained by one standing composition provider.
 pub const MAXIMUM_CURRENT_PRESETS: usize = 256;
+/// Maximum explicitly selected Local markers in each Agent catalog lane.
+pub const MAXIMUM_CATALOG_MARKERS: usize = 4096;
 
 const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.tool-registrar";
 
@@ -38,6 +41,8 @@ const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.tool-registrar";
 #[derive(Clone)]
 pub struct AgentContributionCatalog {
     factories: BTreeMap<PluginId, ResolvedFactory>,
+    local_contracts: BTreeMap<String, TypeId>,
+    local_events: BTreeMap<String, TypeId>,
 }
 
 impl AgentContributionCatalog {
@@ -68,8 +73,54 @@ impl AgentContributionCatalog {
         }
         Ok(Self {
             factories: by_plugin,
+            local_contracts: BTreeMap::new(),
+            local_events: BTreeMap::new(),
         })
     }
+
+    /// Selects a Local marker before transferring this catalog into a factory.
+    ///
+    /// # Errors
+    /// Rejects another nominal marker at the same key or the per-lane capacity limit.
+    pub fn register_local_contract<C: rsi_meta::LocalContract>(
+        &mut self,
+    ) -> rsi_meta_profile::Result<()> {
+        register_marker(&mut self.local_contracts, C::KEY, TypeId::of::<C>())
+    }
+
+    /// Selects an event marker before transferring this catalog into a factory.
+    ///
+    /// # Errors
+    /// Rejects another nominal marker at the same key or the per-lane capacity limit.
+    pub fn register_local_event<E: rsi_meta::LocalEvent>(
+        &mut self,
+    ) -> rsi_meta_profile::Result<()> {
+        register_marker(&mut self.local_events, E::KEY, TypeId::of::<E>())
+    }
+}
+
+fn register_marker(
+    markers: &mut BTreeMap<String, TypeId>,
+    key: &str,
+    nominal: TypeId,
+) -> rsi_meta_profile::Result<()> {
+    if let Some(existing) = markers.get(key) {
+        return if *existing == nominal {
+            Ok(())
+        } else {
+            Err(ProfileError::InvalidProgram(
+                "conflicting Agent nominal marker".into(),
+            ))
+        };
+    }
+    if markers.len() >= MAXIMUM_CATALOG_MARKERS {
+        return Err(ProfileError::CapacityExceeded {
+            resource: "Agent catalog markers",
+            maximum: MAXIMUM_CATALOG_MARKERS,
+        });
+    }
+    markers.insert(key.to_owned(), nominal);
+    Ok(())
 }
 
 impl fmt::Debug for AgentContributionCatalog {
@@ -77,6 +128,8 @@ impl fmt::Debug for AgentContributionCatalog {
         formatter
             .debug_struct("AgentContributionCatalog")
             .field("factories", &self.factories.keys())
+            .field("local_contracts", &self.local_contracts.keys())
+            .field("local_events", &self.local_events.keys())
             .finish()
     }
 }
@@ -91,21 +144,22 @@ impl ProfileResolver for AgentContributionCatalog {
             })
     }
 
-    fn isolate(
-        &self,
-        mut context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        if let Some(key) = isolation.local().first() {
-            return Err(ProfileError::UnknownLocalContract { key: key.clone() });
-        }
-        if let Some(key) = isolation.events().first() {
-            return Err(ProfileError::UnknownLocalEvent { key: key.clone() });
-        }
-        for key in isolation.portable() {
-            context = context.isolate_fresh(key)?.0;
-        }
-        Ok(context)
+    fn local_contract_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
+        self.local_contracts
+            .get(key)
+            .copied()
+            .ok_or_else(|| ProfileError::UnknownLocalContract {
+                key: key.to_owned(),
+            })
+    }
+
+    fn local_event_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
+        self.local_events
+            .get(key)
+            .copied()
+            .ok_or_else(|| ProfileError::UnknownLocalEvent {
+                key: key.to_owned(),
+            })
     }
 }
 

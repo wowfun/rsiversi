@@ -20,6 +20,77 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn named_isolation_accepts_all_lanes_and_bounds_the_complete_disabled_tree() {
+    use rsi_meta_profile::{IsolationLane, IsolationSpec};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("named.toml");
+    let source = r#"format = 1
+[[steps]]
+kind = "group"
+id = "g"
+[steps.isolation]
+local = ["fresh", { key = "shared", label = "label" }]
+events = [{ key = "shared", label = "label" }]
+portable = [{ key = "shared", label = "label" }]
+[[steps.nodes]]
+kind = "plugin"
+id = "leaf"
+plugin = "probe"
+"#;
+    std::fs::write(&path, source).unwrap();
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let program = ProfileProgram::from_file(&path);
+    let candidate = compiler.compile(&program).unwrap();
+    let spec = &candidate.leaves()[0].isolations()[0];
+    assert_eq!(spec.local(), ["fresh"]);
+    assert_eq!(
+        spec.named()
+            .iter()
+            .map(rsi_meta_profile::NamedIsolation::lane)
+            .collect::<Vec<_>>(),
+        [
+            IsolationLane::Local,
+            IsolationLane::Event,
+            IsolationLane::Portable
+        ]
+    );
+    for invalid in [
+        source.replace("key = \"shared\", label", "key = \"fresh\", label"),
+        source.replace("label = \"label\"", "label = \"\""),
+        source.replace("label = \"label\"", "label = \"label\", unknown = true"),
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        assert!(compiler.compile(&program).is_err());
+    }
+    let disabled = ProfileProgram::from_profile(Profile::default()).with_linked_fragments(vec![
+        ProfileFragment::program(
+            "disabled",
+            ["a", "b"].map(|id| {
+                ProfileStep::Node(ProfileNode::Group(
+                    ProfileGroup::new(id, []).enabled(false).isolation(
+                        IsolationSpec::default().with_named(IsolationLane::Local, "key", "label"),
+                    ),
+                ))
+            }),
+        ),
+    ]);
+    let bounded = ProfileCompiler::new(
+        environment(temp.path()),
+        ProfileLimits {
+            maximum_isolation_bindings: 1,
+            ..ProfileLimits::default()
+        },
+    );
+    assert!(matches!(
+        bounded.compile(&disabled),
+        Err(ProfileError::CapacityExceeded {
+            resource: "isolation bindings",
+            maximum: 1
+        })
+    ));
+}
+
+#[test]
 fn rhai_defines_accept_exact_i64_and_reject_every_inexact_json_number() {
     let temp = tempfile::tempdir().unwrap();
     for value in [

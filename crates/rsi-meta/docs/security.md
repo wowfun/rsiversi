@@ -101,7 +101,11 @@ modules above core; Context contains no arbitrary extension value or intercept
 map that can become ambient authority.
 
 Every mutable plugin operation validates Runtime, Fiber, generation, and
-transaction state while holding the owning state lock. User setup, cleanup,
+transaction state while holding the owning state lock. Stable child positions
+are opaque Runtime-local metadata scoped to the exact parent generation.
+Selection and reorder validate that owner, and apply exclusively claims the
+position while the admitted Fiber occupies it. Retained position metadata has
+its own capacity bound and cannot keep execution admission open. User setup, cleanup,
 notification, Local object/event, Portable service, and listener callbacks run without Runtime or
 scope-store locks.
 

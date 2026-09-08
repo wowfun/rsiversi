@@ -1119,7 +1119,7 @@ impl TurnFinalizationReport {
         }
     }
 
-    /// Returns the optional blocker selected by registration order.
+    /// Returns the optional blocker selected by declaration order.
     pub const fn completion_blocker(&self) -> Option<&TurnCompletionBlocker> {
         self.completion_blocker.as_ref()
     }
@@ -1138,14 +1138,15 @@ pub trait TurnFinalizer: fmt::Debug + Send + Sync + 'static {
 /// Ordered process-local finalizer registry invoked by the Agent executor.
 #[async_trait]
 pub trait TurnFinalization: fmt::Debug + Send + Sync + 'static {
-    /// Registers one exact finalizer name until the returned lease drops.
+    /// Registers one exact name, owned by the caller's generation and returned lease.
     fn register(
         &self,
+        context: &rsi_meta::RegistrationContext,
         name: String,
         finalizer: Arc<dyn TurnFinalizer>,
     ) -> FinalizationResult<TurnFinalizerLease>;
 
-    /// Starts an immutable snapshot concurrently and resolves errors and blockers by registration order.
+    /// Starts an immutable snapshot concurrently and resolves errors and blockers by declaration order.
     ///
     /// The caller owns the deadline for the complete snapshot.
     async fn finalize(
@@ -1164,32 +1165,23 @@ impl LocalContract for TurnFinalizationContract {
 }
 
 /// Effect-owned exact finalizer registration.
-pub struct TurnFinalizerLease {
-    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
-}
+#[derive(Debug)]
+pub struct TurnFinalizerLease(rsi_meta::RegistrationLease);
 
 impl TurnFinalizerLease {
-    /// Creates a lease from one exact deregistration action.
-    pub fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self {
-            cleanup: Some(Box::new(cleanup)),
-        }
+    /// Wraps the exact registration installed through the caller's credential.
+    pub const fn from_registration(lease: rsi_meta::RegistrationLease) -> Self {
+        Self(lease)
+    }
+
+    /// Withdraws this contribution and joins its owning effect cleanup.
+    pub async fn dispose(&self) -> rsi_meta::CleanupReport {
+        self.0.dispose().await
     }
 }
 
-impl fmt::Debug for TurnFinalizerLease {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TurnFinalizerLease(..)")
-    }
-}
-
-impl Drop for TurnFinalizerLease {
-    fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
-    }
-}
+/// Maximum simultaneously registered pre-terminal hooks in one Kernel.
+pub const MAXIMUM_TURN_FINALIZERS: usize = 64;
 
 /// Closed pre-terminal finalization failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]

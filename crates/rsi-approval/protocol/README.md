@@ -10,7 +10,9 @@ another payload buffer; live owners use that size for aggregate admission.
 This package owns minimal approval requests, their typed Session/Turn/effect
 subject, decisions, non-secret provenance, answerer registration, and resolver
 contracts. It contains no UI, stdin, durable facts, policy engine, tool
-registry, or plugin lifecycle. The subject lets a product-level live broker
+registry, or Runtime. Local registrar calls require the caller's narrow Meta
+registration credential; they do not borrow Portable invocation authority.
+The protocol-owned `MAXIMUM_APPROVAL_ANSWERERS` bounds live registrations. The subject lets a product-level live broker
 route one request without making the Approval family own Agent durability.
 
 Requests and outcomes revalidate their field bounds during deserialization, so

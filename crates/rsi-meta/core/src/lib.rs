@@ -46,10 +46,12 @@ pub use plugin::{
 pub use rsi_meta_contract::LocalEventKey;
 pub use rsi_meta_execution::{Deadline, Execution, Task};
 pub use runtime::{
-    CallerEffect, Context, DeadlineLimits, DetachedCapability, EffectHandle, EffectTxn,
-    ExecutionLimits, FiberHandle, FiberSnapshot, FiberState, LocalEventHandle, LocalSupplyHandle,
-    MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, MAXIMUM_WATERFALL_LISTENERS_PER_SLOT,
-    PayloadLimits, PendingReason, PendingReport, PreparedPlugin, ResourceUsageSnapshot, Runtime,
+    CallerEffect, ChildPosition, Context, DeadlineLimits, DetachedCapability, EffectHandle,
+    EffectTxn, ExecutionLimits, FiberHandle, FiberSnapshot, FiberState, LocalEventHandle,
+    LocalSupplyHandle, MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE,
+    MAXIMUM_WATERFALL_LISTENERS_PER_SLOT, PayloadLimits, PendingReason, PendingReport,
+    PreparedPlugin, RegistrationContext, RegistrationLease, RegistrationOrderSnapshot,
+    RegistrationPosition, RegistrationRank, ResourceUsageSnapshot, Runtime, RuntimeIdentity,
     RuntimeLimits, RuntimeResourceSnapshot, RuntimeSnapshot, SupplyHandle, TopologyLimits,
 };
 pub use service::{

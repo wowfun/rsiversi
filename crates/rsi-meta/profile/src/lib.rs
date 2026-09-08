@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod bundle;
 mod control;
+#[cfg(test)]
+mod isolation_tests;
 pub use bundle::ProfileBundle;
 #[cfg(not(target_family = "wasm"))]
 mod native_source;
@@ -52,6 +54,8 @@ pub struct ProfileLimits {
     pub maximum_nodes: usize,
     /// Maximum nested declarative groups, including the outermost group.
     pub maximum_group_depth: usize,
+    /// Maximum isolation declarations across the resulting tree, including disabled groups.
+    pub maximum_isolation_bindings: usize,
     /// Maximum bytes in an identifier, path diagnostic, or platform name.
     pub maximum_identifier_bytes: usize,
     /// Maximum Rhai operations across every expression in one rebuild.
@@ -74,6 +78,7 @@ impl Default for ProfileLimits {
             maximum_steps: 16_384,
             maximum_nodes: 4_096,
             maximum_group_depth: 128,
+            maximum_isolation_bindings: 16_384,
             maximum_identifier_bytes: 256,
             maximum_expression_operations: 100_000,
             maximum_expression_depth: 64,
@@ -473,9 +478,43 @@ impl ProfileProgram {
 /// Complete group isolation replacement inherited by descendants.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct IsolationSpec {
-    local: Vec<String>,
-    events: Vec<String>,
-    portable: Vec<String>,
+    local: Arc<Vec<String>>,
+    events: Arc<Vec<String>>,
+    portable: Arc<Vec<String>>,
+    named: Arc<Vec<NamedIsolation>>,
+}
+
+/// Independent namespace lane for Profile isolation.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum IsolationLane {
+    /// Nominal safe-Rust Local services.
+    Local,
+    /// Nominal Local events.
+    Event,
+    /// Portable service keys.
+    Portable,
+}
+
+/// One named allocation shared within one Profile activation namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedIsolation {
+    lane: IsolationLane,
+    key: String,
+    label: String,
+}
+impl NamedIsolation {
+    /// Selected isolation lane.
+    pub const fn lane(&self) -> IsolationLane {
+        self.lane
+    }
+    /// Exact nominal contract or Portable service key.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    /// Label shared only in this Profile namespace and exact lane/key.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
 }
 
 impl IsolationSpec {
@@ -486,10 +525,40 @@ impl IsolationSpec {
         portable: impl IntoIterator<Item = String>,
     ) -> Self {
         Self {
-            local: local.into_iter().collect(),
-            events: events.into_iter().collect(),
-            portable: portable.into_iter().collect(),
+            local: Arc::new(local.into_iter().collect()),
+            events: Arc::new(events.into_iter().collect()),
+            portable: Arc::new(portable.into_iter().collect()),
+            named: Arc::default(),
         }
+    }
+
+    /// Adds one named selection; the compiler rejects duplicate keys and invalid labels.
+    #[must_use]
+    pub fn with_named(
+        mut self,
+        lane: IsolationLane,
+        key: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Arc::make_mut(&mut self.named).push(NamedIsolation {
+            lane,
+            key: key.into(),
+            label: label.into(),
+        });
+        self
+    }
+
+    /// Named selections across all lanes, in declaration order.
+    pub fn named(&self) -> &[NamedIsolation] {
+        &self.named
+    }
+
+    fn len(&self) -> usize {
+        self.local
+            .len()
+            .saturating_add(self.events.len())
+            .saturating_add(self.portable.len())
+            .saturating_add(self.named.len())
     }
 
     /// Stable Local contract keys receiving a fresh group identity.
@@ -999,6 +1068,25 @@ impl<'a> CompileState<'a> {
             }
             self.hash_marker(b"isolation-lane-end");
         }
+        for named in isolation.named.iter() {
+            let lane = match named.lane {
+                IsolationLane::Local => b"local".as_slice(),
+                IsolationLane::Event => b"event",
+                IsolationLane::Portable => b"portable",
+            };
+            digest_component(&mut self.digest, b"named-isolation-lane", lane);
+            digest_component(
+                &mut self.digest,
+                b"named-isolation-key",
+                named.key.as_bytes(),
+            );
+            digest_component(
+                &mut self.digest,
+                b"named-isolation-label",
+                named.label.as_bytes(),
+            );
+        }
+        self.hash_marker(b"named-isolation-end");
     }
 
     fn load_source(&self, requested: &Path) -> Result<(PathBuf, Arc<[u8]>)> {
@@ -1637,7 +1725,17 @@ impl<'a> CompileState<'a> {
 
     fn finish(self) -> Result<ProfileCandidate> {
         let mut retained = 0_usize;
+        let mut isolation_bindings = 0_usize;
         visit_nodes(&self.tree, &mut |node| {
+            if let TreeNode::Group(group) = node {
+                isolation_bindings = isolation_bindings.saturating_add(group.isolation.len());
+                if isolation_bindings > self.compiler.limits.maximum_isolation_bindings {
+                    return Err(ProfileError::CapacityExceeded {
+                        resource: "isolation bindings",
+                        maximum: self.compiler.limits.maximum_isolation_bindings,
+                    });
+                }
+            }
             let TreeNode::Plugin(plugin) = node else {
                 return Ok(());
             };
@@ -1739,31 +1837,68 @@ struct RawPatch {
 #[serde(deny_unknown_fields)]
 struct RawIsolation {
     #[serde(default)]
-    local: Vec<String>,
+    local: Vec<RawIsolationValue>,
     #[serde(default)]
-    events: Vec<String>,
+    events: Vec<RawIsolationValue>,
     #[serde(default)]
-    portable: Vec<String>,
+    portable: Vec<RawIsolationValue>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum RawIsolationValue {
+    Fresh(String),
+    Named(RawNamedIsolation),
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawNamedIsolation {
+    key: String,
+    label: String,
 }
 
 impl RawIsolation {
     fn validate(self, state: &CompileState<'_>) -> Result<IsolationSpec> {
-        let isolation = IsolationSpec {
-            local: self.local,
-            events: self.events,
-            portable: self.portable,
-        };
+        let mut isolation = IsolationSpec::default();
+        for (lane, values) in [
+            (IsolationLane::Local, self.local),
+            (IsolationLane::Event, self.events),
+            (IsolationLane::Portable, self.portable),
+        ] {
+            for value in values {
+                match value {
+                    RawIsolationValue::Fresh(key) => match lane {
+                        IsolationLane::Local => Arc::make_mut(&mut isolation.local).push(key),
+                        IsolationLane::Event => Arc::make_mut(&mut isolation.events).push(key),
+                        IsolationLane::Portable => Arc::make_mut(&mut isolation.portable).push(key),
+                    },
+                    RawIsolationValue::Named(value) => {
+                        Arc::make_mut(&mut isolation.named).push(NamedIsolation {
+                            lane,
+                            key: value.key,
+                            label: value.label,
+                        });
+                    }
+                }
+            }
+        }
         validate_isolation(&isolation, state)?;
         Ok(isolation)
     }
 }
 
 fn validate_isolation(isolation: &IsolationSpec, state: &CompileState<'_>) -> Result<()> {
+    if isolation.len() > state.compiler.limits.maximum_isolation_bindings {
+        return Err(ProfileError::CapacityExceeded {
+            resource: "isolation bindings",
+            maximum: state.compiler.limits.maximum_isolation_bindings,
+        });
+    }
     for value in isolation
         .local
         .iter()
-        .chain(&isolation.events)
-        .chain(&isolation.portable)
+        .chain(isolation.events.iter())
+        .chain(isolation.portable.iter())
     {
         state.validate_identifier("isolation", value)?;
     }
@@ -1774,6 +1909,25 @@ fn validate_isolation(isolation: &IsolationSpec, state: &CompileState<'_>) -> Re
         return Err(ProfileError::InvalidProgram(
             "group isolation keys must be unique within each lane".to_owned(),
         ));
+    }
+    let mut keys = BTreeSet::new();
+    for (lane, values) in [
+        (IsolationLane::Local, &isolation.local),
+        (IsolationLane::Event, &isolation.events),
+        (IsolationLane::Portable, &isolation.portable),
+    ] {
+        for key in values.iter() {
+            keys.insert((lane, key.as_str()));
+        }
+    }
+    for named in isolation.named.iter() {
+        state.validate_identifier("isolation", &named.key)?;
+        state.validate_identifier("isolation label", &named.label)?;
+        if !keys.insert((named.lane, named.key.as_str())) {
+            return Err(ProfileError::InvalidProgram(
+                "group isolation keys must be unique within each lane".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2020,6 +2174,7 @@ fn validate_limits(limits: &ProfileLimits) -> Result<()> {
         ("Profile steps", limits.maximum_steps),
         ("Profile nodes", limits.maximum_nodes),
         ("group depth", limits.maximum_group_depth),
+        ("isolation bindings", limits.maximum_isolation_bindings),
         ("identifier bytes", limits.maximum_identifier_bytes),
         (
             "expression operations",

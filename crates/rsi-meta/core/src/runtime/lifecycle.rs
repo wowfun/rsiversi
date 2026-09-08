@@ -505,6 +505,7 @@ impl Runtime {
             let mut data = fiber.data.lock().expect("fiber state poisoned");
             let retired = (
                 data.fiber_reservation.take(),
+                data.position.take(),
                 data.factory.take(),
                 data.desired.take(),
                 data.attempt.take(),

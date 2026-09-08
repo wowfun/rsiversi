@@ -17,6 +17,8 @@ pub const MAXIMUM_WATERFALL_LISTENERS_PER_SLOT: usize = 256;
 pub struct TopologyLimits {
     /// Maximum reserved and registered Fibers.
     pub maximum_fibers: usize,
+    /// Maximum simultaneously retained stable composition positions, including caller handles.
+    pub maximum_composition_positions: usize,
     /// Maximum parent/child depth, counting the first root Fiber as one.
     pub maximum_fiber_depth: usize,
     /// Maximum staged and published service providers.
@@ -51,6 +53,7 @@ impl Default for TopologyLimits {
     fn default() -> Self {
         Self {
             maximum_fibers: 4_096,
+            maximum_composition_positions: 16_384,
             maximum_fiber_depth: 256,
             maximum_services: 4_096,
             maximum_dependency_edges: 65_536,
@@ -206,6 +209,7 @@ fn validate_nonzero(limits: &RuntimeLimits) -> Result<()> {
     let execution = &limits.execution;
     let capacities = [
         topology.maximum_fibers,
+        topology.maximum_composition_positions,
         topology.maximum_fiber_depth,
         topology.maximum_services,
         topology.maximum_dependency_edges,

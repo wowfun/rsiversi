@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Context, FiberState, LocalContract, PluginFactory, PluginId,
+    ActivationPlan, ConfigValue, FiberState, LocalContract, PluginFactory, PluginId,
     PreparedActivation, ResolvedFactory, Runtime, UpdateMode,
 };
 use rsi_meta_profile::{
-    IsolationSpec, Profile, ProfileCompiler, ProfileEntry, ProfileEnvironment,
-    ProfileGenerationPlan, ProfileLimits, ProfileProgram, ProfileResolver,
+    Profile, ProfileCompiler, ProfileEntry, ProfileEnvironment, ProfileGenerationPlan,
+    ProfileLimits, ProfileProgram, ProfileResolver,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -23,14 +23,6 @@ impl ProfileResolver for MissingResolver {
         Err(rsi_meta_profile::ProfileError::UnknownPlugin {
             plugin: plugin.clone(),
         })
-    }
-
-    fn isolate(
-        &self,
-        _context: Context,
-        _isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        unreachable!("unknown factories fail before Context isolation")
     }
 }
 
@@ -54,17 +46,6 @@ impl ProfileResolver for OneFactoryResolver {
                 live: Arc::clone(&self.live),
             }),
         ))
-    }
-
-    fn isolate(
-        &self,
-        context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        assert!(isolation.local().is_empty());
-        assert!(isolation.events().is_empty());
-        assert!(isolation.portable().is_empty());
-        Ok(context)
     }
 }
 
@@ -113,17 +94,6 @@ impl ProfileResolver for SingleResolver {
             UpdateMode::Replayable,
             Arc::clone(&self.factory),
         ))
-    }
-
-    fn isolate(
-        &self,
-        context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        assert!(isolation.local().is_empty());
-        assert!(isolation.events().is_empty());
-        assert!(isolation.portable().is_empty());
-        Ok(context)
     }
 }
 
@@ -231,17 +201,6 @@ impl ProfileResolver for ActivationFailureResolver {
             UpdateMode::Replayable,
             factory,
         ))
-    }
-
-    fn isolate(
-        &self,
-        context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        assert!(isolation.local().is_empty());
-        assert!(isolation.events().is_empty());
-        assert!(isolation.portable().is_empty());
-        Ok(context)
     }
 }
 

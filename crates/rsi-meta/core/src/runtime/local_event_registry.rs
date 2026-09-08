@@ -1,8 +1,13 @@
 #![allow(clippy::wildcard_imports)] // This is one implementation partition of runtime.
 
-use super::ownership::{EventEffect, EventRemoval};
+use super::composition_order::OrderView;
+use super::ownership::RegistrationRemoval;
 use super::*;
 use crate::Waterfall;
+use crate::local_events::LocalEventBindings;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct LocalEventSlot {
@@ -13,53 +18,100 @@ pub(super) struct LocalEventSlot {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LocalListenerLocation {
     slot: LocalEventSlot,
-    order: i64,
+}
+
+struct PositionedListener {
+    binding: Arc<LocalEventBinding>,
+    position: ChildPosition,
+    prepend: bool,
 }
 
 #[derive(Default)]
 pub(super) struct LocalEventListeners {
-    next_prepend: i64,
-    next_append: i64,
-    bindings: BTreeMap<i64, Arc<LocalEventBinding>>,
+    bindings: BTreeMap<EventListenerId, PositionedListener>,
+    snapshot: Option<(Arc<()>, Arc<LocalEventBindings>)>,
 }
 
 impl LocalEventListeners {
-    fn insert(&mut self, binding: Arc<LocalEventBinding>, prepend: bool) -> Result<i64> {
-        let order = if prepend {
-            self.next_prepend =
-                self.next_prepend
-                    .checked_sub(1)
-                    .ok_or(MetaError::CapacityExhausted {
-                        resource: "Local listener ordering keys",
-                    })?;
-            self.next_prepend
+    fn insert(
+        &mut self,
+        id: EventListenerId,
+        binding: Arc<LocalEventBinding>,
+        position: ChildPosition,
+        prepend: bool,
+    ) {
+        // Every old snapshot member remains in the registry here; releasing the
+        // cached Arc cannot run a final plugin destructor under the registry lock.
+        self.snapshot = None;
+        self.bindings.insert(
+            id,
+            PositionedListener {
+                binding,
+                position,
+                prepend,
+            },
+        );
+    }
+
+    fn remove(
+        &mut self,
+        id: EventListenerId,
+    ) -> Option<(PositionedListener, Option<Arc<LocalEventBindings>>)> {
+        let removed = self.bindings.remove(&id)?;
+        Some((removed, self.snapshot.take().map(|(_, bindings)| bindings)))
+    }
+
+    fn snapshot(&mut self, runtime: &Runtime, order: &OrderView<'_>) -> Arc<LocalEventBindings> {
+        if let Some((revision, snapshot)) = &self.snapshot
+            && Arc::ptr_eq(revision, order.revision())
+        {
+            return snapshot.clone();
+        }
+        let mut entries: Vec<_> = self
+            .bindings
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    entry.prepend,
+                    order.key(&entry.position),
+                    *id,
+                    &entry.binding,
+                )
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            right.0.cmp(&left.0).then_with(|| {
+                let declaration = left.1.cmp(&right.1).then(left.2.cmp(&right.2));
+                if left.0 {
+                    declaration.reverse()
+                } else {
+                    declaration
+                }
+            })
+        });
+        let bindings: Vec<_> = entries
+            .into_iter()
+            .map(|(_, _, _, binding)| binding.clone())
+            .collect();
+        let snapshot = if let Some((_, previous)) = &self.snapshot
+            && previous
+                .bindings
+                .iter()
+                .zip(&bindings)
+                .all(|(left, right)| Arc::ptr_eq(left, right))
+            && previous.bindings.len() == bindings.len()
+        {
+            previous.clone()
         } else {
-            let order = self.next_append;
-            self.next_append =
-                self.next_append
-                    .checked_add(1)
-                    .ok_or(MetaError::CapacityExhausted {
-                        resource: "Local listener ordering keys",
-                    })?;
-            order
+            runtime.local_event_bindings(bindings)
         };
-        let previous = self.bindings.insert(order, binding);
-        debug_assert!(previous.is_none(), "Local listener order keys are unique");
-        Ok(order)
-    }
-
-    fn remove(&mut self, order: i64) -> Option<Arc<LocalEventBinding>> {
-        self.bindings.remove(&order)
-    }
-
-    fn snapshot(&self) -> Vec<Arc<LocalEventBinding>> {
-        self.bindings.values().cloned().collect()
+        self.snapshot = Some((order.revision().clone(), snapshot.clone()));
+        snapshot
     }
 
     fn len(&self) -> usize {
         self.bindings.len()
     }
-
     fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
@@ -69,7 +121,7 @@ impl LocalEventListeners {
 #[derive(Clone)]
 pub struct LocalEventHandle {
     id: EventListenerId,
-    ownership: EventOwnership,
+    ownership: RegistrationOwnership,
 }
 
 impl LocalEventHandle {
@@ -94,6 +146,22 @@ impl fmt::Debug for LocalEventHandle {
 }
 
 impl Runtime {
+    fn local_event_bindings(
+        &self,
+        bindings: Vec<Arc<LocalEventBinding>>,
+    ) -> Arc<LocalEventBindings> {
+        let runtime = Arc::downgrade(&self.inner);
+        Arc::new(LocalEventBindings {
+            bindings,
+            on_drop_panic: Box::new(move || {
+                if let Some(inner) = runtime.upgrade() {
+                    Runtime { inner }
+                        .mark_terminal_owned("Local event listener destructor panicked");
+                }
+            }),
+        })
+    }
+
     pub(super) fn add_local_listener<E, H>(
         &self,
         context: &Context,
@@ -124,22 +192,8 @@ impl Runtime {
             "remove Local event listener".to_owned(),
             self.inner.limits.payloads.maximum_diagnostic_bytes,
         );
-        let removal = EventRemoval::new(self, owner, id, cleanup_label.clone());
-        let ownership = if let Some(setup) = context
-            .setup_effect
-            .as_ref()
-            .filter(|setup| setup.is_open())
-        {
-            let effect = setup.defer_owned(cleanup_label, removal.cleanup())?;
-            EventOwnership::new(Arc::clone(&removal), EventEffect::Setup(effect))
-        } else {
-            let mut transaction = self.begin_effect(owner, "Local event listener".to_owned())?;
-            transaction.defer(cleanup_label, removal.cleanup())?;
-            EventOwnership::new(
-                Arc::clone(&removal),
-                EventEffect::Dynamic(transaction.commit()?),
-            )
-        };
+        let removal = RegistrationRemoval::new(self, owner, id, cleanup_label.clone());
+        let ownership = context.own_registration(&removal, cleanup_label)?;
         // The registry must not retain a strong Runtime through the dynamic
         // effect handle; otherwise Runtime -> binding -> once closure -> Runtime
         // forms a last-owner cycle even when the public listener handle drops.
@@ -212,6 +266,12 @@ impl Runtime {
             })?;
         let mut data = fiber.data.lock().expect("fiber state poisoned");
         Runtime::validate_live_owner_data(owner, &data)?;
+        let position = data
+            .position
+            .as_ref()
+            .expect("live Fiber occupies a position")
+            .position
+            .clone();
         let active = data.active.as_mut().ok_or(MetaError::StaleContext {
             fiber: owner.fiber,
             generation: owner.generation,
@@ -235,11 +295,11 @@ impl Runtime {
                     resource: "event listeners",
                 })?;
         let listeners = state.local_listeners.entry(slot).or_default();
-        let order = listeners.insert(binding, prepend)?;
+        listeners.insert(id, binding, position, prepend);
         active.local_listener_ids.insert(id, reservation);
         state
             .local_listener_events
-            .insert(id, LocalListenerLocation { slot, order });
+            .insert(id, LocalListenerLocation { slot });
         state.advance_revision();
         Ok(())
     }
@@ -258,7 +318,7 @@ impl Runtime {
                 .unwrap_or(LocalIsolationId(0)),
         };
         let bindings = {
-            let state = self.inner.state.lock().expect("runtime state poisoned");
+            let mut state = self.inner.state.lock().expect("runtime state poisoned");
             if let Some(owner) = context.owner {
                 let fiber = state
                     .fibers
@@ -270,11 +330,17 @@ impl Runtime {
                 let data = fiber.data.lock().expect("fiber state poisoned");
                 Runtime::validate_live_owner_data(owner, &data)?;
             }
-            state
-                .local_listeners
-                .get(&slot)
-                .map(LocalEventListeners::snapshot)
-                .unwrap_or_default()
+            self.inner.composition_order.snapshot(|order| {
+                state.local_listeners.get_mut(&slot).map_or_else(
+                    || {
+                        self.inner
+                            .empty_local_event_bindings
+                            .get_or_init(|| self.local_event_bindings(Vec::new()))
+                            .clone()
+                    },
+                    |listeners| listeners.snapshot(self, order),
+                )
+            })
         };
         Ok(LocalEventSnapshot::new(self.clone(), bindings))
     }
@@ -304,7 +370,7 @@ impl Runtime {
                 .get_mut(&location.slot)
                 .expect("Local listener identity retains its exact slot");
             let removed = listeners
-                .remove(location.order)
+                .remove(id)
                 .expect("Local listener identity retains its exact binding");
             let empty = listeners.is_empty();
             if empty {

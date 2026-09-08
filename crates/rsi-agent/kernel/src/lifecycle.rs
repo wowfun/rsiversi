@@ -95,9 +95,7 @@ impl AgentKernel {
                     fresh_reservations: BTreeSet::new(),
                     executors: BTreeMap::new(),
                     next_executor_registration: 0,
-                    finalizers: BTreeMap::new(),
-                    finalizer_names: BTreeSet::new(),
-                    next_finalizer_registration: 0,
+                    finalizers: finalization::Registry::default(),
                     tree_lanes: BTreeMap::new(),
                     next_claim: 0,
                     claim_queue: VecDeque::new(),
@@ -185,7 +183,6 @@ impl AgentKernel {
             let finalizers = std::mem::take(&mut state.finalizers);
             state.fresh_reservations.clear();
             state.executors.clear();
-            state.finalizer_names.clear();
             state.claim_queue.clear();
             state.queued.clear();
             (sessions, loads, finalizers)

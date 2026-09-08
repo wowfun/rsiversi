@@ -14,8 +14,7 @@ use rsi_meta::{
     PreparedActivation, ResolvedFactory, Runtime, UpdateMode,
 };
 use rsi_meta_profile::{
-    IsolationSpec, ProfileCompiler, ProfileEnvironment, ProfileError, ProfileLimits,
-    ProfileResolver,
+    ProfileCompiler, ProfileEnvironment, ProfileError, ProfileLimits, ProfileResolver,
 };
 use rsi_meta_scope::ScopeRoot;
 use rsi_tools::ToolsFactory;
@@ -74,15 +73,21 @@ impl PluginFactory for NoopFactory {
     }
 }
 
-#[tokio::test]
-async fn contribution_catalog_resolves_only_exact_allowlisted_factories() {
+#[test]
+fn contribution_catalog_resolves_only_exact_allowlisted_factories() {
+    use rsi_meta::LocalContract as _;
+    struct ConflictingLabel;
+    impl rsi_meta::LocalContract for ConflictingLabel {
+        const KEY: &'static str = GenerationLabel::KEY;
+        type Service = u64;
+    }
     let expected = ResolvedFactory::linked(
         "agent.allowed",
         "revision-a",
         UpdateMode::Replayable,
         Arc::new(NoopFactory),
     );
-    let catalog = AgentContributionCatalog::new([expected.clone()]).unwrap();
+    let mut catalog = AgentContributionCatalog::new([expected.clone()]).unwrap();
 
     let resolved = catalog.resolve(&"agent.allowed".into()).unwrap();
     assert_eq!(resolved.identity(), expected.identity());
@@ -91,13 +96,29 @@ async fn contribution_catalog_resolves_only_exact_allowlisted_factories() {
         Err(ProfileError::UnknownPlugin { .. })
     ));
 
-    let runtime = rsi_meta::Runtime::default();
+    assert!(matches!(
+        catalog.local_contract_type(GenerationLabel::KEY),
+        Err(ProfileError::UnknownLocalContract { .. })
+    ));
+    catalog
+        .register_local_contract::<GenerationLabel>()
+        .unwrap();
+    catalog
+        .register_local_contract::<GenerationLabel>()
+        .unwrap();
+    assert_eq!(
+        catalog.local_contract_type(GenerationLabel::KEY).unwrap(),
+        std::any::TypeId::of::<GenerationLabel>()
+    );
     assert!(
         catalog
-            .isolate(runtime.root(), &IsolationSpec::default())
-            .is_ok()
+            .register_local_contract::<ConflictingLabel>()
+            .is_err()
     );
-    assert!(runtime.shutdown().await.is_clean());
+    assert!(matches!(
+        catalog.local_event_type(GenerationLabel::KEY),
+        Err(ProfileError::UnknownLocalEvent { .. })
+    ));
 }
 
 #[derive(Debug, Default)]
