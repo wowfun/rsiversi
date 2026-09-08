@@ -9,7 +9,7 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub async fn run_probe() -> Result<String, JsValue> {
-    let header = r#"{"format_version":8,"session_id":"browser-header","created_at_ms":1788778132168,"canonical_cwd":"/workspace","workspace_trust":"untrusted","agent_preset_id":"standard","settings":{"settings_id":"standard","system_prompt":"You are a careful coding agent.","default_model":{"deployment":"fixture","model":"fixture-model"},"sandbox":"workspace-write","require_approval":false,"turn_budget":{"maximum_elapsed_ms":1800000,"maximum_provider_attempts":64,"maximum_tool_calls":256,"maximum_generated_facts":65536,"maximum_generated_fact_bytes":67108864}},"fork_origin":null}"#;
+    let header = r#"{"format_version":9,"session_id":"browser-header","created_at_ms":1788778132168,"canonical_cwd":"/workspace","workspace_trust":"untrusted","agent_preset_id":"standard","settings":{"settings_id":"standard","system_prompt":"You are a careful coding agent.","default_model":{"deployment":"fixture","model":"fixture-model"},"sandbox":"workspace-write","require_approval":false,"turn_budget":{"maximum_elapsed_ms":1800000,"maximum_provider_attempts":64,"maximum_tool_calls":256,"maximum_generated_records":65536,"maximum_generated_record_bytes":67108864}},"fork_origin":null}"#;
     let decoded: rsi_agent_session_protocol::SessionHeader = serde_json::from_str(header)
         .map_err(|error| JsValue::from_str(&format!("durable header decode: {error}")))?;
     assert_eq!(decoded.created_at_ms(), 1_788_778_132_168);

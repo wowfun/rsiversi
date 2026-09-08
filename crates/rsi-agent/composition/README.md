@@ -16,9 +16,12 @@ and their pins; retiring it disposes its complete generation subtree.
 
 Each successful generation is built below a hidden Scope within that root. Its
 pin controls reclamation independently of the composition provider Fiber. A generation first
-activates a private `ToolRegistrar`, then activates every static Profile leaf,
+activates private Tool and domain registrars, then activates every static Profile leaf,
 requires the generation's unique `ModelContextBuilder`, seals its unpublished
-Tool catalog, and only then becomes current. The builder's Local identity is
+Tool and typed domain catalogs, and only then becomes current. Domain registration
+uses exact Meta credentials and leases; rollback closes admission even for a
+registrar retained outside the failed candidate. A sealed pin preserves its
+definitions across generation replacement. The builder's Local identity is
 isolated with the registrar: an ancestor provider cannot satisfy a missing
 selection. Multiple providers conflict at ordinary Local publication. The same
 pin retains both builder and Tools for execution and delayed checkpoint work. A

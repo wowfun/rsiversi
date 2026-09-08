@@ -19,7 +19,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+mod domain;
 mod observation;
+pub use domain::{DomainMutation, DomainMutationReceipt, DomainStateView};
 pub use observation::{
     DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
 };
@@ -667,6 +669,24 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<TurnOutcome>>;
     /// Reads the immutable durable or current-process lazy header.
     async fn session_header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads complete opaque domain states without requiring execution codecs.
+    async fn domain_states(&self, session_id: &SessionId) -> Result<Vec<DomainStateView>> {
+        let _ = session_id;
+        Err(TurnError::Invalid(
+            "domain state reads are unsupported".into(),
+        ))
+    }
+    /// Resolves an exact domain request after a lost acknowledgement without replaying effects.
+    async fn domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<DomainMutationReceipt>> {
+        let _ = (session_id, request_id);
+        Err(TurnError::Invalid(
+            "domain request reads are unsupported".into(),
+        ))
+    }
 }
 
 /// Nominal application-facing Turn service contract.
@@ -966,17 +986,15 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     async fn enter_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
     /// Refreshes complete trust-bound workspace context before provider I/O.
     async fn refresh_workspace_context(&self, claim: &TurnClaim) -> Result<usize>;
-    /// Closes the current Agent Step before its Turn terminal boundary.
+    /// Publishes an ordinary charged Step closure. Turn finalization uses `finish_turn`.
     async fn close_current_step(&self, claim: &TurnClaim, outcome: &TurnOutcome) -> Result<()>;
-    /// Atomically closes an activation-owned Turn and advances tree settlement.
-    ///
-    /// `None` means the claimed Turn is not owned by a mailbox activation and
-    /// should use ordinary terminal publication.
-    async fn finish_activation_turn(
+    /// Durably closes the current Step and Turn in one bounded ending transaction.
+    /// Kernel adds any required budget marker and advances mailbox/tree settlement.
+    async fn finish_turn(
         &self,
         claim: &TurnClaim,
         outcome: &TurnOutcome,
-    ) -> Result<Option<Arc<SessionFact>>>;
+    ) -> Result<Arc<SessionFact>>;
     /// Reads bounded live Facts after a cursor, including a speculative suffix.
     async fn read_facts(
         &self,
@@ -1030,8 +1048,20 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (claim, checkpoint);
         Ok(false)
     }
+    /// Commits exact-generation domain proposals and their optional Facts as one durable request.
+    /// Kernel assigns the claimed Turn as source and charges complete canonical records.
+    async fn commit_domains(
+        &self,
+        claim: &TurnClaim,
+        mutation: DomainMutation,
+    ) -> Result<DomainMutationReceipt> {
+        let _ = (claim, mutation);
+        Err(TurnError::Invalid(
+            "domain mutation admission is unsupported".into(),
+        ))
+    }
     /// Publishes validated bodies as the next live Facts without claiming durability.
-    /// Activation terminals must use `finish_activation_turn`; only direct Turns
+    /// Activation terminals must use `finish_turn`; only direct Turns
     /// may publish a raw `TurnTerminal` body.
     async fn publish(
         &self,
@@ -1270,6 +1300,28 @@ pub enum TurnError {
         session: String,
         /// Message identity.
         message: String,
+    },
+    /// A replacement did not name the exact durable predecessor revision.
+    #[error("domain {domain} revision conflict: expected {expected:?}, actual {actual:?}")]
+    DomainRevisionConflict {
+        /// Durable domain name.
+        domain: String,
+        /// Caller-observed predecessor.
+        expected: rsi_agent_session_protocol::DomainRevision,
+        /// Current durable revision.
+        actual: rsi_agent_session_protocol::DomainRevision,
+    },
+    /// An already committed request has different provenance, state or Fact bodies.
+    #[error("domain request {request_id} conflicts with its committed content")]
+    DomainRequestConflict {
+        /// Exact conflicting request.
+        request_id: String,
+    },
+    /// Store failure prevented reconciliation; the session remains closed to execution.
+    #[error("domain request {request_id} outcome is unknown; query the canonical request")]
+    DomainOutcomeUnknown {
+        /// Exact request to query.
+        request_id: String,
     },
     /// The session already has its bounded number of live turns.
     #[error("Agent session live-turn capacity is exhausted")]

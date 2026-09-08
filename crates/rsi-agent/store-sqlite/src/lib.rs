@@ -48,7 +48,49 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 10] = [
+const EXPECTED_TABLES: [(&str, &str); 13] = [
+    (
+        "domain_versions",
+        "CREATE TABLE domain_versions (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            domain_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            update_index INTEGER NOT NULL CHECK (update_index >= 0 AND update_index < 64),
+            codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
+            PRIMARY KEY (session_id, domain_id, control_seq),
+            UNIQUE (session_id, domain_id, revision),
+            FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
+    (
+        "domain_heads",
+        "CREATE TABLE domain_heads (
+            session_id TEXT NOT NULL,
+            domain_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            update_index INTEGER NOT NULL CHECK (update_index >= 0 AND update_index < 64),
+            codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
+            PRIMARY KEY (session_id, domain_id),
+            FOREIGN KEY (session_id, domain_id, control_seq) REFERENCES domain_versions(session_id, domain_id, control_seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
+    (
+        "domain_requests",
+        "CREATE TABLE domain_requests (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            request_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            source_turn_id TEXT,
+            control_bytes INTEGER NOT NULL CHECK (control_bytes > 0),
+            PRIMARY KEY (session_id, request_id),
+            UNIQUE (session_id, control_seq),
+            FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
     (
         "sessions",
         "CREATE TABLE sessions (
@@ -188,7 +230,11 @@ const EXPECTED_TABLES: [(&str, &str); 10] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 8] = [
+const EXPECTED_INDEXES: [(&str, &str); 9] = [
+    (
+        "domain_requests_by_turn",
+        "CREATE INDEX domain_requests_by_turn ON domain_requests (session_id, source_turn_id, control_seq)",
+    ),
     (
         "facts_by_turn",
         "CREATE INDEX facts_by_turn ON facts (session_id, turn_id, seq)",
@@ -662,6 +708,7 @@ impl SqliteStore {
 
 mod append;
 mod cas;
+mod domain;
 mod filesystem;
 mod session_store;
 mod validation;

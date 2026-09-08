@@ -100,11 +100,7 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
             }
             _ => unreachable!(),
         };
-        initial
-            .finish_activation_turn(&claim, &outcome)
-            .await
-            .unwrap()
-            .unwrap();
+        initial.finish_turn(&claim, &outcome).await.unwrap();
         initial.shutdown(worker).await.unwrap();
         drop(lease);
     }
@@ -224,9 +220,8 @@ async fn consumed_steer_retries_retain_the_original_turn_and_conflicting_text_is
         Err(TurnError::MessageConflict { .. })
     ));
     kernel
-        .finish_activation_turn(&claim, &TurnOutcome::Completed)
+        .finish_turn(&claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert!(
         store

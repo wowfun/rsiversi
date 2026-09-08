@@ -325,11 +325,11 @@ impl TurnExecution for FailingClaimFixture {
         unreachable!("the failing claim fixture never closes a Step")
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
         _claim: &TurnClaim,
         _outcome: &TurnOutcome,
-    ) -> rsi_agent_turn_protocol::Result<Option<Arc<SessionFact>>> {
+    ) -> rsi_agent_turn_protocol::Result<Arc<SessionFact>> {
         unreachable!("the failing claim fixture never settles an activation")
     }
 
@@ -1180,6 +1180,7 @@ impl AgentComposition for CompositionFixture {
             "b".repeat(64),
             tools,
             self.context_builder.lock().unwrap().clone(),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
             Arc::new(GenerationOwner(Arc::clone(&self.owner_drops))),
         )?;
         *current = Some(pin.clone());

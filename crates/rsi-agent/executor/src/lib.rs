@@ -288,7 +288,7 @@ mod execution_support;
 use execution_support::{
     CombinedCancellation, DriveFailure, ai_failure, apply_finalization_failure, bounded,
     combine_cancellation, failed, failure_outcome, fatal, image_ai_failure,
-    image_operation_failure, next_effect_id, prepare_tool_effect, publish_budget_exhaustion,
+    image_operation_failure, next_effect_id, prepare_tool_effect,
     publish_nonterminal_with_capacity_retry, publish_terminal, retry_delay, run_executor_pool,
     settled_tool_budget, should_retry, tool_failure,
 };

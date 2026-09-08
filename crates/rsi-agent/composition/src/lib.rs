@@ -3,12 +3,14 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod domain;
 mod root;
 pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
 
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
+    DomainCatalog, DomainRegistrar, DomainRegistrarContract,
 };
 use rsi_agent_context::{ModelContextBuilder, ModelContextBuilderContract};
 use rsi_agent_presets::{AgentPresetCatalog, AgentPresetId, PresetError};
@@ -36,7 +38,7 @@ pub const MAXIMUM_CURRENT_PRESETS: usize = 256;
 /// Maximum explicitly selected Local markers in each Agent catalog lane.
 pub const MAXIMUM_CATALOG_MARKERS: usize = 4096;
 
-const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.tool-registrar";
+const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.registrars";
 
 /// Frozen Agent-only allowlist of exact resolved contribution factories.
 #[derive(Clone)]
@@ -327,6 +329,7 @@ struct Generation {
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
     context_builder: Arc<dyn ModelContextBuilder>,
+    domains: DomainCatalog,
     owner: Arc<GenerationOwner>,
 }
 
@@ -347,6 +350,7 @@ impl Generation {
             self.source_digest.clone(),
             Arc::clone(&self.tools),
             Arc::clone(&self.context_builder),
+            self.domains.clone(),
             self.owner.clone(),
         )
     }
@@ -377,6 +381,8 @@ struct UnpublishedGeneration {
     scope: Option<ScopeHandle>,
     tools: Option<Arc<dyn ToolRuntime>>,
     context_builder: Option<Arc<dyn ModelContextBuilder>>,
+    domain_stage: domain::DomainStage,
+    domains: Option<DomainCatalog>,
     singleflight: Option<OwnedMutexGuard<()>>,
     build_slot: Option<OwnedSemaphorePermit>,
     state: Weak<CompositionState>,
@@ -403,11 +409,14 @@ impl UnpublishedGeneration {
         owner_state: Weak<CompositionState>,
         executor: tokio::runtime::Handle,
     ) -> Self {
+        let domain_stage = domain::DomainStage::new(scope.context().meta().runtime_identity());
         Self {
             stage: Some(stage),
             scope: Some(scope),
             tools: None,
             context_builder: None,
+            domain_stage,
+            domains: None,
             singleflight: Some(singleflight),
             build_slot: Some(build_slot),
             state: owner_state,
@@ -436,6 +445,11 @@ impl UnpublishedGeneration {
         let builder = context
             .lookup_local::<ModelContextBuilderContract>()
             .ok_or_else(|| unavailable(preset_id, "Agent Profile requires one context builder"))?;
+        self.domains = Some(
+            self.domain_stage
+                .seal()
+                .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
+        );
         let stage = self
             .stage
             .take()
@@ -454,6 +468,7 @@ impl UnpublishedGeneration {
     ) -> (
         Arc<dyn ToolRuntime>,
         Arc<dyn ModelContextBuilder>,
+        DomainCatalog,
         ScopeHandle,
     ) {
         let tools = self
@@ -468,9 +483,13 @@ impl UnpublishedGeneration {
             .context_builder
             .take()
             .expect("published Agent generation has a context builder");
+        let domains = self
+            .domains
+            .take()
+            .expect("published Agent generation has domain definitions");
         drop(self.singleflight.take());
         drop(self.build_slot.take());
-        (tools, context_builder, scope)
+        (tools, context_builder, domains, scope)
     }
 
     async fn rollback(mut self) -> bool {
@@ -718,6 +737,7 @@ impl CompositionState {
             .clone()
             .isolate_local_fresh::<ToolRegistrarContract>()
             .and_then(|(context, _)| context.isolate_local_fresh::<ModelContextBuilderContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<DomainRegistrarContract>())
         {
             Ok((context, _isolation)) => context,
             Err(_error) => {
@@ -735,8 +755,9 @@ impl CompositionState {
                     REGISTRAR_FACTORY_ID,
                     env!("CARGO_PKG_VERSION"),
                     UpdateMode::RestartRequired,
-                    Arc::new(ToolRegistrarFactory {
+                    Arc::new(AgentRegistrarFactory {
                         registrar: unpublished.registrar(),
+                        domains: unpublished.domain_stage.registrar(),
                     }),
                 ),
                 ConfigValue::Null,
@@ -747,17 +768,11 @@ impl CompositionState {
             Ok(handle) => {
                 let _cleanup = handle.dispose().await;
                 let _clean = unpublished.rollback().await;
-                return Err(unavailable(
-                    preset_id,
-                    "Agent Tool registrar activation failed",
-                ));
+                return Err(unavailable(preset_id, "Agent registrar activation failed"));
             }
             Err(_error) => {
                 let _clean = unpublished.rollback().await;
-                return Err(unavailable(
-                    preset_id,
-                    "Agent Tool registrar activation failed",
-                ));
+                return Err(unavailable(preset_id, "Agent registrar activation failed"));
             }
         };
         let _registrar_handle = registrar_handle;
@@ -842,7 +857,7 @@ impl CompositionState {
             if let Some(error) = rejection {
                 Err((error, unpublished))
             } else {
-                let (tools, context_builder, scope) = unpublished.into_published_parts();
+                let (tools, context_builder, domains, scope) = unpublished.into_published_parts();
                 inner.next_scope += 1;
                 let record = Arc::new(ScopeRecord {
                     id: inner.next_scope,
@@ -859,6 +874,7 @@ impl CompositionState {
                     source_digest,
                     tools,
                     context_builder,
+                    domains,
                     owner,
                 });
                 let previous = row
@@ -961,16 +977,17 @@ where
 }
 
 #[derive(Debug)]
-struct ToolRegistrarFactory {
+struct AgentRegistrarFactory {
     registrar: Arc<dyn ToolRegistrar>,
+    domains: Arc<dyn DomainRegistrar>,
 }
 
 #[async_trait]
-impl PluginFactory for ToolRegistrarFactory {
+impl PluginFactory for AgentRegistrarFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         if !desired.is_null() {
             return Err(MetaError::InvalidInput(
-                "Agent Tool registrar configuration must be null".to_owned(),
+                "Agent registrar configuration must be null".to_owned(),
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null))
@@ -980,11 +997,15 @@ impl PluginFactory for ToolRegistrarFactory {
         let supply = plan
             .context()
             .provide_local::<ToolRegistrarContract>(Arc::clone(&self.registrar))?;
+        let domain_supply = plan
+            .context()
+            .provide_local::<DomainRegistrarContract>(Arc::clone(&self.domains))?;
         plan.defer(
-            "withdraw Agent Tool registrar",
+            "withdraw Agent registrars",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    drop(domain_supply);
                     Ok(())
                 })
             }),

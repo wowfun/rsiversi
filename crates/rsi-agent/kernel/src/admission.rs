@@ -74,7 +74,6 @@ impl AgentKernel {
             return Ok(None);
         };
         let drain = self.drain_agent_mutations(claim).await?;
-        self.close_current_step(claim, proposed_outcome).await?;
         if !matches!(proposed_outcome, TurnOutcome::Completed) {
             let descendants = descendant_session_ids(&self.inner.store, claim.session_id()).await?;
             let cancellations = descendants.iter().map(|child_session_id| async move {
@@ -159,34 +158,16 @@ impl AgentKernel {
                 "activation index disagrees with the live claim".into(),
             ));
         }
-        let terminal_body = canonicalize_terminal(
-            SessionFactBody::TurnTerminal {
-                turn_id: claim.turn_id().clone(),
-                outcome: proposed_outcome.clone(),
-            },
-            original.cancel_requested,
-        );
-        let outcome = match &terminal_body {
+        let facts =
+            ending::ending_facts(self, claim, &original, expected_fact_seq, proposed_outcome)?
+                .into_iter()
+                .map(Arc::new)
+                .collect::<Vec<_>>();
+        let terminal = facts.last().expect("ending contains its terminal").clone();
+        let outcome = match terminal.body() {
             SessionFactBody::TurnTerminal { outcome, .. } => outcome.clone(),
             _ => unreachable!("terminal canonicalization preserves its body kind"),
         };
-        let terminal = SessionFact::new(
-            expected_fact_seq
-                .checked_add(1)
-                .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?,
-            self.inner.clock.now_ms().max(1),
-            terminal_body,
-        )
-        .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let budget_original = clone_turn_control(&original);
-        let mut staged = original;
-        apply_executor_body(&mut staged, terminal.body())?;
-        enforce_turn_budget(
-            claim.header().settings().turn_budget(),
-            &budget_original,
-            std::slice::from_ref(&terminal),
-            terminal.timestamp_ms(),
-        )?;
 
         let mailbox = self
             .inner
@@ -211,13 +192,12 @@ impl AgentKernel {
             },
             &mailbox.pending_promotable_message_ids,
         )?;
-        let terminal = Arc::new(terminal);
         let mut sessions = vec![AtomicSessionAppend {
             session_id: claim.session_id().clone(),
             expected_fact_seq,
             expected_control_seq,
             header: None,
-            facts: vec![terminal.clone()],
+            facts: facts.clone(),
             controls: settled_controls,
         }];
         if let Some(parent_session_id) = &parent_session_id {
@@ -237,7 +217,6 @@ impl AgentKernel {
         let claim = claim.clone();
         self.owned_commit(async move {
             drain.admit();
-            let _terminal_lease = terminal_lease;
             let settlement = kernel
                 .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                     sessions,
@@ -259,7 +238,7 @@ impl AgentKernel {
                         },
                         &mailbox.pending_promotable_message_ids,
                     )?;
-                    kernel
+                    let result = kernel
                         .inner
                         .commit_agent(AtomicAgentCommit {
                             sessions: vec![AtomicSessionAppend {
@@ -267,7 +246,7 @@ impl AgentKernel {
                                 expected_fact_seq,
                                 expected_control_seq,
                                 header: None,
-                                facts: vec![terminal.clone()],
+                                facts,
                                 controls: waiting,
                             }],
                             required_active_activations: vec![AgentActivationGuard {
@@ -276,17 +255,26 @@ impl AgentKernel {
                             }],
                             quiescent_descendants_of: None,
                         })
-                        .await
-                        .map_err(turn_store_error)?;
+                        .await;
+                    if let Err(error) = result {
+                        kernel
+                            .reconcile_failed_ending(&claim, &terminal, &terminal_lease, error)
+                            .await?;
+                    }
                     false
                 }
-                Err(error) => return Err(turn_store_error(error)),
+                Err(error) => {
+                    kernel
+                        .reconcile_failed_ending(&claim, &terminal, &terminal_lease, error)
+                        .await?;
+                    true
+                }
             };
-            kernel.install_committed_activation_terminal(
-                &claim,
-                expected_fact_seq,
-                terminal.seq(),
-            )?;
+            kernel.install_committed_terminal(&claim, expected_fact_seq, terminal.seq())?;
+            kernel.inner.session_changes.committed(claim.session_id());
+            if settled && let Some(parent) = &parent_session_id {
+                kernel.inner.session_changes.committed(parent);
+            }
             drop(admissions);
             kernel.request_ready_scan();
             if settled {
@@ -388,7 +376,7 @@ impl AgentKernel {
         })
     }
 
-    pub(super) fn install_committed_activation_terminal(
+    pub(super) fn install_committed_terminal(
         &self,
         claim: &TurnClaim,
         expected_fact_seq: u64,
@@ -414,7 +402,7 @@ impl AgentKernel {
                 .expect("validated claim session exists");
             if session.durable_seq != expected_fact_seq || !session.pending.is_empty() {
                 return Err(TurnError::Invariant(
-                    "resident session changed across activation terminal commit".into(),
+                    "resident session changed across terminal commit".into(),
                 ));
             }
             session.durable_seq = terminal_seq;
@@ -445,6 +433,8 @@ impl AgentKernel {
         if evict_session {
             state.sessions.remove(claim.session_id());
         }
+        drop(state);
+        self.inner.claim_changed.notify_waiters();
         Ok(())
     }
 

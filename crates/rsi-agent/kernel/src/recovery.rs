@@ -266,6 +266,7 @@ pub(super) fn validate_durable_intent_fence(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One snapshot joins open-Turn Facts with derived workspace state and domain usage.
 pub(super) async fn load_control_state(
     store: &Arc<dyn SessionStore>,
     admission: Option<&KernelInner>,
@@ -347,11 +348,20 @@ pub(super) async fn load_control_state(
                     ));
                 }
             }
-            if !turns.contains_key(&open_turn.turn_id) {
-                return Err(KernelError::Invariant(
+            let turn = turns.get_mut(&open_turn.turn_id).ok_or_else(|| {
+                KernelError::Invariant(
                     "Store open-turn index selected a terminal Fact stream".into(),
-                ));
-            }
+                )
+            })?;
+            restore_domain_usage(
+                store.as_ref(),
+                session_id,
+                &open_turn.turn_id,
+                page.durable_seq,
+                budget,
+                turn,
+            )
+            .await?;
             open_cursor = open_turn.accepted_seq;
         }
         if !page.has_more {
@@ -368,6 +378,25 @@ pub(super) async fn load_control_state(
             ));
         }
     }
+}
+
+async fn restore_domain_usage(
+    store: &dyn SessionStore,
+    session: &SessionId,
+    turn_id: &TurnId,
+    expected_fact_seq: u64,
+    budget: &TurnBudget,
+    turn: &mut TurnControl,
+) -> Result<()> {
+    let usage = store.read_turn_domain_usage(session, turn_id).await?;
+    if usage.durable_fact_seq != expected_fact_seq {
+        return Err(KernelError::Invariant(
+            "Store Fact watermark changed during domain usage load".into(),
+        ));
+    }
+    turn_state::add_generated_usage(&mut turn.budget_usage, usage.records, usage.bytes)
+        .map_err(kernel_turn_error)?;
+    turn_state::check_budget_usage(budget, turn.budget_usage).map_err(kernel_turn_error)
 }
 
 pub(super) async fn read_stored_outcome(

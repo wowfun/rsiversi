@@ -101,6 +101,9 @@ impl SessionStore for MemoryStore {
                     controls: Vec::new(),
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
                     workspace_context,
+                    domain_versions: BTreeMap::new(),
+                    domain_requests: BTreeMap::new(),
+                    domain_usage: BTreeMap::new(),
                 },
             );
             Ok(AppendCommit { durable_seq })
@@ -150,6 +153,117 @@ impl SessionStore for MemoryStore {
             .get(session_id)
             .map(|session| session.header.clone())
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
+    }
+
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        at_control_seq: Option<u64>,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        use rsi_agent_store_protocol::{StoreDomainState, StoreDomainStatePage};
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
+        let selected_control_seq = at_control_seq.unwrap_or(durable_control_seq);
+        if selected_control_seq > durable_control_seq {
+            return Err(StoreError::Invalid(
+                "domain horizon exceeds current control tail".into(),
+            ));
+        }
+        let mut states = Vec::new();
+        for versions in session.domain_versions.values() {
+            let Some(index) = versions
+                .partition_point(|head| head.control_seq <= selected_control_seq)
+                .checked_sub(1)
+            else {
+                continue;
+            };
+            let head = &versions[index];
+            let record = domain_control(session, head.control_seq)?;
+            let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+                return Err(StoreError::Corrupt(
+                    "domain index points to another control kind".into(),
+                ));
+            };
+            let update = commit.updates().get(head.update_index).ok_or_else(|| {
+                StoreError::Corrupt("domain update offset exceeds canonical request".into())
+            })?;
+            if update.revision() != head.revision {
+                return Err(StoreError::Corrupt(
+                    "domain indexed revision differs from canonical update".into(),
+                ));
+            }
+            states.push(StoreDomainState {
+                head: head.clone(),
+                snapshot: update.snapshot().clone(),
+            });
+        }
+        let page = StoreDomainStatePage {
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq,
+            selected_control_seq,
+            states,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<AgentControlRecord>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let Some(seq) = session.domain_requests.get(request_id) else {
+            return Ok(None);
+        };
+        let record = domain_control(session, *seq)?;
+        if !matches!(record.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.request_id() == Some(request_id))
+        {
+            return Err(StoreError::Corrupt(
+                "domain request index differs from canonical request".into(),
+            ));
+        }
+        Ok(Some(record.clone()))
+    }
+
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<rsi_agent_store_protocol::StoreTurnDomainUsage> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let (records, bytes) = session
+            .domain_usage
+            .get(turn_id)
+            .copied()
+            .unwrap_or_default();
+        Ok(rsi_agent_store_protocol::StoreTurnDomainUsage {
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            records,
+            bytes,
+        })
     }
 
     async fn read_facts(
@@ -1120,6 +1234,80 @@ impl SessionStore for MemoryStore {
     }
 }
 
+fn domain_control(session: &MemorySession, seq: u64) -> Result<&AgentControlRecord> {
+    let index = seq
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+        .ok_or_else(|| StoreError::Corrupt("invalid domain control position".into()))?;
+    session
+        .controls
+        .get(index)
+        .filter(|record| record.seq() == seq)
+        .ok_or_else(|| StoreError::Corrupt("domain control is absent".into()))
+}
+
+fn apply_domain_updates(
+    session: &mut MemorySession,
+    minimum_fact_seq: u64,
+    controls: &[AgentControlRecord],
+) -> Result<()> {
+    use rsi_agent_session_protocol::DomainMutationSource;
+    for record in controls {
+        let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+            continue;
+        };
+        if let Some(request) = commit.request_id()
+            && session.domain_requests.contains_key(request)
+        {
+            return Err(StoreError::DomainRequestConflict {
+                request_id: request.to_string(),
+            });
+        }
+        if let DomainMutationSource::Turn { turn_id, .. } = commit.source() {
+            let live = session.turns.get(turn_id).is_some_and(|turn| {
+                turn.terminal_seq
+                    .is_none_or(|terminal| terminal >= minimum_fact_seq)
+            });
+            if !live {
+                return Err(StoreError::Invalid(
+                    "domain mutation has no open originating Turn".into(),
+                ));
+            }
+            let usage = session.domain_usage.entry(turn_id.clone()).or_default();
+            usage.0 = usage
+                .0
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Invalid("domain record count overflow".into()))?;
+            usage.1 = usage
+                .1
+                .checked_add(record.encoded_len() as u64)
+                .ok_or_else(|| StoreError::Invalid("domain byte count overflow".into()))?;
+        }
+        let heads: Vec<_> = session
+            .domain_versions
+            .values()
+            .filter_map(|versions| versions.last().cloned())
+            .collect();
+        let next = rsi_agent_store_protocol::domain_heads_after(&heads, record.seq(), commit)?;
+        for head in next
+            .into_iter()
+            .filter(|head| head.control_seq == record.seq())
+        {
+            session
+                .domain_versions
+                .entry(head.identity.id().into())
+                .or_default()
+                .push(head);
+        }
+        if let Some(request) = commit.request_id() {
+            session
+                .domain_requests
+                .insert(request.clone(), record.seq());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Keep the mechanical atomic-append mirror auditable as one transaction state transition.
 fn apply_atomic_memory_append(
     state: &mut MemoryState,
@@ -1218,6 +1406,9 @@ fn apply_atomic_memory_append(
                 controls: append.controls.clone(),
                 control_prefix_digest: control_digest,
                 workspace_context,
+                domain_versions: BTreeMap::new(),
+                domain_requests: BTreeMap::new(),
+                domain_usage: BTreeMap::new(),
             },
         );
         apply_message_updates(
@@ -1233,6 +1424,7 @@ fn apply_atomic_memory_append(
         .sessions
         .get_mut(&session_id)
         .expect("atomic append installed or updated its session");
+    apply_domain_updates(session, minimum_entered_fact_seq, &append.controls)?;
     if let Some(record) = append.controls.last()
         && let AgentControlRecordBody::TurnBoundaryRecorded {
             turn_id,
@@ -1507,7 +1699,8 @@ fn apply_message_updates(
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
-            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
     }
     Ok(())
@@ -1749,7 +1942,8 @@ fn apply_activation_updates(
             }
             | AgentControlRecordBody::MessagePromoted { .. }
             | AgentControlRecordBody::MessageDiscarded { .. }
-            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
     }
     Ok(())
@@ -1840,7 +2034,8 @@ fn apply_ready_updates(
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
-            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
     }
     Ok(())

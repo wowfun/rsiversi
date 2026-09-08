@@ -306,7 +306,7 @@ async fn parallel_publication_failure_does_not_drop_a_later_settled_sibling() {
     assert!(matches!(
         outcome,
         TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::GeneratedFactBytes,
+            dimension: BudgetDimension::GeneratedRecordBytes,
             ..
         }
     ));
@@ -734,7 +734,7 @@ async fn tool_result_budget_failure_retires_the_retained_identity_after_terminal
     assert_eq!(
         outcome,
         TurnOutcome::BudgetExceeded {
-            dimension: BudgetDimension::GeneratedFacts,
+            dimension: BudgetDimension::GeneratedRecords,
             consumed: 9,
             limit: 8,
         }

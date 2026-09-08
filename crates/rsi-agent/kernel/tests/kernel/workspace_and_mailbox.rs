@@ -212,9 +212,8 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
         .unwrap()
         .unwrap();
     first
-        .finish_activation_turn(&first_claim, &TurnOutcome::Completed)
+        .finish_turn(&first_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     first.shutdown(first_worker).await.unwrap();
 
@@ -249,9 +248,8 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
         .unwrap()
         .unwrap();
     second
-        .finish_activation_turn(&second_claim, &TurnOutcome::Completed)
+        .finish_turn(&second_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
 
     let facts = store.read_facts(&session_id, 0, 64).await.unwrap().facts;
@@ -475,9 +473,8 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
         .unwrap()
         .unwrap();
     initial
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(
         initial
@@ -487,9 +484,8 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
         1
     );
     initial
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     initial.shutdown(initial_worker).await.unwrap();
 
@@ -588,9 +584,8 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         Err(TurnError::Invalid(message)) if message.contains("live ancestor caller")
     ));
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let _leaf_lease = kernel.register("executor-interrupt-leaf".into()).unwrap();
     let leaf_claim = kernel

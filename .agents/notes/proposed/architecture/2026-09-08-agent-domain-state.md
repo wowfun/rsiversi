@@ -4,28 +4,28 @@ name: Generation-pinned Agent contributions and durable domain state
 
 ## Problem
 
-Workspace context has dedicated Kernel branches. Fact-only budgets cannot account
-for plugin control records, and Session controls have no typed domain-state admission.
+Workspace context has dedicated Kernel branches. The durable domain substrate
+needs ordinary contribution, command and projection consumers before standard
+business features can use the same extension paths as independent addons.
 
 ## Proposal
 
 The [model-context builder decision](../../implemented/architecture/2026-09-08-model-context-builder.md)
 owns context selection, exact execution/maintenance pinning and cache envelopes.
-This proposal begins at the authoritative durable-state boundary.
-
-Introduce typed complete domain state in Session controls. Kernel admits
-validated proposals, revision CAS, and receipts. GeneratedRecords/Bytes charge
-Facts and Turn-attributed domain controls; user commands and baselines use
-separate bounded admission. Plugins cannot select their charging class.
+The [typed domain decision](../../implemented/architecture/2026-09-08-typed-domain-commits.md)
+owns complete state, exact-generation proposals, revision CAS, canonical
+receipts, fresh/fork baselines, mixed generated-record budgets and constrained
+ending. This proposal begins with consumers of that substrate.
 
 The [terminal boundary decision](../../implemented/architecture/2026-09-08-terminal-control-boundaries.md)
 owns same-transaction Fact/control correlation, exact historical fork prefixes,
 control-admission fences and partial startup repair. Domain as-of selection uses
-that established control horizon. PluginContext preserves actual model input;
-ToolRejected records denial without a fake start. Initial domain baselines join
-Header and first acceptance atomically.
+that established control horizon. PluginContext must preserve actual model
+input with producer admission and replay. ToolRejected must record denial
+without a fake start while still charging tool-call admission.
 
-Only after substrate tests pass, migrate workspace/time contributors, followed
+Only after both durable vocabulary paths have producer and failure tests,
+migrate workspace/time contributors, followed
 by commands, projections, draft controls, and planning policy. Ordered consumers
 use stable composition positions.
 
@@ -37,13 +37,13 @@ compatibility cannot replace an explicit authoritative Store schema cutover.
 
 ## Acceptance criteria
 
-Builder equivalence precedes durable changes. Tests cover mixed budgets, atomic
-failure, terminal correlation including recovery, historical forks, draft
-receipts, unknown codecs, and zero replayed effects. Authoritative formats use
-explicit schema cutovers with old databases preserved.
+Builder and substrate evidence precedes contribution execution. Tests cover
+persisted actual input, retry reuse, policy rejection, bounded callbacks, draft
+commands and receipts, projections, cold recovery and zero replayed effects.
+Authoritative formats use explicit schema cutovers with old databases preserved.
 
 ## Risks
 
-All terminal producers must use one correlated commit. Required cleanup must
-remain possible after work budgets expire. Missing cold-generation codecs block
-execution while history remains readable.
+Callbacks must not bypass the existing correlated terminal, budget or mutation
+admission. Missing cold-generation contributions must not replay external work;
+extension projection failures must not hide core history.

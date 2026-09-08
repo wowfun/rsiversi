@@ -35,6 +35,20 @@ from model JSON. Final source admission and retained commit ownership follow the
 [Kernel contract](../kernel/README.md). `settlement_health` reads bounded runtime
 settlement diagnostics without Store I/O.
 
+`commit_domains` accepts exact-generation typed proposals and optional Fact
+bodies without a caller-selected source or charging category. Kernel assigns
+the claimed Turn, validates the mixed candidate and retains commit ownership.
+Its canonical receipt supports exact idempotent retry and read-only query after
+a lost acknowledgement. Opaque state/history reads do not require execution
+codecs. An indeterminate commit whose receipt also cannot be read closes Session
+execution until durable recovery establishes its state.
+
+`finish_turn` owns the durable ending transaction for direct and mailbox Turns,
+including any open-Step closure, required budget marker and tree settlement.
+The executor supplies the resolved outcome and waits for that terminal receipt;
+it does not independently publish an intermediate ending prefix. Ordinary
+`close_current_step` remains charged business publication.
+
 Mailbox admission, message state, dual-stream reconnectable observation, and
 the six source-authorized Agent operations share this seam. Spawn creates a
 durable continuable fork child; send/followup address only a direct parent-child

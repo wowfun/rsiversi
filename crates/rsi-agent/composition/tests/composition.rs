@@ -31,6 +31,9 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[path = "composition/domains.rs"]
+mod domains;
+
 #[derive(Debug)]
 struct NoopFactory;
 
@@ -403,6 +406,7 @@ fn test_compiler(temp: &TempDir) -> AgentPresetProfileCompiler {
             "test.blocking",
             "test.unknown",
             "test.context",
+            "test.domain",
         ],
     )
 }

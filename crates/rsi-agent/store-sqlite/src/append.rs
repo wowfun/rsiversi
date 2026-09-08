@@ -260,6 +260,13 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            AgentControlRecordBody::DomainStateCommitted { commit } => super::domain::insert(
+                self.transaction,
+                self.session_id,
+                self.minimum_entered_fact_seq,
+                self.record,
+                commit,
+            ),
             // The enclosing atomic append derives the correlated digest after inserting this row.
             AgentControlRecordBody::TurnBoundaryRecorded { .. } => Ok(()),
             AgentControlRecordBody::MessageAccepted {

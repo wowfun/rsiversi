@@ -559,7 +559,8 @@ impl MailboxProjection {
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
-            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
         if let AgentControlRecordBody::MessageClaimed { message_id, .. }
         | AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
@@ -806,7 +807,8 @@ impl ActivationProjection {
             }
             | AgentControlRecordBody::MessagePromoted { .. }
             | AgentControlRecordBody::MessageDiscarded { .. }
-            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
         Ok(())
     }
@@ -1174,7 +1176,8 @@ impl ReadyProjection {
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::CompletionReserved { .. }
-            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
         Ok(())
     }
@@ -1234,6 +1237,7 @@ pub(super) fn validate_agent_indexes(
     let mut mailbox = MailboxProjection::default();
     let mut ready = ReadyProjection::default();
     let mut activation = ActivationProjection::default();
+    let mut domains = super::domain::Projection::default();
     let mut decoded = 0_u64;
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
@@ -1275,6 +1279,7 @@ pub(super) fn validate_agent_indexes(
         mailbox.apply(connection, header, &record)?;
         ready.apply(selected.as_str(), &record)?;
         activation.apply(header, &record)?;
+        domains.apply(connection, selected, &record)?;
     }
     let indexed_terminals = connection
         .query_row(
@@ -1291,6 +1296,7 @@ pub(super) fn validate_agent_indexes(
     mailbox.finish(connection, selected)?;
     ready.finish(connection, selected)?;
     activation.finish(connection, selected)?;
+    domains.finish(connection, selected)?;
     Ok(decoded)
 }
 

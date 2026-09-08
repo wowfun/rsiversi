@@ -573,7 +573,11 @@ impl TurnService for AgentKernel {
     ) -> TurnResult<Option<TurnOutcome>> {
         {
             let state = lock_state(&self.inner);
-            if let Some(session) = state.sessions.get(session_id) {
+            if let Some(session) = state
+                .sessions
+                .get(session_id)
+                .filter(|session| session.permanent_flush_error.is_none())
+            {
                 if let Some(turn) = session.turns.get(turn_id) {
                     return Ok(turn
                         .terminal_seq
@@ -599,6 +603,29 @@ impl TurnService for AgentKernel {
         read_header_bounded(&self.inner, session_id)
             .await
             .map_err(turn_store_error)
+    }
+    async fn domain_states(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<Vec<rsi_agent_turn_protocol::DomainStateView>> {
+        let page = observation::read_domain_states_bounded(&self.inner, session_id, None)
+            .await
+            .map_err(turn_store_error)?;
+        Ok(page
+            .states
+            .into_iter()
+            .map(|state| rsi_agent_turn_protocol::DomainStateView {
+                revision: state.head.revision,
+                snapshot: state.snapshot,
+            })
+            .collect())
+    }
+    async fn domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> TurnResult<Option<rsi_agent_turn_protocol::DomainMutationReceipt>> {
+        observation::read_domain_request_bounded(&self.inner, session_id, request_id).await
     }
 }
 
@@ -760,6 +787,9 @@ impl AgentKernel {
             }
         };
         if let Some(entry) = scan.selected {
+            if let SubmitSession::Fresh(prepared) = &request.session {
+                self.validate_fresh_baseline(prepared).await?;
+            }
             if entry.message != request.message
                 || entry.root_session_id != root_session_id
                 || entry.delivery != request.delivery
@@ -815,9 +845,15 @@ impl AgentKernel {
             MessageDelivery::Steer if bound_turn_id.is_some() => MessageTarget::NextStep,
             MessageDelivery::NextTurn | MessageDelivery::Steer => MessageTarget::NextTurn,
         };
+        let baseline = match &request.session {
+            SubmitSession::Fresh(prepared) => {
+                lifecycle::initial_domain_control(prepared.header(), prepared.baseline())?
+            }
+            SubmitSession::Resume(_) => None,
+        };
         let control_seq = scan
             .durable_control_seq
-            .checked_add(1)
+            .checked_add(1 + u64::from(baseline.is_some()))
             .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
         let control = AgentControlRecord::new(
             control_seq,
@@ -834,7 +870,7 @@ impl AgentKernel {
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let header = match request.session {
             SubmitSession::Fresh(prepared) => {
-                let (header, _composition) = prepared.into_parts();
+                let (header, _composition, _baseline) = prepared.into_parts();
                 Some(header)
             }
             SubmitSession::Resume(prepared) => {
@@ -857,7 +893,10 @@ impl AgentKernel {
                         expected_control_seq: scan.durable_control_seq,
                         header,
                         facts: Vec::new(),
-                        controls: vec![control],
+                        controls: baseline
+                            .into_iter()
+                            .chain(std::iter::once(control))
+                            .collect(),
                     }],
                     required_active_activations: Vec::new(),
                     quiescent_descendants_of: None,
@@ -1331,14 +1370,35 @@ impl AgentKernel {
             .pin(child_header.agent_preset_id())
             .await
             .map_err(turn_composition_error)?;
+        let mut prepared =
+            PreparedFreshSession::new(child_header, composition).map_err(turn_composition_error)?;
+        if boundary.resolved_terminal_control_seq > 0 {
+            let states = observation::read_domain_states_bounded(
+                &self.inner,
+                &parent_session_id,
+                Some(boundary.resolved_terminal_control_seq),
+            )
+            .await
+            .map_err(turn_store_error)?;
+            let mut baseline = prepared.baseline().clone();
+            baseline
+                .inherit(
+                    &states
+                        .states
+                        .into_iter()
+                        .map(|state| state.snapshot)
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|error| turn_composition_error(error.into()))?;
+            prepared = prepared
+                .with_baseline(baseline)
+                .map_err(turn_composition_error)?;
+        }
         self.validate_agent_caller(&request.caller)?;
         let receipt = self
             .submit_message_admitted(
                 SubmitMessage {
-                    session: SubmitSession::Fresh(
-                        PreparedFreshSession::new(child_header, composition)
-                            .map_err(turn_composition_error)?,
-                    ),
+                    session: SubmitSession::Fresh(prepared),
                     message,
                     delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 },
@@ -1399,11 +1459,19 @@ impl AgentKernel {
             Some(&request.message_id),
         )
         .await?;
+        let initial = observation::read_domain_states_bounded(
+            &self.inner,
+            &request.child_session_id,
+            Some(1),
+        )
+        .await
+        .map_err(turn_store_error)?;
+        let acceptance_seq = 1 + u64::from(!initial.states.is_empty());
         let entry = scan
             .selected
             .filter(|entry| {
                 &entry.message == message
-                    && entry.accepted_control_seq == 1
+                    && entry.accepted_control_seq == acceptance_seq
                     && entry.root_session_id == origin.root_session_id
                     && entry.target == MessageTarget::NextTurn
                     && entry.wake_required

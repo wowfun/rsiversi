@@ -1,7 +1,13 @@
 # rsi-agent-session-protocol
 
+Complete domain values use a bounded JSON envelope (256 KiB, the shared JSON
+depth/node limits), an exact identity/version and a checked revision. JSON null
+is an ordinary explicit state, distinct from absent revision zero. A frozen
+baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
+mechanical bounds do not replace the owning domain's typed semantic validator.
+
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 8), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 9), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.
@@ -42,10 +48,14 @@ The durable
 value records which preset a session selected; process-local composition
 generation handles are deliberately outside this format.
 
-Each immutable settings value carries a `TurnBudget`. The first protocol generation
-uses repository hard maxima of 30 elapsed minutes, 64 provider attempts, 256
-Tool calls, 65,536 generated Facts, and 64 MiB of generated Fact bytes; a
-settings may only tighten them. Budget exhaustion is itself a nonterminal Fact
+Each immutable settings value carries a `TurnBudget`, with repository hard maxima
+of 30 elapsed minutes, 64 provider attempts, 256
+Tool calls, 65,536 generated records, and 64 MiB of generated record bytes.
+Generated records include ordinary generated Facts and Turn-attributed domain
+controls, charged by their complete canonical envelope. Baselines and external
+commands use separate bounded admission; necessary atomic ending records retain
+the Kernel-owned ending channel. Settings may only tighten these limits.
+Budget exhaustion is itself a nonterminal Fact
 followed by the sole `budget_exceeded` terminal outcome, so interrupted
 observers and recovery can classify the stop from durable history.
 Both records validate that their frozen limit is positive and no greater than

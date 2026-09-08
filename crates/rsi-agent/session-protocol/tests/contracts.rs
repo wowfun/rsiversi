@@ -149,44 +149,44 @@ fn turn_budget_accepts_each_hard_limit_and_rejects_limit_plus_one() {
     assert_eq!(maximum.maximum_elapsed_ms(), 1_800_000);
     assert_eq!(maximum.maximum_provider_attempts(), 64);
     assert_eq!(maximum.maximum_tool_calls(), 256);
-    assert_eq!(maximum.maximum_generated_facts(), 65_536);
-    assert_eq!(maximum.maximum_generated_fact_bytes(), 67_108_864);
+    assert_eq!(maximum.maximum_generated_records(), 65_536);
+    assert_eq!(maximum.maximum_generated_record_bytes(), 67_108_864);
 
     for invalid in [
         json!({
             "maximum_elapsed_ms": 1_800_001,
             "maximum_provider_attempts": 64,
             "maximum_tool_calls": 256,
-            "maximum_generated_facts": 65_536,
-            "maximum_generated_fact_bytes": 67_108_864
+            "maximum_generated_records": 65_536,
+            "maximum_generated_record_bytes": 67_108_864
         }),
         json!({
             "maximum_elapsed_ms": 1_800_000,
             "maximum_provider_attempts": 65,
             "maximum_tool_calls": 256,
-            "maximum_generated_facts": 65_536,
-            "maximum_generated_fact_bytes": 67_108_864
+            "maximum_generated_records": 65_536,
+            "maximum_generated_record_bytes": 67_108_864
         }),
         json!({
             "maximum_elapsed_ms": 1_800_000,
             "maximum_provider_attempts": 64,
             "maximum_tool_calls": 257,
-            "maximum_generated_facts": 65_536,
-            "maximum_generated_fact_bytes": 67_108_864
+            "maximum_generated_records": 65_536,
+            "maximum_generated_record_bytes": 67_108_864
         }),
         json!({
             "maximum_elapsed_ms": 1_800_000,
             "maximum_provider_attempts": 64,
             "maximum_tool_calls": 256,
-            "maximum_generated_facts": 65_537,
-            "maximum_generated_fact_bytes": 67_108_864
+            "maximum_generated_records": 65_537,
+            "maximum_generated_record_bytes": 67_108_864
         }),
         json!({
             "maximum_elapsed_ms": 1_800_000,
             "maximum_provider_attempts": 64,
             "maximum_tool_calls": 256,
-            "maximum_generated_facts": 65_536,
-            "maximum_generated_fact_bytes": 67_108_865
+            "maximum_generated_records": 65_536,
+            "maximum_generated_record_bytes": 67_108_865
         }),
     ] {
         assert!(serde_json::from_value::<TurnBudget>(invalid).is_err());
@@ -204,12 +204,12 @@ fn exhaustion_records_cannot_widen_the_named_budget_dimension() {
         ),
         (BudgetDimension::ToolCalls, MAXIMUM_TURN_TOOL_CALLS),
         (
-            BudgetDimension::GeneratedFacts,
-            MAXIMUM_TURN_GENERATED_FACTS,
+            BudgetDimension::GeneratedRecords,
+            MAXIMUM_TURN_GENERATED_RECORDS,
         ),
         (
-            BudgetDimension::GeneratedFactBytes,
-            MAXIMUM_TURN_GENERATED_FACT_BYTES,
+            BudgetDimension::GeneratedRecordBytes,
+            MAXIMUM_TURN_GENERATED_RECORD_BYTES,
         ),
     ] {
         let widened = maximum + 1;

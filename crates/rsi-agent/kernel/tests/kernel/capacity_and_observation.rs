@@ -793,7 +793,8 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
     let second_base_bytes = SessionFact::new(5, 42, second_delta_base)
         .unwrap()
         .encoded_len();
-    let pending_budget = usize::try_from(MAXIMUM_TURN_GENERATED_FACT_BYTES).unwrap() - intent_bytes;
+    let pending_budget =
+        usize::try_from(MAXIMUM_TURN_GENERATED_RECORD_BYTES).unwrap() - intent_bytes;
     let second_text_bytes = pending_budget
         .checked_sub(started_bytes + first_delta_bytes + second_base_bytes - 1)
         .expect("maximum deltas leave room for the second event");
@@ -1638,6 +1639,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         "a".repeat(64),
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();
@@ -1711,6 +1713,7 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
         "a".repeat(64),
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();

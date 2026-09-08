@@ -30,6 +30,48 @@ pub(super) async fn read_controls_bounded(
     result
 }
 
+pub(super) async fn read_domain_states_bounded(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+    at_control_seq: Option<u64>,
+) -> std::result::Result<rsi_agent_store_protocol::StoreDomainStatePage, StoreError> {
+    // A complete domain set and its decode scratch fit below the existing single-record reservation.
+    let (_, permit) = acquire_store_read(inner, 1).await?;
+    let result = inner
+        .store
+        .read_domain_states(session_id, at_control_seq)
+        .await;
+    drop(permit);
+    let page = result?;
+    page.validate()?;
+    Ok(page)
+}
+
+pub(super) async fn read_domain_request_bounded(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+    request_id: &rsi_agent_session_protocol::DomainRequestId,
+) -> TurnResult<Option<rsi_agent_turn_protocol::DomainMutationReceipt>> {
+    let (_, permit) = acquire_store_read(inner, 1)
+        .await
+        .map_err(turn_store_error)?;
+    let result = inner
+        .store
+        .read_domain_request(session_id, request_id)
+        .await;
+    drop(permit);
+    let Some(record) = result.map_err(turn_store_error)? else {
+        return Ok(None);
+    };
+    let receipt = rsi_agent_turn_protocol::DomainMutationReceipt::new(session_id.clone(), record)?;
+    if receipt.commit().request_id() != Some(request_id) {
+        return Err(TurnError::Invariant(
+            "domain request lookup changed the selected identity".into(),
+        ));
+    }
+    Ok(Some(receipt))
+}
+
 pub(super) async fn read_fork_page_from_header(
     inner: &Arc<KernelInner>,
     header: &SessionHeader,

@@ -103,6 +103,7 @@ async fn execution_and_delayed_checkpoint_keep_the_admitted_builder_after_catalo
         "c".repeat(64),
         admitted.tools(),
         replacement.clone(),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
         Arc::new(()),
     )
     .unwrap();

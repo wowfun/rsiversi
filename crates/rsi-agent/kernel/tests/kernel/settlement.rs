@@ -45,9 +45,8 @@ async fn waiting_root(
         .unwrap()
         .unwrap();
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     (root, child_claim, [root_lease, child_lease])
 }
@@ -69,9 +68,8 @@ async fn persistent_first_root_failure_preserves_flush_later_pages_and_global_he
     observed.fail_waiting_pages.store(true, Ordering::Release);
     for (_, claim, _) in &roots {
         kernel
-            .finish_activation_turn(claim, &TurnOutcome::Completed)
+            .finish_turn(claim, &TurnOutcome::Completed)
             .await
-            .unwrap()
             .unwrap();
     }
     tokio::time::timeout(std::time::Duration::from_secs(6), async {
@@ -214,9 +212,8 @@ async fn transient_ancestor_settlement_failure_is_retried_without_restart() {
         .unwrap()
         .unwrap();
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(
         store
@@ -230,9 +227,8 @@ async fn transient_ancestor_settlement_failure_is_retried_without_restart() {
 
     store.fail_next_agent_tree_read_for(root_id.clone());
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert!(store.active_activation(&child_id).await.unwrap().is_none());
     tokio::time::timeout(std::time::Duration::from_secs(6), async {
@@ -328,15 +324,13 @@ async fn reserved_child_completion_settles_at_full_parent_mailbox_occupancy() {
         Err(TurnError::Capacity)
     ));
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
 
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
 
     wait_for_settlement(store.as_ref(), &root_id).await;
@@ -394,7 +388,7 @@ async fn activation_terminal_accepts_a_turn_submitted_during_preparation() {
         let claim = claim.clone();
         async move {
             kernel
-                .finish_activation_turn(
+                .finish_turn(
                     &claim,
                     &TurnOutcome::Failed {
                         code: "fixture.failure".into(),

@@ -59,6 +59,14 @@ fn model_delta(seq: u64, turn_id: &TurnId, text: String) -> SessionFact {
 }
 
 #[tokio::test]
+async fn memory_domains_preserve_atomic_revisions_receipts_and_history() {
+    let accepted = fact(1);
+    let event = model_delta(2, accepted.body().turn_id(), "event".into());
+    rsi_agent_testkit::assert_domain_store_contract(&MemoryStore::new(), header(), accepted, event)
+        .await;
+}
+
+#[tokio::test]
 async fn memory_store_is_compare_and_append_and_failure_injection_is_precommit() {
     let store = MemoryStore::new();
     let session = SessionId::new("memory-session").unwrap();

@@ -107,7 +107,7 @@ async fn permanent_wait_resume_faults_pause_the_session_and_release_owned_cleanu
         );
         let stopped = tokio::time::timeout(Duration::from_secs(1), kernel.shutdown(workers)).await;
         assert!(
-            matches!(&stopped, Ok(Err(KernelError::Shutdown(message))) if message.contains("retained wait failed")),
+            matches!(&stopped, Ok(Err(KernelError::Shutdown(message))) if message.contains("retained mutation failed")),
             "shutdown must report the failure without retaining a retry task: {stopped:?}"
         );
         drop(kernel);
@@ -178,11 +178,11 @@ async fn agent_wait_resume_retries_failures_and_lost_acknowledgements() {
             1
         );
         kernel
-            .finish_activation_turn(&child, &TurnOutcome::Completed)
+            .finish_turn(&child, &TurnOutcome::Completed)
             .await
             .unwrap();
         kernel
-            .finish_activation_turn(&parent, &TurnOutcome::Completed)
+            .finish_turn(&parent, &TurnOutcome::Completed)
             .await
             .unwrap();
         kernel.shutdown(workers).await.unwrap();
@@ -242,11 +242,11 @@ async fn rejected_overlapping_agent_park_cannot_resume_the_original_wait() {
     cancellation.cancel();
     assert!(waiting.await.unwrap().is_err());
     kernel
-        .finish_activation_turn(&child, &TurnOutcome::Completed)
+        .finish_turn(&child, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel
-        .finish_activation_turn(&parent, &TurnOutcome::Completed)
+        .finish_turn(&parent, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel.shutdown(workers).await.unwrap();
@@ -299,11 +299,11 @@ async fn lost_park_ack_is_reconciled_and_preserves_the_original_error() {
         1
     );
     kernel
-        .finish_activation_turn(&child, &TurnOutcome::Completed)
+        .finish_turn(&child, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel
-        .finish_activation_turn(&parent, &TurnOutcome::Completed)
+        .finish_turn(&parent, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel.shutdown(workers).await.unwrap();
@@ -367,11 +367,11 @@ async fn failed_human_parking_has_a_bounded_waiter_and_retains_its_durable_clean
     .await
     .unwrap();
     kernel
-        .finish_activation_turn(&child, &TurnOutcome::Completed)
+        .finish_turn(&child, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel
-        .finish_activation_turn(&parent, &TurnOutcome::Completed)
+        .finish_turn(&parent, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel.shutdown(workers).await.unwrap();
@@ -448,7 +448,7 @@ async fn human_resume_retries_storage_failures_without_stranding_or_duplicating_
             1
         );
         kernel
-            .finish_activation_turn(&claim, &TurnOutcome::Completed)
+            .finish_turn(&claim, &TurnOutcome::Completed)
             .await
             .unwrap();
         kernel.shutdown(workers).await.unwrap();
@@ -599,7 +599,7 @@ async fn timed_out_or_aborted_resume_keeps_claim_retirement_owned_until_repaired
             }
         )));
         kernel
-            .finish_activation_turn(&reclaimed, &TurnOutcome::Completed)
+            .finish_turn(&reclaimed, &TurnOutcome::Completed)
             .await
             .unwrap();
         kernel.shutdown(workers).await.unwrap();
@@ -679,7 +679,7 @@ async fn human_wait_parks_durably_excludes_elapsed_and_reacquires_before_resumin
     clock.0.fetch_add(15, Ordering::SeqCst);
     assert_eq!(elapsed.consumed_ms(), 25);
     kernel
-        .finish_activation_turn(&claim, &TurnOutcome::Completed)
+        .finish_turn(&claim, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
@@ -738,7 +738,7 @@ async fn cancellation_and_dropped_waiter_cleanup_release_the_mutation_gate() {
             .unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            kernel.finish_activation_turn(&claim, &TurnOutcome::Cancelled),
+            kernel.finish_turn(&claim, &TurnOutcome::Cancelled),
         )
         .await
         .unwrap()
@@ -810,7 +810,7 @@ async fn human_wait_releases_tree_admission_and_cancelled_resume_does_not_retain
     assert_eq!(pool.available_permits(), 1);
     for extra in extras {
         kernel
-            .finish_activation_turn(&extra, &TurnOutcome::Completed)
+            .finish_turn(&extra, &TurnOutcome::Completed)
             .await
             .unwrap();
     }

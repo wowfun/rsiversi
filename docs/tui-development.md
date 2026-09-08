@@ -136,8 +136,8 @@ cat > "$tui_dev/config/rsi/settings.json" <<'JSON'
       "maximum_elapsed_ms": 360000,
       "maximum_provider_attempts": 32,
       "maximum_tool_calls": 64,
-      "maximum_generated_facts": 65536,
-      "maximum_generated_fact_bytes": 67108864
+      "maximum_generated_records": 65536,
+      "maximum_generated_record_bytes": 67108864
     }
   }
 }

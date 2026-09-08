@@ -1,5 +1,30 @@
 # rsi-agent-store-protocol
 
+## Domain mutations
+
+Domain state is canonical only in `DomainStateCommitted` controls. One record
+contains all distinct-domain replacements for a bounded request, its expected
+revisions and Kernel-assigned source. A receipt identifies that control and the
+request digest. Domain head/as-of and request indexes retain control positions,
+never a second authoritative state payload. Store does not invoke domain codecs.
+
+A mixed Turn mutation binds its exact contiguous same-append Fact span and a
+digest of those Fact bodies. The request digest includes that body digest,
+but excludes allocated sequences and timestamps. Store admission validates the
+binding before either stream changes; cold validation checks the canonical
+Fact interval again. A retry cannot change Facts while retaining the same
+domain request identity. Baselines and external commands do not claim Turn Facts.
+
+The initial nonempty baseline is control one of the atomic fresh Header and
+first acceptance commit; an omitted baseline denotes an empty domain set.
+Only baseline admission creates a domain. Later mutations require an existing
+matching codec and exact predecessor revision. Same request identity with
+different content conflicts. Querying a committed request recovers the exact
+receipt after an unknown result. Selecting a historical state uses the paired
+terminal control horizon, so later idle mutations cannot enter that fork.
+
+## Correlated terminal commits
+
 Every terminal Fact is committed with one `TurnBoundaryRecorded` control in the
 same `AtomicAgentCommit`. Each Session append contains at most one terminal;
 its marker is the final control, names that exact Turn and Fact sequence, and

@@ -55,8 +55,8 @@ impl PluginFactory for AgentSettingsFactory {
                         "maximum_elapsed_ms": 1_800_000,
                         "maximum_provider_attempts": 64,
                         "maximum_tool_calls": 256,
-                        "maximum_generated_facts": 65_536,
-                        "maximum_generated_fact_bytes": 67_108_864
+                        "maximum_generated_records": 65_536,
+                        "maximum_generated_record_bytes": 67_108_864
                     }
                 }),
                 base: json!({}),

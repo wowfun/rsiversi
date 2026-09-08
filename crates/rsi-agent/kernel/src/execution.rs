@@ -508,12 +508,15 @@ impl TurnExecution for AgentKernel {
         }
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
         claim: &TurnClaim,
         outcome: &TurnOutcome,
-    ) -> TurnResult<Option<Arc<SessionFact>>> {
-        self.finish_activation_claim(claim, outcome).await
+    ) -> TurnResult<Arc<SessionFact>> {
+        if let Some(terminal) = self.finish_activation_claim(claim, outcome).await? {
+            return Ok(terminal);
+        }
+        self.finish_direct_claim(claim, outcome).await
     }
 
     async fn read_facts(
@@ -762,6 +765,14 @@ impl TurnExecution for AgentKernel {
         }
     }
 
+    async fn commit_domains(
+        &self,
+        claim: &TurnClaim,
+        mutation: rsi_agent_turn_protocol::DomainMutation,
+    ) -> TurnResult<rsi_agent_turn_protocol::DomainMutationReceipt> {
+        self.commit_turn_domains(claim, mutation).await
+    }
+
     async fn publish(
         &self,
         claim: &TurnClaim,
@@ -780,7 +791,7 @@ impl TurnExecution for AgentKernel {
                 let state = lock_state(&self.inner);
                 if self.validate_claim(&state, claim)?.activation_id.is_some() {
                     return Err(TurnError::Invalid(
-                        "activation terminal requires finish_activation_turn".into(),
+                        "activation terminal requires finish_turn".into(),
                     ));
                 }
             }
@@ -875,13 +886,59 @@ pub(super) enum PublishAdmission {
     ProcessPressure(Vec<SessionFactBody>),
 }
 
+pub(super) struct StagedExecutionFacts {
+    pub(super) turn: TurnControl,
+    pub(super) workspace: WorkspaceContextState,
+    pub(super) facts: Vec<SessionFact>,
+    pub(super) bytes: usize,
+}
+
+pub(super) fn stage_execution_facts(
+    kernel: &AgentKernel,
+    claim: &TurnClaim,
+    original: &TurnControl,
+    base_seq: u64,
+    mut workspace: WorkspaceContextState,
+    bodies: Vec<SessionFactBody>,
+) -> TurnResult<StagedExecutionFacts> {
+    let mut turn = clone_turn_control(original);
+    let mut facts = Vec::with_capacity(bodies.len());
+    let mut bytes = 0_usize;
+    let mut next_seq = base_seq;
+    for body in bodies {
+        if body.turn_id() != claim.turn_id() {
+            return Err(TurnError::Invalid(
+                "executor Fact changed the claimed turn identity".into(),
+            ));
+        }
+        let body = canonicalize_terminal(body, turn.cancel_requested);
+        apply_executor_body(&mut turn, &body)?;
+        apply_workspace_context_state(&mut workspace, &body);
+        next_seq = next_seq
+            .checked_add(1)
+            .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
+        let fact = SessionFact::new(next_seq, kernel.inner.clock.now_ms().max(1), body)
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        bytes = bytes
+            .checked_add(fact.encoded_len())
+            .ok_or_else(|| TurnError::Invalid("Fact bytes overflowed".into()))?;
+        facts.push(fact);
+    }
+    Ok(StagedExecutionFacts {
+        turn,
+        workspace,
+        facts,
+        bytes,
+    })
+}
+
 #[allow(clippy::too_many_lines)] // Staging keeps budget, intent fences, and speculative suffix mutation all-or-nothing.
 pub(super) fn try_publish_once(
     kernel: &AgentKernel,
     claim: &TurnClaim,
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<PublishAdmission> {
-    let (original, header, base_seq, mut staged_workspace_context) = {
+    let (original, header, base_seq, workspace) = {
         let state = lock_state(&kernel.inner);
         let original = kernel.validate_claim(&state, claim)?;
         if !state.accepting {
@@ -901,33 +958,12 @@ pub(super) fn try_publish_once(
             session.workspace_context.clone(),
         )
     };
-    let mut staged = clone_turn_control(&original);
-    let mut normalized = Vec::with_capacity(bodies.len());
-    for body in bodies {
-        if body.turn_id() != claim.turn_id() {
-            return Err(TurnError::Invalid(
-                "executor Fact changed the claimed turn identity".into(),
-            ));
-        }
-        let body = canonicalize_terminal(body, staged.cancel_requested);
-        apply_executor_body(&mut staged, &body)?;
-        apply_workspace_context_state(&mut staged_workspace_context, &body);
-        normalized.push(body);
-    }
-    let mut next_seq = base_seq;
-    let mut facts = Vec::with_capacity(normalized.len());
-    let mut added_bytes = 0_usize;
-    for body in normalized {
-        next_seq = next_seq
-            .checked_add(1)
-            .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
-        let fact = SessionFact::new(next_seq, kernel.inner.clock.now_ms().max(1), body)
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        added_bytes = added_bytes
-            .checked_add(fact.encoded_len())
-            .ok_or_else(|| TurnError::Invalid("Fact bytes overflowed".into()))?;
-        facts.push(fact);
-    }
+    let StagedExecutionFacts {
+        turn: mut staged,
+        workspace: staged_workspace_context,
+        facts,
+        bytes: added_bytes,
+    } = stage_execution_facts(kernel, claim, &original, base_seq, workspace, bodies)?;
     staged.budget_usage = enforce_turn_budget(
         header.settings().turn_budget(),
         &original,

@@ -302,11 +302,11 @@ impl TurnExecution for CheckpointFixture {
         unreachable!("checkpoint writer does not close Steps")
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
         _claim: &TurnClaim,
         _outcome: &TurnOutcome,
-    ) -> rsi_agent_turn_protocol::Result<Option<Arc<SessionFact>>> {
+    ) -> rsi_agent_turn_protocol::Result<Arc<SessionFact>> {
         unreachable!("checkpoint writer does not settle activations")
     }
 
@@ -461,12 +461,25 @@ impl TurnExecution for FullBeforePublish {
         Ok(())
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
-        _claim: &TurnClaim,
-        _outcome: &TurnOutcome,
-    ) -> rsi_agent_turn_protocol::Result<Option<Arc<SessionFact>>> {
-        Ok(None)
+        claim: &TurnClaim,
+        outcome: &TurnOutcome,
+    ) -> rsi_agent_turn_protocol::Result<Arc<SessionFact>> {
+        if self.shutdown_on_publish {
+            return Err(TurnError::ShuttingDown);
+        }
+        Ok(Arc::new(
+            SessionFact::new(
+                2,
+                42,
+                SessionFactBody::TurnTerminal {
+                    turn_id: claim.turn_id().clone(),
+                    outcome: outcome.clone(),
+                },
+            )
+            .unwrap(),
+        ))
     }
 
     async fn read_facts(
@@ -659,7 +672,7 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
 }
 
 #[tokio::test]
-async fn terminal_publication_flushes_and_retries_a_full_speculative_suffix() {
+async fn terminal_publication_delegates_durable_ending_to_kernel() {
     let (claim, accepted) = claim();
     let turns = FullBeforePublish {
         facts: vec![Arc::new(accepted)],
@@ -682,8 +695,8 @@ async fn terminal_publication_flushes_and_retries_a_full_speculative_suffix() {
     publish_terminal(&turns, &config, &claim, TurnOutcome::Completed)
         .await
         .unwrap();
-    assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(turns.flushes.lock().unwrap().as_slice(), [1, 2]);
+    assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 0);
+    assert!(turns.flushes.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1009,6 +1022,7 @@ pub(super) fn context_pin() -> AgentCompositionPin {
         "a".repeat(64),
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
         Arc::new(()),
     )
     .unwrap()

@@ -202,6 +202,7 @@ impl AgentComposition for AvailableComposition {
             "a".repeat(64),
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
             Arc::new(()),
         )
     }
@@ -1879,6 +1880,7 @@ impl AgentComposition for PinTracker {
             "a".repeat(64),
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
             Arc::new(TrackedLease(self.0.clone())),
         )
     }

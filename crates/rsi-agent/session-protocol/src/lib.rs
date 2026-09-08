@@ -16,8 +16,15 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+mod domain;
+pub use domain::{
+    DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
+    DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue,
+    MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_DOMAIN_STATE_BYTES, MAXIMUM_SESSION_DOMAINS,
+};
+
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 8;
+pub const SESSION_FORMAT_VERSION: u32 = 9;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -44,10 +51,10 @@ pub const MAXIMUM_TURN_ELAPSED_MS: u64 = 30 * 60 * 1_000;
 pub const MAXIMUM_TURN_PROVIDER_ATTEMPTS: u64 = 64;
 /// Hard maximum Tool calls for one accepted turn.
 pub const MAXIMUM_TURN_TOOL_CALLS: u64 = 256;
-/// Hard maximum executor-generated Facts for one accepted turn.
-pub const MAXIMUM_TURN_GENERATED_FACTS: u64 = 65_536;
-/// Hard maximum compact encoded bytes across executor-generated Facts.
-pub const MAXIMUM_TURN_GENERATED_FACT_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard maximum generated Facts and Turn-attributed domain controls for one accepted turn.
+pub const MAXIMUM_TURN_GENERATED_RECORDS: u64 = 65_536;
+/// Hard maximum compact encoded bytes across generated Facts and Turn-attributed domain controls.
+pub const MAXIMUM_TURN_GENERATED_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 /// Empty predecessor for the canonical durable Fact-prefix digest chain.
 pub const EMPTY_FACT_PREFIX_DIGEST: [u8; 32] = [0; 32];
 /// Empty predecessor for the canonical Agent-control digest chain.
@@ -120,6 +127,7 @@ string_identity!(EffectId, "effect");
 string_identity!(MessageId, "message");
 string_identity!(ActivationId, "activation");
 string_identity!(StepId, "step");
+string_identity!(DomainRequestId, "domain request");
 
 /// Stable path from an Agent-tree root to one descendant.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -612,6 +620,8 @@ pub enum WaitKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
+    /// One complete domain mutation request, including its durable receipt identity.
+    DomainStateCommitted { commit: DomainStateCommit },
     /// Kernel-owned correlation committed with one terminal Fact. This record is
     /// the final control in that Session append and defines its control horizon.
     TurnBoundaryRecorded {
@@ -758,6 +768,7 @@ impl AgentControlRecordBody {
                 )))
             }
             Self::MessageClaimed { .. }
+            | Self::DomainStateCommitted { .. }
             | Self::MessagePromoted { .. }
             | Self::MessageDiscarded { .. }
             | Self::ActivationWaitingForDescendants { .. }
@@ -909,8 +920,8 @@ pub struct TurnBudget {
     maximum_elapsed_ms: u64,
     maximum_provider_attempts: u64,
     maximum_tool_calls: u64,
-    maximum_generated_facts: u64,
-    maximum_generated_fact_bytes: u64,
+    maximum_generated_records: u64,
+    maximum_generated_record_bytes: u64,
 }
 
 impl<'de> Deserialize<'de> for TurnBudget {
@@ -925,8 +936,8 @@ impl<'de> Deserialize<'de> for TurnBudget {
             maximum_elapsed_ms: u64,
             maximum_provider_attempts: u64,
             maximum_tool_calls: u64,
-            maximum_generated_facts: u64,
-            maximum_generated_fact_bytes: u64,
+            maximum_generated_records: u64,
+            maximum_generated_record_bytes: u64,
         }
 
         let wire = WireBudget::deserialize(deserializer)?;
@@ -934,8 +945,8 @@ impl<'de> Deserialize<'de> for TurnBudget {
             wire.maximum_elapsed_ms,
             wire.maximum_provider_attempts,
             wire.maximum_tool_calls,
-            wire.maximum_generated_facts,
-            wire.maximum_generated_fact_bytes,
+            wire.maximum_generated_records,
+            wire.maximum_generated_record_bytes,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -947,8 +958,8 @@ impl Default for TurnBudget {
             maximum_elapsed_ms: MAXIMUM_TURN_ELAPSED_MS,
             maximum_provider_attempts: MAXIMUM_TURN_PROVIDER_ATTEMPTS,
             maximum_tool_calls: MAXIMUM_TURN_TOOL_CALLS,
-            maximum_generated_facts: MAXIMUM_TURN_GENERATED_FACTS,
-            maximum_generated_fact_bytes: MAXIMUM_TURN_GENERATED_FACT_BYTES,
+            maximum_generated_records: MAXIMUM_TURN_GENERATED_RECORDS,
+            maximum_generated_record_bytes: MAXIMUM_TURN_GENERATED_RECORD_BYTES,
         }
     }
 }
@@ -959,15 +970,15 @@ impl TurnBudget {
         maximum_elapsed_ms: u64,
         maximum_provider_attempts: u64,
         maximum_tool_calls: u64,
-        maximum_generated_facts: u64,
-        maximum_generated_fact_bytes: u64,
+        maximum_generated_records: u64,
+        maximum_generated_record_bytes: u64,
     ) -> Result<Self> {
         let budget = Self {
             maximum_elapsed_ms,
             maximum_provider_attempts,
             maximum_tool_calls,
-            maximum_generated_facts,
-            maximum_generated_fact_bytes,
+            maximum_generated_records,
+            maximum_generated_record_bytes,
         };
         budget.validate()?;
         Ok(budget)
@@ -991,14 +1002,14 @@ impl TurnBudget {
             MAXIMUM_TURN_TOOL_CALLS,
         )?;
         validate_budget_dimension(
-            "maximum_generated_facts",
-            self.maximum_generated_facts,
-            MAXIMUM_TURN_GENERATED_FACTS,
+            "maximum_generated_records",
+            self.maximum_generated_records,
+            MAXIMUM_TURN_GENERATED_RECORDS,
         )?;
         validate_budget_dimension(
-            "maximum_generated_fact_bytes",
-            self.maximum_generated_fact_bytes,
-            MAXIMUM_TURN_GENERATED_FACT_BYTES,
+            "maximum_generated_record_bytes",
+            self.maximum_generated_record_bytes,
+            MAXIMUM_TURN_GENERATED_RECORD_BYTES,
         )
     }
 
@@ -1017,14 +1028,14 @@ impl TurnBudget {
         self.maximum_tool_calls
     }
 
-    /// Returns the executor-generated Fact-count limit.
-    pub const fn maximum_generated_facts(&self) -> u64 {
-        self.maximum_generated_facts
+    /// Returns the generated-record count limit.
+    pub const fn maximum_generated_records(&self) -> u64 {
+        self.maximum_generated_records
     }
 
     /// Returns the executor-generated compact-byte limit.
-    pub const fn maximum_generated_fact_bytes(&self) -> u64 {
-        self.maximum_generated_fact_bytes
+    pub const fn maximum_generated_record_bytes(&self) -> u64 {
+        self.maximum_generated_record_bytes
     }
 }
 
@@ -1047,10 +1058,10 @@ pub enum BudgetDimension {
     ProviderAttempts,
     /// Tool invocations.
     ToolCalls,
-    /// Executor-generated Fact count.
-    GeneratedFacts,
-    /// Compact encoded bytes across executor-generated Facts.
-    GeneratedFactBytes,
+    /// Generated Fact and Turn domain-control count.
+    GeneratedRecords,
+    /// Compact encoded bytes across generated Facts and Turn-attributed domain controls.
+    GeneratedRecordBytes,
 }
 
 impl BudgetDimension {
@@ -1060,8 +1071,8 @@ impl BudgetDimension {
             Self::Elapsed => MAXIMUM_TURN_ELAPSED_MS,
             Self::ProviderAttempts => MAXIMUM_TURN_PROVIDER_ATTEMPTS,
             Self::ToolCalls => MAXIMUM_TURN_TOOL_CALLS,
-            Self::GeneratedFacts => MAXIMUM_TURN_GENERATED_FACTS,
-            Self::GeneratedFactBytes => MAXIMUM_TURN_GENERATED_FACT_BYTES,
+            Self::GeneratedRecords => MAXIMUM_TURN_GENERATED_RECORDS,
+            Self::GeneratedRecordBytes => MAXIMUM_TURN_GENERATED_RECORD_BYTES,
         }
     }
 }

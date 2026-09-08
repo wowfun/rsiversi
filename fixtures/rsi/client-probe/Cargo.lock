@@ -359,8 +359,11 @@ dependencies = [
  "async-trait",
  "rsi-agent-context",
  "rsi-agent-session-protocol",
+ "rsi-meta",
  "rsi-meta-contract",
  "rsi-tools-protocol",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

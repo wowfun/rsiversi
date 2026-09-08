@@ -161,6 +161,57 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        at_control_seq: Option<u64>,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let states = super::domain::read_states(&transaction, &session_id, at_control_seq)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(states)
+        })
+        .await
+    }
+
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<AgentControlRecord>> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let request_id = request_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let record = super::domain::read_request(&transaction, &session_id, &request_id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(record)
+        })
+        .await
+    }
+
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<rsi_agent_store_protocol::StoreTurnDomainUsage> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let turn_id = turn_id.clone();
+        self.with_reader(move |connection| {
+            super::domain::read_turn_usage(connection, &session_id, &turn_id)
+        })
+        .await
+    }
+
     async fn read_facts(
         &self,
         session_id: &SessionId,

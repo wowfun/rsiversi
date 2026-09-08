@@ -14,6 +14,7 @@ enum MutationAdmission {
     Closed,
     ReopenPending,
     TerminalAdmitted,
+    Failed,
 }
 
 #[derive(Default)]
@@ -40,7 +41,10 @@ impl ClaimMutationGate {
         let drained = {
             let mut state = self.lock();
             state.retiring = true;
-            if state.admission != MutationAdmission::TerminalAdmitted {
+            if !matches!(
+                state.admission,
+                MutationAdmission::TerminalAdmitted | MutationAdmission::Failed
+            ) {
                 state.admission = MutationAdmission::Closed;
             }
             state.active == 0
@@ -92,7 +96,10 @@ impl Drop for TerminalMutationDrain {
         {
             let mut state = self.gate.lock();
             state.terminal_drainer = false;
-            if state.admission != MutationAdmission::TerminalAdmitted {
+            if !matches!(
+                state.admission,
+                MutationAdmission::TerminalAdmitted | MutationAdmission::Failed
+            ) {
                 state.admission = MutationAdmission::ReopenPending;
             }
         }
@@ -145,9 +152,12 @@ impl AgentMutationLease {
         {
             return;
         }
-        session
-            .permanent_flush_error
-            .get_or_insert_with(|| bounded_diagnostic(&format!("retained wait failed: {error}")));
+        // Permanent failure closes business admission while preserving explicit claim release.
+        self.gate.lock().admission = MutationAdmission::Failed;
+        self.gate.stopping.cancel();
+        session.permanent_flush_error.get_or_insert_with(|| {
+            bounded_diagnostic(&format!("retained mutation failed: {error}"))
+        });
         session.flush_status.send_replace(FlushStatus {
             durable_seq: session.durable_seq,
             permanent_error: session.permanent_flush_error.clone(),
@@ -322,7 +332,7 @@ impl AgentKernel {
             );
             {
                 let mut admission = gate.lock();
-                if admission.terminal_drainer {
+                if admission.terminal_drainer || admission.admission == MutationAdmission::Failed {
                     return Err(TurnError::StaleClaim);
                 }
                 admission.terminal_drainer = true;

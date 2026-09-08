@@ -12,6 +12,13 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod domain;
+pub use domain::{
+    DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
+    DomainError, DomainHandle, DomainRegistrar, DomainRegistrarContract, DomainRegistration,
+    ValidatedDomainProposal,
+};
+
 /// Opaque lifetime owner retained by one composition pin.
 pub trait AgentGenerationOwner: fmt::Debug + Send + Sync + 'static {}
 
@@ -24,6 +31,7 @@ pub struct AgentCompositionPin {
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
     context_builder: Arc<dyn ModelContextBuilder>,
+    domains: DomainCatalog,
     _owner: Arc<dyn AgentGenerationOwner>,
 }
 
@@ -39,6 +47,7 @@ impl AgentCompositionPin {
         source_digest: impl Into<String>,
         tools: Arc<dyn ToolRuntime>,
         context_builder: Arc<dyn ModelContextBuilder>,
+        domains: DomainCatalog,
         owner: Arc<dyn AgentGenerationOwner>,
     ) -> Result<Self> {
         let source_digest = source_digest.into();
@@ -56,6 +65,7 @@ impl AgentCompositionPin {
             source_digest,
             tools,
             context_builder,
+            domains,
             _owner: owner,
         })
     }
@@ -78,6 +88,11 @@ impl AgentCompositionPin {
     /// Returns the unique immutable context builder from this exact generation.
     pub fn context_builder(&self) -> Arc<dyn ModelContextBuilder> {
         Arc::clone(&self.context_builder)
+    }
+
+    /// Returns the exact immutable domain definitions frozen with this generation.
+    pub const fn domains(&self) -> &DomainCatalog {
+        &self.domains
     }
 }
 
@@ -134,6 +149,7 @@ pub struct PreparedFreshSession {
 struct PreparedFreshSessionInner {
     header: SessionHeader,
     composition: AgentCompositionPin,
+    baseline: DomainBaseline,
 }
 
 impl PreparedFreshSession {
@@ -149,10 +165,12 @@ impl PreparedFreshSession {
                 "fresh Session header and composition preset identities differ".into(),
             ));
         }
+        let baseline = DomainBaseline::new(composition.domains().clone())?;
         Ok(Self {
             inner: Box::new(PreparedFreshSessionInner {
                 header,
                 composition,
+                baseline,
             }),
         })
     }
@@ -167,10 +185,25 @@ impl PreparedFreshSession {
         &self.inner.composition
     }
 
+    /// Returns the actual frozen initial states to be committed with first acceptance.
+    pub const fn baseline(&self) -> &DomainBaseline {
+        &self.inner.baseline
+    }
+
+    /// Selects already prepared initial state from the exact same generation.
+    ///
+    /// # Errors
+    /// Rejects a baseline from another generation.
+    pub fn with_baseline(mut self, baseline: DomainBaseline) -> Result<Self> {
+        baseline.ensure_catalog(self.inner.composition.domains())?;
+        self.inner.baseline = baseline;
+        Ok(self)
+    }
+
     /// Consumes the fresh admission into its exact owned parts.
-    pub fn into_parts(self) -> (SessionHeader, AgentCompositionPin) {
+    pub fn into_parts(self) -> (SessionHeader, AgentCompositionPin, DomainBaseline) {
         let inner = *self.inner;
-        (inner.header, inner.composition)
+        (inner.header, inner.composition, inner.baseline)
     }
 }
 
@@ -180,6 +213,7 @@ pub struct AgentSessionDraft {
     header: SessionHeader,
     composition_service: Arc<dyn AgentComposition>,
     composition: AgentCompositionPin,
+    baseline: DomainBaseline,
 }
 
 impl AgentSessionDraft {
@@ -199,10 +233,12 @@ impl AgentSessionDraft {
                 "Agent composition returned a different preset identity".into(),
             ));
         }
+        let baseline = DomainBaseline::new(composition.domains().clone())?;
         Ok(Self {
             header,
             composition_service,
             composition,
+            baseline,
         })
     }
 
@@ -214,6 +250,20 @@ impl AgentSessionDraft {
     /// Returns the exact currently staged generation.
     pub const fn composition(&self) -> &AgentCompositionPin {
         &self.composition
+    }
+
+    /// Returns the current process-local initial states.
+    pub const fn baseline(&self) -> &DomainBaseline {
+        &self.baseline
+    }
+
+    /// Applies a typed initial-state proposal without writing a Header or control.
+    ///
+    /// # Errors
+    /// Rejects wrong generations, nonzero revisions and aggregate bound violations.
+    pub fn apply_domain_initial(&mut self, proposal: &ValidatedDomainProposal) -> Result<()> {
+        self.baseline.apply(proposal)?;
+        Ok(())
     }
 
     /// Fully stages and then atomically selects one replacement preset.
@@ -234,8 +284,10 @@ impl AgentSessionDraft {
             .clone()
             .with_agent_preset_id(preset_id)
             .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
+        let baseline = DomainBaseline::new(composition.domains().clone())?;
         self.header = header;
         self.composition = composition;
+        self.baseline = baseline;
         Ok(())
     }
 
@@ -245,6 +297,7 @@ impl AgentSessionDraft {
             inner: Box::new(PreparedFreshSessionInner {
                 header: self.header,
                 composition: self.composition,
+                baseline: self.baseline,
             }),
         }
     }
@@ -253,6 +306,9 @@ impl AgentSessionDraft {
 /// Closed composition failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentCompositionError {
+    /// Typed initial-state validation or binding failed.
+    #[error(transparent)]
+    Domain(#[from] DomainError),
     /// Malformed or internally inconsistent bounded input.
     #[error("invalid Agent composition input: {0}")]
     InvalidInput(String),

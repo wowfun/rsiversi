@@ -507,6 +507,7 @@ struct SessionRuntime {
     pending: VecDeque<Arc<SessionFact>>,
     pending_bytes: usize,
     header_pending: bool,
+    pending_domain_baseline: Option<AgentControlRecord>,
     turns: BTreeMap<TurnId, TurnControl>,
     turn_order: Vec<TurnId>,
     updates: watch::Sender<LiveWatermarks>,
@@ -574,16 +575,20 @@ struct PreparedFlushBatch {
     expected_seq: u64,
     header: Option<SessionHeader>,
     facts: Vec<Arc<SessionFact>>,
+    baseline: Option<AgentControlRecord>,
 }
 
 impl PreparedFlushBatch {
-    fn into_store_batch(self) -> AppendBatch {
-        AppendBatch {
-            session_id: self.session_id,
-            expected_seq: self.expected_seq,
-            header: self.header,
-            facts: self.facts,
-        }
+    fn into_store_batch(self) -> (AppendBatch, Option<AgentControlRecord>) {
+        (
+            AppendBatch {
+                session_id: self.session_id,
+                expected_seq: self.expected_seq,
+                header: self.header,
+                facts: self.facts,
+            },
+            self.baseline,
+        )
     }
 }
 
@@ -634,8 +639,8 @@ struct DurableMessageScan {
 struct BudgetUsage {
     provider_attempts: u64,
     tool_calls: u64,
-    generated_facts: u64,
-    generated_fact_bytes: u64,
+    generated_records: u64,
+    generated_record_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -715,6 +720,7 @@ impl SessionRuntime {
             pending: VecDeque::new(),
             pending_bytes: 0,
             header_pending,
+            pending_domain_baseline: None,
             turns: BTreeMap::new(),
             turn_order: Vec::new(),
             updates,
@@ -782,6 +788,7 @@ fn apply_committed_flush(
     }
     session.durable_seq = commit.durable_seq;
     session.header_pending = false;
+    session.pending_domain_baseline = None;
     session.retry_failures = 0;
     session.retry_not_before = None;
     let _previous = session.flush_status.send_replace(FlushStatus {
@@ -811,7 +818,9 @@ fn apply_committed_flush(
 }
 
 mod admission;
+mod domains;
 mod elapsed;
+mod ending;
 mod execution;
 mod finalization;
 mod human_wait;

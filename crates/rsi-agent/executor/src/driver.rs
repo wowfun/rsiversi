@@ -1549,31 +1549,8 @@ impl Driver {
                 },
             )
             .await;
-        if !matches!(
-            outcome,
-            TurnOutcome::BudgetExceeded {
-                dimension: outcome_dimension,
-                consumed: outcome_consumed,
-                limit: outcome_limit,
-            } if outcome_dimension == dimension
-                && outcome_consumed == consumed
-                && outcome_limit == limit
-        ) {
-            let terminal =
-                publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await?;
-            return Ok(vec![terminal]);
-        }
-        let exhausted = publish_budget_exhaustion(
-            self.turns.as_ref(),
-            &self.config,
-            claim,
-            dimension,
-            consumed,
-            limit,
-        )
-        .await?;
         let terminal = publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await?;
-        Ok(vec![exhausted, terminal])
+        Ok(vec![terminal])
     }
 
     const fn context_limits(&self) -> ContextLimits {

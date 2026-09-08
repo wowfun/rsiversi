@@ -26,7 +26,10 @@ check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
 It streams, decodes and hashes each canonical Agent control once, checking terminal
 control prefixes and feeding separate
-mailbox, ready, and active-activation projections. Completed pending payloads
+mailbox, ready, active-activation and bounded domain-head projections. Domain
+version/request membership and exact canonical update positions are verified in
+that same pass. Domain indexes retain positions and derived capacity metadata;
+only controls contain the authoritative complete state. Completed pending payloads
 are released during that pass. All projections borrow the same immutable Header
 already decoded in that validation transaction; control history length does not
 multiply Header reads. Activation guards require this proof even when
@@ -118,7 +121,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 13 admits only the current mandatory Agent-preset
+The exact schema version 14 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

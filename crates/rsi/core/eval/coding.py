@@ -894,7 +894,7 @@ def configure(root, model, turn_count):
     settings = {"rsi.agent": {"default_model": {"deployment": "live-deepseek", "model": model},
         "system_prompt": "You are a coding agent. Inspect source, make the requested implementation, and run checks. Follow the task's file constraints. Report command failures truthfully.",
         "turn_budget": {"maximum_elapsed_ms": 480000, "maximum_provider_attempts": PROVIDER_ATTEMPTS_PER_TURN, "maximum_tool_calls": 48 // turn_count,
-                        "maximum_generated_facts": 65536, "maximum_generated_fact_bytes": 67108864}}}
+                        "maximum_generated_records": 65536, "maximum_generated_record_bytes": 67108864}}}
     (config / "settings.json").write_text(json.dumps(settings))
     profile = config / "host-profiles/live/host.profile.toml"
     profile.parent.mkdir(parents=True)

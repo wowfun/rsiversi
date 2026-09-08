@@ -299,9 +299,8 @@ async fn activation_terminal_cannot_bypass_its_atomic_settlement() {
         "an activation terminal must include its durable control transition"
     );
     kernel
-        .finish_activation_turn(&claim, &TurnOutcome::Completed)
+        .finish_turn(&claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let _child_lease = kernel
         .register("settle-after-rejected-terminal".into())
@@ -313,9 +312,8 @@ async fn activation_terminal_cannot_bypass_its_atomic_settlement() {
         .unwrap();
     assert_eq!(child_claim.session_id(), &child);
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     wait_for_settlement(memory.as_ref(), claim.session_id()).await;
     assert!(memory.active_activation(&child).await.unwrap().is_none());
@@ -360,9 +358,7 @@ async fn admitted_terminal_failure_keeps_mutations_closed_but_allows_settlement_
     kernel.flush(&claim, page.through_seq).await.unwrap();
     memory.fail_next_appends(1);
     assert!(matches!(
-        kernel
-            .finish_activation_turn(&claim, &TurnOutcome::Completed)
-            .await,
+        kernel.finish_turn(&claim, &TurnOutcome::Completed).await,
         Err(TurnError::Store(_))
     ));
     let result = kernel
@@ -376,13 +372,14 @@ async fn admitted_terminal_failure_keeps_mutations_closed_but_allows_settlement_
         })
         .await;
     assert!(matches!(result, Err(TurnError::StaleClaim)));
-    assert!(
+    assert!(matches!(
         kernel
-            .finish_activation_turn(&claim, &TurnOutcome::Completed)
+            .finish_turn(&claim, &TurnOutcome::Completed)
             .await
             .unwrap()
-            .is_some()
-    );
+            .body(),
+        SessionFactBody::TurnTerminal { .. }
+    ));
     kernel.shutdown(workers).await.unwrap();
 }
 
@@ -408,7 +405,7 @@ async fn cancelled_terminal_drain_reopens_only_after_the_last_mutation_finishes(
         }
     });
     observed.wait_until_agent_commit_is_before_apply().await;
-    let mut terminal = Box::pin(kernel.finish_activation_turn(&claim, &TurnOutcome::Completed));
+    let mut terminal = Box::pin(kernel.finish_turn(&claim, &TurnOutcome::Completed));
     assert!(futures_util::poll!(&mut terminal).is_pending());
     drop(terminal);
     observed.release_agent_commit_before_apply();
@@ -425,7 +422,7 @@ async fn cancelled_terminal_drain_reopens_only_after_the_last_mutation_finishes(
         .await
         .expect("abandoned terminal drain did not restore its live claim");
     kernel
-        .finish_activation_turn(&claim, &TurnOutcome::Completed)
+        .finish_turn(&claim, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel.shutdown(workers).await.unwrap();
@@ -509,7 +506,7 @@ async fn terminal_drains_admitted_source_mutation_after_store_commit() {
         }
     });
     observed.wait_until_agent_commit_is_applied().await;
-    let terminal = kernel.finish_activation_turn(&claim, &TurnOutcome::Completed);
+    let terminal = kernel.finish_turn(&claim, &TurnOutcome::Completed);
     tokio::pin!(terminal);
     assert!(futures_util::poll!(&mut terminal).is_pending());
     let facts = memory.read_facts(claim.session_id(), 0, 32).await.unwrap();
@@ -521,7 +518,7 @@ async fn terminal_drains_admitted_source_mutation_after_store_commit() {
     assert!(send.await.unwrap_err().is_cancelled());
     assert!(futures_util::poll!(&mut terminal).is_pending());
     observed.release_applied_agent_commit();
-    terminal.await.unwrap().unwrap();
+    terminal.await.unwrap();
     kernel.shutdown(workers).await.unwrap();
 }
 
@@ -832,7 +829,7 @@ async fn retirement_and_abandoned_terminal_drain_never_reopen_the_old_claim() {
             }
         });
         observed.wait_until_agent_commit_is_before_apply().await;
-        let mut terminal = Box::pin(kernel.finish_activation_turn(&claim, &TurnOutcome::Completed));
+        let mut terminal = Box::pin(kernel.finish_turn(&claim, &TurnOutcome::Completed));
         assert!(futures_util::poll!(&mut terminal).is_pending());
         if retire_first {
             kernel.release(&claim).unwrap();

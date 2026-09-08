@@ -19,8 +19,14 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod domain;
+pub use domain::{
+    StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
+    domain_heads_after,
+};
+
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 13;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 14;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -328,6 +334,7 @@ impl AtomicSessionAppend {
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.validate_terminal_boundary()?;
+        self.validate_domain_commits()?;
         self.facts
             .iter()
             .map(|fact| fact.encoded_len())
@@ -381,6 +388,53 @@ impl AtomicSessionAppend {
                 "terminal Fact requires its exact same-append boundary as the final control".into(),
             )),
         }
+    }
+
+    fn validate_domain_commits(&self) -> Result<()> {
+        use rsi_agent_session_protocol::{AgentControlRecordBody, DomainMutationSource};
+        let mut requests = BTreeSet::new();
+        for record in &self.controls {
+            if let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() {
+                if matches!(commit.source(), DomainMutationSource::Turn { .. }) {
+                    let bound = commit
+                        .clone()
+                        .with_facts(self.facts.iter().map(AsRef::as_ref))
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+                    if &bound != commit {
+                        return Err(StoreError::Invalid(
+                            "domain request does not bind its complete same-append Fact span"
+                                .into(),
+                        ));
+                    }
+                }
+                if matches!(commit.source(), DomainMutationSource::Baseline) {
+                    let acceptance = self.facts.iter().any(|fact| {
+                        matches!(
+                            fact.body(),
+                            SessionFactBody::TurnAccepted { .. }
+                                | SessionFactBody::MessageTurnAccepted { .. }
+                                | SessionFactBody::ImageRequested { .. }
+                        )
+                    }) || self.controls.iter().any(|control| {
+                        matches!(
+                            control.body(),
+                            AgentControlRecordBody::MessageAccepted { .. }
+                        )
+                    });
+                    if self.header.is_none() || record.seq() != 1 || !acceptance {
+                        return Err(StoreError::Invalid("domain baseline requires the fresh Header and first acceptance at control one".into()));
+                    }
+                }
+                if let Some(request) = commit.request_id()
+                    && !requests.insert(request)
+                {
+                    return Err(StoreError::DomainRequestConflict {
+                        request_id: request.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1647,6 +1701,40 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     async fn validate_session(&self, session_id: &SessionId) -> Result<()>;
     /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads the complete bounded domain set at the current or explicit control horizon.
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        at_control_seq: Option<u64>,
+    ) -> Result<StoreDomainStatePage> {
+        let _ = (session_id, at_control_seq);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support domain state reads".into(),
+        ))
+    }
+    /// Resolves one request identity to its exact canonical `DomainStateCommitted` control.
+    /// None denotes an uncommitted request; absence never licenses replay of external effects.
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<AgentControlRecord>> {
+        let _ = (session_id, request_id);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support domain request lookup".into(),
+        ))
+    }
+    /// Reads exact Turn-attributed canonical domain-control usage from derived indexes.
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<StoreTurnDomainUsage> {
+        let _ = (session_id, turn_id);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support Turn domain usage".into(),
+        ))
+    }
     /// Reads at most `limit` contiguous Facts after one cursor.
     async fn read_facts(
         &self,
@@ -1877,6 +1965,22 @@ impl LocalContract for SessionStoreContract {
 /// Closed Store failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StoreError {
+    /// A complete domain replacement observed another predecessor revision.
+    #[error("domain `{domain}` revision conflict: expected {expected}, actual {actual}")]
+    DomainRevisionConflict {
+        /// Exact durable domain name.
+        domain: String,
+        /// Caller-observed predecessor.
+        expected: u64,
+        /// Current committed predecessor, or zero for absence.
+        actual: u64,
+    },
+    /// A request identity already belongs to a canonical domain commit.
+    #[error("domain request identity already committed: {request_id}")]
+    DomainRequestConflict {
+        /// Exact existing request identity.
+        request_id: String,
+    },
     /// Malformed or out-of-bounds input.
     #[error("invalid Agent Store input: {0}")]
     Invalid(String),

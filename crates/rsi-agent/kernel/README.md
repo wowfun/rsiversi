@@ -20,6 +20,24 @@ use the current healthy source generation. The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
+Turn domain mutations accept exact-generation validated proposals and optional
+Facts as one request. Kernel assigns the claimed Turn as their source, flushes
+the preceding speculative suffix, validates the entire candidate state and
+budget, and commits both streams atomically under retained source and Session
+admission. Generated-record limits charge generated Facts and Turn domain
+controls using their complete canonical envelope bytes. A receipt binds the
+source, replacements and accompanying Fact bodies; same-ID changes conflict.
+Result-unknown reconciliation queries that canonical request before releasing
+ownership or permitting a new mutation. Domain-only work is still charged and
+elapsed-limited. Protocol-constrained budget and terminal records retain their
+ending channel after business work is exhausted. `finish_turn` owns a bounded
+atomic ending batch: at most one current-Step closure, one required budget
+marker and the terminal Fact. Only the adjacent closure in that ending batch
+is exempt from generated-record and elapsed limits. Ordinary Step closure
+remains charged. Domain mutations cannot append ending records. This prevents
+an exhausted open Step from blocking finalization without creating a reusable
+free business-work lane.
+
 Agent mutations prepare and acquire target admission before their final source
 check. That check, under the short Kernel state lock, verifies the exact claim,
 executor registration, open mutation gate, and execution cancellation. An
@@ -40,11 +58,15 @@ is still live and has not been retired. Restoration installs a fresh stop token;
 it cannot revive a cancelled, replaced, or terminal claim. Once the terminal
 commit task owns admission, its gate remains closed through Store reconciliation.
 One mutex owns the gate's admission phase (`Open`, `Closed`, `ReopenPending`,
-or `TerminalAdmitted`), retirement flag, terminal drainer, retained wait, and
+`TerminalAdmitted`, or `Failed`), retirement flag, terminal drainer, retained wait, and
 active lease count. Retirement and draining are independent dimensions. Lock
 order is Kernel state then gate state; a gate guard never survives an await or
 an attempt to acquire Kernel state. The last lease release and drainer drop
 use the same reopening rule, and an admitted terminal never reopens.
+An indeterminate retained mutation fails business admission while preserving
+explicit claim release. Once Store reads recover, domain receipts and terminal
+outcomes remain queryable from canonical history; failed resident state cannot
+mask a committed result. Execution resumes only through cold recovery.
 Factory preparation validates limits once and retains a private typed value
 alongside normalized configuration; activation consumes that value. Public
 recovery constructors still validate raw caller-supplied limits.
@@ -73,7 +95,7 @@ Durable observations retain at most one page, alternating controls and Facts;
 live Facts are also charged. The item handle owns the charge through all
 consumer clones, including a renderer queue after the stream is detached.
 Configuration can tighten the pool only while admitting one maximum Fact.
-Activation terminals must use `finish_activation_turn`, which commits the
+Activation terminals must use `finish_turn`, which commits the
 terminal and activation transition together; raw terminal publication is only
 valid for direct Turns.
 Agent interruption publishes its cancellation Fact only after the direct atomic

@@ -80,6 +80,7 @@ impl AgentComposition for FakeComposition {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
             Arc::new(GenerationOwner),
         )
     }
@@ -133,8 +134,9 @@ async fn failed_switch_preserves_the_exact_prior_draft_and_success_moves_one_pin
     let fresh = draft.into_fresh();
     assert_eq!(fresh.header().agent_preset_id().as_str(), "beta");
     assert_eq!(fresh.composition().preset_id().as_str(), "beta");
-    let (header, pin) = fresh.into_parts();
+    let (header, pin, baseline) = fresh.into_parts();
     assert_eq!(header.agent_preset_id(), pin.preset_id());
+    assert!(baseline.commit().is_none());
 }
 
 #[test]
@@ -145,6 +147,7 @@ fn pin_rejects_non_sha256_source_identity() {
             "not-a-digest",
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
             Arc::new(GenerationOwner),
         ),
         Err(AgentCompositionError::InvalidInput(_))

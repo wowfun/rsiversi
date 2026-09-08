@@ -75,7 +75,9 @@ must treat the Header and the Fact/control watermarks as independent durable
 dimensions; outcome reads still require an exact Turn identity. Once durable,
 the Header's preset identity, canonical workspace path, frozen settings,
 default model, and creation-time permission facts never follow later
-configuration drift.
+configuration drift. A nonempty fresh domain baseline is control one in the same
+commit as the Header and first Turn or message acceptance. The draft's actual
+payload crosses that boundary; omission denotes the frozen empty domain set.
 
 Before first submission, an `AgentSessionDraft` owns the candidate header and
 one exact composition pin without creating Store state, reserving Kernel
@@ -89,12 +91,14 @@ Agent composition resolves one preset source digest into a standing child Scope
 inside the existing Runtime. It starts an unpublished Tool catalog stage,
 activates the preset's allowlisted contribution Profile, requires every child
 Fiber to become Active, requires one explicitly selected context builder, seals
-the exact Tool catalog, and only then publishes the
+the exact Tool and typed domain catalogs, and only then publishes the
 generation. Candidate failure disposes the complete stage and never replaces a
 healthy current generation. Construction is single-flight per preset identity
 and source digest. A superseded generation remains alive while a draft,
 resident session, or admitted Tool result holds its pin, then tears down after
-the final pin releases.
+the final pin releases. Domain registrations use exact Meta registration credentials
+and leases. Rollback and sealing close the unpublished registrar; frozen pins
+retain the validated definitions and bounded initial states.
 
 The preset catalog and generation builder share one application-supplied frozen
 Profile compiler. Fresh roster discovery compiles each winning source, including
@@ -140,7 +144,8 @@ It returns the authoritative Header together with either the resident session's
 exact pin or the current healthy generation for a cold session. Applications
 must complete this preparation before creating any durable workspace
 registration or other run-local side effect, and submission consumes the token.
-A missing or broken cold preset therefore fails before workspace mutation,
+A missing or broken cold preset, unsupported domain codec, missing frozen domain
+state or invalid typed payload therefore fails before workspace mutation,
 resident capacity, Fact materialization, or external effects. A resident
 session continues using its existing pin across source changes; after idle
 eviction or process restart, preparation deliberately acquires the latest
