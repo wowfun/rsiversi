@@ -146,13 +146,33 @@ fn restore() {
 }
 
 #[cfg(unix)]
-fn tty(read: bool) -> io::Result<std::fs::File> {
+pub(super) fn tty(read: bool) -> io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(target_os = "macos")]
+    let name = if read {
+        rustix::termios::ttyname(io::stdin(), Vec::new())
+    } else {
+        rustix::termios::ttyname(io::stdout(), Vec::new())
+    }
+    .map_err(|error| io_stage("resolve terminal device", &error.into()))?;
+    #[cfg(target_os = "macos")]
+    let path = {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::ffi::OsStr::from_bytes(name.to_bytes())
+    };
+    #[cfg(not(target_os = "macos"))]
+    let path = "/dev/tty";
     std::fs::OpenOptions::new()
         .read(read)
         .write(!read)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open("/dev/tty")
+        .open(path)
+        .map_err(|error| io_stage("open terminal device", &error))
+}
+
+#[cfg(unix)]
+pub(super) fn io_stage(stage: &'static str, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{stage}: {error}"))
 }
 
 #[cfg(unix)]
@@ -163,7 +183,8 @@ async fn writer(
     setup: Vec<u8>,
     stop: CancellationToken,
 ) -> io::Result<()> {
-    let tty = tokio::io::unix::AsyncFd::new(tty(false)?)?;
+    let tty = tokio::io::unix::AsyncFd::with_interest(tty(false)?, tokio::io::Interest::WRITABLE)
+        .map_err(|error| io_stage("register terminal output", &error))?;
     if write_bytes(&tty, &setup, &stop, &ACTIVE).await? == WriteStatus::Interrupted {
         return Ok(());
     }
@@ -229,12 +250,12 @@ async fn write_bytes(
         let mut ready = tokio::select! {
             biased;
             () = stop.cancelled() => return Ok(WriteStatus::Interrupted),
-            ready = tty.writable() => ready?,
+            ready = tty.writable() => ready.map_err(|error| io_stage("wait for terminal output", &error))?,
         };
         match ready.try_io(|fd| fd.get_ref().write(remaining)) {
             Ok(Ok(0)) => return Err(io::Error::new(io::ErrorKind::WriteZero, "terminal closed")),
             Ok(Ok(count)) => remaining = &remaining[count..],
-            Ok(Err(error)) => return Err(error),
+            Ok(Err(error)) => return Err(io_stage("write terminal output", &error)),
             Err(_) => {}
         }
     }
@@ -481,8 +502,31 @@ mod tests {
         };
         let stage = std::env::var("RSI_TUI_GUARD_TEST_STAGE").unwrap();
         std::fs::write(&stage, b"entering terminal").unwrap();
-        let terminal = Terminal::enter(&tokio_util::task::TaskTracker::new()).unwrap();
+        let tasks = tokio_util::task::TaskTracker::new();
+        let mut terminal = Terminal::enter(&tasks).unwrap();
         std::fs::write(&stage, b"terminal entered").unwrap();
+        let input_stop = CancellationToken::new();
+        if mode == "input" {
+            let mut input = super::super::input::spawn(input_stop.clone(), &tasks).unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(2), input.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(received, super::super::input::Input::Terminal(termina::Event::Key(key))
+                if key.code == termina::event::KeyCode::Char('x'))
+            );
+            terminal.frames.send_replace(Some(rendered(
+                1,
+                1,
+                Buffer::with_lines(["terminal input and output ready"]),
+            )));
+            tokio::time::timeout(Duration::from_secs(2), terminal.presented.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.presented.borrow().as_ref().unwrap().revision, 1);
+        }
         if mode == "slow" {
             for revision in 1..=100 {
                 let buffer = Buffer::filled(
@@ -506,6 +550,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        input_stop.cancel();
+        tasks.close();
+        tokio::time::timeout(Duration::from_secs(1), tasks.wait())
+            .await
+            .unwrap();
         std::fs::write(std::env::var("RSI_TUI_GUARD_TEST_DONE").unwrap(), b"closed").unwrap();
     }
 
@@ -526,7 +575,7 @@ mod tests {
 
     #[test]
     fn panic_restores_terminal_and_blocked_writer_does_not_prevent_exit() {
-        for mode in ["panic", "slow"] {
+        for mode in ["panic", "slow", "input"] {
             let directory = tempfile::tempdir().unwrap();
             let completed = directory.path().join("closed");
             let stage = directory.path().join("stage");
@@ -552,6 +601,9 @@ mod tests {
             let mut child = pair.slave.spawn_command(command).unwrap();
             eprintln!("PTY {mode}: child spawned");
             drop(pair.slave);
+            if mode == "input" {
+                pair.master.take_writer().unwrap().write_all(b"x").unwrap();
+            }
             if mode == "slow" {
                 let start = std::time::Instant::now();
                 while !completed.exists() {
@@ -590,13 +642,34 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             };
             eprintln!("PTY {mode}: child exited; checking restored termios");
-            assert_eq!(status.success(), mode != "panic");
+            let bytes = reader.finish();
+            assert_eq!(
+                status.success(),
+                mode != "panic",
+                "PTY {mode}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
             assert!(
                 format!("{:?}", pair.master.get_termios().unwrap().local_flags).contains("ICANON")
             );
             eprintln!("PTY {mode}: finishing output capture");
-            let bytes = reader.finish();
             eprintln!("PTY {mode}: capture finished ({} bytes)", bytes.len());
+            if mode == "input" {
+                let mut parser = vt100::Parser::new(24, 80, 0);
+                // Restoration leaves the alternate screen, so inspect its frame
+                // before that suffix instead of the enclosing libtest output.
+                let end = bytes
+                    .windows(RESTORE.len())
+                    .position(|part| part == RESTORE)
+                    .unwrap();
+                parser.process(&bytes[..end]);
+                assert!(
+                    parser
+                        .screen()
+                        .contents()
+                        .contains("terminal input and output ready")
+                );
+            }
             if mode == "panic" {
                 assert!(bytes.windows(RESTORE.len()).any(|bytes| bytes == RESTORE));
             }

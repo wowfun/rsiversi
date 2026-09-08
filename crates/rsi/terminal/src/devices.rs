@@ -126,10 +126,11 @@ fn write_to(
 mod tests {
     #[test]
     fn retiring_device_output_interrupts_backpressure_and_restores_descriptor_flags() {
-        let (mut writer, _unread) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (writer, _unread) = std::os::unix::net::UnixStream::pair().unwrap();
         // Darwin records FWASWRITTEN in F_GETFL after the first write. Establish
         // that kernel history before comparing all descriptor flags exactly.
-        std::io::Write::write_all(&mut writer, b"x").unwrap();
+        // UnixStream::write uses send(), which does not set this write(2) bit.
+        assert_eq!(rustix::io::write(&writer, b"x").unwrap(), 1);
         let original = rustix::fs::fcntl_getfl(&writer).unwrap();
         let worker_fd = writer.try_clone().unwrap();
         let stop = tokio_util::sync::CancellationToken::new();

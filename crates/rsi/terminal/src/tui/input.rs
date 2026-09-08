@@ -155,12 +155,11 @@ pub(super) fn spawn(
     tasks: &tokio_util::task::TaskTracker,
 ) -> std::io::Result<mpsc::Receiver<Input>> {
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let tty = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open("/dev/tty")?;
-    let tty = tokio::io::unix::AsyncFd::new(tty)?;
+    let tty = tokio::io::unix::AsyncFd::with_interest(
+        super::terminal::tty(true)?,
+        tokio::io::Interest::READABLE,
+    )
+    .map_err(|error| super::terminal::io_stage("register terminal input", &error))?;
     let (sender, receiver) = mpsc::channel(8);
     tasks.spawn(async move {
         let mut framer = Framer::default();

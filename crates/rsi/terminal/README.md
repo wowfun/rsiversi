@@ -64,6 +64,11 @@ attachment generation forces a full repaint. Input uses the last acknowledged
 source map for the current attachment generation.
 Incomplete bounded escape sequences expire after 50 ms without input. Paste and
 oversized-sequence quarantine retain their terminator rule across idle intervals.
+On macOS the fullscreen input and output owners reopen the actual terminal
+devices named by stdin and stdout, respectively, with independent nonblocking
+descriptions. Darwin cannot register the `/dev/tty` alias with kqueue. Other Unix
+targets open that alias directly. Neither path changes the standard descriptors'
+flags; failure to open or register a terminal is reported with its I/O stage.
 Line framing retries interrupted reads without discarding an accumulated prefix.
 The [development tutorial](../../../docs/tui-development.md)
 and [debugging reference](../../../docs/tui-debugging.md) explain isolated launch,
