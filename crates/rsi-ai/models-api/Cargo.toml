@@ -1,0 +1,25 @@
+[package]
+name = "rsi-ai-models-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-ai-protocol = { path = "../protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-ai = { path = "../core" }
+rsi-ai-provider = { path = "../provider" }
+rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

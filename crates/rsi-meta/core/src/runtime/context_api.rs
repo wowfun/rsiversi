@@ -338,7 +338,7 @@ impl Context {
 
     /// Prepares and applies a factory as a child of this Context.
     ///
-    /// This future must be polled inside a Tokio runtime. One absolute
+    /// Owned work uses the Runtime's explicit execution dependency. One absolute
     /// transition deadline includes preparation and convergence. Timeout or
     /// caller cancellation cannot stop blocking work or Runtime-owned rollback.
     pub fn apply(
@@ -354,43 +354,63 @@ impl Context {
             let preparation = runtime.begin_plugin_preparation()?;
             let (identity, update_mode, implementation) = factory.into_parts();
             let factory = RetainedFactory::new(implementation);
-            let deadline = tokio::time::Instant::now()
-                .checked_add(self.runtime.inner.limits.deadlines.transition)
-                .expect("validated transition deadline fits Tokio Instant");
+            let deadline = self
+                .runtime
+                .inner
+                .execution
+                .deadline_after(self.runtime.inner.limits.deadlines.transition);
             let preparation = self.runtime.yield_reconciliation_slot(async move {
-                tokio::task::spawn_blocking(move || {
-                    runtime.prepare_admitted(identity, update_mode, factory, config, preparation)
-                })
-                .await
-                .map_err(|error| {
-                    MetaError::Activation(super::diagnostics::bound_formatted(
-                        format_args!("plugin preparation task failed: {error}"),
-                        maximum_diagnostic_bytes,
-                    ))
-                })?
-                .map_err(|error| super::diagnostics::bound_error(error, maximum_diagnostic_bytes))
+                runtime
+                    .execution()
+                    .clone()
+                    .prepare(move || {
+                        runtime.prepare_admitted(
+                            identity,
+                            update_mode,
+                            factory,
+                            config,
+                            preparation,
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        MetaError::Activation(super::diagnostics::bound_formatted(
+                            format_args!("plugin preparation task failed: {error}"),
+                            maximum_diagnostic_bytes,
+                        ))
+                    })?
+                    .map_err(|error| {
+                        super::diagnostics::bound_error(error, maximum_diagnostic_bytes)
+                    })
             });
-            let prepared = tokio::time::timeout_at(deadline, preparation)
+            let prepared = deadline
+                .timeout(preparation)
                 .await
                 .map_err(|_| MetaError::Timeout("plugin transition"))??;
-            tokio::time::timeout_at(deadline, self.runtime.apply_prepared(self, prepared))
+            deadline
+                .timeout(self.runtime.apply_prepared(self, prepared))
                 .await
                 .map_err(|_| MetaError::Timeout("plugin transition"))?
+                .map(|ownership| ownership.acknowledge(self.runtime.clone()))
         }
     }
 
     /// Applies an already validated and normalized preparation proof.
     ///
-    /// This future must be polled inside a Tokio runtime. Its absolute
+    /// Owned work uses the Runtime's explicit execution dependency. Its absolute
     /// transition deadline drops only the waiter; an inserted unacknowledged
     /// Fiber remains Runtime-owned through disposal.
     pub async fn apply_prepared(&self, prepared: PreparedPlugin) -> Result<FiberHandle> {
-        let deadline = tokio::time::Instant::now()
-            .checked_add(self.runtime.inner.limits.deadlines.transition)
-            .expect("validated transition deadline fits Tokio Instant");
-        tokio::time::timeout_at(deadline, self.runtime.apply_prepared(self, prepared))
+        let deadline = self
+            .runtime
+            .inner
+            .execution
+            .deadline_after(self.runtime.inner.limits.deadlines.transition);
+        deadline
+            .timeout(self.runtime.apply_prepared(self, prepared))
             .await
             .map_err(|_| MetaError::Timeout("plugin transition"))?
+            .map(|ownership| ownership.acknowledge(self.runtime.clone()))
     }
 
     /// Begins one wrapper-first effect transaction on the owning generation.
@@ -529,7 +549,7 @@ impl FiberHandle {
 
     /// Waits until the Fiber is not loading or unloading.
     ///
-    /// This future must be polled inside a Tokio runtime.
+    /// Owned work uses the Runtime's explicit execution dependency.
     pub async fn wait_settled(&self) -> FiberSnapshot {
         let mut receiver = self.subscribe();
         loop {
@@ -545,7 +565,7 @@ impl FiberHandle {
 
     /// Waits for an active generation, terminal Fiber state, or cancellation.
     ///
-    /// This future must be polled inside a Tokio runtime.
+    /// Owned work uses the Runtime's explicit execution dependency.
     pub async fn wait_active(&self, cancellation: &CancellationToken) -> Result<FiberSnapshot> {
         let mut receiver = self.subscribe();
         loop {
@@ -573,7 +593,7 @@ impl FiberHandle {
 
     /// Replaces retained configuration and converges one serialized generation.
     ///
-    /// This future must be polled inside a Tokio runtime. One absolute
+    /// Owned work uses the Runtime's explicit execution dependency. One absolute
     /// transition deadline includes normalization and convergence. Once
     /// admitted, timeout or caller cancellation detaches only the waiter.
     #[allow(clippy::too_many_lines)] // The returned future owns serialized preparation, installation, and convergence.
@@ -583,9 +603,11 @@ impl FiberHandle {
     ) -> impl std::future::Future<Output = Result<FiberSnapshot>> + '_ {
         let config = configuration::OwnedJsonValue::new(config);
         async move {
-            let deadline = tokio::time::Instant::now()
-                .checked_add(self.runtime.inner.limits.deadlines.transition)
-                .expect("validated transition deadline fits Tokio Instant");
+            let deadline = self
+                .runtime
+                .inner
+                .execution
+                .deadline_after(self.runtime.inner.limits.deadlines.transition);
             let maximum_diagnostic_bytes =
                 self.runtime.inner.limits.payloads.maximum_diagnostic_bytes;
             let runtime = self.runtime.clone();
@@ -597,7 +619,7 @@ impl FiberHandle {
                         operation: "plugin reconfiguration",
                     })?;
             let (preparation, attempt_reservations) = runtime.begin_attempt_preparation()?;
-            let operation = tokio::spawn(async move {
+            let operation = runtime.execution().clone().spawn(async move {
                 let _configuration = configuration;
                 let (factory, desired_revision) = {
                     let data = fiber.data.lock().expect("fiber state poisoned");
@@ -623,25 +645,28 @@ impl FiberHandle {
                 };
                 let preparing_runtime = runtime.clone();
                 let preparing_factory = factory.clone();
-                let (desired, attempt) = tokio::task::spawn_blocking(move || {
-                    preparing_runtime.prepare_attempt_admitted(
-                        &preparing_factory,
-                        config,
-                        desired_revision,
-                        preparation,
-                        attempt_reservations,
-                    )
-                })
-                .await
-                .map_err(|error| {
-                    MetaError::InvalidConfig(super::diagnostics::bound_formatted(
-                        format_args!("validation task failed: {error}"),
-                        maximum_diagnostic_bytes,
-                    ))
-                })?
-                .map_err(|error| {
-                    super::diagnostics::bound_error(error, maximum_diagnostic_bytes)
-                })?;
+                let (desired, attempt) = runtime
+                    .execution()
+                    .clone()
+                    .prepare(move || {
+                        preparing_runtime.prepare_attempt_admitted(
+                            &preparing_factory,
+                            config,
+                            desired_revision,
+                            preparation,
+                            attempt_reservations,
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        MetaError::InvalidConfig(super::diagnostics::bound_formatted(
+                            format_args!("validation task failed: {error}"),
+                            maximum_diagnostic_bytes,
+                        ))
+                    })?
+                    .map_err(|error| {
+                        super::diagnostics::bound_error(error, maximum_diagnostic_bytes)
+                    })?;
                 let (retired_desired, retired_attempts) = {
                     let mut state = runtime.inner.state.lock().expect("runtime state poisoned");
                     let mut data = fiber.data.lock().expect("fiber state poisoned");
@@ -688,7 +713,8 @@ impl FiberHandle {
                 };
                 Ok(snapshot)
             });
-            tokio::time::timeout_at(deadline, operation)
+            deadline
+                .timeout(operation)
                 .await
                 .map_err(|_| MetaError::Timeout("plugin transition"))?
                 .map_err(|error| {
@@ -703,7 +729,7 @@ impl FiberHandle {
 
     /// Joins idempotent child/effect teardown and returns every cleanup failure.
     ///
-    /// This future must be polled inside a Tokio runtime. Once initiated,
+    /// Owned work uses the Runtime's explicit execution dependency. Once initiated,
     /// disposal remains Runtime-owned if this future is dropped.
     pub async fn dispose(&self) -> CleanupReport {
         self.runtime

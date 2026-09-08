@@ -1,5 +1,9 @@
 # rsi-tools-protocol
 
+Execution-policy paths use the bounded
+[host-path grammar](../../rsi-workspace/path/README.md) when validated as data.
+Native process and sandbox providers retain actual filesystem validation.
+
 This package owns bounded process-local tool definitions, schemas, calls,
 results, and catalog interfaces. Canonical JSON values are distinct
 from ordered model-facing text and Media references. Every typed JSON value is

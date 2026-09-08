@@ -31,6 +31,18 @@ pages before their next JSON body is materialized.
 The report-only Store benchmark measures metadata and first validation before
 any mixed writes. Each mixed sample appends to a different session at the same
 initial Fact count, so a growing target history does not confound that phase.
+Separate operational matrices traverse every member of 257- and 512-session
+working sets over repeated cycles and read a fixed one-Fact page against long
+control histories. Report latency distributions and actual API call counts;
+unit tests own exact decode counts and deterministic lane-blocking assertions.
+Concurrent warm reads are sampled during cold validation without a pass/fail
+timing threshold or a claim that process memory is OS-cold.
+
+Headless child-process tests drain bounded stdout and stderr from spawn, record
+durable acceptance, provider entry, and signal stages, and race stage waits
+against child exit and the existing deadline. A timeout captures diagnostics
+before killing and reaping the child; partial output is never lost by dropping
+an `output()` future. Captured-output overflow fails the test explicitly.
 
 Kernel tests use deterministic clocks and a controllable Store. They cover lazy
 empty sessions, live-before-durable observation, the 200 ms batching boundary,
@@ -91,6 +103,9 @@ resident state, resume tokens preserve resident pins, token failure/drop
 releases cold pins, and every claim returns the exact admitted pin. Standard
 application tests also prove generation preparation precedes durable Workspace
 registration for both fresh and resumed sessions.
+Composition tests also run beneath explicit service Local isolation. Generation
+contributions must inherit that mapping while their pins remain independent of
+composition-provider retirement; acquiring a fresh Runtime root would violate it.
 
 Context tests fold real Facts and prove deterministic compaction, complete-turn
 removal, tool call/result adjacency, Media references, and hard byte/message
@@ -137,6 +152,9 @@ as interrupted rather than dispatching another model effect.
 Default tests are isolated from credentials, real user state, and live network
 services. Native Windows and macOS behavior is reported only by their native
 runners; Linux validation does not imply that coverage.
+Fixtures pass canonical temporary workspace authorities to production code;
+platform temporary-directory aliases must not accidentally become the symlink
+under test. Explicit malicious-link cases retain their original test paths.
 
 Human-interaction tests park a real Kernel activation, advance its injected clock
 by a day, and block executor admission during resume. They fill the released

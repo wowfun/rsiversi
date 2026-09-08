@@ -67,6 +67,100 @@ fn terminal_fact(seq: u64, turn: u64) -> SessionFact {
 }
 
 #[tokio::test]
+async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata() {
+    for (name, closed, mutation) in [
+        ("valid-open", false, None),
+        ("valid-closed", true, None),
+        (
+            "terminal-fields-null",
+            true,
+            Some("UPDATE turns SET terminal_seq = NULL, terminal_prefix_sha256 = NULL"),
+        ),
+        ("missing-turn", true, Some("DELETE FROM turns")),
+        (
+            "terminal-sequence-mismatch",
+            true,
+            Some("UPDATE turns SET terminal_seq = 3"),
+        ),
+        (
+            "terminal-digest-null",
+            true,
+            Some("UPDATE turns SET terminal_prefix_sha256 = NULL"),
+        ),
+        (
+            "open-with-digest",
+            false,
+            Some("UPDATE turns SET terminal_prefix_sha256 = printf('%064d', 0)"),
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let session = SessionId::new(name).unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let mut facts = vec![fact(1)];
+        if closed {
+            facts.push(terminal_fact(2, 1));
+        }
+        store
+            .append(AppendBatch {
+                session_id: session.clone(),
+                expected_seq: 0,
+                header: Some(header(name)),
+                facts: (facts).into_iter().map(Into::into).collect(),
+            })
+            .await
+            .unwrap();
+        drop(store);
+        if let Some(sql) = mutation {
+            let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
+            connection.execute_batch(sql).unwrap();
+        }
+        let store = SqliteStore::open(root.path()).unwrap();
+        let validation = store.validate_session(&session).await;
+        let boundary = store
+            .read_turn_boundary(&session, &TurnId::new("turn-1").unwrap())
+            .await;
+        let open = store.list_open_turns(&session, 0, 8).await;
+        let facts = store.read_facts(&session, 0, 8).await;
+        if mutation.is_some() {
+            assert!(
+                matches!(validation, Err(StoreError::Corrupt(_))),
+                "{name}: {validation:?}"
+            );
+            assert!(
+                matches!(boundary, Err(StoreError::Corrupt(_))),
+                "{name}: {boundary:?}"
+            );
+            assert!(
+                matches!(open, Err(StoreError::Corrupt(_))),
+                "{name}: {open:?}"
+            );
+            assert!(
+                matches!(facts, Err(StoreError::Corrupt(_))),
+                "{name}: {facts:?}"
+            );
+        } else {
+            validation.unwrap();
+            assert_eq!(boundary.unwrap().terminal().is_some(), closed, "{name}");
+            assert_eq!(open.unwrap().turns.is_empty(), closed, "{name}");
+            assert_eq!(facts.unwrap().facts.len(), if closed { 2 } else { 1 });
+        }
+        drop(store);
+        let verification = SqliteStore::verify(root.path());
+        if mutation.is_some() {
+            assert!(
+                matches!(verification, Err(StoreError::Corrupt(_))),
+                "{name}: {verification:?}"
+            );
+        } else {
+            verification.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -77,7 +171,7 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
-            facts: vec![
+            facts: (vec![
                 fact(1),
                 fact(2),
                 terminal_fact(3, 1),
@@ -94,7 +188,10 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
@@ -129,7 +226,7 @@ async fn workspace_context_digests_are_recovered_from_the_sqlite_fact_projection
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -193,7 +290,10 @@ async fn workspace_context_digests_are_recovered_from_the_sqlite_fact_projection
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
@@ -285,7 +385,7 @@ async fn zero_fact_agent_session_is_durable_and_multi_session_conflict_rolls_bac
             session_id: parent_id.clone(),
             expected_seq: 0,
             header: Some(header(parent_id.as_str())),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -390,7 +490,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
             session_id: root_id.clone(),
             expected_seq: 0,
             header: Some(root_header.clone()),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -427,7 +527,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                     expected_fact_seq: 0,
                     expected_control_seq: 0,
                     header: Some(child),
-                    facts: vec![fact(1)],
+                    facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
                     controls: Vec::new(),
                 }],
                 required_active_activations: Vec::new(),
@@ -448,7 +548,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                     expected_fact_seq: 0,
                     expected_control_seq: 0,
                     header: Some(overflow),
-                    facts: vec![fact(1)],
+                    facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
                     controls: Vec::new(),
                 }],
                 required_active_activations: Vec::new(),
@@ -575,7 +675,10 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header("session-1")),
-            facts: vec![fact(1), fact(2)],
+            facts: (vec![fact(1), fact(2)])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
@@ -586,7 +689,7 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
                 session_id: session.clone(),
                 expected_seq: 1,
                 header: None,
-                facts: vec![fact(2)],
+                facts: (vec![fact(2)]).into_iter().map(Into::into).collect(),
             })
             .await,
         Err(StoreError::Conflict {
@@ -599,7 +702,7 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
             session_id: session.clone(),
             expected_seq: 2,
             header: None,
-            facts: vec![fact(3)],
+            facts: (vec![fact(3)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -608,7 +711,10 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
             session_id: session.clone(),
             expected_seq: 3,
             header: None,
-            facts: vec![terminal_fact(4, 2)],
+            facts: (vec![terminal_fact(4, 2)])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
@@ -625,7 +731,7 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
                 session_id: id,
                 expected_seq: 0,
                 header: Some(header(name)),
-                facts: vec![fact(1)],
+                facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
@@ -701,7 +807,7 @@ async fn clean_close_makes_the_main_database_a_complete_store() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -745,7 +851,7 @@ async fn open_session_cursor_pagination_is_lexical_and_bounded() {
                 session_id: SessionId::new(name).unwrap(),
                 expected_seq: 0,
                 header: Some(header(name)),
-                facts: vec![fact(1)],
+                facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
@@ -779,7 +885,7 @@ async fn checkpoint_reads_reassert_immutable_session_metadata() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(session_header.clone()),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -844,7 +950,10 @@ async fn turn_indexes_support_exact_outcome_and_open_turn_queries() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
-            facts: vec![fact(1), fact(2), fact(3), terminal_fact(4, 2)],
+            facts: (vec![fact(1), fact(2), fact(3), terminal_fact(4, 2)])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
@@ -875,7 +984,7 @@ async fn oversized_fact_rows_are_rejected_by_sql_length_before_json_decode() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -935,7 +1044,7 @@ fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
             session_id: SessionId::new("session-index-corrupt").unwrap(),
             expected_seq: 0,
             header: Some(header("session-index-corrupt")),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     runtime
@@ -943,7 +1052,7 @@ fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
             session_id: SessionId::new("session-valid").unwrap(),
             expected_seq: 0,
             header: Some(header("session-valid")),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     drop(store);
@@ -1195,7 +1304,7 @@ fn indexed_turn_boundary_rejects_fact_json_with_a_different_sequence() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     drop(store);
@@ -1239,7 +1348,7 @@ fn malformed_fact_prefix_digest_is_rejected_on_access_and_by_verify() {
             session_id: SessionId::new("session-prefix-corrupt").unwrap(),
             expected_seq: 0,
             header: Some(header("session-prefix-corrupt")),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     drop(store);
@@ -1275,7 +1384,7 @@ fn verify_decodes_every_dormant_session_header() {
             session_id: SessionId::new("session-header-corrupt").unwrap(),
             expected_seq: 0,
             header: Some(header("session-header-corrupt")),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     drop(store);
@@ -1306,7 +1415,7 @@ fn verify_recomputes_every_canonical_fact_prefix_digest() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header("session-fact-corrupt")),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     drop(store);
@@ -1456,7 +1565,7 @@ fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
             session_id: SessionId::new("session-in-wal").unwrap(),
             expected_seq: 0,
             header: Some(header("session-in-wal")),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         }))
         .unwrap();
     let wal = live_root.path().join("sessions.sqlite3-wal");
@@ -1640,7 +1749,7 @@ async fn lazy_session_access_rejects_a_malformed_control_digest() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -1667,7 +1776,10 @@ async fn a_missing_fork_terminal_digest_is_corruption() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
-            facts: vec![fact(1), terminal_fact(2, 1), fact(3)],
+            facts: (vec![fact(1), terminal_fact(2, 1), fact(3)])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
@@ -1772,7 +1884,7 @@ async fn cold_control_reads_and_unguarded_commits_reject_missing_mailbox_indexes
                             expected_fact_seq: 0,
                             expected_control_seq: 3,
                             header: None,
-                            facts: vec![fact(1)],
+                            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
                             controls: Vec::new(),
                         }],
                         required_active_activations: Vec::new(),
@@ -1839,7 +1951,7 @@ async fn cold_activation_guard_rejects_a_fabricated_owner_outside_the_write_set(
                     expected_fact_seq: 0,
                     expected_control_seq: 0,
                     header: Some(header(destination.as_str())),
-                    facts: vec![fact(1)],
+                    facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
                     controls: Vec::new(),
                 }],
                 required_active_activations: vec![AgentActivationGuard {

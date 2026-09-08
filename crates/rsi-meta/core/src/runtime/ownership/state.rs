@@ -26,7 +26,7 @@ pub(in crate::runtime) struct RegistryEffectHandle {
     owner: Owner,
     id: u64,
     record: Arc<EffectRecord>,
-    executor: tokio::runtime::Handle,
+    executor: crate::Execution,
 }
 
 impl RegistryEffectHandle {
@@ -108,10 +108,7 @@ impl EventOwnership {
         }
     }
 
-    pub(in crate::runtime) fn rollback_failed_publication(
-        &self,
-        executor: &tokio::runtime::Handle,
-    ) {
+    pub(in crate::runtime) fn rollback_failed_publication(&self, executor: &crate::Execution) {
         match &self.effect {
             EventEffect::Setup(effect) => {
                 let retention = effect.detach();

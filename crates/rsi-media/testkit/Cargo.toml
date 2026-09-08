@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+bytes.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 rsi-media-protocol = { path = "../protocol" }
@@ -15,7 +16,7 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [lints]
 workspace = true

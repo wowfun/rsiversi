@@ -184,9 +184,10 @@ impl Runtime {
                     resolved_local_bindings,
                     prepared_state,
                 );
-                let deadline = tokio::time::Instant::now()
-                    .checked_add(self.inner.limits.deadlines.transition)
-                    .expect("validated activation deadline fits Tokio Instant");
+                let deadline = self
+                    .inner
+                    .execution
+                    .deadline_after(self.inner.limits.deadlines.transition);
                 self.yield_reconciliation_slot(
                     activation_driver::ActivationDriver {
                         factory: &factory,

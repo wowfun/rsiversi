@@ -3,6 +3,9 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod root;
+pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
+
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
@@ -147,7 +150,8 @@ impl PluginFactory for AgentCompositionFactory {
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
-            .requiring_local::<ToolCatalogProviderContract>())
+            .requiring_local::<ToolCatalogProviderContract>()
+            .requiring_local::<AgentGenerationRootContract>())
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -156,10 +160,12 @@ impl PluginFactory for AgentCompositionFactory {
             presets: self.presets.clone(),
             contributions: Arc::clone(&self.contributions),
             scopes: self.scopes.clone(),
-            // Generation Fibers are owned by their pins, not by the provider
-            // Fiber. Root them beside the provider so its deferred shutdown
-            // can wait for the final pin before explicitly disposing them.
-            parent: plan.context().runtime().root(),
+            // Preserve the containing service's isolation while pins can outlive
+            // this provider's admission and delay its deferred cleanup.
+            parent: plan
+                .local::<AgentGenerationRootContract>()?
+                .as_ref()
+                .clone(),
             tools,
             build_slots: Arc::new(Semaphore::new(MAXIMUM_CONCURRENT_BUILDS)),
             shutdown: CancellationToken::new(),

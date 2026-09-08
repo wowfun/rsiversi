@@ -19,13 +19,13 @@ rsi-meta-profile = { path = "../../rsi-meta/profile" }
 rsi-meta-scope = { path = "../../rsi-meta/scope" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
 rsi-tools = { path = "../../rsi-tools/core" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

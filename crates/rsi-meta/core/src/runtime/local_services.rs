@@ -68,7 +68,7 @@ struct LocalSupplyDisposal {
     owner: Owner,
     slot: LocalSlot,
     binding: Arc<LocalBinding>,
-    executor: tokio::runtime::Handle,
+    executor: crate::Execution,
     maximum_diagnostic_entries: usize,
     maximum_diagnostic_bytes: usize,
     started: AtomicBool,
@@ -115,7 +115,7 @@ impl LocalSupplyDisposal {
         owner: Owner,
         slot: LocalSlot,
         binding: Arc<LocalBinding>,
-        executor: tokio::runtime::Handle,
+        executor: crate::Execution,
     ) -> Arc<Self> {
         let maximum_diagnostic_entries = runtime.inner.limits.payloads.maximum_diagnostic_entries;
         let maximum_diagnostic_bytes = runtime.inner.limits.payloads.maximum_diagnostic_bytes;

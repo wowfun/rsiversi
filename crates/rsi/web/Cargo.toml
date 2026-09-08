@@ -1,0 +1,56 @@
+[package]
+name = "rsi-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-application = { path = "../application" }
+rsi-client = { path = "../client" }
+rsi-client-composition = { path = "../client-composition" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-meta-execution = { path = "../../rsi-meta/execution" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
+tokio-util.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rsi-api-browser-client = { path = "../../rsi-api/browser-client" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["WorkerGlobalScope", "Crypto"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

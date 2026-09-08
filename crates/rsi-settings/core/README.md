@@ -13,3 +13,10 @@ reload stale activation-time state. Dropping a registration lease makes all
 escaped scopes stale and defers namespace handoff until any in-flight commit
 has converged. A provider panic fails that commit but still releases its
 in-flight namespace ownership so retirement cannot strand the name.
+
+The same plugin publishes asynchronous `SettingsAccess` for explicit client
+namespace projections. Registration allocates a fresh opaque scope identity;
+snapshots carry it alongside their revision. Versioned writes compare identity
+within the namespace lookup without copying a resolved value, then retain that scope's generation fence
+through validation and durable commit. Re-registration and service restart
+cannot reuse an earlier client's revision-zero authority.

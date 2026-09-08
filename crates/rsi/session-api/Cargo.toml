@@ -1,0 +1,32 @@
+[package]
+name = "rsi-session-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+async-stream.workspace = true
+futures-util.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

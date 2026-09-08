@@ -73,7 +73,7 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, TransportError>> +
 
 enum RequestBodyPart {
     Bytes(Bytes),
-    Base64(Arc<[u8]>),
+    Base64(bytes::Bytes),
 }
 
 /// A JSON request body that is buffered when it has no media and streamed
@@ -112,14 +112,14 @@ impl fmt::Debug for JsonRequestBody {
 pub struct JsonBase64Replacement {
     pointer: String,
     prefix: String,
-    bytes: Arc<[u8]>,
+    bytes: bytes::Bytes,
 }
 
 struct LocatedBase64Replacement {
     start: usize,
     end: usize,
     prefix: Bytes,
-    bytes: Arc<[u8]>,
+    bytes: bytes::Bytes,
 }
 
 impl fmt::Debug for JsonBase64Replacement {
@@ -138,7 +138,7 @@ impl JsonBase64Replacement {
     ///
     /// The referenced slot must exist and contain `null` when passed to
     /// [`json_base64_body`].
-    pub fn new(pointer: impl Into<String>, prefix: impl Into<String>, bytes: Arc<[u8]>) -> Self {
+    pub fn new(pointer: impl Into<String>, prefix: impl Into<String>, bytes: bytes::Bytes) -> Self {
         Self {
             pointer: pointer.into(),
             prefix: prefix.into(),

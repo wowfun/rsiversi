@@ -7,7 +7,7 @@ comment: Give every child a durable identity while keeping lifecycle and authori
 
 This feature note owns the user-visible subagent tree, delivery, supervision,
 and fork policy. Generic durable claim/recovery/checkpoint mechanics remain in
-the [Session Kernel note](../architecture/2026-08-26-durable-session-kernel.md),
+the [Agent Kernel note](../architecture/2026-08-26-durable-agent-kernel.md),
 while current interfaces are documented in the
 [Agent architecture](../../../../crates/rsi-agent/docs/architecture.md) and
 [Agent Tools package](../../../../crates/rsi-agent/tools/README.md).
@@ -30,7 +30,7 @@ records the exact parent and root Sessions, bounded tree path, sibling-unique ta
 name, invoking Turn, parent Header fingerprint, requested fork selection, resolved
 balanced Fact interval, and terminal-prefix digest. The standard tree permits at
 most three child edges below the root, 256 durable Sessions, and three running
-Turns in one Kernel process. The exclusively owned standard Session Host keeps
+Turns in one Kernel process. The exclusively owned standard Service Host keeps
 that scheduler singular. The fourth standard executor lane therefore remains
 available to an independent tree; a parked activation holds no lane.
 
@@ -170,4 +170,4 @@ invalid.
 Recursive cancellation remains cooperative for safe-Rust work. Restricted Linux
 process execution supplies OS containment, while an unconfined descendant that
 escapes its process group can outlive hard process death as recorded by the
-Session Host decision.
+Service Host decision.

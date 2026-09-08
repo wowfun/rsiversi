@@ -1,0 +1,23 @@
+[package]
+name = "rsi-api-device-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-api-protocol = { path = "../protocol" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

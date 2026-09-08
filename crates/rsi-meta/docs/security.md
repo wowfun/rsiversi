@@ -7,6 +7,13 @@ and allocator contract at the operation that relies on it.
 
 ## Runtime policy and durable input
 
+Runtime execution is injected before composition. Platform task, clock and timer
+adapters are trusted safe-Rust dependencies; JS objects may not be made Send/Sync
+through unsafe implementations. Native execution retains the captured Tokio
+handle. Browser bridges retain foreign resources in bounded thread-local tables.
+Unwind containment applies only where the target supports unwinding: a browser
+Worker trap is fatal and cannot establish cleanup completion.
+
 `Runtime::new` validates topology, payload, execution, and deadline groups
 before constructing a downstream primitive. Zero widths, arithmetic overflow,
 Tokio primitive maxima, inconsistent aggregate/per-item limits, and deadlines

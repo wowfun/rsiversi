@@ -202,6 +202,10 @@ async fn merge_revision_cas_and_lease_staleness_are_one_contract() {
         .replace(0, json!({"model":"next"}))
         .await
         .unwrap();
+    let projected = settings.scope("agent").unwrap();
+    assert_eq!(projected.get().unwrap(), updated);
+    assert!(settings.scope("unregistered").is_err());
+    assert!(settings.scope("bad namespace").is_err());
     assert_eq!(updated.revision, 1);
     assert!(matches!(
         registration.scope.clear(0).await,
@@ -211,6 +215,8 @@ async fn merge_revision_cas_and_lease_staleness_are_one_contract() {
         })
     ));
     drop(registration.lease);
+    assert!(projected.get().is_err());
+    assert!(settings.scope("agent").is_err());
     assert!(matches!(
         registration.scope.get(),
         Err(SettingsError::StaleRegistration(namespace)) if namespace == "agent"
@@ -321,4 +327,121 @@ async fn panicking_provider_does_not_strand_retiring_namespace_ownership() {
     drop(settings);
     assert!(service.dispose().await.is_clean());
     assert!(provider.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn client_projection_fences_recreated_namespaces_even_when_the_revision_repeats() {
+    use rsi_settings_protocol::SettingsAccessContract;
+    let runtime = Runtime::default();
+    let provider = runtime
+        .root()
+        .apply(
+            linked(
+                "rsi.settings.memory",
+                Arc::new(MemorySettingsProviderFactory::new(json!({}))),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let service = runtime
+        .root()
+        .apply(
+            linked("rsi.settings", Arc::new(SettingsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+    let access = runtime
+        .root()
+        .lookup_local::<SettingsAccessContract>()
+        .unwrap();
+    assert!(matches!(
+        access.read("client").await,
+        Err(SettingsError::UnknownNamespace(_))
+    ));
+    let first = registry.register(client_spec()).unwrap();
+    let before = access.read("client").await.unwrap();
+    let updated = access
+        .replace("client", &before.version(), json!({"count":2}))
+        .await
+        .unwrap();
+    assert_eq!(updated.scope_id, before.scope_id);
+    assert_eq!(updated.revision, 1);
+    assert!(matches!(
+        access.clear("client", &before.version()).await,
+        Err(SettingsError::Conflict {
+            expected: 0,
+            actual: 1
+        })
+    ));
+    drop(first.lease);
+    let second = registry.register(client_spec()).unwrap();
+    let replacement = access.read("client").await.unwrap();
+    assert_eq!(replacement.revision, 0);
+    assert_ne!(replacement.scope_id, before.scope_id);
+    assert!(matches!(
+        access
+            .replace("client", &before.version(), json!({"count":9}))
+            .await,
+        Err(SettingsError::StaleRegistration(_))
+    ));
+    assert_eq!(
+        access.read("client").await.unwrap().value,
+        json!({"count":2})
+    );
+    assert!(
+        access
+            .replace("client", &replacement.version(), json!({"count":"bad"}))
+            .await
+            .is_err()
+    );
+    assert_eq!(access.read("client").await.unwrap(), replacement);
+    drop(second.lease);
+    assert!(service.dispose().await.is_clean());
+    let restarted = runtime
+        .root()
+        .apply(
+            linked("rsi.settings.restarted", Arc::new(SettingsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let registration = runtime
+        .root()
+        .lookup_local::<SettingsContract>()
+        .unwrap()
+        .register(client_spec())
+        .unwrap();
+    let access = runtime
+        .root()
+        .lookup_local::<SettingsAccessContract>()
+        .unwrap();
+    assert_ne!(
+        access.read("client").await.unwrap().scope_id,
+        replacement.scope_id
+    );
+    assert!(matches!(
+        access.clear("client", &replacement.version()).await,
+        Err(SettingsError::StaleRegistration(_))
+    ));
+    drop(registration.lease);
+    assert!(restarted.dispose().await.is_clean());
+    assert!(provider.dispose().await.is_clean());
+}
+
+fn client_spec() -> SettingsSpec {
+    SettingsSpec {
+        namespace: "client".into(),
+        defaults: json!({"count":1}),
+        base: json!({}),
+        validator: Arc::new(ValidateWith(|value: &Value| {
+            if value["count"].is_u64() {
+                Ok(())
+            } else {
+                Err(SettingsError::InvalidInput("count must be unsigned".into()))
+            }
+        })),
+    }
 }

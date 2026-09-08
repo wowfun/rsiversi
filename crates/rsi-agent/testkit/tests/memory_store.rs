@@ -69,7 +69,7 @@ async fn memory_store_is_compare_and_append_and_failure_injection_is_precommit()
                 session_id: session.clone(),
                 expected_seq: 0,
                 header: Some(header()),
-                facts: vec![fact(1)],
+                facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await,
         Err(StoreError::Io(_))
@@ -83,7 +83,7 @@ async fn memory_store_is_compare_and_append_and_failure_injection_is_precommit()
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header()),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -113,7 +113,7 @@ async fn memory_store_rejects_a_terminal_fact_for_an_unknown_turn_at_append() {
             session_id: session,
             expected_seq: 0,
             header: Some(header()),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -123,7 +123,10 @@ async fn memory_store_rejects_a_terminal_fact_for_an_unknown_turn_at_append() {
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await;
 
@@ -140,7 +143,7 @@ async fn memory_store_fact_pages_stop_before_the_aggregate_byte_bound() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header()),
-            facts: vec![fact(1)],
+            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -150,11 +153,14 @@ async fn memory_store_fact_pages_stop_before_the_aggregate_byte_bound() {
                 session_id: session.clone(),
                 expected_seq: seq - 1,
                 header: None,
-                facts: vec![model_delta(
+                facts: (vec![model_delta(
                     seq,
                     &turn,
                     "x".repeat(MAX_LANGUAGE_OUTPUT_BYTES),
-                )],
+                )])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             })
             .await
             .unwrap();
@@ -199,4 +205,73 @@ async fn memory_store_passes_the_shared_mechanical_contract() {
         .unwrap(),
     )
     .await;
+}
+
+#[tokio::test]
+async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocations() {
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    use std::sync::Arc;
+
+    let store = MemoryStore::new();
+    let accepted = Arc::new(fact(1));
+    let payload = Arc::new(model_delta(
+        2,
+        accepted.body().turn_id(),
+        "x".repeat(8 * 1024 * 1024),
+    ));
+    let payload_identity = Arc::downgrade(&payload);
+    let batch = AppendBatch {
+        session_id: header().session_id().clone(),
+        expected_seq: 0,
+        header: Some(header()),
+        facts: vec![accepted, payload],
+    };
+    store.fail_next_appends(1);
+    assert!(store.append(batch.clone()).await.is_err());
+    assert_eq!(payload_identity.strong_count(), 1);
+    store.append(batch).await.unwrap();
+    assert_eq!(
+        payload_identity.strong_count(),
+        1,
+        "the Store retains the submitted allocation"
+    );
+
+    let terminal = Arc::new(
+        SessionFact::new(
+            3,
+            3,
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new("turn-1").unwrap(),
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .unwrap(),
+    );
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: header().session_id().clone(),
+                expected_fact_seq: 2,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![terminal],
+                controls: vec![],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        payload_identity.strong_count(),
+        1,
+        "transaction staging shares retained history"
+    );
+    let page = store.read_facts(header().session_id(), 1, 1).await.unwrap();
+    assert_eq!(
+        page.facts[0].encoded_len(),
+        payload_identity.upgrade().unwrap().encoded_len()
+    );
+    drop(store);
+    assert!(payload_identity.upgrade().is_none());
 }

@@ -3,7 +3,7 @@ use super::*;
 async fn mutation_fixture(
     direct: bool,
 ) -> (
-    SessionKernel,
+    AgentKernel,
     rsi_agent_kernel::KernelWorkers,
     Arc<FactReadRaceStore>,
     Arc<MemoryStore>,
@@ -14,7 +14,7 @@ async fn mutation_fixture(
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
     let kernel =
-        SessionKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -162,7 +162,7 @@ async fn tree_control_requires_validation_even_when_metadata_is_readable() {
     append_terminal_history(&memory, id.as_str(), 1).await;
     let observed = Arc::new(FactReadRaceStore::new(memory));
     let kernel =
-        SessionKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     *observed.failed_validation.lock().unwrap() = Some(id.clone());
@@ -203,13 +203,10 @@ impl Clock for PublicationClock {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_staging_releases_global_state_but_keeps_session_admission() {
     let clock = Arc::new(PublicationClock::default());
-    let kernel = SessionKernel::recover_with_clock(
-        Arc::new(MemoryStore::new()),
-        composition(),
-        clock.clone(),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(Arc::new(MemoryStore::new()), composition(), clock.clone())
+            .await
+            .unwrap();
     let workers = kernel.start_workers();
     submit(&kernel, "publication-a", "large producer").await;
     submit(&kernel, "publication-b", "independent claim").await;
@@ -649,7 +646,7 @@ async fn slow_ready_root_does_not_hold_other_roots_and_preparation_is_bounded() 
             peak: AtomicUsize::new(0),
             release: tokio::sync::Semaphore::new(0),
         });
-        let kernel = SessionKernel::recover_with_context_clock_and_limits(
+        let kernel = AgentKernel::recover_with_context_clock_and_limits(
             memory.clone(),
             composition(),
             context.clone(),
@@ -717,7 +714,7 @@ async fn new_ready_root_is_discovered_while_the_previous_page_is_still_preparing
         peak: AtomicUsize::new(0),
         release: tokio::sync::Semaphore::new(0),
     });
-    let kernel = SessionKernel::recover_with_context_clock_and_limits(
+    let kernel = AgentKernel::recover_with_context_clock_and_limits(
         Arc::new(MemoryStore::new()),
         composition(),
         context.clone(),
@@ -808,4 +805,62 @@ async fn agent_interrupt_is_visible_only_after_its_owned_commit_returns() {
     );
     drop(observation);
     kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn retirement_and_abandoned_terminal_drain_never_reopen_the_old_claim() {
+    for retire_first in [false, true] {
+        let (kernel, workers, observed, _memory, _lease, claim, child) =
+            mutation_fixture(false).await;
+        let caller = kernel.agent_caller(&claim).unwrap();
+        observed.pause_next_agent_commit_before_apply();
+        let send = tokio::spawn({
+            let kernel = kernel.clone();
+            let caller = caller.clone();
+            let child = child.clone();
+            async move {
+                kernel
+                    .send_agent_message(SendAgentMessage {
+                        cancellation: CancellationToken::new(),
+                        caller,
+                        target_session_id: child,
+                        message_id: MessageId::new("retained-during-retirement").unwrap(),
+                        message: "owned commit".into(),
+                        start_new_turn: false,
+                    })
+                    .await
+            }
+        });
+        observed.wait_until_agent_commit_is_before_apply().await;
+        let mut terminal = Box::pin(kernel.finish_activation_turn(&claim, &TurnOutcome::Completed));
+        assert!(futures_util::poll!(&mut terminal).is_pending());
+        if retire_first {
+            kernel.release(&claim).unwrap();
+            drop(terminal);
+        } else {
+            drop(terminal);
+            kernel.release(&claim).unwrap();
+        }
+        let next = kernel.claim("mutation-executor", CancellationToken::new());
+        tokio::pin!(next);
+        assert!(futures_util::poll!(&mut next).is_pending());
+        observed.release_agent_commit_before_apply();
+        send.await.unwrap().unwrap();
+        let replacement = next.await.unwrap().unwrap();
+        assert_ne!(replacement.claim_id(), claim.claim_id());
+        assert!(matches!(
+            kernel
+                .send_agent_message(SendAgentMessage {
+                    cancellation: CancellationToken::new(),
+                    caller,
+                    target_session_id: child,
+                    message_id: MessageId::new("stale-after-retirement").unwrap(),
+                    message: "must not publish".into(),
+                    start_new_turn: false,
+                })
+                .await,
+            Err(TurnError::StaleClaim)
+        ));
+        kernel.shutdown(workers).await.unwrap();
+    }
 }

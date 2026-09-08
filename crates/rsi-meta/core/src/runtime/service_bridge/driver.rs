@@ -14,7 +14,7 @@ pub(super) struct CallDriver {
     pub(super) byte_resources: Arc<ResourceLedger>,
     pub(super) capability_resources: Arc<ResourceLedger>,
     pub(super) cancellation: CancellationToken,
-    pub(super) deadline: tokio::time::Instant,
+    pub(super) deadline: crate::Deadline,
     pub(super) maximum_message_bytes: usize,
     pub(super) maximum_capabilities_per_message: usize,
     pub(super) call_lease: Arc<CallLease>,
@@ -58,7 +58,7 @@ impl CallDriver {
                 byte_resources: &byte_resources,
                 capability_resources: &capability_resources,
                 cancellation: &cancellation,
-                deadline,
+                deadline: deadline.clone(),
                 maximum_message_bytes,
                 maximum_capabilities_per_message,
             };

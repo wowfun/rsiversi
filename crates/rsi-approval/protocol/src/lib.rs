@@ -109,7 +109,7 @@ pub struct ApprovalReview {
 impl ApprovalReview {
     /// Bounds the review before admission or after external decoding.
     pub fn validate(&self) -> Result<()> {
-        if !std::path::Path::new(&self.cwd).is_absolute()
+        if !rsi_workspace_path::is_absolute(&self.cwd)
             || self.cwd.len() > MAXIMUM_APPROVAL_FIELD_BYTES
             || self.cwd.chars().any(char::is_control)
             || !matches!(

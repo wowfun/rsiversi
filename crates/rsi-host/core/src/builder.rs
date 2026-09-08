@@ -44,11 +44,12 @@ impl Default for HostLimits {
 
 /// Freezes all generic Host composition inputs before Runtime creation.
 pub struct HostBuilder {
-    paths: HostPaths,
+    paths: Option<HostPaths>,
     platform: String,
     defines: BTreeMap<String, ConfigValue>,
     limits: HostLimits,
     runtime_limits: RuntimeLimits,
+    execution: Option<rsi_meta::Execution>,
     linked: BTreeMap<PluginId, LinkedRegistration>,
     local_contract_keys: BTreeMap<LocalContractKey, TypeId>,
     local_contract_types: HashMap<TypeId, &'static str>,
@@ -122,12 +123,25 @@ impl Drop for ContainedFactory {
 impl HostBuilder {
     /// Creates a builder from explicit path authority and frozen target platform.
     pub fn new(paths: HostPaths) -> Self {
+        Self::from_environment(
+            Some(paths),
+            format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        )
+    }
+
+    /// Creates a builder for an embedder with no filesystem authority.
+    pub fn without_paths(platform: impl Into<String>) -> Self {
+        Self::from_environment(None, platform.into())
+    }
+
+    fn from_environment(paths: Option<HostPaths>, platform: String) -> Self {
         Self {
             paths,
-            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            platform,
             defines: BTreeMap::new(),
             limits: HostLimits::default(),
             runtime_limits: RuntimeLimits::default(),
+            execution: None,
             linked: BTreeMap::new(),
             local_contract_keys: BTreeMap::new(),
             local_contract_types: HashMap::new(),
@@ -143,6 +157,13 @@ impl HostBuilder {
     #[must_use]
     pub fn limits(mut self, limits: HostLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Freezes explicit platform execution for startup without running any work.
+    #[must_use]
+    pub fn execution(mut self, execution: rsi_meta::Execution) -> Self {
+        self.execution = Some(execution);
         self
     }
 
@@ -173,8 +194,8 @@ impl HostBuilder {
     }
 
     /// Returns the explicit frozen path candidate.
-    pub const fn paths(&self) -> &HostPaths {
-        &self.paths
+    pub const fn paths(&self) -> Option<&HostPaths> {
+        self.paths.as_ref()
     }
 
     /// Registers one process-linked implementation without executing it.
@@ -385,23 +406,25 @@ impl HostBuilder {
                 self.limits.profile.maximum_identifier_bytes,
             )?;
         }
-        ProfileEnvironment::new(
-            self.paths.config(),
-            self.paths.state(),
-            self.paths.cache(),
-            self.platform.clone(),
-            self.defines.clone(),
-        )?
-        .validate(&self.limits.profile)?;
+        let environment = match &self.paths {
+            Some(paths) => ProfileEnvironment::new(
+                paths.config(),
+                paths.state(),
+                paths.cache(),
+                self.platform,
+                self.defines,
+            )?,
+            None => ProfileEnvironment::without_paths(self.platform, self.defines)?,
+        };
+        environment.validate(&self.limits.profile)?;
         let runtime_limits = self.runtime_limits;
-        let runtime = Runtime::new(runtime_limits.clone())?;
+        Runtime::validate_limits(&runtime_limits)?;
         Ok(Host::new(
             self.paths,
-            self.platform,
-            self.defines,
+            environment,
             self.limits,
             runtime_limits,
-            runtime,
+            self.execution,
             LinkedCatalog {
                 linked: self.linked,
                 fragments: self.fragments,

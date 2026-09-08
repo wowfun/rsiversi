@@ -1,6 +1,6 @@
 use super::*;
 
-impl SessionKernel {
+impl AgentKernel {
     pub(super) async fn reconcile_waiting_activations(&self) -> Result<()> {
         let mut after = None;
         loop {
@@ -211,6 +211,7 @@ impl SessionKernel {
             },
             &mailbox.pending_promotable_message_ids,
         )?;
+        let terminal = Arc::new(terminal);
         let mut sessions = vec![AtomicSessionAppend {
             session_id: claim.session_id().clone(),
             expected_fact_seq,
@@ -260,7 +261,6 @@ impl SessionKernel {
                     )?;
                     kernel
                         .inner
-                        .store
                         .commit_agent(AtomicAgentCommit {
                             sessions: vec![AtomicSessionAppend {
                                 session_id: claim.session_id().clone(),
@@ -292,7 +292,7 @@ impl SessionKernel {
             if settled {
                 kernel.inner.settlement_requested.notify_one();
             }
-            Ok(Some(Arc::new(terminal)))
+            Ok(Some(terminal))
         })
         .await
     }
@@ -595,7 +595,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     pub(super) async fn settlement_loop(self) {
         let mut cursor = None;
         let mut scan_failed = false;

@@ -1,0 +1,30 @@
+[package]
+name = "rsi-media-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-media-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-media = { path = "../core" }
+rsi-media-local = { path = "../local" }
+image.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

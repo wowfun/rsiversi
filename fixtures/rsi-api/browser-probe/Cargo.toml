@@ -1,0 +1,26 @@
+[package]
+name = "rsi-api-browser-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rsi-api = { path = "../../../crates/rsi-api/core" }
+rsi-api-client = { path = "../../../crates/rsi-api/client" }
+rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
+rsi-meta = { path = "../../../crates/rsi-meta/core" }
+rsi-meta-execution = { path = "../../../crates/rsi-meta/execution" }
+async-trait = "0.1"
+bytes = "1"
+http = "1"
+futures-util = "0.3"
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio = { version = "1.47", features = ["sync", "macros"] }
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "=0.4.77"

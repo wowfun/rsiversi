@@ -1,0 +1,8 @@
+{
+  "name": "rsi-client-browser-probe",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node verify.mjs" },
+  "engines": { "node": ">=22" },
+  "devDependencies": { "playwright": "1.63.0" }
+}

@@ -1,5 +1,9 @@
 # rsi-sandbox
 
+Durable enforcement stamps validate their originating host's paths with the
+[normalized host-path grammar](../../rsi-workspace/path/README.md). This does
+not authorize native access; the selected provider verifies its actual paths.
+
 This package owns platform-neutral sandbox modes, explicit process inputs,
 confined process plans, enforcement stamps, and the Local service contract. It
 contains no feature probing, process spawning, filesystem mutation, or plugin

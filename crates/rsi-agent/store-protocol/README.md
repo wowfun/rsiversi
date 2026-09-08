@@ -16,7 +16,12 @@ Both adapters validate this against the canonical control stream.
 
 This crate owns the mechanical durable seam for Agent sessions. A Store accepts
 one immutable header, contiguous compare-and-append Fact batches, bounded
-reads, session enumeration for recovery, and immutable CAS objects. Alongside
+reads, session enumeration for recovery, and immutable CAS objects.
+Append and atomic-commit suffixes own `Arc<SessionFact>` handles. Transferring
+or retrying a prepared suffix shares immutable payloads; adapters validate and
+encode borrowed Facts. The Memory adapter retains those same allocations.
+Read pages keep their separate bounded materialization contract.
+Alongside
 the canonical session sequence it transactionally maintains mechanical turn
 membership and open/terminal indexes. Those indexes select durable bytes; they
 do not apply effect transitions, classify recovery, or select a turn outcome.

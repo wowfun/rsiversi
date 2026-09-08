@@ -8,7 +8,7 @@ comment: Permit concurrency without inferring effect independence from model out
 This note owns the Tool-definition scheduling assertion and its deterministic
 publication consequences. Generic claim, durability, and checkpoint ownership
 remain in the
-[Session Kernel note](2026-08-26-durable-session-kernel.md); the executable
+[Agent Kernel note](2026-08-26-durable-agent-kernel.md); the executable
 contract lives in the
 [executor package](../../../../crates/rsi-agent/executor/README.md).
 

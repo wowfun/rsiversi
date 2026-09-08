@@ -16,14 +16,14 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rsi-agent-testkit = { path = "../testkit" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

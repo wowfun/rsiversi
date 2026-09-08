@@ -6,6 +6,11 @@
 
 `cargo xtask verify-docs` validates repository-root execution, documentation layout, governance boundaries, active `AGENTS.md` word budgets, Cargo package README identity and minimum prose, internal Markdown links, and active Agent Notes. Independent diagnostics are collected and printed in stable path, line, and message order.
 
+Generated build directories and installed `node_modules` are excluded from
+documentation traversal; authored fixture documentation is still checked.
+Standalone Cargo fixtures must occupy `fixtures/<product>/<fixture>` under an
+existing `crates/<product>` namespace and retain their own package README.
+
 ## Agent Note archives
 
 `cargo xtask verify-agent-notes` runs the focused Note lifecycle and archive-integrity checks. `cargo xtask verify-agent-notes --write` is the only documentation command that may append archive seals; it never edits or replaces an existing sealed entry.

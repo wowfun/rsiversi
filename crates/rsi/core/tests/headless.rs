@@ -1,3 +1,9 @@
+#[path = "headless/child.rs"]
+mod child;
+use child::CommandOutput as _;
+#[cfg(unix)]
+use child::ObservedChild;
+
 use axum::{
     Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,
 };
@@ -15,8 +21,8 @@ use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, Result as CredentialResult, SecretValue};
 use rsi_host::HostPaths;
 use rsi_sandbox::SandboxMode;
-use rsi_session::{
-    CreateSession, SessionApplication as _, SessionHandle, SessionInput, SubmitDirectImage,
+use rsi_session_protocol::{
+    CreateSession, SessionHandle, SessionInput, SessionService as _, SubmitDirectImage,
     SubmitInput, TurnReceipt,
 };
 use std::collections::BTreeMap;
@@ -79,11 +85,11 @@ fn fixture(endpoint: &str) -> Fixture {
     .unwrap();
     let profile = config.join("host-profiles/test/host.profile.toml");
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
-    let application = config.join("application-profiles/test-headless/application.toml");
+    let application = config.join("application-profiles/test-headless/application.profile.toml");
     std::fs::create_dir_all(application.parent().unwrap()).unwrap();
     std::fs::write(
         &application,
-        "format = 1\napplication = \"headless\"\nhost_profile = \"test\"\n",
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"connection\"\nplugin = \"rsi.application.connection\"\nconfig = { host_profile = \"test\" }\n[[steps]]\nkind = \"plugin\"\nid = \"application\"\nplugin = \"rsi.application.headless\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -656,7 +662,7 @@ async fn failed_server() -> (String, tokio::task::JoinHandle<()>) {
 async fn observe_after_acceptance(
     handle: &Arc<dyn SessionHandle>,
     receipt: &TurnReceipt,
-) -> (Vec<Arc<SessionFact>>, TurnOutcome, u64) {
+) -> (Vec<rsi_agent_turn_protocol::ObservedFact>, TurnOutcome, u64) {
     observe_turn_after(handle, &receipt.turn_id, receipt.accepted_seq).await
 }
 
@@ -692,7 +698,7 @@ async fn observe_turn_after(
     handle: &Arc<dyn SessionHandle>,
     turn_id: &TurnId,
     after_fact_seq: u64,
-) -> (Vec<Arc<SessionFact>>, TurnOutcome, u64) {
+) -> (Vec<rsi_agent_turn_protocol::ObservedFact>, TurnOutcome, u64) {
     let mut observation = handle
         .observe(ObservationCursor {
             control_seq: 0,
@@ -738,11 +744,17 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
-    let application = running.session_application().unwrap();
+    let application = running.session_service().unwrap();
     let first_handle = application
         .create(CreateSession {
-            cwd: fixture.workspace.clone(),
-            session_id: None,
+            workspace_id: running
+                .workspace_registry()
+                .unwrap()
+                .get_or_create(&fixture.workspace)
+                .await
+                .unwrap()
+                .id,
+            session_id: SessionId::new("fixture-created").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
             workspace_trust: WorkspaceTrust::Untrusted,
         })
@@ -843,7 +855,7 @@ async fn resume_rejects_a_different_canonical_workspace() {
             "--session-id",
             "session-workspace-authority",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert!(first.status.success());
@@ -857,7 +869,7 @@ async fn resume_rejects_a_different_canonical_workspace() {
             "--cwd",
             other.to_str().unwrap(),
         ])
-        .output()
+        .observed_output()
         .await;
     let resumed = resumed.unwrap();
     assert_eq!(resumed.status.code(), Some(2));
@@ -884,7 +896,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
             "--output",
             "jsonl",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert!(
@@ -920,7 +932,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
             "--cwd",
             fixture.workspace.to_str().unwrap(),
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert!(
@@ -976,7 +988,7 @@ async fn built_binary_treats_help_after_separator_as_the_literal_task() {
             "--",
             "--help",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
 
@@ -1056,7 +1068,7 @@ async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_pr
     let extra = tokio::process::Command::new(binary)
         .args(["--rsi-run-as-apply-patch", "extra"])
         .current_dir(workspace.path())
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert_eq!(extra.status.code(), Some(2));
@@ -1081,7 +1093,7 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             "--output",
             "jsonl",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert!(
@@ -1171,7 +1183,7 @@ async fn built_binary_blocks_success_when_background_work_was_not_collected() {
             "--output",
             "jsonl",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1214,7 +1226,7 @@ async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
             "--output",
             "jsonl",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert!(
@@ -1260,7 +1272,7 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     let binary = env!("CARGO_BIN_EXE_rsi");
     let usage = tokio::process::Command::new(binary)
         .args(["--profile", "headless", "task", "--stdin"])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert_eq!(usage.status.code(), Some(2));
@@ -1290,7 +1302,7 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
             "XDG_CACHE_HOME",
             missing_route.paths.cache().parent().unwrap(),
         )
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert_eq!(boot.status.code(), Some(1));
@@ -1314,7 +1326,7 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
         .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
         .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
         .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert_eq!(failed.status.code(), Some(1));
@@ -1334,33 +1346,32 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
 async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     let (endpoint, first_request_started, _calls, server) = crash_server().await;
     let fixture = fixture(&endpoint);
-    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
-        .args([
-            "--profile",
-            "test-headless",
-            "wait",
-            "--cwd",
-            fixture.workspace.to_str().unwrap(),
-            "--output",
-            "jsonl",
-        ])
-        .env("HOME", fixture.temporary.path())
-        .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
-        .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
-        .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
-        .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(
-        CHILD_PROVIDER_START_TIMEOUT,
-        first_request_started.notified(),
+    let mut child = ObservedChild::spawn(
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
+            .args([
+                "--profile",
+                "test-headless",
+                "wait",
+                "--cwd",
+                fixture.workspace.to_str().unwrap(),
+                "--output",
+                "jsonl",
+            ])
+            .env("HOME", fixture.temporary.path())
+            .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
+            .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
+            .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
+            .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret"),
     )
-    .await
-    .expect("provider request proves the child installed its runtime signal path");
-    let process_id = child.id().unwrap().to_string();
+    .unwrap();
+    child
+        .wait_provider(
+            first_request_started.notified(),
+            CHILD_PROVIDER_START_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let process_id = child.id().to_string();
     assert!(
         tokio::process::Command::new("/bin/kill")
             .args(["-INT", &process_id])
@@ -1369,10 +1380,8 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
             .unwrap()
             .success()
     );
-    let output = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-        .await
-        .expect("SIGINT shutdown bound")
-        .unwrap();
+    child.signal_sent("SIGINT");
+    let output = child.wait(std::time::Duration::from_secs(5)).await.unwrap();
     assert_eq!(output.status.code(), Some(130));
     assert!(output.stderr.is_empty());
     let lines = String::from_utf8(output.stdout)
@@ -1437,8 +1446,8 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     let (endpoint, first_request_started, calls, server) = crash_server().await;
     let fixture = fixture(&endpoint);
     let session_id = "session-sigkill-recovery";
-    let child = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
-        .args([
+    let mut child =
+        ObservedChild::spawn(binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture).args([
             "--profile",
             "test-headless",
             "first",
@@ -1448,19 +1457,16 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
             session_id,
             "--output",
             "jsonl",
-        ])
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        ]))
         .unwrap();
-    tokio::time::timeout(
-        CHILD_PROVIDER_START_TIMEOUT,
-        first_request_started.notified(),
-    )
-    .await
-    .expect("first provider request should start after its effect prefix is durable");
-    let process_id = child.id().unwrap().to_string();
+    child
+        .wait_provider(
+            first_request_started.notified(),
+            CHILD_PROVIDER_START_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let process_id = child.id().to_string();
     assert!(
         tokio::process::Command::new("/bin/kill")
             .args(["-KILL", &process_id])
@@ -1469,10 +1475,8 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
             .unwrap()
             .success()
     );
-    let killed = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-        .await
-        .expect("SIGKILL process reap bound")
-        .unwrap();
+    child.signal_sent("SIGKILL");
+    let killed = child.wait(std::time::Duration::from_secs(5)).await.unwrap();
     assert!(!killed.status.success());
 
     let resumed = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
@@ -1487,7 +1491,7 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
             "--output",
             "jsonl",
         ])
-        .output()
+        .observed_output()
         .await
         .unwrap();
     assert!(
@@ -1534,11 +1538,17 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
     let running = RunningRsi::boot(openai_composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
-    let application = running.session_application().unwrap();
+    let application = running.session_service().unwrap();
     let handle = application
         .create(CreateSession {
-            cwd: fixture.workspace.clone(),
-            session_id: None,
+            workspace_id: running
+                .workspace_registry()
+                .unwrap()
+                .get_or_create(&fixture.workspace)
+                .await
+                .unwrap()
+                .id,
+            session_id: SessionId::new("fixture-created").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("standard").unwrap()),
             workspace_trust: WorkspaceTrust::Untrusted,
         })
@@ -1591,7 +1601,13 @@ async fn question_then_chat(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One real Host lifecycle per adapter validates the same question protocol.
 async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
-    use rsi_session_host::{HostEpoch, SessionHostPaths, UdsSessionApplication, UdsSessionServer};
+    use rsi_api_http::LocalHttpService;
+    use rsi_api_protocol::HostEpoch;
+    use rsi_api_uds_client::{UdsClient, UdsClientConfig};
+    use rsi_service_host::{
+        HostOwnerLease, LocalApiServer, ServiceHostPaths, local_compatibility_key,
+    };
+    use rsi_session_api::SessionClient;
     use tokio_util::sync::CancellationToken;
     for remote in [false, true] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1612,42 +1628,59 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             .unwrap();
         });
         let fixture = fixture(&endpoint);
-        let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
-            .await
-            .unwrap();
-        let local = Arc::new(running.session_application().unwrap());
-        let paths = SessionHostPaths::from_host_paths_with_runtime(
+        let paths = ServiceHostPaths::from_host_paths_with_runtime(
             &fixture.paths,
             Some(&fixture.temporary.path().join("runtime")),
         )
         .unwrap();
         let epoch = HostEpoch::generate().unwrap();
-        let transport = UdsSessionServer::bind(
-            &paths,
-            local.clone(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            epoch.clone(),
+        let owner = Arc::new(HostOwnerLease::try_acquire(paths.clone()).unwrap());
+        let composition = composition(fixture.paths.clone())
+            .with_service_owner(owner.clone(), epoch)
+            .unwrap();
+        let running = RunningRsi::boot(composition, &fixture.profile)
+            .await
+            .unwrap();
+        let local = running.session_service().unwrap();
+        let description = running.connection_description().unwrap();
+        let compatibility = local_compatibility_key(&"a".repeat(64)).unwrap();
+        let config = UdsClientConfig {
+            socket: paths.socket().to_path_buf(),
+            endpoint_id: description.endpoint_id.clone(),
+            host_epoch: description.host_epoch.clone(),
+            compatibility: compatibility.clone(),
+        };
+        let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+        let service = LocalHttpService::new(
+            execution.clone(),
+            running.api_dispatch().unwrap(),
+            description.as_ref(),
+            compatibility,
         )
         .unwrap();
+        let transport = LocalApiServer::bind(owner, service).unwrap();
         let stop = CancellationToken::new();
         let server = tokio::spawn(transport.serve(stop.clone()));
-        let application: Arc<dyn rsi_session::SessionApplication> = if remote {
-            Arc::new(
-                UdsSessionApplication::connect(
-                    paths.socket(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    epoch.clone(),
-                )
+        let client = Arc::new(
+            UdsClient::connect(execution.clone(), config.clone())
                 .await
                 .unwrap(),
-            )
+        );
+        let application: Arc<dyn rsi_session_protocol::SessionService> = if remote {
+            Arc::new(SessionClient::new(client.clone()).unwrap())
         } else {
             local.clone()
         };
         let handle = application
             .create(CreateSession {
-                cwd: fixture.workspace.clone(),
-                session_id: Some(SessionId::new("question-session").unwrap()),
+                workspace_id: running
+                    .workspace_registry()
+                    .unwrap()
+                    .get_or_create(&fixture.workspace)
+                    .await
+                    .unwrap()
+                    .id,
+                session_id: SessionId::new("question-session").unwrap(),
                 agent_preset_id: None,
                 workspace_trust: WorkspaceTrust::Untrusted,
             })
@@ -1687,13 +1720,8 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             snapshot.tree.session.session_id,
             *handle.header().await.unwrap().session_id()
         );
-        let reconnect = UdsSessionApplication::connect(
-            paths.socket(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            epoch,
-        )
-        .await
-        .unwrap();
+        let reconnected = Arc::new(UdsClient::connect(execution, config).await.unwrap());
+        let reconnect = SessionClient::new(reconnected.clone()).unwrap();
         let attached = reconnect
             .attach(handle.header().await.unwrap().session_id())
             .await
@@ -1733,6 +1761,8 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
                 .contains("my free answer")
         );
         assert!(handle.pending_questions().await.unwrap().is_empty());
+        reconnected.close().await;
+        client.close().await;
         stop.cancel();
         server.await.unwrap().unwrap();
         assert!(running.shutdown().await.is_clean());
@@ -1841,23 +1871,19 @@ async fn model_reads_full_command_output_across_raw_utf8_page_boundaries() {
         .unwrap();
     });
     let fixture = fixture(&endpoint);
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
-            .args([
-                "--profile",
-                "test-headless",
-                "read complete output",
-                "--cwd",
-                fixture.workspace.to_str().unwrap(),
-                "--output",
-                "jsonl",
-            ])
-            .output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+        .args([
+            "--profile",
+            "test-headless",
+            "read complete output",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--output",
+            "jsonl",
+        ])
+        .observed_output_with_timeout(std::time::Duration::from_secs(20))
+        .await
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1944,23 +1970,19 @@ async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
         .unwrap();
     });
     let fixture = fixture(&endpoint);
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
-            .args([
-                "--profile",
-                "test-headless",
-                "spawn a worker and wait",
-                "--cwd",
-                fixture.workspace.to_str().unwrap(),
-                "--output",
-                "jsonl",
-            ])
-            .output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
+        .args([
+            "--profile",
+            "test-headless",
+            "spawn a worker and wait",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--output",
+            "jsonl",
+        ])
+        .observed_output_with_timeout(std::time::Duration::from_secs(20))
+        .await
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1990,4 +2012,137 @@ async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
                 .is_some_and(|questions| !questions.is_empty())
     }));
     http.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn built_binary_sigint_exits_with_an_undrained_stdout_pipe() {
+    verify_undrained_stdout(None).await;
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn built_binary_sigint_after_model_completion_still_stops_blocked_output() {
+    verify_undrained_stdout(Some(0)).await;
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn built_binary_sigint_after_model_completion_with_a_full_renderer_queue() {
+    verify_undrained_stdout(Some(64)).await;
+}
+#[cfg(unix)]
+async fn verify_undrained_stdout(deltas: Option<usize>) {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt as _;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sent = Arc::new(Notify::new());
+    let notify = sent.clone();
+    let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/chat/completions", post(move || {
+            let notify = notify.clone();
+            async move {
+                let chunk = format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":{"role":"assistant","content":"x".repeat(200_000)},"finish_reason":null}]}));
+                let first = futures_util::stream::once(async move {
+                    notify.notify_one();
+                    Ok::<_, std::io::Error>(chunk)
+                });
+                let tail = if let Some(count) = deltas {
+                    let chunks = futures_util::stream::iter(0..count).then(|_| async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        Ok(format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":{"content":"more"},"finish_reason":null}]})))
+                    });
+                    chunks.chain(futures_util::stream::once(async {
+                        Ok("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n".into())
+                    })).boxed()
+                } else { futures_util::stream::pending().boxed() };
+                Response::builder().header("content-type", "text/event-stream")
+                    .body(Body::from_stream(first.chain(tail))).unwrap()
+            }
+        }))).await.unwrap();
+    }));
+    let fixture = fixture(&format!("http://{address}"));
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
+        .args([
+            "--profile",
+            "test-headless",
+            "wait",
+            "--cwd",
+            fixture.workspace.to_str().unwrap(),
+            "--session-id",
+            "backpressure",
+            "--output",
+            "jsonl",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", fixture.temporary.path())
+        .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
+        .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
+        .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
+        .env("XDG_RUNTIME_DIR", fixture.temporary.path().join("runtime"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}/absent", fixture.temporary.path().display()),
+        )
+        .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(CHILD_PROVIDER_START_TIMEOUT, sent.notified())
+        .await
+        .unwrap();
+    // Confirm streamed model bytes reached the pipe, then retain it without draining.
+    let mut stdout = child.stdout.take().unwrap();
+    let mut prefix = vec![0; 4096];
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut prefix))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(prefix.windows(32).any(|bytes| bytes == [b'x'; 32]));
+    if let Some(count) = deltas {
+        wait_for_completed_output(&fixture, count).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(
+        tokio::process::Command::new("/bin/kill")
+            .args(["-INT", &child.id().unwrap().to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    assert!(
+        result.is_ok(),
+        "SIGINT cleanup waited for the external stdout consumer"
+    );
+    assert_eq!(result.unwrap().unwrap().code(), Some(130));
+    drop(stdout);
+    server.abort();
+    let _ = server.await;
+}
+
+#[cfg(unix)]
+async fn wait_for_completed_output(fixture: &Fixture, count: usize) {
+    use std::time::Duration;
+    // Read-only WAL visibility proves completion without acquiring the running
+    // Store's exclusive writer lease or unblocking the product's output pipe.
+    let connection = rusqlite::Connection::open_with_flags(
+        fixture.paths.state().join("agent/sessions.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (facts, terminal): (i64, i64) = connection.query_row(
+                    "SELECT count(*), coalesce(sum(fact_kind = 'terminal'), 0) FROM facts WHERE session_id = ?1",
+                    ["backpressure"], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).unwrap();
+                if terminal > 0 { assert!(facts > i64::try_from(count).unwrap()); break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
 }

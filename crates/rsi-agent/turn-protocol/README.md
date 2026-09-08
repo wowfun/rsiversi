@@ -68,6 +68,11 @@ receipt. Together with the acceptance control cursor, it is a reconnectable
 starting point that lets a caller subscribe for the later claim without
 replaying old Facts or polling message status. A claimed receipt proves its
 model-visible input Fact is at or before that observed tail.
+
+Message receipts/states, observation cursors and cancellation values have closed
+Serde representations for domain adapters. Decoders still validate cross-field
+receipt and stream invariants at their owning boundary; these values do not
+change the durable Session or Store format.
 Each claim exposes only borrowed getters and carries a private Kernel-issued
 seal plus the resident session's shared immutable Header allocation. Live
 operations require that seal, current claim identity, and the exact resident
@@ -82,9 +87,20 @@ at publication. The sole terminal Fact and `outcome` become visible only after
 the terminal Fact's complete prefix is durable. A permanent flush failure ends
 an attached observation with `TurnError::Flush`; observation cannot wait
 forever for a terminal that the Store can no longer commit.
-Every process-local Fact seam uses `Arc<SessionFact>`: publication, claim
-pages, and observation share one immutable allocation while the Store remains
-the serialization owner.
+Publication, claim pages, and Store append suffixes share immutable
+`Arc<SessionFact>` allocations. Observations use concrete `ObservedFact` and
+`ObservedControl` handles, exposing borrowed records without an escaping bare
+Arc. Clones share both payload and retained-byte reservation; only the last
+clone releases that item's reservation, even after its stream has been dropped.
+An adapter's `ObservationRetention` pool admits each complete page atomically
+and returns `Capacity` immediately when it cannot retain the page. More than
+the protocol's 512 records is `Invalid`, because releasing capacity cannot make
+that page valid. Failed admission advances no delivered cursor. Consumers reconnect from their last
+actually delivered cursor after releasing earlier items. Encoded canonical
+payload bytes are charged conservatively per observation; this is independent
+of Store-read materialization and does not claim a total heap or RSS limit.
+The standard pool is 64 MiB and can only be tightened while admitting one
+maximum Fact. Transport decoding and renderer queues preserve these handles.
 Publication consumes owned Fact bodies. `Published` returns shared Facts only
 after live commit; `FlushRequired` returns the canonical unpublished bodies for
 an explicit durability flush and retry. Terminal canonicalization may therefore

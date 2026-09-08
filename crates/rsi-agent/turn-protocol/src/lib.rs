@@ -19,6 +19,11 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+mod observation;
+pub use observation::{
+    DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
+};
+
 /// Kernel-owned issuer for exact resume admissions.
 ///
 /// This public type is an integration seam between the Turn protocol and its
@@ -194,9 +199,11 @@ pub struct SubmittedTurn {
 }
 
 /// Durable state of one admitted mailbox message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessageState {
     /// Accepted but not yet claimed or discarded.
+    #[serde(deserialize_with = "deserialize_empty_message_state")]
     Pending,
     /// Entered one exact execution boundary.
     Claimed {
@@ -218,8 +225,18 @@ pub enum MessageState {
     },
 }
 
+fn deserialize_empty_message_state<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<(), D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+    <Empty as serde::Deserialize>::deserialize(deserializer).map(|_| ())
+}
+
 /// Durable receipt for one accepted mailbox message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessageReceipt {
     /// Exact target session.
     pub session_id: SessionId,
@@ -418,7 +435,8 @@ pub enum AgentWaitResult {
 }
 
 /// Cursor spanning independent Agent-control and Fact streams.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservationCursor {
     /// Last observed durable Agent-control sequence.
     pub control_seq: u64,
@@ -432,14 +450,14 @@ pub enum SessionObservation {
     /// Agent-control record and its durable sequence.
     Control {
         /// Exact record.
-        record: Arc<AgentControlRecord>,
+        record: ObservedControl,
         /// Durable control watermark.
         durable_control_seq: u64,
     },
     /// Model-visible Fact and its durable sequence.
     Fact {
         /// Exact Fact.
-        fact: Arc<SessionFact>,
+        fact: ObservedFact,
         /// Durable Fact watermark.
         durable_fact_seq: u64,
     },
@@ -449,8 +467,18 @@ pub enum SessionObservation {
 pub type SessionObservationStream =
     Pin<Box<dyn Stream<Item = Result<SessionObservation>> + Send + 'static>>;
 
+/// Coalesced process-local notifications that a root's durable membership changed.
+/// Subscribe before collecting a tree snapshot; no payload history is retained.
+pub type TreeMembershipChanges = Pin<Box<dyn Stream<Item = ()> + Send + 'static>>;
+
 /// Idempotent cancellation target before or after message claim.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum CancelTarget {
     /// Discard one accepted, unclaimed message.
     Message(MessageId),
@@ -459,7 +487,8 @@ pub enum CancelTarget {
 }
 
 /// Idempotent cancellation result.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CancelResult {
     /// Whether a new cancellation Fact entered the live stream.
     pub accepted: bool,
@@ -474,7 +503,7 @@ pub enum TurnUpdate {
     /// `durable_seq` may lag only a nonterminal Fact.
     Fact {
         /// Exact Fact.
-        fact: Arc<SessionFact>,
+        fact: ObservedFact,
         /// Durable watermark at publication time.
         durable_seq: u64,
     },
@@ -504,6 +533,13 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
     /// Preparation does not reserve resident capacity or materialize Facts.
     /// Dropping the returned token has no Store semantics.
     async fn prepare_resume(&self, session_id: &SessionId) -> Result<PreparedResumeSession>;
+    /// Subscribes before the root exists so a fresh Session can observe its first publication.
+    fn watch_tree_membership(&self, root: &SessionId) -> Result<TreeMembershipChanges> {
+        let _ = root;
+        Err(TurnError::Invalid(
+            "tree membership observation is unavailable".into(),
+        ))
+    }
     /// Lists the exact root followed by every durable descendant in stable tree order.
     async fn tree_sessions(&self, session_id: &SessionId) -> Result<Vec<SessionId>> {
         let _ = session_id;
@@ -1316,5 +1352,20 @@ mod tests {
         };
 
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn pending_message_state_rejects_fields_despite_having_no_payload() {
+        assert_eq!(
+            serde_json::from_str::<MessageState>(r#"{"kind":"pending"}"#).unwrap(),
+            MessageState::Pending
+        );
+        assert!(
+            serde_json::from_str::<MessageState>(r#"{"kind":"pending","foreign":true}"#).is_err()
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageState::Pending).unwrap(),
+            r#"{"kind":"pending"}"#
+        );
     }
 }

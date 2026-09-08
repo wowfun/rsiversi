@@ -14,7 +14,6 @@ use rsi_tools_protocol::{ToolCall, ToolResult, ToolResultIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::path::Path;
 use thiserror::Error;
 
 /// Exact durable format accepted by this pre-release implementation.
@@ -2120,7 +2119,12 @@ fn compact_json_len(value: &(impl Serialize + ?Sized)) -> Result<usize> {
 }
 
 /// Validates one contiguous Fact sequence after an explicit cursor.
-pub fn validate_fact_sequence(after_seq: u64, facts: &[SessionFact]) -> Result<()> {
+pub fn validate_fact_sequence<'a, I>(after_seq: u64, facts: I) -> Result<()>
+where
+    I: IntoIterator<Item = &'a SessionFact>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let facts = facts.into_iter();
     if facts.len() > MAXIMUM_FACTS_PER_READ {
         return Err(SessionError::TooLarge {
             kind: "Fact page",
@@ -2259,12 +2263,7 @@ fn validate_canonical_path(value: &str) -> Result<()> {
         MAXIMUM_WORKSPACE_PATH_BYTES,
         false,
     )?;
-    let path = Path::new(value);
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
+    if !rsi_workspace_path::is_absolute(value) {
         return Err(SessionError::Invalid(
             "workspace path must be absolute and lexically normalized".into(),
         ));

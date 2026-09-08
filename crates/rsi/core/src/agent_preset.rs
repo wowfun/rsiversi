@@ -1,20 +1,19 @@
-use crate::{Result, RsiError};
+use crate::{ProfileOwner, Result, RsiError};
 use async_trait::async_trait;
 use rsi_agent_presets::{
-    AgentPresetCatalog, AgentPresetCatalogConfig, AgentPresetDefaultStore, AgentPresetId,
-    AgentPresetProfileCompiler, AgentPresetRoot, AgentPresetTrust, MAX_ROOTS, PresetError,
+    AgentPresetCatalog, AgentPresetDefaultStore, AgentPresetId, AgentPresetProfileCompiler,
+    AgentPresetTrust, MAX_ROOTS, PresetError,
 };
-use rsi_host::{HostBuilder, HostPaths, Profile, ProfileEntry, RunningHost};
+use rsi_host::{HostBuilder, HostPaths, Profile, ProfileEntry, ProfileProgram};
 use rsi_meta::UpdateMode;
 use rsi_meta_profile::{ProfileCompiler, ProfileEnvironment, ProfileLimits};
 use rsi_settings_protocol::{
-    SettingsContract, SettingsError, SettingsProviderContract, SettingsRegistration, SettingsScope,
-    SettingsSpec, ValidateWith,
+    SettingsContract, SettingsError, SettingsProviderContract, SettingsScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Settings namespace owned by standard Agent-preset selection and roots.
@@ -23,6 +22,9 @@ pub const AGENT_PRESET_SETTINGS_NAMESPACE: &str = "rsi.agent-presets";
 pub const DEFAULT_AGENT_PRESET_ID: &str = "standard";
 /// Directory below the standard configuration root that owns user presets.
 pub const USER_AGENT_PRESET_DIRECTORY: &str = "agent-presets";
+
+mod plugin;
+const CATALOG_FACTORY: &str = "rsi.agent.preset-catalog";
 
 const SETTINGS_LOCAL_FACTORY: &str = "rsi.settings.local";
 const SETTINGS_CORE_FACTORY: &str = "rsi.settings";
@@ -69,11 +71,11 @@ struct UserSettingsWire<'a> {
 /// Management lifetime for one settings-backed Agent-preset catalog.
 #[derive(Debug)]
 pub struct AgentPresetManager {
-    catalog: AgentPresetCatalog,
-    registration: Option<SettingsRegistration>,
-    host: RunningHost,
+    catalog: Arc<AgentPresetCatalog>,
+    host: ProfileOwner,
 }
 
+#[derive(Debug)]
 enum SystemPresetSource {
     Root(PathBuf),
     Exact { id: AgentPresetId, path: PathBuf },
@@ -97,6 +99,7 @@ impl AgentPresetManager {
         P: Into<PathBuf>,
     {
         Self::open_with_system_sources(
+            None,
             paths,
             system_roots
                 .into_iter()
@@ -114,10 +117,37 @@ impl AgentPresetManager {
         system_root: impl Into<PathBuf>,
         coding_tools_enabled: bool,
     ) -> Result<Self> {
+        Self::open_standard_with_context(None, paths, system_root.into(), coding_tools_enabled)
+            .await
+    }
+
+    /// Mounts the standard catalog and Settings plugins below an existing Context.
+    pub async fn open_standard_in(
+        parent: &rsi_meta::Context,
+        paths: HostPaths,
+        system_root: impl Into<PathBuf>,
+        coding_tools_enabled: bool,
+    ) -> Result<Self> {
+        Self::open_standard_with_context(
+            Some(parent),
+            paths,
+            system_root.into(),
+            coding_tools_enabled,
+        )
+        .await
+    }
+
+    async fn open_standard_with_context(
+        parent: Option<&rsi_meta::Context>,
+        paths: HostPaths,
+        system_root: PathBuf,
+        coding_tools_enabled: bool,
+    ) -> Result<Self> {
         let id = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID)
             .map_err(|error| RsiError::Boot(error.to_string()))?;
-        let path = system_root.into().join(id.as_str());
+        let path = system_root.join(id.as_str());
         Self::open_with_system_sources(
+            parent,
             paths,
             vec![SystemPresetSource::Exact { id, path }],
             coding_tools_enabled,
@@ -142,87 +172,34 @@ impl AgentPresetManager {
     }
 
     async fn open_with_system_sources(
+        parent: Option<&rsi_meta::Context>,
         paths: HostPaths,
         system_sources: Vec<SystemPresetSource>,
         coding_tools_enabled: bool,
     ) -> Result<Self> {
-        let base_default = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID)
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        let settings_path = paths.config().join("settings.json");
-        let host = boot_settings_host(paths.clone(), &settings_path).await?;
-        let Some(settings) = host.lookup_local::<SettingsContract>() else {
+        let factory = Arc::new(plugin::CatalogFactory {
+            compiler: standard_agent_profile_compiler(&paths, coding_tools_enabled)?,
+            paths: paths.clone(),
+            sources: system_sources,
+            diagnostic: std::sync::Mutex::new(None),
+        });
+        let host = boot_settings_host(parent, paths, factory).await?;
+        let Some(catalog) = host.lookup_local::<plugin::CatalogContract>() else {
             let _shutdown = host.shutdown().await;
             return Err(RsiError::Boot(
-                "Agent-preset Settings registry did not become active".into(),
+                "Agent-preset catalog plugin did not become active".into(),
             ));
         };
-        let registration = match settings.register(SettingsSpec {
-            namespace: AGENT_PRESET_SETTINGS_NAMESPACE.into(),
-            defaults: json!({ "default": DEFAULT_AGENT_PRESET_ID, "roots": [] }),
-            base: json!({}),
-            validator: Arc::new(ValidateWith(validate_settings)),
-        }) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let _shutdown = host.shutdown().await;
-                return Err(settings_boot(error));
-            }
-        };
-        let wire = match read_settings(registration.scope.as_ref()) {
-            Ok(wire) => wire,
-            Err(error) => {
-                drop(registration);
-                let _shutdown = host.shutdown().await;
-                return Err(settings_boot(error));
-            }
-        };
-        let mut config = AgentPresetCatalogConfig::new(base_default);
-        for source in system_sources {
-            config = match source {
-                SystemPresetSource::Root(path) => config.with_system_root(path),
-                SystemPresetSource::Exact { id, path } => config.with_system_preset(id, path),
-            };
-        }
-        for root in &wire.roots {
-            let root = match AgentPresetRoot::new(root.path.clone(), root.trust.into()) {
-                Ok(root) => root,
-                Err(error) => {
-                    drop(registration);
-                    let _shutdown = host.shutdown().await;
-                    return Err(preset_boot(&error));
-                }
-            };
-            config = config.with_configured_root(root);
-        }
-        config = config.with_user_root(user_agent_preset_root(&paths));
-        let defaults: Arc<dyn AgentPresetDefaultStore> = Arc::new(SettingsDefaultStore {
-            scope: Arc::clone(&registration.scope),
-            path: settings_path,
-        });
-        let compiler = standard_agent_profile_compiler(&paths, coding_tools_enabled)?;
-        let catalog = match AgentPresetCatalog::with_default_store(config, defaults, compiler) {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                drop(registration);
-                let _shutdown = host.shutdown().await;
-                return Err(preset_boot(&error));
-            }
-        };
-        Ok(Self {
-            catalog,
-            registration: Some(registration),
-            host,
-        })
+        Ok(Self { catalog, host })
     }
 
     /// Returns the live catalog backed by this manager's Settings scope.
-    pub const fn catalog(&self) -> &AgentPresetCatalog {
+    pub fn catalog(&self) -> &AgentPresetCatalog {
         &self.catalog
     }
 
-    /// Releases namespace ownership before shutting down the management Host.
-    pub async fn shutdown(mut self) -> rsi_meta::ShutdownOutcome {
-        drop(self.registration.take());
+    /// Disposes the management Profile and its ordinary catalog/Settings owners.
+    pub async fn shutdown(self) -> rsi_meta::ShutdownOutcome {
         self.host.shutdown().await
     }
 }
@@ -255,11 +232,19 @@ pub fn user_agent_preset_root(paths: &HostPaths) -> PathBuf {
     paths.config().join(USER_AGENT_PRESET_DIRECTORY)
 }
 
-async fn boot_settings_host(paths: HostPaths, settings_path: &Path) -> Result<RunningHost> {
-    let mut builder = HostBuilder::new(paths);
+async fn boot_settings_host(
+    parent: Option<&rsi_meta::Context>,
+    paths: HostPaths,
+    factory: Arc<plugin::CatalogFactory>,
+) -> Result<ProfileOwner> {
+    let settings_path = paths.config().join("settings.json");
+    let mut builder = HostBuilder::new(paths.clone());
     builder
         .register_local_contract::<SettingsProviderContract>()
         .and_then(|builder| builder.register_local_contract::<SettingsContract>())
+        .and_then(|builder| {
+            builder.register_local_contract::<rsi_settings_protocol::SettingsAccessContract>()
+        })
         .map_err(host_boot)?;
     builder
         .register_linked(
@@ -277,8 +262,19 @@ async fn boot_settings_host(paths: HostPaths, settings_path: &Path) -> Result<Ru
             )
         })
         .map_err(host_boot)?;
+    builder
+        .register_local_contract::<plugin::CatalogContract>()
+        .map_err(host_boot)?;
+    builder
+        .register_linked(
+            CATALOG_FACTORY,
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            factory.clone(),
+        )
+        .map_err(host_boot)?;
     let host = builder.build().map_err(host_boot)?;
-    host.start(Profile::new([
+    let profile = Profile::new([
         ProfileEntry::new(
             "rsi-agent-preset-settings-local",
             SETTINGS_LOCAL_FACTORY,
@@ -289,9 +285,24 @@ async fn boot_settings_host(paths: HostPaths, settings_path: &Path) -> Result<Ru
             SETTINGS_CORE_FACTORY,
             Value::Null,
         ),
-    ]))
-    .await
-    .map_err(host_boot)
+        ProfileEntry::new("rsi-agent-preset-catalog", CATALOG_FACTORY, Value::Null),
+    ]);
+    let started = if let Some(parent) = parent {
+        ProfileOwner::start_scoped(host, paths, parent, ProfileProgram::from_profile(profile)).await
+    } else {
+        host.start(profile)
+            .await
+            .map(ProfileOwner::Root)
+            .map_err(host_boot)
+    };
+    started.map_err(|error| {
+        let diagnostic = factory
+            .diagnostic
+            .lock()
+            .expect("catalog diagnostic poisoned")
+            .take();
+        diagnostic.map_or_else(|| error, host_boot)
+    })
 }
 
 fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
@@ -388,8 +399,4 @@ fn settings_boot(error: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(format!(
         "invalid `{AGENT_PRESET_SETTINGS_NAMESPACE}` Settings: {error}"
     ))
-}
-
-fn preset_boot(error: &PresetError) -> RsiError {
-    RsiError::Boot(error.to_string())
 }

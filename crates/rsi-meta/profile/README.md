@@ -18,6 +18,19 @@ open, and is read through a byte bound; special files are rejected without a
 blocking read. Canonical identities are checked against fixed cycle, include
 depth, group depth, file-count, and aggregate-byte bounds.
 
+An immutable `ProfileBundle` supplies bounded UTF-8 TOML documents under relative
+slash-separated identities. Its includes resolve within that bundle; absolute
+paths, traversal above its root, ambiguous separators and missing documents fail
+before composition. Bundle loading uses the same ordered compiler, Rhai engine,
+patch rules and rebuild budgets as native files. The complete retained bundle
+also obeys document, source-count and aggregate-byte limits, including unused
+documents. Native file opening and watching are excluded from browser builds.
+
+Frozen environments may omit filesystem paths. In that case Rhai receives an
+empty `paths` map, and the absence participates in the source digest. Browser
+callers do not supply invented native directories. Immutable bundles install no
+file watcher; manual reload rechecks the same immutable program.
+
 Nodes are declarative groups or plugin leaves. `InstanceId` is unique across
 the complete tree; one `PluginId` may appear at several leaves. Groups own
 enabled state and exact Local, event, and Portable isolation declarations for
@@ -93,7 +106,7 @@ The Profile Fiber watches the root and every transitive include. Change signals
 use a serialized single-flight worker with a dirty bit, so a signal arriving
 during reload causes one subsequent rebuild. A candidate watch plan is fully
 established before mutation and replaces the old plan only after commit.
-The portable polling watcher performs bounded metadata probes at its short
+The native polling watcher performs bounded metadata probes at its short
 interval, rereads immediately when metadata changes, and forces a complete
 content hash at least every five seconds to detect changes that preserve size
 and modification time. Watcher read failures publish bounded redacted status

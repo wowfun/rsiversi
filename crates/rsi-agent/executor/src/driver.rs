@@ -597,13 +597,17 @@ impl Driver {
                         "closed Image output was not retained",
                     )
                 })?;
-                let reference = self
-                    .media
-                    .import_image(Arc::from(output.bytes))
-                    .await
-                    .map_err(|error| {
-                        image_operation_failure(media.clone(), "media.commit", error.to_string())
-                    })?;
+                let reference =
+                    self.media
+                        .import_image(output.bytes.into())
+                        .await
+                        .map_err(|error| {
+                            image_operation_failure(
+                                media.clone(),
+                                "media.commit",
+                                error.to_string(),
+                            )
+                        })?;
                 let published = self
                     .publish_apply(
                         claim,

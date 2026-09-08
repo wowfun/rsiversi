@@ -1,5 +1,5 @@
 use rsi_host::HostPaths;
-use rsi_session_host::SESSION_HOST_PROTOCOL_EPOCH;
+use rsi_service_host::SERVICE_HOST_PROTOCOL_EPOCH;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
@@ -14,17 +14,20 @@ use thiserror::Error;
 /// Directory containing user-authored Application Profiles.
 pub const APPLICATION_PROFILE_DIRECTORY: &str = "application-profiles";
 /// File name owned by one Application Profile directory.
-pub const APPLICATION_PROFILE_FILE: &str = "application.toml";
+pub const APPLICATION_PROFILE_FILE: &str = "application.profile.toml";
+const LEGACY_APPLICATION_PROFILE_FILE: &str = "application.toml";
 /// Directory containing user-authored Host Profiles.
 pub const HOST_PROFILE_DIRECTORY: &str = "host-profiles";
 /// File name owned by one Host Profile directory.
 pub const HOST_PROFILE_FILE: &str = "host.profile.toml";
 
-const PROFILE_FORMAT: u32 = 1;
 const MAXIMUM_PROFILE_BYTES: usize = 1024 * 1024;
 const MAXIMUM_PROFILE_ENTRIES: usize = 4096;
-const SESSION_PROFILE: &str = "session";
+const CLI_PROFILE: &str = "cli";
 const HEADLESS_PROFILE: &str = "headless";
+const TUI_PROFILE: &str = "tui";
+const SERVE_PROFILE: &str = "serve";
+const DEVICES_PROFILE: &str = "devices";
 const STANDARD_HOST_PROFILE: &str = "standard";
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -78,56 +81,6 @@ macro_rules! profile_id {
 profile_id!(ApplicationProfileId, "Application Profile");
 profile_id!(HostProfileId, "Host Profile");
 
-/// Product application selected by an Application Profile.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ApplicationKind {
-    /// Interactive line-oriented Session application.
-    Session,
-    /// Single-submission non-interactive application.
-    Headless,
-}
-
-/// Exact `application.toml` schema.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApplicationProfile {
-    format: u32,
-    application: ApplicationKind,
-    host_profile: HostProfileId,
-}
-
-impl ApplicationProfile {
-    /// Creates the current schema after validating the Host Profile identity.
-    pub fn new(application: ApplicationKind, host_profile: HostProfileId) -> Self {
-        Self {
-            format: PROFILE_FORMAT,
-            application,
-            host_profile,
-        }
-    }
-
-    /// Returns the selected application.
-    pub const fn application(&self) -> ApplicationKind {
-        self.application
-    }
-
-    /// Returns the selected Host Profile identity.
-    pub const fn host_profile(&self) -> &HostProfileId {
-        &self.host_profile
-    }
-
-    fn validate(&self) -> Result<(), ProfileCatalogError> {
-        if self.format != PROFILE_FORMAT {
-            return Err(ProfileCatalogError::UnsupportedFormat {
-                kind: "Application Profile",
-                observed: self.format,
-            });
-        }
-        Ok(())
-    }
-}
-
 /// Origin of one selected profile document.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileSource {
@@ -142,12 +95,27 @@ pub enum ProfileSource {
 pub struct ApplicationProfileDocument {
     /// Selected identity.
     pub id: ApplicationProfileId,
-    /// Parsed strict document.
-    pub profile: ApplicationProfile,
+    /// Bounded ordinary Profile source; the shared compiler owns its grammar.
+    pub contents: Vec<u8>,
     /// Resolved source class.
     pub source: ProfileSource,
     /// Exact source path for a user document.
     pub path: Option<PathBuf>,
+}
+
+impl ApplicationProfileDocument {
+    /// Uses native relative sources for user Profiles and an immutable bundle for builtins.
+    pub fn program(&self) -> rsi_meta_profile::Result<rsi_host::ProfileProgram> {
+        if let Some(path) = &self.path {
+            return Ok(rsi_host::ProfileProgram::from_file(path));
+        }
+        let bundle = rsi_meta_profile::ProfileBundle::new(
+            APPLICATION_PROFILE_FILE,
+            [(APPLICATION_PROFILE_FILE.to_owned(), self.contents.clone())].into(),
+            &rsi_meta_profile::ProfileLimits::default(),
+        )?;
+        Ok(rsi_host::ProfileProgram::from_bundle(bundle))
+    }
 }
 
 /// Loaded Host Profile source with resolved provenance.
@@ -180,7 +148,7 @@ impl HostLaunchKey {
         hash_component(
             &mut digest,
             b"protocol-epoch",
-            &SESSION_HOST_PROTOCOL_EPOCH.to_be_bytes(),
+            &SERVICE_HOST_PROTOCOL_EPOCH.to_be_bytes(),
         );
         hash_component(
             &mut digest,
@@ -343,26 +311,32 @@ impl ProfileCatalog {
         &self,
         id: &ApplicationProfileId,
     ) -> Result<ApplicationProfileDocument, ProfileCatalogError> {
+        if id.as_str() == "session" {
+            return Err(ProfileCatalogError::RetiredApplication);
+        }
         let path = self.application_path(id);
-        if let Some(profile) = builtin_application(id) {
+        reject_legacy_application(&path)?;
+        if let Some(contents) = builtin_application(id) {
             reject_shadow("Application Profile", id.as_str(), &path)?;
             return Ok(ApplicationProfileDocument {
                 id: id.clone(),
-                profile,
+                contents,
                 source: ProfileSource::Builtin,
                 path: None,
             });
         }
-        let bytes = read_regular_file(&path, MAXIMUM_PROFILE_BYTES)?;
-        let profile: ApplicationProfile =
-            toml::from_slice(&bytes).map_err(|error| ProfileCatalogError::InvalidDocument {
+        let contents = read_regular_file(&path, MAXIMUM_PROFILE_BYTES)?;
+        let table: toml::Table =
+            toml::from_slice(&contents).map_err(|error| ProfileCatalogError::InvalidDocument {
                 path: path.clone(),
                 message: error.to_string(),
             })?;
-        profile.validate()?;
+        if table.contains_key("application") || table.contains_key("host_profile") {
+            return Err(ProfileCatalogError::LegacyApplication { path });
+        }
         Ok(ApplicationProfileDocument {
             id: id.clone(),
-            profile,
+            contents,
             source: ProfileSource::User,
             path: Some(path),
         })
@@ -393,7 +367,13 @@ impl ProfileCatalog {
     pub fn list_applications(
         &self,
     ) -> Result<Vec<ProfileRow<ApplicationProfileId>>, ProfileCatalogError> {
-        let builtins = [SESSION_PROFILE, HEADLESS_PROFILE];
+        let builtins = [
+            CLI_PROFILE,
+            HEADLESS_PROFILE,
+            TUI_PROFILE,
+            SERVE_PROFILE,
+            DEVICES_PROFILE,
+        ];
         let mut ids = list_user_ids::<ApplicationProfileId>(
             &self.paths.config().join(APPLICATION_PROFILE_DIRECTORY),
             APPLICATION_PROFILE_FILE,
@@ -454,10 +434,12 @@ impl ProfileCatalog {
             builtin_application(target).is_some(),
         )?;
         let source = self.application(source)?;
-        let bytes = toml::to_string_pretty(&source.profile)
-            .map_err(|error| ProfileCatalogError::Encode(error.to_string()))?;
         let path = self.application_path(target);
-        create_new_document(&path, bytes.as_bytes())?;
+        if target.as_str() == "session" {
+            return Err(ProfileCatalogError::RetiredApplication);
+        }
+        reject_legacy_application(&path)?;
+        create_new_document(&path, &source.contents)?;
         Ok(path)
     }
 
@@ -499,12 +481,48 @@ impl ProfileCatalog {
     }
 }
 
-fn builtin_application(id: &ApplicationProfileId) -> Option<ApplicationProfile> {
-    let standard = HostProfileId(STANDARD_HOST_PROFILE.to_owned());
-    match id.as_str() {
-        SESSION_PROFILE => Some(ApplicationProfile::new(ApplicationKind::Session, standard)),
-        HEADLESS_PROFILE => Some(ApplicationProfile::new(ApplicationKind::Headless, standard)),
-        _ => None,
+fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
+    let (plugin, connection) = match id.as_str() {
+        CLI_PROFILE => ("rsi.application.cli", "rsi.application.connection"),
+        HEADLESS_PROFILE => ("rsi.application.headless", "rsi.application.connection"),
+        TUI_PROFILE => ("rsi.application.tui", "rsi.application.connection"),
+        SERVE_PROFILE => ("rsi.application.serve", "rsi.application.service"),
+        DEVICES_PROFILE => ("rsi.application.devices", "rsi.application.operator"),
+        _ => return None,
+    };
+    let config = if id.as_str() == DEVICES_PROFILE {
+        ""
+    } else {
+        "config = { host_profile = \"standard\" }"
+    };
+    Some(
+        format!(
+            r#"format = 1
+[[steps]]
+kind = "plugin"
+id = "connection"
+plugin = "{connection}"
+{config}
+[[steps]]
+kind = "plugin"
+id = "application"
+plugin = "{plugin}"
+"#
+        )
+        .into_bytes(),
+    )
+}
+
+fn reject_legacy_application(path: &Path) -> Result<(), ProfileCatalogError> {
+    let legacy = path.with_file_name(LEGACY_APPLICATION_PROFILE_FILE);
+    match fs::symlink_metadata(&legacy) {
+        Ok(_) => Err(ProfileCatalogError::LegacyApplication { path: legacy }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProfileCatalogError::Io {
+            path: legacy,
+            operation: "inspect legacy application document",
+            source: error,
+        }),
     }
 }
 
@@ -802,13 +820,18 @@ pub enum ProfileCatalogError {
         value: String,
     },
     /// A document uses an unsupported schema generation.
-    #[error("{kind} format {observed} is unsupported; expected {PROFILE_FORMAT}")]
-    UnsupportedFormat {
-        /// Profile class.
-        kind: &'static str,
-        /// Rejected generation.
-        observed: u32,
+    #[error(
+        "legacy Application Profile at `{path}` is unsupported; recreate it as application.profile.toml with ordinary connection and application plugin entries; the old file was not replaced"
+    )]
+    LegacyApplication {
+        /// Existing unsupported document, preserved unchanged.
+        path: PathBuf,
     },
+    /// The old built-in application name is reserved for explicit migration errors.
+    #[error(
+        "the session application name was retired; select cli or recreate a named Application Profile"
+    )]
+    RetiredApplication,
     /// A user path attempts to replace a built-in identity.
     #[error("built-in {kind} `{id}` cannot be shadowed by {}", path.display())]
     BuiltinShadowed {

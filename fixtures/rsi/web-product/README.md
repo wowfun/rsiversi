@@ -1,0 +1,30 @@
+# Web product verification
+
+`npm ci && npm test` builds the actual Rust Web bundle and native RSI executable,
+then drives the product document and Dedicated Worker in Chromium and Firefox.
+The runner also exercises document-only reset/reopen and unresolved-submission
+button projection using the shipped JavaScript; those checks are distinct from
+Worker and transport evidence. Install those Playwright browsers first. `RSI_WASM_BINDGEN` selects a matching
+wasm-bindgen executable. `RSI_WEB_ASSETS` and `RSI_WEB_BINARY` can select already
+built artifacts explicitly; `RSI_WEB_REPORT` selects a new evidence directory.
+
+The fixture owns an isolated real Service Host, temporary settings and Workspace,
+ephemeral TLS/H2 listener and a bounded deterministic OpenAI-compatible provider.
+Device credentials are registered through the real local operator application.
+Browser commands pass through the product Worker, API and Agent Kernel. The
+provider supplies fixed replies and Tool requests; this verifies mechanisms and
+rendering, not autonomous model capability. Real provider validation is opt-in
+and recorded separately.
+
+The runner freezes and hashes its native executable before starting either
+service. Concurrent Cargo builds cannot change that owner's executable gate.
+Only explicit non-secret build variables reach the test application, and an
+absent private D-Bus address prevents access to the operator's native keyring.
+`RSI_WEB_BROWSER=chromium` or `firefox` selects a diagnostic subset.
+
+Screenshots and scenario results identify the browser version and viewport.
+Settings scenarios wait for the acknowledged editor replacement before creating
+a conversation, whose Header freezes the settings at creation.
+Failures retain their evidence and stop that run. Shutdown always closes the
+browser, exact service child, provider connections and fixture directories.
+Neither credentials nor user state are read by default.

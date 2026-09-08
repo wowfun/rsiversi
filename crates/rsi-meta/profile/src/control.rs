@@ -1,30 +1,58 @@
 use super::{
     CandidateLeaf, IsolationSpec, ProfileCandidate, ProfileCompiler, ProfileEnvironment,
     ProfileError, ProfileLimits, ProfileProgram, Result, TreeNode, bound_message,
-    read_file_bounded,
 };
 use async_trait::async_trait;
+use futures_util::stream::{FuturesUnordered, StreamExt as _};
+#[cfg(not(target_family = "wasm"))]
+mod native_watch;
+#[cfg(not(target_family = "wasm"))]
+use native_watch::{WatchPlan, WatchProbe};
+
+#[cfg(target_family = "wasm")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WatchPlan;
+#[cfg(target_family = "wasm")]
+impl WatchPlan {
+    #[allow(clippy::unused_self)] // The shared controller observes either a native or immutable plan.
+    fn health(&self) -> WatcherHealth {
+        WatcherHealth::Inactive
+    }
+    fn establish(candidate: &ProfileCandidate, _: &ProfileLimits) -> Result<Self> {
+        if !candidate.watch_paths().is_empty() || !candidate.source_fingerprints.is_empty() {
+            return Err(ProfileError::InvalidProgram(
+                "native watching is unavailable in a Worker".into(),
+            ));
+        }
+        Ok(Self)
+    }
+}
+
 use rsi_meta::{
     ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberHandle, FiberState, LocalContract,
     MetaError, PendingReport, PluginFactory, PluginId, PreparedActivation, PreparedPlugin,
     ResolvedFactory, Runtime, UpdateMode,
 };
-use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(target_family = "wasm"))]
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(not(target_family = "wasm"))]
 const FULL_CONTENT_AUDIT_TICKS: usize = 50;
+#[cfg(not(target_family = "wasm"))]
 const MINIMUM_AUTOMATIC_RELOAD_BACKOFF: Duration = Duration::from_secs(1);
+#[cfg(not(target_family = "wasm"))]
 const MAXIMUM_AUTOMATIC_RELOAD_BACKOFF: Duration = Duration::from_secs(5);
 
+#[cfg(not(target_family = "wasm"))]
 fn automatic_reload_backoff(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(5);
     MINIMUM_AUTOMATIC_RELOAD_BACKOFF
@@ -500,7 +528,10 @@ async fn prepare_generation(
         let runtime = runtime.clone();
         let factory = leaf.factory.clone();
         let config = leaf.candidate.config().clone();
-        let mut task = tokio::task::spawn_blocking(move || runtime.prepare(factory, config));
+        let mut task = runtime
+            .execution()
+            .clone()
+            .prepare(move || runtime.prepare(factory, config));
         let joined = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
@@ -651,173 +682,6 @@ struct ActiveLeaf {
     handle: FiberHandle,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct WatchPlan {
-    fingerprints: BTreeMap<PathBuf, [u8; 32]>,
-    stamps: BTreeMap<PathBuf, SourceStamp>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SourceStamp {
-    length: u64,
-    modified: Option<SystemTime>,
-}
-
-enum WatchProbe {
-    MetadataUnchanged,
-    ContentVerified(WatchPlan),
-}
-
-impl WatchPlan {
-    fn capture(paths: &[PathBuf], limits: &ProfileLimits) -> Result<Self> {
-        let mut fingerprints = BTreeMap::new();
-        let mut stamps = BTreeMap::new();
-        let mut total = 0_usize;
-        for path in paths {
-            let bytes =
-                read_file_bounded(path, limits.maximum_document_bytes).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::InvalidData {
-                        ProfileError::CapacityExceeded {
-                            resource: "document bytes",
-                            maximum: limits.maximum_document_bytes,
-                        }
-                    } else {
-                        ProfileError::Source {
-                            message: "cannot read a required watched source".to_owned(),
-                        }
-                    }
-                })?;
-            total = total
-                .checked_add(bytes.len())
-                .ok_or(ProfileError::CapacityExceeded {
-                    resource: "source bytes",
-                    maximum: limits.maximum_source_bytes,
-                })?;
-            if total > limits.maximum_source_bytes {
-                return Err(ProfileError::CapacityExceeded {
-                    resource: "source bytes",
-                    maximum: limits.maximum_source_bytes,
-                });
-            }
-            let digest: [u8; 32] = Sha256::digest(&bytes).into();
-            fingerprints.insert(path.clone(), digest);
-            stamps.insert(path.clone(), source_stamp(path, limits)?);
-        }
-        Ok(Self {
-            fingerprints,
-            stamps,
-        })
-    }
-
-    fn probe(
-        baseline: &Self,
-        limits: &ProfileLimits,
-        force_content_audit: bool,
-    ) -> Result<WatchProbe> {
-        let paths = baseline.fingerprints.keys().cloned().collect::<Vec<_>>();
-        let stamps = capture_stamps(&paths, limits)?;
-        if !force_content_audit && stamps == baseline.stamps {
-            return Ok(WatchProbe::MetadataUnchanged);
-        }
-        Self::capture(&paths, limits).map(WatchProbe::ContentVerified)
-    }
-
-    fn health(&self) -> WatcherHealth {
-        if self.fingerprints.is_empty() {
-            WatcherHealth::Inactive
-        } else {
-            WatcherHealth::Healthy
-        }
-    }
-
-    fn establish(candidate: &ProfileCandidate, limits: &ProfileLimits) -> Result<Self> {
-        let plan = Self::capture(candidate.watch_paths(), limits)?;
-        if plan.fingerprints != candidate.source_fingerprints {
-            return Err(ProfileError::Source {
-                message: "a required source changed after Profile compilation".to_owned(),
-            });
-        }
-        Ok(plan)
-    }
-}
-
-fn source_stamp(path: &PathBuf, limits: &ProfileLimits) -> Result<SourceStamp> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| ProfileError::Source {
-        message: "cannot read a required watched source".to_owned(),
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(ProfileError::Source {
-            message: "a required watched source is not a regular file".to_owned(),
-        });
-    }
-    let length = metadata.len();
-    if length > limits.maximum_document_bytes as u64 {
-        return Err(ProfileError::CapacityExceeded {
-            resource: "document bytes",
-            maximum: limits.maximum_document_bytes,
-        });
-    }
-    Ok(SourceStamp {
-        length,
-        modified: metadata.modified().ok(),
-    })
-}
-
-fn capture_stamps(
-    paths: &[PathBuf],
-    limits: &ProfileLimits,
-) -> Result<BTreeMap<PathBuf, SourceStamp>> {
-    let mut stamps = BTreeMap::new();
-    let mut total = 0_usize;
-    for path in paths {
-        let stamp = source_stamp(path, limits)?;
-        let length = usize::try_from(stamp.length).map_err(|_| ProfileError::CapacityExceeded {
-            resource: "source bytes",
-            maximum: limits.maximum_source_bytes,
-        })?;
-        total = total
-            .checked_add(length)
-            .ok_or(ProfileError::CapacityExceeded {
-                resource: "source bytes",
-                maximum: limits.maximum_source_bytes,
-            })?;
-        if total > limits.maximum_source_bytes {
-            return Err(ProfileError::CapacityExceeded {
-                resource: "source bytes",
-                maximum: limits.maximum_source_bytes,
-            });
-        }
-        stamps.insert(path.clone(), stamp);
-    }
-    Ok(stamps)
-}
-
-#[cfg(test)]
-mod watch_tests {
-    use super::*;
-
-    #[test]
-    fn metadata_fast_path_and_forced_content_audit_are_distinct() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("profile.toml");
-        fs::write(&path, b"format = 1\n").unwrap();
-        let limits = ProfileLimits::default();
-        let baseline = WatchPlan::capture(std::slice::from_ref(&path), &limits).unwrap();
-
-        assert!(matches!(
-            WatchPlan::probe(&baseline, &limits, false).unwrap(),
-            WatchProbe::MetadataUnchanged
-        ));
-        fs::write(&path, b"format = 2\n").unwrap();
-        let WatchProbe::ContentVerified(changed) =
-            WatchPlan::probe(&baseline, &limits, true).unwrap()
-        else {
-            panic!("forced audit must hash content");
-        };
-        assert_ne!(changed.fingerprints, baseline.fingerprints);
-    }
-}
-
 #[derive(Debug)]
 struct Controller {
     runtime: Runtime,
@@ -828,7 +692,9 @@ struct Controller {
     reload_lock: AsyncMutex<()>,
     status_tx: watch::Sender<ProfileStatus>,
     membership_changed: Notify,
+    #[cfg(not(target_family = "wasm"))]
     dirty: AtomicBool,
+    #[cfg(not(target_family = "wasm"))]
     dirty_notify: Notify,
 }
 
@@ -872,7 +738,9 @@ impl Controller {
             reload_lock: AsyncMutex::new(()),
             status_tx,
             membership_changed: Notify::new(),
+            #[cfg(not(target_family = "wasm"))]
             dirty: AtomicBool::new(false),
+            #[cfg(not(target_family = "wasm"))]
             dirty_notify: Notify::new(),
         }
     }
@@ -885,12 +753,14 @@ impl Controller {
     ) -> Result<()> {
         let candidate = target.candidate.clone();
         let limits = self.compiler.limits.clone();
-        let watch_plan =
-            tokio::task::spawn_blocking(move || WatchPlan::establish(&candidate, &limits))
-                .await
-                .map_err(|_| {
-                    ProfileError::InvalidProgram("Profile watcher task failed".to_owned())
-                })??;
+        let watch_plan = self
+            .runtime
+            .execution()
+            .prepare(move || WatchPlan::establish(&candidate, &limits))
+            .await
+            .map_err(|_| {
+                ProfileError::InvalidProgram("Profile watcher task failed".to_owned())
+            })??;
         let watcher = watch_plan.health();
         let mut state = self.state.lock().expect("Profile state poisoned");
         if state.is_some() {
@@ -1069,20 +939,27 @@ impl Controller {
     async fn resolve_reload(&self) -> Result<(ResolvedTarget, WatchPlan)> {
         let source_compiler = self.compiler.clone();
         let program = self.program.clone();
-        let candidate = tokio::task::spawn_blocking(move || source_compiler.compile(&program))
+        let candidate = self
+            .runtime
+            .execution()
+            .prepare(move || source_compiler.compile(&program))
             .await
             .map_err(|_| {
                 ProfileError::InvalidProgram("Profile compiler task failed".to_owned())
             })??;
         let resolver = Arc::clone(&self.resolver);
         let limits = self.compiler.limits.clone();
-        tokio::task::spawn_blocking(move || {
-            let target = resolve_target(resolver.as_ref(), candidate)?;
-            let watch_plan = WatchPlan::establish(&target.candidate, &limits)?;
-            Ok::<_, ProfileError>((target, watch_plan))
-        })
-        .await
-        .map_err(|_| ProfileError::InvalidProgram("Profile resolution task failed".to_owned()))?
+        self.runtime
+            .execution()
+            .prepare(move || {
+                let target = resolve_target(resolver.as_ref(), candidate)?;
+                let watch_plan = WatchPlan::establish(&target.candidate, &limits)?;
+                Ok::<_, ProfileError>((target, watch_plan))
+            })
+            .await
+            .map_err(|_| {
+                ProfileError::InvalidProgram("Profile resolution task failed".to_owned())
+            })?
     }
 
     fn reload_base(&self) -> Result<(u64, ProfileHealth, Context, ResolvedTarget)> {
@@ -1281,6 +1158,7 @@ impl Controller {
         result
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn publish_watcher_error(&self, baseline: &WatchPlan) -> bool {
         const DIAGNOSTIC: &str = "a required watched Profile source is unavailable";
         let diagnostic = bound_message(
@@ -1345,12 +1223,14 @@ impl Controller {
         status
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn mark_dirty(&self) {
         if !self.dirty.swap(true, Ordering::AcqRel) {
             self.dirty_notify.notify_one();
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     async fn poll_sources(self: &Arc<Self>, mut stop: watch::Receiver<bool>) {
         let mut ticks_since_content_audit = 0_usize;
         loop {
@@ -1360,7 +1240,7 @@ impl Controller {
                         return;
                     }
                 }
-                () = tokio::time::sleep(WATCH_INTERVAL) => {
+                () = self.runtime.execution().sleep(WATCH_INTERVAL) => {
                     ticks_since_content_audit = ticks_since_content_audit
                         .checked_add(1)
                         .unwrap_or(FULL_CONTENT_AUDIT_TICKS);
@@ -1381,7 +1261,7 @@ impl Controller {
                     let Some((plan, was_faulted)) = baseline else { continue; };
                     let limits = self.compiler.limits.clone();
                     let probed_plan = plan.clone();
-                    let current = tokio::task::spawn_blocking(move || {
+                    let current = self.runtime.execution().prepare(move || {
                         WatchPlan::probe(
                             &probed_plan,
                             &limits,
@@ -1409,6 +1289,7 @@ impl Controller {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn refresh_watch_plan(&self, baseline: &WatchPlan, current: WatchPlan) {
         let mut state = self.state.lock().expect("Profile state poisoned");
         let Some(state) = state.as_mut() else {
@@ -1419,6 +1300,7 @@ impl Controller {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     async fn drive_dirty(self: &Arc<Self>, mut stop: watch::Receiver<bool>) {
         let mut consecutive_failures = 0_u32;
         loop {
@@ -1431,7 +1313,7 @@ impl Controller {
                                 return;
                             }
                         }
-                        () = tokio::time::sleep(automatic_reload_backoff(consecutive_failures)) => {}
+                        () = self.runtime.execution().sleep(automatic_reload_backoff(consecutive_failures)) => {}
                     }
                 } else {
                     consecutive_failures = 0;
@@ -1469,46 +1351,28 @@ impl Controller {
                 .map(|handle| handle.subscribe())
                 .collect::<Vec<_>>();
             self.refresh_observed();
-            let mut subscriptions = tokio::task::JoinSet::new();
-            let child_changed = Arc::new(Notify::new());
-            for mut receiver in receivers {
-                let child_changed = Arc::clone(&child_changed);
-                subscriptions.spawn(async move {
-                    while receiver.changed().await.is_ok() {
-                        child_changed.notify_one();
-                    }
-                    child_changed.notify_one();
-                });
-            }
+            let mut subscriptions = receivers
+                .into_iter()
+                .map(next_child_change)
+                .collect::<FuturesUnordered<_>>();
             loop {
-                if subscriptions.is_empty() {
-                    tokio::select! {
-                        stop_change = stop.changed() => {
-                            if stop_change.is_err() || *stop.borrow() {
-                                return;
-                            }
-                        }
-                        () = self.membership_changed.notified() => break,
-                        () = child_changed.notified() => self.refresh_observed(),
+                tokio::select! {
+                    stop_change = stop.changed() => {
+                        if stop_change.is_err() || *stop.borrow() { return; }
                     }
-                } else {
-                    tokio::select! {
-                        stop_change = stop.changed() => {
-                            if stop_change.is_err() || *stop.borrow() {
-                                subscriptions.abort_all();
-                                return;
-                            }
+                    () = self.membership_changed.notified() => break,
+                    changed = subscriptions.next(), if !subscriptions.is_empty() => {
+                        if let Some((receiver, open)) = changed {
+                            self.refresh_observed();
+                            if open { subscriptions.push(next_child_change(receiver)); }
                         }
-                        () = self.membership_changed.notified() => break,
-                        () = child_changed.notified() => self.refresh_observed(),
-                        _ = subscriptions.join_next() => self.refresh_observed(),
                     }
                 }
             }
-            subscriptions.abort_all();
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn has_watched_sources(&self) -> bool {
         self.state
             .lock()
@@ -1657,19 +1521,20 @@ impl PluginFactory for ProfileFactory {
             .map_err(|error| MetaError::Activation(error.to_string()))?;
 
         let mut handles = Vec::new();
+        #[cfg(not(target_family = "wasm"))]
         if control.has_watched_sources() {
-            handles.push(tokio::spawn({
+            handles.push(control.runtime.execution().spawn({
                 let control = Arc::clone(&control);
                 let stop = tasks.stop.subscribe();
                 async move { control.poll_sources(stop).await }
             }));
-            handles.push(tokio::spawn({
+            handles.push(control.runtime.execution().spawn({
                 let control = Arc::clone(&control);
                 let stop = tasks.stop.subscribe();
                 async move { control.drive_dirty(stop).await }
             }));
         }
-        handles.push(tokio::spawn({
+        handles.push(control.runtime.execution().spawn({
             let control = Arc::clone(&control);
             let stop = tasks.stop.subscribe();
             async move { control.refresh_loop(stop).await }
@@ -1682,7 +1547,7 @@ impl PluginFactory for ProfileFactory {
 #[derive(Debug)]
 struct TaskOwner {
     stop: watch::Sender<bool>,
-    handles: Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
+    handles: Mutex<Option<Vec<rsi_meta::Task<()>>>>,
 }
 
 impl TaskOwner {
@@ -1948,6 +1813,13 @@ fn stopped_status() -> ProfileStatus {
         observed: Vec::new(),
         diagnostic: None,
     }
+}
+
+async fn next_child_change(
+    mut receiver: watch::Receiver<rsi_meta::FiberSnapshot>,
+) -> (watch::Receiver<rsi_meta::FiberSnapshot>, bool) {
+    let open = receiver.changed().await.is_ok();
+    (receiver, open)
 }
 
 #[cfg(test)]

@@ -1,0 +1,34 @@
+[package]
+name = "rsi-client-browser-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rsi-sandbox = { path = "../../../crates/rsi-sandbox/core" }
+rsi-tools-protocol = { path = "../../../crates/rsi-tools/protocol" }
+rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
+rsi-application = { path = "../../../crates/rsi/application" }
+rsi-host = { path = "../../../crates/rsi-host/core" }
+rsi-client = { path = "../../../crates/rsi/client" }
+rsi-meta = { path = "../../../crates/rsi-meta/core" }
+rsi-meta-execution = { path = "../../../crates/rsi-meta/execution" }
+rsi-meta-scope = { path = "../../../crates/rsi-meta/scope" }
+rsi-session-protocol = { path = "../../../crates/rsi/session-protocol" }
+rsi-agent-session-protocol = { path = "../../../crates/rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../../crates/rsi-agent/turn-protocol" }
+rsi-agent-store-protocol = { path = "../../../crates/rsi-agent/store-protocol" }
+rsi-approval-protocol = { path = "../../../crates/rsi-approval/protocol" }
+rsi-user-questions-protocol = { path = "../../../crates/rsi-user-questions/protocol" }
+async-trait = "0.1"
+futures-util = "0.3"
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+tokio-util = "0.7"
+tokio = { version = "1.47", features = ["sync", "macros"] }
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "=0.4.77"

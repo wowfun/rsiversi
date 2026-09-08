@@ -2,7 +2,7 @@ use super::*;
 use rsi_agent_session_protocol::MessageDelivery;
 
 #[async_trait]
-impl TurnService for SessionKernel {
+impl TurnService for AgentKernel {
     fn settlement_health(&self) -> SettlementHealth {
         self.inner
             .settlement_health
@@ -224,56 +224,48 @@ impl TurnService for SessionKernel {
         self.claim_message_with_lane(request, None, None).await
     }
 
+    fn watch_tree_membership(
+        &self,
+        root: &SessionId,
+    ) -> TurnResult<rsi_agent_turn_protocol::TreeMembershipChanges> {
+        let observer = ObserverLease::acquire(&self.inner)?;
+        let watch = self.inner.session_changes.tree(root);
+        let inner = Arc::downgrade(&self.inner);
+        Ok(stream::unfold(
+            (watch, inner, observer),
+            |(mut watch, owner, observer)| async move {
+                let inner = owner.upgrade()?;
+                tokio::select! {
+                    () = inner.stop_worker.cancelled() => None,
+                    () = watch.changed() => Some(((), (watch, owner, observer))),
+                }
+            },
+        )
+        .boxed())
+    }
+
     async fn observe_session(
         &self,
         session_id: &SessionId,
         cursor: ObservationCursor,
     ) -> TurnResult<SessionObservationStream> {
         let observer_lease = ObserverLease::acquire(&self.inner)?;
-        let controls = read_controls_bounded(
-            &self.inner,
-            session_id,
-            cursor.control_seq,
-            MAXIMUM_FACTS_PER_READ,
-        )
-        .await
-        .map_err(turn_store_error)?;
-        let facts = read_facts_bounded(
-            &self.inner,
-            session_id,
-            cursor.fact_seq,
-            MAXIMUM_FACTS_PER_READ,
-        )
-        .await
-        .map_err(turn_store_error)?;
-        controls.validate().map_err(turn_store_error)?;
-        facts.validate().map_err(turn_store_error)?;
-        let mut pending = VecDeque::new();
-        let mut control_seq = cursor.control_seq;
-        for record in controls.records {
-            control_seq = record.seq();
-            pending.push_back(SessionObservation::Control {
-                record: Arc::new(record),
-                durable_control_seq: controls.durable_seq,
-            });
-        }
-        let mut fact_seq = cursor.fact_seq;
-        for fact in facts.facts {
-            fact_seq = fact.seq();
-            pending.push_back(SessionObservation::Fact {
-                fact: Arc::new(fact),
-                durable_fact_seq: facts.durable_seq,
-            });
-        }
-        let state = DurableObservationState {
+        let mut watch = self.inner.session_changes.session(session_id);
+        watch.mark_seen();
+        let mut state = DurableObservationState {
             inner: Arc::downgrade(&self.inner),
             session_id: session_id.clone(),
-            control_seq,
-            fact_seq,
-            pending,
+            control_seq: cursor.control_seq,
+            fact_seq: cursor.fact_seq,
+            pending: VecDeque::new(),
+            watch,
+            next_page: ObservationPageKind::Control,
+            read_controls: true,
+            read_facts: true,
             stopped: false,
             _observer_lease: observer_lease,
         };
+        fill_observation_page(&self.inner, &mut state).await?;
         Ok(stream::unfold(state, durable_observation_next).boxed())
     }
 
@@ -523,17 +515,9 @@ impl TurnService for SessionKernel {
                     VecDeque::new(),
                 )
             } else {
-                let page =
-                    read_facts_bounded(&self.inner, session_id, after_seq, MAXIMUM_FACTS_PER_READ)
-                        .await
-                        .map_err(|error| match error {
-                            StoreError::Invalid(_) => TurnError::Invalid(
-                                "observation cursor exceeds the durable tail".into(),
-                            ),
-                            other => turn_store_error(other),
-                        })?;
-                let page_durable_seq = page.durable_seq;
-                let durable_facts = page.facts.into_iter().map(Arc::new).collect();
+                let (facts, page_durable_seq) =
+                    read_observed_facts(&self.inner, session_id, after_seq).await?;
+                let durable_facts = facts.into();
                 let state = lock_state(&self.inner);
                 if let Some(session) = state.sessions.get(session_id) {
                     (
@@ -618,7 +602,7 @@ impl TurnService for SessionKernel {
 }
 
 pub(super) async fn append_retained_wait_control(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     caller: &AgentCallerAuthority,
     lease: &mutation::AgentMutationLease,
     activation_id: &rsi_agent_session_protocol::ActivationId,
@@ -658,7 +642,7 @@ pub(super) async fn append_retained_wait_control(
 }
 
 async fn commit_wait_control(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     caller: &AgentCallerAuthority,
     activation_id: &rsi_agent_session_protocol::ActivationId,
     body: AgentControlRecordBody,
@@ -698,7 +682,7 @@ async fn commit_wait_control(
     Ok(())
 }
 
-impl SessionKernel {
+impl AgentKernel {
     async fn submit_message_authorized(
         &self,
         request: SubmitMessage,
@@ -899,7 +883,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     #[allow(clippy::too_many_lines)] // Claim materializes Activation, Turn, Step, context, reservation, and indexes in one transaction.
     pub(super) async fn claim_message_with_lane(
         &self,
@@ -1160,13 +1144,13 @@ impl SessionKernel {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(TurnError::Cancelled);
         }
+        let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
         let _parts = self.inner.resume_issuer.consume(request.session)?;
         let kernel = self.clone();
         self.owned_commit(async move {
             let _admissions = admissions;
             kernel
                 .inner
-                .store
                 .commit_agent(AtomicAgentCommit {
                     sessions: vec![AtomicSessionAppend {
                         session_id: session_id.clone(),
@@ -1236,7 +1220,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     #[allow(clippy::too_many_lines)] // Child identity, lineage, source admission and initial message form one preparation protocol.
     async fn spawn_agent_prepared(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         self.validate_agent_caller(&request.caller)?;
@@ -1432,7 +1416,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     async fn send_agent_message_prepared(
         &self,
         request: SendAgentMessage,
@@ -1491,7 +1475,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     async fn interrupt_agent_prepared(
         &self,
         caller: &AgentCallerAuthority,

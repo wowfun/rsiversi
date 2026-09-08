@@ -17,6 +17,7 @@ hex.workspace = true
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true

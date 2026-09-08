@@ -35,6 +35,34 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 struct NoopFactory;
 
+struct GenerationLabel;
+impl rsi_meta::LocalContract for GenerationLabel {
+    const KEY: &'static str = "fixture.generation-label";
+    type Service = u64;
+}
+#[derive(Debug)]
+struct LabelFactory;
+#[async_trait::async_trait]
+impl PluginFactory for LabelFactory {
+    fn prepare(&self, _: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(ConfigValue::Null))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let supply = plan
+            .context()
+            .provide_local::<GenerationLabel>(Arc::new(17))?;
+        plan.defer(
+            "withdraw fixture label",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
+}
+
 #[async_trait::async_trait]
 impl PluginFactory for NoopFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
@@ -46,8 +74,8 @@ impl PluginFactory for NoopFactory {
     }
 }
 
-#[test]
-fn contribution_catalog_resolves_only_exact_allowlisted_factories() {
+#[tokio::test]
+async fn contribution_catalog_resolves_only_exact_allowlisted_factories() {
     let expected = ResolvedFactory::linked(
         "agent.allowed",
         "revision-a",
@@ -63,8 +91,13 @@ fn contribution_catalog_resolves_only_exact_allowlisted_factories() {
         Err(ProfileError::UnknownPlugin { .. })
     ));
 
-    let context = rsi_meta::Runtime::default().root();
-    assert!(catalog.isolate(context, &IsolationSpec::default()).is_ok());
+    let runtime = rsi_meta::Runtime::default();
+    assert!(
+        catalog
+            .isolate(runtime.root(), &IsolationSpec::default())
+            .is_ok()
+    );
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[derive(Debug, Default)]
@@ -144,11 +177,14 @@ struct BlockingFactory {
 #[async_trait::async_trait]
 impl PluginFactory for BlockingFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        Ok(PreparedActivation::new(desired.clone()).requiring_local::<ToolRegistrarContract>())
+        Ok(PreparedActivation::new(desired.clone())
+            .requiring_local::<ToolRegistrarContract>()
+            .requiring_local::<GenerationLabel>())
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let _registrar = plan.local::<ToolRegistrarContract>()?;
+        assert_eq!(*plan.local::<GenerationLabel>()?, 17);
         let active = self.gate.active.fetch_add(1, Ordering::AcqRel) + 1;
         let _active = ActiveBuild { gate: &self.gate };
         self.gate.maximum_active.fetch_max(active, Ordering::AcqRel);
@@ -176,11 +212,14 @@ impl ToolExecutor for ProbeTool {
 #[async_trait::async_trait]
 impl PluginFactory for ProbeFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        Ok(PreparedActivation::new(desired.clone()).requiring_local::<ToolRegistrarContract>())
+        Ok(PreparedActivation::new(desired.clone())
+            .requiring_local::<ToolRegistrarContract>()
+            .requiring_local::<GenerationLabel>())
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let registrar = plan.local::<ToolRegistrarContract>()?;
+        assert_eq!(*plan.local::<GenerationLabel>()?, 17);
         if plan
             .config()
             .get("fail")
@@ -258,8 +297,36 @@ async fn activate_composition(
     contributions: AgentContributionCatalog,
 ) -> (Runtime, FiberHandle, FiberHandle, Arc<dyn AgentComposition>) {
     let runtime = Runtime::default();
-    let tools_fiber = runtime
+    let (parent, _) = runtime
         .root()
+        .isolate_local_fresh::<GenerationLabel>()
+        .unwrap();
+    parent
+        .apply(
+            ResolvedFactory::linked(
+                "fixture.label",
+                "v1",
+                UpdateMode::RestartRequired,
+                Arc::new(LabelFactory),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    assert!(runtime.root().lookup_local::<GenerationLabel>().is_none());
+    parent
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.agent.generation-root",
+                "fixture",
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_agent_composition::AgentGenerationRootFactory),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    let tools_fiber = parent
         .apply(
             ResolvedFactory::linked(
                 "rsi.tools",
@@ -272,8 +339,7 @@ async fn activate_composition(
         .await
         .unwrap();
     assert!(matches!(tools_fiber.snapshot().state, FiberState::Active));
-    let composition_fiber = runtime
-        .root()
+    let composition_fiber = parent
         .apply(
             ResolvedFactory::linked(
                 "rsi.agent.composition",
@@ -293,10 +359,7 @@ async fn activate_composition(
         composition_fiber.snapshot().state,
         FiberState::Active
     ));
-    let service = runtime
-        .root()
-        .lookup_local::<AgentCompositionContract>()
-        .unwrap();
+    let service = parent.lookup_local::<AgentCompositionContract>().unwrap();
     (runtime, tools_fiber, composition_fiber, service)
 }
 

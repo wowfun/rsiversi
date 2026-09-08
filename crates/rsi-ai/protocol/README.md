@@ -10,6 +10,9 @@ invariants remain enforced by this package.
 Exact model-capacity facts are stored in `LanguageModelProfiles`, a bounded
 map shared by concrete adapters. Model identifiers must be explicit; an
 unknown model has no inferred or family-based fallback capacity.
+Remote model catalogs retain connection failures through `ModelsError::Api`.
+Their bounded pages validate count, strict order and exclusive continuation at
+the client boundary without acquiring provider invocation authority.
 
 `rsi-tools-protocol` owns freeform grammar and `rsi-media-protocol` owns
 locator-free image/audio metadata validation. This package imports those

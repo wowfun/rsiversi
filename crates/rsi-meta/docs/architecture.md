@@ -22,6 +22,18 @@ effect-owned contribution to that authority.
 
 ## Context and ownership
 
+Execution is an explicit bootstrap dependency, defined below core, for owned
+tasks, preparation jobs and monotonic deadlines. Core does not select an executor
+per Fiber or per caller. Platform adapters supply native Tokio or browser Worker
+execution; neither adapter adds a composition graph. Native constructors may
+capture an explicitly entered Tokio runtime as a convenience. Drop paths and an
+empty Runtime retain the same execution authority as ordinary active Fibers.
+
+The browser adapter accepts only trusted bounded synchronous preparation. The
+deadline includes that work but cannot interrupt it; stale results cannot publish
+after control returns. Native unwind containment remains intact. On panic-abort
+WASM, a trap destroys the Worker and cannot report cleanup or shutdown completion.
+
 A `Runtime` owns all mutable registries, admission, scheduling, resource
 accounting, persistent cleanup, and shutdown. A `Context` is a cloned
 capability value that retains its Runtime and optional owning Fiber generation.
@@ -125,6 +137,9 @@ generation or spinning a retry intent.
 Caller cancellation or deadline expiry detaches only the waiter; admitted
 preparation, activation rollback, retirement, and shutdown remain owned and
 joinable.
+An inserted apply retains its disposal guard through the final deadline check.
+Only acceptance of the result transfers that responsibility to the returned
+Fiber handle; a late successful activation is still disposed when its result is rejected.
 
 ## Transactional effects
 

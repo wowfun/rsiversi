@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+rsi-workspace-protocol = { path = "../protocol" }
 hex.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-storage = { path = "../../rsi-storage/core" }
@@ -15,8 +16,7 @@ rsi-storage-domain = { path = "../../rsi-storage/domain" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rsi-storage-json = { path = "../../rsi-storage/json" }

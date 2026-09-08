@@ -6,6 +6,7 @@ use super::{
     StandardComposition, Write, report_error, standard_agent_preset_root, standard_coding_tools,
     standard_paths,
 };
+use rsi_terminal::write_text_line;
 
 pub(super) async fn run_agent_store(command: AgentStoreCommand) -> u8 {
     let root = match command.root {
@@ -76,7 +77,7 @@ pub(super) async fn run_profile(command: &ProfileCommand) -> u8 {
             (ProfileKind::Application, ProfileOperationKind::Show) => {
                 let id = application_profile_id(&command.ids[0])?;
                 let document = catalog.application(&id).map_err(profile_management_error)?;
-                let contents = toml::to_string_pretty(&document.profile)
+                let contents = String::from_utf8(document.contents)
                     .map_err(|error| RsiError::Boot(error.to_string()))?;
                 write_profile_document(
                     command.output,
@@ -735,14 +736,6 @@ pub(super) fn write_json(value: &impl Serialize) -> rsi::Result<()> {
         .map_err(|error| RsiError::Boot(format!("stdout JSON write failed: {error}")))?;
     stdout
         .write_all(b"\n")
-        .and_then(|()| stdout.flush())
-        .map_err(output_error)
-}
-
-pub(super) fn write_text_line(value: &str) -> rsi::Result<()> {
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    writeln!(stdout, "{value}")
         .and_then(|()| stdout.flush())
         .map_err(output_error)
 }

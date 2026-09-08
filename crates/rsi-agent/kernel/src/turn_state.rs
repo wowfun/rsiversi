@@ -642,10 +642,7 @@ pub(super) fn deregister_executor(
 /// Closes one current claim; returns whether nonterminal work can be requeued now.
 pub(super) fn retire_claim(turn: &mut TurnControl) -> bool {
     let gate = &turn.claim.as_ref().expect("current claim owner").mutations;
-    gate.closed.store(true, Ordering::Release);
-    gate.retiring.store(true, Ordering::Release);
-    gate.stopping.cancel();
-    if gate.active.load(Ordering::Acquire) != 0 {
+    if !gate.retire() {
         return false;
     }
     turn.claim = None;

@@ -1,0 +1,32 @@
+[package]
+name = "rsi-workspace-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-workspace-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-api-http-client = { path = "../../rsi-api/http-client" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-storage = { path = "../../rsi-storage/core" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+rsi-storage-json = { path = "../../rsi-storage/json" }
+rsi-workspace = { path = "../core" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

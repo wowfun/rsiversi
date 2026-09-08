@@ -200,7 +200,7 @@ impl EffectRecord {
         self.state.lock().expect("effect record poisoned").claim
     }
 
-    fn start(self: &Arc<Self>, runtime: &Runtime, executor: &tokio::runtime::Handle) {
+    fn start(self: &Arc<Self>, runtime: &Runtime, executor: &crate::Execution) {
         if self
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -343,7 +343,7 @@ pub struct EffectTxn {
     id: u64,
     record: Arc<EffectRecord>,
     effect_budget: Arc<GenerationBudget>,
-    executor: tokio::runtime::Handle,
+    executor: crate::Execution,
     armed: bool,
     autoabort_on_drop: bool,
 }
@@ -637,7 +637,7 @@ pub struct EffectHandle {
     pub(super) owner: Owner,
     pub(super) id: u64,
     pub(super) record: Arc<EffectRecord>,
-    pub(super) executor: tokio::runtime::Handle,
+    pub(super) executor: crate::Execution,
 }
 
 impl EffectHandle {
@@ -786,7 +786,7 @@ impl Runtime {
         id: u64,
         record: &Arc<EffectRecord>,
         claim: EffectClaim,
-        executor: &tokio::runtime::Handle,
+        executor: &crate::Execution,
     ) -> Option<EffectClaim> {
         let mut effective_claim = record.claim_kind();
         if let Ok(fiber) = self.owner_fiber(owner) {
@@ -813,7 +813,7 @@ impl Runtime {
         id: u64,
         record: &Arc<EffectRecord>,
         claim: EffectClaim,
-        executor: &tokio::runtime::Handle,
+        executor: &crate::Execution,
     ) -> bool {
         let Ok(fiber) = self.owner_fiber(owner) else {
             return false;
@@ -839,7 +839,7 @@ impl Runtime {
         owner: Owner,
         id: u64,
         record: Arc<EffectRecord>,
-        executor: &tokio::runtime::Handle,
+        executor: &crate::Execution,
     ) {
         let _claim =
             self.start_effect_disposal(owner, id, &record, EffectClaim::AutoAbort, executor);

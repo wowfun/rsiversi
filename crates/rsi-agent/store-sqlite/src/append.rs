@@ -6,10 +6,10 @@ use super::{
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId, MessageTarget,
     OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
     StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
-    StoreFactTurnRole, StoreInner, StoreReadyMessage, Transaction, TurnId,
-    advance_control_prefix_digest, advance_fact_prefix_digest, decode_projected_json,
-    decode_sha256, decode_u64, encode_json, fact_index_kind, params, read_session_header_row,
-    sql_error, sqlite_u64, validate_message_claim_fact,
+    StoreFactTurnRole, StoreReadyMessage, Transaction, TurnId, advance_control_prefix_digest,
+    advance_fact_prefix_digest, decode_projected_json, decode_sha256, decode_u64, encode_json,
+    fact_index_kind, params, read_session_header_row, sql_error, sqlite_u64,
+    validate_message_claim_fact,
 };
 
 pub(super) fn validate_sqlite_activation_guards(
@@ -39,10 +39,9 @@ pub(super) fn validate_sqlite_activation_guards(
 pub(super) fn validate_sqlite_quiescence_guard(
     transaction: &Transaction<'_>,
     root: Option<&SessionId>,
-    owner: &StoreInner,
 ) -> Result<Option<StoreAgentSubtreeSnapshot>> {
     if let Some(root) = root {
-        let snapshot = owner.read_validated_agent_subtree(transaction, root)?;
+        let snapshot = super::session_store::read_agent_subtree(transaction, root)?;
         for descendant in &snapshot.descendants {
             let status = &descendant.status;
             if status.has_active_activation || status.has_open_turn || status.has_waking_message {
@@ -151,7 +150,7 @@ pub(super) fn apply_atomic_sqlite_append(
             }
         }
     }
-    let durable_fact_seq = append.facts.last().map_or(actual_fact, SessionFact::seq);
+    let durable_fact_seq = append.facts.last().map_or(actual_fact, |fact| fact.seq());
     let minimum_entered_fact_seq = append
         .expected_fact_seq
         .checked_add(1)

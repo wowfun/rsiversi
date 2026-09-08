@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+bytes.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 libc.workspace = true
@@ -16,7 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 same-file.workspace = true
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 image.workspace = true

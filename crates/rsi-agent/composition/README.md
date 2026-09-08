@@ -8,8 +8,14 @@ Its default-preset query delegates to the same frozen `AgentPresetCatalog` and
 current default-store adapter used for generation resolution, exposing only the
 validated effective identity.
 
-Each successful generation is built below a hidden Runtime-root Scope whose
-owner is the generation pin, not the provider Fiber. A generation first
+`AgentGenerationRootFactory` supplies an explicit process-local Context for
+generation ownership. It is an ordinary plugin in the containing service Profile
+and preserves that service's Local isolation. Composition providers require this
+root and never reacquire `Runtime::root()`. The root must outlive those providers
+and their pins; retiring it disposes its complete generation subtree.
+
+Each successful generation is built below a hidden Scope within that root. Its
+pin controls reclamation independently of the composition provider Fiber. A generation first
 activates a private `ToolRegistrar`, then activates every static Profile leaf,
 then seals its unpublished Tool catalog, and only then becomes current. A
 missing, malformed, or otherwise failed current source returns an error; it
@@ -36,7 +42,8 @@ to release before disposing and joining the corresponding Scope.
 `AgentContributionCatalog` exposes only exact immutable `ResolvedFactory`
 values selected by the application. `AgentCompositionFactory` is an ordinary
 Meta plugin: its constructor receives the concrete preset catalog, compiler,
-allowlist, and Scope root, while activation requires only the existing
-`ToolCatalogProviderContract`. It supplies `AgentCompositionContract`; it does
+allowlist, and Scope root, while activation requires the existing
+`ToolCatalogProviderContract` and explicit `AgentGenerationRootContract`.
+It supplies `AgentCompositionContract`; it does
 not expose preset locations, the Tool registrar, a mutable Host catalog, or a
 resolver to Agent consumers.

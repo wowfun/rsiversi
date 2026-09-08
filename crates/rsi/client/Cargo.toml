@@ -1,0 +1,32 @@
+[package]
+name = "rsi-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta-execution = { path = "../../rsi-meta/execution" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-meta-scope = { path = "../../rsi-meta/scope" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true

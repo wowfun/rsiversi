@@ -111,7 +111,7 @@ pub(super) async fn read_fork_page_from_header(
 }
 
 pub(super) async fn observe_agent_wait_change(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     caller: &AgentCallerAuthority,
     baseline: &StoreAgentSubtreeSnapshot,
 ) -> TurnResult<Option<WaitResumeCause>> {
@@ -667,6 +667,126 @@ pub(super) const fn context_checkpoints_enabled(inner: &KernelInner) -> bool {
     inner.limits.maximum_store_read_bytes >= MAXIMUM_CONTEXT_CHECKPOINT_BYTES
 }
 
+pub(super) async fn read_observed_facts(
+    inner: &Arc<KernelInner>,
+    session: &SessionId,
+    cursor: u64,
+) -> TurnResult<(Vec<ObservedFact>, u64)> {
+    let requested = if inner.limits.maximum_retained_observation_bytes < MAXIMUM_STORE_BATCH_BYTES {
+        1
+    } else {
+        MAXIMUM_FACTS_PER_READ
+    };
+    let (limit, _read) = acquire_store_read(inner, requested)
+        .await
+        .map_err(turn_store_error)?;
+    let page = inner
+        .store
+        .read_facts(session, cursor, limit)
+        .await
+        .map_err(turn_store_error)?;
+    if page.after_seq != cursor || page.facts.len() > limit {
+        return Err(TurnError::Invariant(
+            "Fact observation page differs from its requested cursor or limit".into(),
+        ));
+    }
+    page.validate()
+        .map_err(|error| TurnError::Invariant(bounded_diagnostic(&error.to_string())))?;
+    if page.facts.is_empty() && page.durable_seq > cursor {
+        return Err(TurnError::Invariant(
+            "durable observation page made no progress".into(),
+        ));
+    }
+    let retained = inner
+        .observation_retention
+        .retain_facts(page.facts.into_iter().map(Arc::new).collect())?;
+    Ok((retained, page.durable_seq))
+}
+
+async fn read_observed_controls(
+    inner: &Arc<KernelInner>,
+    session: &SessionId,
+    cursor: u64,
+) -> TurnResult<(Vec<ObservedControl>, u64)> {
+    let requested = if inner.limits.maximum_retained_observation_bytes < MAXIMUM_STORE_BATCH_BYTES {
+        1
+    } else {
+        MAXIMUM_FACTS_PER_READ
+    };
+    let (limit, _read) = acquire_store_read(inner, requested)
+        .await
+        .map_err(turn_store_error)?;
+    let page = inner
+        .store
+        .read_controls(session, cursor, limit)
+        .await
+        .map_err(turn_store_error)?;
+    if page.after_seq != cursor || page.records.len() > limit {
+        return Err(TurnError::Invariant(
+            "control observation page differs from its requested cursor or limit".into(),
+        ));
+    }
+    page.validate()
+        .map_err(|error| TurnError::Invariant(bounded_diagnostic(&error.to_string())))?;
+    if page.records.is_empty() && page.durable_seq > cursor {
+        return Err(TurnError::Invariant(
+            "control observation page made no progress".into(),
+        ));
+    }
+    let retained = inner
+        .observation_retention
+        .retain_controls(page.records.into_iter().map(Arc::new).collect())?;
+    Ok((retained, page.durable_seq))
+}
+
+pub(super) async fn fill_observation_page(
+    inner: &Arc<KernelInner>,
+    state: &mut DurableObservationState,
+) -> TurnResult<()> {
+    while state.pending.is_empty() && (state.read_controls || state.read_facts) {
+        let controls = if matches!(state.next_page, ObservationPageKind::Control) {
+            state.read_controls
+        } else {
+            !state.read_facts
+        };
+        if controls {
+            let (records, durable_control_seq) =
+                read_observed_controls(inner, &state.session_id, state.control_seq).await?;
+            if let Some(last) = records.last() {
+                state.control_seq = last.seq();
+            }
+            state.read_controls = state.control_seq < durable_control_seq;
+            state.pending.extend(
+                records
+                    .into_iter()
+                    .map(|record| SessionObservation::Control {
+                        record,
+                        durable_control_seq,
+                    }),
+            );
+        } else {
+            let (facts, durable_fact_seq) =
+                read_observed_facts(inner, &state.session_id, state.fact_seq).await?;
+            if let Some(last) = facts.last() {
+                state.fact_seq = last.seq();
+            }
+            state.read_facts = state.fact_seq < durable_fact_seq;
+            state
+                .pending
+                .extend(facts.into_iter().map(|fact| SessionObservation::Fact {
+                    fact,
+                    durable_fact_seq,
+                }));
+        }
+        state.next_page = if controls {
+            ObservationPageKind::Fact
+        } else {
+            ObservationPageKind::Control
+        };
+    }
+    Ok(())
+}
+
 pub(super) async fn durable_observation_next(
     mut state: DurableObservationState,
 ) -> Option<(TurnResult<SessionObservation>, DurableObservationState)> {
@@ -678,57 +798,24 @@ pub(super) async fn durable_observation_next(
             return Some((Ok(observation), state));
         }
         let inner = state.inner.upgrade()?;
-        let changed = inner.claim_changed.notified();
-        tokio::pin!(changed);
-        changed.as_mut().enable();
-        let controls = match read_controls_bounded(
-            &inner,
-            &state.session_id,
-            state.control_seq,
-            MAXIMUM_FACTS_PER_READ,
-        )
-        .await
-        {
-            Ok(page) => page,
-            Err(error) => {
-                state.stopped = true;
-                return Some((Err(turn_store_error(error)), state));
-            }
-        };
-        let facts = match read_facts_bounded(
-            &inner,
-            &state.session_id,
-            state.fact_seq,
-            MAXIMUM_FACTS_PER_READ,
-        )
-        .await
-        {
-            Ok(page) => page,
-            Err(error) => {
-                state.stopped = true;
-                return Some((Err(turn_store_error(error)), state));
-            }
-        };
-        for record in controls.records {
-            state.control_seq = record.seq();
-            state.pending.push_back(SessionObservation::Control {
-                record: Arc::new(record),
-                durable_control_seq: controls.durable_seq,
-            });
+        if state.watch.has_changed() {
+            state.watch.mark_seen();
+            state.read_controls = true;
+            state.read_facts = true;
         }
-        for fact in facts.facts {
-            state.fact_seq = fact.seq();
-            state.pending.push_back(SessionObservation::Fact {
-                fact: Arc::new(fact),
-                durable_fact_seq: facts.durable_seq,
-            });
-        }
-        if state.pending.is_empty() {
+        if !state.read_controls && !state.read_facts {
             tokio::select! {
                 () = inner.stop_worker.cancelled() => return None,
-                () = &mut changed => {}
+                () = state.watch.changed() => {}
                 () = tokio::time::sleep(DURABLE_OBSERVER_FALLBACK_INTERVAL) => {}
             }
+            state.watch.mark_seen();
+            state.read_controls = true;
+            state.read_facts = true;
+        }
+        if let Err(error) = fill_observation_page(&inner, &mut state).await {
+            state.stopped = true;
+            return Some((Err(error), state));
         }
     }
 }
@@ -749,18 +836,11 @@ pub(super) async fn observation_next(
                 return Some((update, state));
             }
             let inner = state.inner.upgrade()?;
-            match read_facts_bounded(
-                &inner,
-                &state.session_id,
-                state.cursor,
-                MAXIMUM_FACTS_PER_READ,
-            )
-            .await
-            {
-                Ok(page) => {
-                    state.durable_target = state.durable_target.max(page.durable_seq);
-                    state.live_target = state.live_target.max(page.durable_seq);
-                    state.durable_facts = page.facts.into_iter().map(Arc::new).collect();
+            match read_observed_facts(&inner, &state.session_id, state.cursor).await {
+                Ok((facts, durable_seq)) => {
+                    state.durable_target = state.durable_target.max(durable_seq);
+                    state.live_target = state.live_target.max(durable_seq);
+                    state.durable_facts = facts.into();
                     if state.durable_facts.is_empty() {
                         state.ended = true;
                         return Some((
@@ -774,7 +854,7 @@ pub(super) async fn observation_next(
                 }
                 Err(error) => {
                     state.ended = true;
-                    return Some((Err(turn_store_error(error)), state));
+                    return Some((Err(error), state));
                 }
             }
         }
@@ -789,6 +869,14 @@ pub(super) async fn observation_next(
         if state.cursor < state.live_target
             && let Some(fact) = next_speculative_observation_fact(&mut state)
         {
+            let inner = state.inner.upgrade()?;
+            let fact = match inner.observation_retention.retain_fact(fact) {
+                Ok(fact) => fact,
+                Err(error) => {
+                    state.ended = true;
+                    return Some((Err(error), state));
+                }
+            };
             state.cursor = fact.seq();
             return Some((
                 Ok(TurnUpdate::Fact {

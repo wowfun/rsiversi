@@ -61,7 +61,7 @@ struct MemoryState {
 #[derive(Clone, Debug)]
 struct MemorySession {
     header: SessionHeader,
-    facts: Vec<SessionFact>,
+    facts: Vec<Arc<SessionFact>>,
     turns: BTreeMap<TurnId, MemoryTurnBoundary>,
     fact_prefix_digest: [u8; 32],
     checkpoint: Option<StoredContextCheckpoint>,

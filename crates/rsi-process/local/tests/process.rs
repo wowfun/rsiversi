@@ -120,10 +120,13 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
     let page = cache.read(&id, 0, 16).await.unwrap();
     assert_eq!(&page.bytes[..6], b"prefix");
     assert_eq!(page.total_bytes, 100_012);
-    assert_eq!(cache.read(&id, 100_006, 16).await.unwrap().bytes, b"suffix");
+    assert_eq!(
+        cache.read(&id, 100_006, 16).await.unwrap().bytes.as_ref(),
+        b"suffix"
+    );
     let stderr_id = managed.stderr().read_from(0).unwrap().full_output.unwrap();
     assert_eq!(
-        cache.read(&stderr_id, 0, 16).await.unwrap().bytes,
+        cache.read(&stderr_id, 0, 16).await.unwrap().bytes.as_ref(),
         b"warning"
     );
     assert!(fiber.dispose().await.is_clean());

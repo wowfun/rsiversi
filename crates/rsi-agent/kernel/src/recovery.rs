@@ -165,7 +165,7 @@ pub(super) async fn repair_unfinished_session(
                     expected_fact_seq: durable_seq,
                     expected_control_seq: controls.durable_seq,
                     header: None,
-                    facts: repair,
+                    facts: repair.into_iter().map(Arc::new).collect(),
                     controls: control_repairs,
                 }],
                 required_active_activations: vec![AgentActivationGuard {
@@ -181,7 +181,7 @@ pub(super) async fn repair_unfinished_session(
                 session_id: session_id.clone(),
                 expected_seq: durable_seq,
                 header: None,
-                facts: repair,
+                facts: repair.into_iter().map(Arc::new).collect(),
             })
             .await?;
     }

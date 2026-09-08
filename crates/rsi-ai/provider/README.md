@@ -38,6 +38,8 @@ with the prepared call's resolved media.
 Construction revalidates the public prepared-call snapshot once, so provider
 adapters may trust its digest and identity invariants in-process.
 Resolved-body digest verification runs behind fixed blocking-work admission.
+Resolved bytes preserve the Media body's immutable allocation owner through
+provider framing and streaming, including any API receive lease.
 An adapter that retains the context for a later control plane releases its
 successful media cache after the final Start-time read; in-flight waiters keep
 their own result ownership.

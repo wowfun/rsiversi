@@ -18,6 +18,11 @@ impl ServiceEndpoint for NoopEndpoint {
 
 #[test]
 fn context_byte_budget_includes_retained_service_isolation_keys() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
             maximum_context_bytes: 10,
@@ -35,6 +40,11 @@ fn context_byte_budget_includes_retained_service_isolation_keys() {
 
 #[test]
 fn service_apis_validate_identifiers_before_resolving_context_ownership() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
             maximum_identifier_bytes: 3,

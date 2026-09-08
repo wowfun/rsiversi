@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-libc.workspace = true
+futures-util.workspace = true
 rhai.workspace = true
 rsi-meta = { path = "../core" }
 serde.workspace = true
@@ -22,9 +22,15 @@ toml.workspace = true
 [target.'cfg(windows)'.dependencies]
 same-file.workspace = true
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+rhai = { workspace = true, features = ["wasm-bindgen"] }
+
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

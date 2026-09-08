@@ -59,6 +59,8 @@ mod tests {
 
     #[test]
     fn exhaustion_never_wraps_or_reuses_an_identity() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let runtime = Runtime::default();
         runtime
             .inner
@@ -76,6 +78,8 @@ mod tests {
 
     #[test]
     fn every_foundation_identity_fails_closed_at_exhaustion() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let runtime = Runtime::default();
         let cases = [
             (&runtime.inner.next_fiber, "fiber identities"),
@@ -125,6 +129,8 @@ mod tests {
 
     #[test]
     fn registry_revision_saturates_without_wrapping() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let runtime = Runtime::default();
         let mut state = runtime.inner.state.lock().expect("runtime state poisoned");
         state.revision = u64::MAX;

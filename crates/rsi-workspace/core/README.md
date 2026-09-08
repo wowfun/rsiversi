@@ -1,9 +1,12 @@
 # rsi-workspace
 
-This package provides the Workspace registry contract and ordinary plugin. One
+This package provides the native Workspace registry plugin over the shared protocol. One
 configured storage-domain backend persists a versioned record per Workspace,
-including its immutable insertion order. Mutations serialize, publish only the
-affected domain record durably, and then update the live snapshot. Readers keep
+including its immutable insertion order. A separate bounded allocation record
+reserves each order durably before its registration is written. Deletion never
+removes this high-water mark. Failed creation may leave a gap; orders cannot be
+reused after restart. Mutations serialize and update the live snapshot after
+durable registration publication. Readers keep
 observing the previous committed snapshot while durable I/O is in flight. Once
 a mutation acquires the commit slot, a service-owned task completes durability
 and live publication even if the requesting future is dropped.

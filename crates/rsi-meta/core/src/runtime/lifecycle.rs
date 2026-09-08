@@ -531,11 +531,7 @@ impl Runtime {
             // quiescence instead of allowing callbacks to start after teardown.
             self.inner.terminal_cancellation.cancel();
             let roots = self.shutdown_membership_snapshot();
-            let executor = roots
-                .first()
-                .map_or_else(tokio::runtime::Handle::current, |root| {
-                    root.executor.clone()
-                });
+            let executor = self.inner.execution.clone();
             let runtime = self.clone();
             executor.spawn(async move {
                 let result = contain_panic_result(
@@ -564,9 +560,10 @@ impl Runtime {
             });
         }
 
-        let deadline = tokio::time::Instant::now()
-            .checked_add(self.inner.limits.deadlines.shutdown_wait)
-            .expect("validated shutdown deadline fits Tokio Instant");
+        let deadline = self
+            .inner
+            .execution
+            .deadline_after(self.inner.limits.deadlines.shutdown_wait);
         loop {
             let notified = self.inner.shutdown.complete.notified();
             tokio::pin!(notified);
@@ -581,16 +578,13 @@ impl Runtime {
                     unresolved: self.unresolved_cleanup_report(),
                 };
             }
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.has_elapsed() {
                 return ShutdownOutcome::TimedOut {
                     report,
                     unresolved: self.unresolved_cleanup_report(),
                 };
             }
-            if tokio::time::timeout_at(deadline, notified.as_mut())
-                .await
-                .is_err()
-            {
+            if deadline.timeout(notified.as_mut()).await.is_err() {
                 let (report, complete, failed) = self.inner.shutdown.snapshot();
                 return if let Some(report) = complete {
                     ShutdownOutcome::Complete(report)

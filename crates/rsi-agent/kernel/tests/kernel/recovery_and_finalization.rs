@@ -44,7 +44,7 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header("session-recovery")),
-            facts,
+            facts: (facts).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -90,7 +90,10 @@ async fn startup_recovery_repairs_open_turns_without_resolving_the_preset() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
-            facts: vec![accepted_fact(1, &turn)],
+            facts: (vec![accepted_fact(1, &turn)])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
@@ -98,10 +101,9 @@ async fn startup_recovery_repairs_open_turns_without_resolving_the_preset() {
     composition.set_unavailable();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
 
-    let kernel =
-        SessionKernel::recover_with_clock(store, composition_contract, Arc::new(FixedClock))
-            .await
-            .expect("startup repair must not require an executable Agent preset");
+    let kernel = AgentKernel::recover_with_clock(store, composition_contract, Arc::new(FixedClock))
+        .await
+        .expect("startup repair must not require an executable Agent preset");
 
     assert!(matches!(
         kernel.outcome(&session, &turn).await.unwrap(),
@@ -120,7 +122,7 @@ async fn recovery_preserves_a_durable_cancellation_classification() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header("session-recovery-cancelled")),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -142,7 +144,10 @@ async fn recovery_preserves_a_durable_cancellation_classification() {
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
@@ -193,7 +198,7 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
             session_id: session,
             expected_seq: 0,
             header: Some(bounded_header),
-            facts: {
+            facts: ({
                 let first = EffectId::new("effect-one").unwrap();
                 let second = EffectId::new("effect-two").unwrap();
                 vec![
@@ -203,13 +208,16 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
                     model_finished_fact(4, &turn, &first),
                     model_intent_fact(5, &turn, &second),
                 ]
-            },
+            })
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
     let overused_store: Arc<dyn SessionStore> = overused;
     assert!(
-        SessionKernel::recover_with_clock(overused_store, composition(), Arc::new(FixedClock),)
+        AgentKernel::recover_with_clock(overused_store, composition(), Arc::new(FixedClock),)
             .await
             .is_err(),
         "recovery must apply the immutable provider-attempt limit"
@@ -223,16 +231,19 @@ async fn recovery_rejects_usage_and_markers_that_exceed_the_frozen_budget() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
-            facts: vec![
+            facts: (vec![
                 accepted_fact(1, &turn),
                 budget_fact(2, &turn, BudgetDimension::ProviderAttempts, 1, 1),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
     let mismatched_store: Arc<dyn SessionStore> = mismatched;
     assert!(
-        SessionKernel::recover_with_clock(mismatched_store, composition(), Arc::new(FixedClock),)
+        AgentKernel::recover_with_clock(mismatched_store, composition(), Arc::new(FixedClock),)
             .await
             .is_err(),
         "a durable exhaustion marker must match the immutable budget"
@@ -267,13 +278,16 @@ async fn recovery_preserves_a_valid_durable_budget_classification() {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(bounded_header),
-            facts: vec![
+            facts: (vec![
                 accepted_fact(1, &turn),
                 model_intent_fact(2, &turn, &effect),
                 model_started_fact(3, &turn, &effect),
                 model_finished_fact(4, &turn, &effect),
                 budget_fact(5, &turn, BudgetDimension::ProviderAttempts, 2, 1),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();

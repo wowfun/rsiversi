@@ -288,7 +288,9 @@ impl<'de> Deserialize<'de> for ToolExecutionPolicy {
 impl ToolExecutionPolicy {
     /// Validates process-plan paths before Tool preparation is started.
     pub fn validate(&self) -> Result<()> {
-        if !self.cwd.is_absolute() || !self.workspace.is_absolute() {
+        if !rsi_workspace_path::is_absolute_path(&self.cwd)
+            || !rsi_workspace_path::is_absolute_path(&self.workspace)
+        {
             return Err(ToolError::InvalidInput(
                 "Tool sandbox paths must be absolute".into(),
             ));

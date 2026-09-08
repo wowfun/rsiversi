@@ -1,7 +1,7 @@
 use super::*;
 
 async fn waiting_root(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     index: usize,
 ) -> (
     SessionId,
@@ -57,7 +57,7 @@ async fn persistent_first_root_failure_preserves_flush_later_pages_and_global_he
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
     let kernel =
-        SessionKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -147,7 +147,7 @@ async fn persistent_first_root_failure_preserves_flush_later_pages_and_global_he
 async fn failed_settlement_enumeration_uses_exponential_backoff() {
     let observed = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
     let kernel =
-        SessionKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     observed.waiting_page_reads.store(0, Ordering::Release);
@@ -363,7 +363,7 @@ async fn activation_terminal_accepts_a_turn_submitted_during_preparation() {
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = observed.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();

@@ -335,6 +335,8 @@ mod tests {
 
     #[test]
     fn detached_capability_does_not_retain_its_runtime() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let (runtime, entry) = occupied_entry();
         let weak_runtime = Arc::downgrade(&runtime.inner);
         let capability = Capability {
@@ -351,6 +353,8 @@ mod tests {
 
     #[test]
     fn capability_entry_identity_exhaustion_fails_closed() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let runtime = Runtime::default();
         runtime
             .inner

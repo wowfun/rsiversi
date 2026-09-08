@@ -196,6 +196,58 @@ impl Router {
 }
 
 #[async_trait]
+impl rsi_ai_protocol::LanguageModels for Router {
+    async fn list_models(
+        &self,
+        after: Option<&ModelRef>,
+        limit: usize,
+    ) -> Result<rsi_ai_protocol::LanguageModelPage, rsi_ai_protocol::ModelsError> {
+        if !(1..=rsi_ai_protocol::MAX_LANGUAGE_MODEL_PAGE).contains(&limit) {
+            return Err(rsi_ai_protocol::ModelsError::Invalid(
+                "model page limit must be 1..=256".into(),
+            ));
+        }
+        if let Some(after) = after {
+            after
+                .validate()
+                .map_err(|error| rsi_ai_protocol::ModelsError::Invalid(error.to_string()))?;
+        }
+        let inner = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut models = Vec::with_capacity(limit);
+        for (deployment, route) in &inner.routes {
+            if !route.gate.is_committed() {
+                continue;
+            }
+            let Some(adapter) = route.registration.language() else {
+                continue;
+            };
+            for (model, _) in adapter.models().iter() {
+                let model = ModelRef::new(deployment.clone(), model)
+                    .expect("registered and configured model identifiers are validated");
+                if after.is_some_and(|after| model <= *after) {
+                    continue;
+                }
+                if models.len() == limit {
+                    return Ok(rsi_ai_protocol::LanguageModelPage {
+                        models,
+                        has_more: true,
+                    });
+                }
+                models.push(model);
+            }
+        }
+        Ok(rsi_ai_protocol::LanguageModelPage {
+            models,
+            has_more: false,
+        })
+    }
+}
+
+#[async_trait]
 impl LanguageCall for Router {
     fn describe(&self, model: &ModelRef) -> Result<LanguageProfile, AiError> {
         let route = self.route(model)?;
@@ -526,6 +578,7 @@ impl PluginFactory for LanguageRouterFactory {
             context: plan.context().clone(),
             next_call_id: AtomicU64::new(0),
         });
+        let models: Arc<dyn rsi_ai_protocol::LanguageModels> = router.clone();
         let calls: Arc<dyn LanguageCall> = router.clone();
         let registrar: Arc<dyn LanguageRegistrar> = router;
         let call_supply = plan
@@ -541,10 +594,14 @@ impl PluginFactory for LanguageRouterFactory {
                 return Err(error);
             }
         };
+        let models_supply = plan
+            .context()
+            .provide_local::<rsi_ai_protocol::LanguageModelsContract>(models)?;
         plan.defer(
             "withdraw Language router",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(models_supply);
                     drop(registrar_supply);
                     drop(call_supply);
                     Ok(())

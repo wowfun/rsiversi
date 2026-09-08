@@ -18,6 +18,19 @@ The two request schemas are owned by
 
 ## Contract
 
+Language adapters expose their bounded configured `LanguageModelProfiles` as
+read-only declarations. `LanguageModels::list_models(after, limit)` enumerates
+committed Language routes in strict `ModelRef` order with an exclusive cursor
+and 1–256 models per page. The total across deployments may exceed one page.
+Enumeration performs no credential resolution, media read, or provider I/O and
+does not promise that a listed route survives later generation withdrawal.
+The router publishes `LanguageModelsContract` independently of its invocation
+capability. Its asynchronous interface is shared by native and remote clients;
+enumerating models requires neither a Session nor provider invocation authority.
+The Models API endpoint and client plugins own the versioned remote catalog
+operation. They consume only the read-only catalog or a negotiated API connection;
+provider wire translation remains with provider adapters.
+
 Each router generation owns an exact deployment table populated by
 generation-bound provider leases. `ModelRef` always names a deployment and
 model exactly; there is no alias, fallback, or request-level endpoint override.

@@ -686,9 +686,10 @@ mod linux {
             ProcessError::Unsupported => "process_unsupported",
             ProcessError::SettlementTimeout => "process_settlement_timeout",
             ProcessError::ShutdownTimeout => "process_shutdown_timeout",
-            ProcessError::InvalidInput(_) | ProcessError::Spawn(_) | ProcessError::Io(_) => {
-                "process_error"
-            }
+            ProcessError::InvalidInput(_)
+            | ProcessError::Spawn(_)
+            | ProcessError::Io(_)
+            | ProcessError::Api(_) => "process_error",
         };
         error_result(code, error.to_string())
     }

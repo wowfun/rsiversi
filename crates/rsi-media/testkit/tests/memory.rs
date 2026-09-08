@@ -32,7 +32,7 @@ async fn memory_backend_rejects_bytes_that_do_not_match_their_reference() {
                 width: 1,
                 height: 1,
             },
-            bytes: Arc::from(*b"nope"),
+            bytes: bytes::Bytes::from_static(b"nope"),
         })
         .await;
 

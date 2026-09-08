@@ -28,6 +28,13 @@ an intended interface is made private instead of being documented into a new
 accidental contract. Existing schema, ABI, wire, and product conformance suites
 remain the evidence for their seams.
 
+Standalone fixture packages use `fixtures/<product>/<fixture>` with an existing
+`crates/<product>` owner. The documentation gate derives that relationship from
+the repository layout instead of maintaining a list of products allowed to own
+fixtures. Fixture package identity, authored prose and links receive the same
+checks regardless of product. Generated assets and installed dependencies stay
+outside authored-document traversal.
+
 ## Alternatives considered
 
 A central contract registry and stable contract identifiers were rejected

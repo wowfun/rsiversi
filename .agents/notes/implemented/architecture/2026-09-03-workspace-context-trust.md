@@ -7,7 +7,7 @@ comment: Prevent project-controlled context from becoming ambient authority
 
 This note owns the trust decision and user-visible workspace-context policy;
 the generic durable scheduling and Fact lifecycle remain in the
-[Session Kernel note](2026-08-26-durable-session-kernel.md). The current package
+[Agent Kernel note](2026-08-26-durable-agent-kernel.md). The current package
 contract is documented by
 [Workspace Context](../../../../crates/rsi-agent/workspace-context/README.md).
 

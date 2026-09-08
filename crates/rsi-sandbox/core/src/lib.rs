@@ -9,7 +9,7 @@ use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Maximum argv items in one sandbox process plan.
@@ -215,19 +215,7 @@ impl EnforcementStamp {
 }
 
 fn is_lexically_normal_absolute(path: &Path) -> bool {
-    if !path.is_absolute() || path.as_os_str().is_empty() {
-        return false;
-    }
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir | Component::ParentDir => return false,
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    normalized.as_os_str() == path.as_os_str()
+    rsi_workspace_path::is_normalized_absolute_path(path)
 }
 
 /// Exact process invocation after sandbox wrapping.

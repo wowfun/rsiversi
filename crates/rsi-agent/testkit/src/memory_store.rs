@@ -30,7 +30,7 @@ impl SessionStore for MemoryStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(session) = state.sessions.get_mut(&batch.session_id) {
-            let actual = session.facts.last().map_or(0, SessionFact::seq);
+            let actual = session.facts.last().map_or(0, |fact| fact.seq());
             if actual != batch.expected_seq {
                 return Err(StoreError::Conflict {
                     expected: batch.expected_seq,
@@ -168,7 +168,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         if after_seq > durable_seq {
             return Err(StoreError::Invalid(
                 "Fact cursor exceeds the durable tail".into(),
@@ -186,7 +186,7 @@ impl SessionStore for MemoryStore {
                 break;
             }
             encoded_bytes = projected;
-            facts.push(fact.clone());
+            facts.push(fact.as_ref().clone());
         }
         let page = StoreFactPage {
             after_seq,
@@ -256,7 +256,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         let maximum_before = durable_seq
             .checked_add(1)
             .ok_or_else(|| StoreError::Corrupt("durable sequence is exhausted".into()))?;
@@ -284,7 +284,7 @@ impl SessionStore for MemoryStore {
                 break;
             }
             encoded_bytes = projected;
-            facts.push(fact.clone());
+            facts.push(fact.as_ref().clone());
         }
         facts.reverse();
         let has_more = facts.first().is_some_and(|fact| fact.seq() > 1);
@@ -314,7 +314,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         if after_seq > durable_seq {
             return Err(StoreError::Invalid(
                 "turn Fact cursor exceeds the durable tail".into(),
@@ -345,7 +345,7 @@ impl SessionStore for MemoryStore {
                 break;
             }
             encoded_bytes = projected;
-            facts.push(fact.clone());
+            facts.push(fact.as_ref().clone());
         }
         let page = StoreTurnFactPage {
             turn_id: turn_id.clone(),
@@ -387,13 +387,14 @@ impl SessionStore for MemoryStore {
                 .facts
                 .get(usize::try_from(seq - 1).expect("bounded sequence"))
                 .expect("turn index terminal points into Facts")
+                .as_ref()
                 .clone()
         });
         StoreTurnBoundary::new(
             turn_id.clone(),
-            accepted.clone(),
+            accepted.as_ref().clone(),
             terminal,
-            session.facts.last().map_or(0, SessionFact::seq),
+            session.facts.last().map_or(0, |fact| fact.seq()),
         )
     }
 
@@ -517,7 +518,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         if after_accepted_seq > durable_seq {
             return Err(StoreError::Invalid(
                 "open-turn cursor exceeds the durable tail".into(),
@@ -724,7 +725,7 @@ impl SessionStore for MemoryStore {
         pending.sort_by_key(|entry| entry.accepted_control_seq);
         let inspection = StoreSessionInspection {
             header: session.header.clone(),
-            durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             pending,
             active_turn_id: session
@@ -757,7 +758,7 @@ impl SessionStore for MemoryStore {
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
-        let durable_fact_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_fact_seq = session.facts.last().map_or(0, |fact| fact.seq());
         let selected = selected_message_id
             .and_then(|message_id| {
                 state
@@ -841,7 +842,7 @@ impl SessionStore for MemoryStore {
                     .collect()
             },
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
-            durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         };
         summary.validate()?;
         Ok(summary)
@@ -868,7 +869,7 @@ impl SessionStore for MemoryStore {
                 .expect("validated workspace-context session exists")
                 .facts
                 .last()
-                .map_or(0, SessionFact::seq),
+                .map_or(0, |fact| fact.seq()),
             ..workspace_context
         };
         workspace_context.validate()?;
@@ -1035,7 +1036,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get_mut(&write.session_id)
             .ok_or_else(|| StoreError::NotFound(write.session_id.to_string()))?;
-        let actual = session.facts.last().map_or(0, SessionFact::seq);
+        let actual = session.facts.last().map_or(0, |fact| fact.seq());
         if actual != write.expected_durable_seq {
             return Err(StoreError::Conflict {
                 expected: write.expected_durable_seq,
@@ -1117,7 +1118,7 @@ fn apply_atomic_memory_append(
                 "existing session cannot replace its immutable Header".into(),
             ));
         }
-        let actual_fact = session.facts.last().map_or(0, SessionFact::seq);
+        let actual_fact = session.facts.last().map_or(0, |fact| fact.seq());
         let actual_control = session.controls.last().map_or(0, AgentControlRecord::seq);
         if actual_fact != append.expected_fact_seq {
             return Err(StoreError::Conflict {
@@ -1216,14 +1217,14 @@ fn apply_atomic_memory_append(
         .expect("atomic append installed or updated its session");
     Ok(AgentCommitWatermark {
         session_id,
-        durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+        durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
     })
 }
 
 fn workspace_context_after(
     mut state: StoreWorkspaceContextState,
-    facts: &[SessionFact],
+    facts: &[Arc<SessionFact>],
 ) -> StoreWorkspaceContextState {
     for fact in facts {
         if let SessionFactBody::InputMessageEntered { source, .. } = fact.body() {
@@ -1414,7 +1415,7 @@ fn apply_message_updates(
                     turn_id,
                     step_id,
                     minimum_entered_fact_seq,
-                    fact,
+                    fact.map(AsRef::as_ref),
                 )?;
                 let entry = state
                     .agent_messages
@@ -1807,7 +1808,7 @@ fn apply_ready_updates(
 
 fn index_appended_turns(
     turns: &BTreeMap<TurnId, MemoryTurnBoundary>,
-    facts: &[SessionFact],
+    facts: &[Arc<SessionFact>],
     mut prefix_digest: [u8; 32],
 ) -> Result<(BTreeMap<TurnId, MemoryTurnBoundary>, [u8; 32])> {
     let mut updates = BTreeMap::new();

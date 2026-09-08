@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
@@ -18,6 +19,9 @@ rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 thiserror.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

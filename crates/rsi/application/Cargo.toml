@@ -1,0 +1,25 @@
+[package]
+name = "rsi-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-host = { path = "../../rsi-host/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-meta-scope = { path = "../../rsi-meta/scope" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true

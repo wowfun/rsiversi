@@ -48,7 +48,7 @@ async fn permanent_wait_resume_faults_pause_the_session_and_release_owned_cleanu
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
         let kernel =
-            SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
                 .await
                 .unwrap();
         let workers = kernel.start_workers();
@@ -128,7 +128,7 @@ async fn agent_wait_resume_retries_failures_and_lost_acknowledgements() {
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
         let kernel =
-            SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
                 .await
                 .unwrap();
         let workers = kernel.start_workers();
@@ -257,7 +257,7 @@ async fn lost_park_ack_is_reconciled_and_preserves_the_original_error() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -329,7 +329,7 @@ async fn failed_human_parking_has_a_bounded_waiter_and_retains_its_durable_clean
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -383,7 +383,7 @@ async fn human_resume_retries_storage_failures_without_stranding_or_duplicating_
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
         let kernel =
-            SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
                 .await
                 .unwrap();
         let workers = kernel.start_workers();
@@ -460,7 +460,7 @@ async fn shutdown_timeout_retains_failed_human_resume_until_storage_recovers() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -526,7 +526,7 @@ async fn timed_out_or_aborted_resume_keeps_claim_retirement_owned_until_repaired
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
         let kernel =
-            SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
                 .await
                 .unwrap();
         let workers = kernel.start_workers();
@@ -610,7 +610,7 @@ async fn timed_out_or_aborted_resume_keeps_claim_retirement_owned_until_repaired
 async fn human_wait_parks_durably_excludes_elapsed_and_reacquires_before_resuming() {
     let store = Arc::new(MemoryStore::new());
     let clock = Arc::new(HumanClock(AtomicU64::new(100)));
-    let kernel = SessionKernel::recover_with_clock(store.clone(), composition(), clock.clone())
+    let kernel = AgentKernel::recover_with_clock(store.clone(), composition(), clock.clone())
         .await
         .unwrap();
     let worker = kernel.start_workers();

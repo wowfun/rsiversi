@@ -1,9 +1,9 @@
 use super::message_admission::{BufferedMessageAdmission, BufferedMessagePermit};
 use super::message_waiter::MessageChannel;
+use crate::Deadline;
 use crate::runtime::{CapabilityEntry, ResourceLedger, ResourceReservation};
 use crate::{Capability, Context, MetaError, Result};
 use std::sync::Arc;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// One opaque byte payload with transferable generation-fenced capabilities.
@@ -72,7 +72,7 @@ impl BufferedMessage {
         byte_resources: &Arc<ResourceLedger>,
         capability_resources: &Arc<ResourceLedger>,
         cancellation: &CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
     ) -> Result<Self> {
         let PreparedMessage { bytes, entries } = message;
         let byte_count = bytes.len();

@@ -8,6 +8,10 @@ const DEFERRED_PARSER_NAMESPACE: &str = "openai.responses.deferred_parser";
 const DEFERRED_PARSER_VERSION: u32 = 1;
 
 impl LanguageAdapter for OpenAiResponsesAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        &self.config.language_models
+    }
+
     fn describe(&self, model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
         let limits = self.config.model_limits(model)?;
         Ok(rsi_ai_protocol::LanguageProfile::new(

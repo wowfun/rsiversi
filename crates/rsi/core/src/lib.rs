@@ -1,13 +1,21 @@
-//! Standard `RSIversi` local Session application, Host, and headless adapter.
+//! Standard RSI product composition and service lifecycle.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
 mod agent_preset;
+mod application_connection;
+pub use application_connection::{ApplicationDiagnostics, standard_application_host};
+mod api_composition;
+#[cfg(target_os = "linux")]
+mod client_composition;
+#[cfg(target_os = "linux")]
+pub use client_composition::probe_service_host;
 mod composition;
 mod local_host;
 mod output_read;
+mod profile_owner;
 mod profiles;
 mod settings;
 
@@ -20,30 +28,30 @@ pub use composition::{
     standard_agent_preset_root,
 };
 #[cfg(target_os = "linux")]
-pub use local_host::StandardSessionDaemon;
+pub use local_host::StandardServiceDaemon;
 pub use local_host::{
-    SessionHostConnection, SessionHostConnectionMode, connect_or_embed_session_host,
+    ServiceHostConnection, ServiceHostConnectionMode, connect_or_embed_service_host,
 };
 pub use profiles::{
-    APPLICATION_PROFILE_DIRECTORY, APPLICATION_PROFILE_FILE, ApplicationKind, ApplicationProfile,
-    ApplicationProfileDocument, ApplicationProfileId, HOST_PROFILE_DIRECTORY, HOST_PROFILE_FILE,
-    HostLaunchKey, HostProfileDocument, HostProfileId, ProfileCatalog, ProfileCatalogError,
-    ProfileRow, ProfileSource,
+    APPLICATION_PROFILE_DIRECTORY, APPLICATION_PROFILE_FILE, ApplicationProfileDocument,
+    ApplicationProfileId, HOST_PROFILE_DIRECTORY, HOST_PROFILE_FILE, HostLaunchKey,
+    HostProfileDocument, HostProfileId, ProfileCatalog, ProfileCatalogError, ProfileRow,
+    ProfileSource,
 };
 pub use rsi_agent_presets::{AgentPresetSource, AgentPresetTrust};
 pub use rsi_apply_patch::maybe_run_apply_patch_helper;
-pub use rsi_session;
+pub use rsi_session_protocol;
 pub use rsi_shell_bash::scrub_child_environment;
-pub use settings::{AgentSettings, AgentSettingsContract};
 
-use rsi_host::{HostPaths, RunningHost};
+use profile_owner::ProfileOwner;
+use rsi_host::HostPaths;
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
 /// Running standard Host and its application-facing operations.
 #[derive(Debug)]
 pub struct RunningRsi {
-    host: RunningHost,
+    host: ProfileOwner,
+    paths: HostPaths,
 }
 
 impl RunningRsi {
@@ -56,13 +64,7 @@ impl RunningRsi {
             .start_file(profile_path)
             .await
             .map_err(|error| RsiError::Boot(error.to_string()))?;
-        if host.lookup_local::<AgentSettingsContract>().is_none() {
-            let _outcome = host.shutdown().await;
-            return Err(RsiError::Boot(
-                "Session Agent Settings did not become active".into(),
-            ));
-        }
-        Ok(Self { host })
+        Self::from_started_host(ProfileOwner::Root(host)).await
     }
 
     /// Boots one catalog-resolved Host Profile document.
@@ -73,84 +75,178 @@ impl RunningRsi {
         let host = composition
             .build()
             .map_err(|error| RsiError::Boot(error.to_string()))?;
+        Self::start_host_profile(host, profile).await
+    }
+
+    /// Boots a standard service child Profile within the caller's application Runtime.
+    /// Parent lifetime and bootstrap cancellation belong to the caller; shutdown affects
+    /// only this isolated child subtree.
+    pub async fn boot_host_profile_in(
+        composition: StandardComposition,
+        profile: &HostProfileDocument,
+        parent: &rsi_meta::Context,
+    ) -> Result<Self> {
+        let paths = composition.paths().clone();
+        let host = composition
+            .build()
+            .map_err(|error| RsiError::Boot(error.to_string()))?;
+        let program = match &profile.path {
+            Some(path) => rsi_host::ProfileProgram::from_file(path),
+            None => rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
+        };
+        Self::from_started_host(ProfileOwner::start_scoped(host, paths, parent, program).await?)
+            .await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn boot_daemon_profile(
+        composition: StandardComposition,
+        profile: &HostProfileDocument,
+        launch_key: &str,
+        parent: Option<&rsi_meta::Context>,
+    ) -> Result<Self> {
+        let paths = composition.paths().clone();
+        let host = composition
+            .build_daemon(launch_key)
+            .map_err(|error| RsiError::Boot(error.to_string()))?;
+        match parent {
+            Some(parent) => {
+                let program = match &profile.path {
+                    Some(path) => rsi_host::ProfileProgram::from_file(path),
+                    None => rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
+                };
+                Self::from_started_host(
+                    ProfileOwner::start_scoped(host, paths, parent, program).await?,
+                )
+                .await
+            }
+            None => Self::start_host_profile(host, profile).await,
+        }
+    }
+
+    async fn start_host_profile(
+        host: rsi_host::Host,
+        profile: &HostProfileDocument,
+    ) -> Result<Self> {
         let host = match &profile.path {
             Some(path) => host.start_file(path).await,
             None => host.start(rsi_host::Profile::default()).await,
         }
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-        if host.lookup_local::<AgentSettingsContract>().is_none() {
+        Self::from_started_host(ProfileOwner::Root(host)).await
+    }
+
+    async fn from_started_host(host: ProfileOwner) -> Result<Self> {
+        let Some(paths) = host.paths().cloned() else {
             let _outcome = host.shutdown().await;
             return Err(RsiError::Boot(
-                "Session Agent Settings did not become active".into(),
+                "standard composition requires native Host paths".into(),
+            ));
+        };
+        if host
+            .lookup_local::<rsi_session_protocol::SessionContract>()
+            .is_none()
+        {
+            let _outcome = host.shutdown().await;
+            return Err(RsiError::Boot(
+                "Session service did not become active".into(),
             ));
         }
-        Ok(Self { host })
+        Ok(Self { host, paths })
     }
 
     /// Returns the frozen Host paths.
     pub const fn paths(&self) -> &HostPaths {
-        self.host.paths()
+        &self.paths
     }
 
-    /// Builds the process-local adapter over this running Host generation.
-    pub fn session_application(&self) -> Result<rsi_session::LocalSessionApplication> {
-        self.session_application_with_approvals(std::sync::Arc::new(rsi_session::NoApprovalControl))
-    }
-
-    /// Builds the process-local adapter with Host-owned live approval control.
-    pub fn session_application_with_approvals(
+    /// Clones the persisted deployment and live generation identity of this API.
+    pub fn connection_description(
         &self,
-        approvals: std::sync::Arc<dyn rsi_session::SessionApprovalControl>,
-    ) -> Result<rsi_session::LocalSessionApplication> {
-        use rsi_agent_composition_protocol::AgentCompositionContract;
-        use rsi_agent_store_protocol::SessionStoreContract;
-        use rsi_agent_turn_protocol::TurnServiceContract;
-        use rsi_ai_protocol::{ImageCallContract, LanguageCallContract};
-        use rsi_media_protocol::MediaContract;
-        use rsi_workspace::WorkspaceRegistryContract;
-
-        let turns = required_local::<TurnServiceContract>(&self.host, "Agent Turn service")?;
-        let store = required_local::<SessionStoreContract>(&self.host, "Agent Store")?;
-        let composition =
-            required_local::<AgentCompositionContract>(&self.host, "Agent composition")?;
-        let workspace =
-            required_local::<WorkspaceRegistryContract>(&self.host, "Workspace registry")?;
-        let settings = required_local::<AgentSettingsContract>(&self.host, "Agent settings")?;
-        let settings: std::sync::Arc<dyn rsi_session::AgentSettingsSource> =
-            std::sync::Arc::new(SessionSettingsSource(settings));
-        let language = required_local::<LanguageCallContract>(&self.host, "Language router")?;
-        let image = required_local::<ImageCallContract>(&self.host, "Image router")?;
-        let media = required_local::<MediaContract>(&self.host, "Media")?;
-        Ok(rsi_session::LocalSessionApplication::new(
-            turns,
-            store,
-            composition,
-            workspace,
-            settings,
-            language,
-            image,
-            media,
-            approvals,
+    ) -> Result<std::sync::Arc<rsi_api_protocol::ConnectionDescription>> {
+        required_local::<rsi_api_protocol::ConnectionDescriptionContract>(
+            &self.host,
+            "connection description",
         )
-        .with_live_capabilities(
-            Some(required_local::<
-                rsi_user_questions_protocol::UserQuestionsContract,
-            >(&self.host, "human questions")?),
-            self.host
-                .lookup_local::<rsi_process::ProcessOutputCacheContract>(),
-        ))
     }
 
-    /// Registers one process-generation approval answerer until its lease drops.
-    pub fn register_approval_answerer(
-        &self,
-        answerer: std::sync::Arc<dyn rsi_approval_protocol::ApprovalAnswerer>,
-    ) -> Result<rsi_approval_protocol::ApprovalLease> {
-        use rsi_approval_protocol::ApprovalAnswerersContract;
+    /// Clones the shared dispatcher for an explicitly composed server adapter.
+    pub fn api_dispatch(&self) -> Result<std::sync::Arc<dyn rsi_api_protocol::ApiDispatch>> {
+        required_local::<rsi_api_protocol::ApiDispatchContract>(&self.host, "API dispatcher")
+    }
 
-        required_local::<ApprovalAnswerersContract>(&self.host, "Approval answerers")?
-            .register(answerer)
-            .map_err(|error| RsiError::Boot(error.to_string()))
+    /// Clones local operator authority; this capability is never registered as a remote API.
+    pub fn device_administration(
+        &self,
+    ) -> Result<std::sync::Arc<dyn rsi_api_protocol::DeviceAdministration>> {
+        required_local::<rsi_api_protocol::DeviceAdministrationContract>(
+            &self.host,
+            "device administration",
+        )
+    }
+
+    /// Clones the device verifier for an explicitly composed authenticated transport.
+    pub fn device_authentication(
+        &self,
+    ) -> Result<std::sync::Arc<dyn rsi_api_protocol::DeviceAuthentication>> {
+        required_local::<rsi_api_protocol::DeviceAuthenticationContract>(
+            &self.host,
+            "device authentication",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn local_api_listener(
+        &self,
+    ) -> Result<std::sync::Arc<rsi_service_host::LocalApiListener>> {
+        required_local::<rsi_service_host::LocalApiListenerContract>(
+            &self.host,
+            "local API listener",
+        )
+    }
+
+    /// Clones the shared Session plugin service for this Host generation.
+    pub fn session_service(
+        &self,
+    ) -> Result<std::sync::Arc<dyn rsi_session_protocol::SessionService>> {
+        required_local::<rsi_session_protocol::SessionContract>(&self.host, "Session service")
+    }
+
+    /// Clones independent canonical Media upload and read capabilities.
+    pub fn media_service(&self) -> Result<std::sync::Arc<dyn rsi_media_protocol::Media>> {
+        required_local::<rsi_media_protocol::MediaContract>(&self.host, "Media service")
+    }
+
+    /// Clones the independent host Workspace registry.
+    pub fn workspace_registry(
+        &self,
+    ) -> Result<std::sync::Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>> {
+        required_local::<rsi_workspace_protocol::WorkspaceRegistryContract>(
+            &self.host,
+            "Workspace registry",
+        )
+    }
+
+    /// Clones the read-only committed Language model catalog.
+    pub fn language_models(&self) -> Result<std::sync::Arc<dyn rsi_ai_protocol::LanguageModels>> {
+        required_local::<rsi_ai_protocol::LanguageModelsContract>(
+            &self.host,
+            "Language model catalog",
+        )
+    }
+
+    /// Clones the read-only completed Process output capability.
+    pub fn output_cache(&self) -> Result<std::sync::Arc<dyn rsi_process::ProcessOutputCache>> {
+        required_local::<rsi_process::ProcessOutputCacheContract>(
+            &self.host,
+            "Process output cache",
+        )
+    }
+
+    pub(crate) fn approval_broker(
+        &self,
+    ) -> Result<std::sync::Arc<rsi_service_host::ApprovalBroker>> {
+        required_local::<rsi_service_host::ApprovalBrokerContract>(&self.host, "Approval broker")
     }
 
     /// Rebuilds the complete Host Profile source program.
@@ -161,23 +257,14 @@ impl RunningRsi {
             .map_err(|error| RsiError::Boot(error.to_string()))
     }
 
-    /// Shuts down all Profile Fibers and process-local Jobs deterministically.
+    /// Shuts down this service's Profile and Jobs, preserving a scoped parent's Runtime.
     pub async fn shutdown(&self) -> rsi_meta::ShutdownOutcome {
         self.host.shutdown().await
     }
 }
 
-#[derive(Debug)]
-struct SessionSettingsSource(std::sync::Arc<dyn AgentSettings>);
-
-impl rsi_session::AgentSettingsSource for SessionSettingsSource {
-    fn current(&self) -> rsi_agent_session_protocol::FrozenAgentSettings {
-        self.0.current().clone()
-    }
-}
-
 fn required_local<C: rsi_meta::LocalContract>(
-    host: &RunningHost,
+    host: &ProfileOwner,
     name: &str,
 ) -> Result<std::sync::Arc<C::Service>> {
     host.lookup_local::<C>()
@@ -235,26 +322,7 @@ fn optional_environment_path(name: &str) -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-/// Standard application failure classified by process exit contract.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum RsiError {
-    /// CLI, path, Profile, Settings, or Host bootstrap failure.
-    #[error("{0}")]
-    Boot(String),
-    /// Accepted turn or runtime execution failure.
-    #[error("{0}")]
-    Run(String),
-}
-
-impl RsiError {
-    /// Stable process exit code for this failure class.
-    pub const fn exit_code(&self) -> u8 {
-        match self {
-            Self::Boot(_) => 2,
-            Self::Run(_) => 1,
-        }
-    }
-}
+pub use rsi_application::RsiError;
 
 /// Standard application result.
 pub type Result<T> = std::result::Result<T, RsiError>;

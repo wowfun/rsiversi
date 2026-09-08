@@ -226,7 +226,7 @@ pub struct AppendBatch {
     /// Header supplied only when creating the durable session.
     pub header: Option<SessionHeader>,
     /// Nonempty exact contiguous suffix.
-    pub facts: Vec<SessionFact>,
+    pub facts: Vec<Arc<SessionFact>>,
 }
 
 impl AppendBatch {
@@ -247,7 +247,7 @@ impl AppendBatch {
                 ));
             }
         }
-        validate_fact_sequence(self.expected_seq, &self.facts)
+        validate_fact_sequence(self.expected_seq, self.facts.iter().map(AsRef::as_ref))
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         let bytes = self.facts.iter().try_fold(0_usize, |total, fact| {
             total
@@ -282,7 +282,7 @@ pub struct AtomicSessionAppend {
     /// Header supplied only for the single newly durable session.
     pub header: Option<SessionHeader>,
     /// Optional exact contiguous Fact suffix.
-    pub facts: Vec<SessionFact>,
+    pub facts: Vec<Arc<SessionFact>>,
     /// Optional exact contiguous Agent-control suffix.
     pub controls: Vec<AgentControlRecord>,
 }
@@ -314,13 +314,13 @@ impl AtomicSessionAppend {
                 ));
             }
         }
-        validate_fact_sequence(self.expected_fact_seq, &self.facts)
+        validate_fact_sequence(self.expected_fact_seq, self.facts.iter().map(AsRef::as_ref))
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.facts
             .iter()
-            .map(SessionFact::encoded_len)
+            .map(|fact| fact.encoded_len())
             .chain(self.controls.iter().map(AgentControlRecord::encoded_len))
             .try_fold(0_usize, |total, bytes| {
                 total

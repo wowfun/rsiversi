@@ -126,6 +126,9 @@ fn invalid(message: &str) -> QuestionError {
     QuestionError::Invalid(message.to_owned())
 }
 
+/// Coalesced payload-free changes for one bounded Session selection.
+pub type PendingChanges = std::pin::Pin<Box<dyn futures_util::Stream<Item = ()> + Send>>;
+
 /// Live provider and client-control seam. Implementations revalidate all inputs.
 #[async_trait]
 pub trait UserQuestions: std::fmt::Debug + Send + Sync + 'static {
@@ -137,6 +140,10 @@ pub trait UserQuestions: std::fmt::Debug + Send + Sync + 'static {
     ) -> Result<QuestionAnswer>;
     /// Lists live pending requests for one exact Session.
     async fn pending(&self, session_id: &str) -> Result<Vec<QuestionRequest>>;
+    /// Collects selected Sessions in one bounded registry pass.
+    async fn pending_for_sessions(&self, sessions: &[String]) -> Result<Vec<QuestionRequest>>;
+    /// Registers before snapshot collection; changes coalesce without a payload queue.
+    fn watch_pending(&self, sessions: &[String]) -> Result<PendingChanges>;
     /// Settles or retries one answer; false means unavailable.
     async fn answer(
         &self,

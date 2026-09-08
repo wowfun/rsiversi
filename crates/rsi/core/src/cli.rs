@@ -1,4 +1,5 @@
-use super::*;
+use super::{AgentPresetId, ApplicationProfileId, HostProfileId, OsString, PathBuf, RsiError};
+use rsi_application::arguments::utf8;
 
 pub(super) const HELP: &str = "Usage:\n\
   rsi --profile PROFILE [APPLICATION ARGUMENTS]\n\
@@ -6,16 +7,19 @@ pub(super) const HELP: &str = "Usage:\n\
                 [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
                 [--deployment ID --model ID] [--sandbox MODE]\n\
                 [--trust-workspace] [--output text|jsonl]\n\
-      session:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
+      cli:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
                 [--agent-preset ID] [--trust-workspace] [--output text|jsonl]\n\
+      tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
+      serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
+      devices: <register LABEL|list|revoke DEVICE_ID>\n\
   rsi profile <application|host> <COMMAND> [--output text|json]\n\
   rsi host <start|serve|restart|stop|status|reload> [--profile HOST]\n\
   rsi agent-preset <COMMAND> [--output text|json]\n\
   rsi agent-store verify [--root ABSOLUTE] [--output text|json]\n\n\
 Commands:\n\
-  --profile       Run a named Session or headless Application Profile\n\
+  --profile       Run a named application plugin Profile\n\
   profile         Inspect and manage Application and Host Profiles\n\
-  host            Control the explicit local Session Host daemon\n\
+  host            Control the explicit local Service Host daemon\n\
   agent-preset    Inspect and manage local Agent presets\n\
   agent-store     Verify the durable Agent Store\n";
 pub(super) const PROFILE_HELP: &str = "Usage:\n\
@@ -60,30 +64,15 @@ Commands:\n\
   verify    Run an offline full integrity audit without creating a Store\n";
 pub(super) const BOOT_FAILURE_EXIT_CODE: u8 = 2;
 
-#[derive(Clone, Debug)]
-pub(super) struct Command {
-    pub(super) positional: Option<String>,
-    pub(super) stdin: bool,
-    pub(super) cwd: Option<PathBuf>,
-    pub(super) resume: Option<SessionId>,
-    pub(super) session_id: Option<SessionId>,
-    pub(super) message_id: Option<MessageId>,
-    pub(super) images: Vec<PathBuf>,
-    pub(super) agent_preset: Option<AgentPresetId>,
-    pub(super) trust_workspace: bool,
-    pub(super) deployment: Option<String>,
-    pub(super) model: Option<String>,
-    pub(super) sandbox: Option<SandboxMode>,
-    pub(super) output: OutputMode,
-}
-
 pub(super) enum Parse {
     Help(&'static str),
     Version,
     Application(ApplicationInvocation),
     Profile(ProfileCommand),
+    #[cfg(target_os = "linux")]
     Host(HostCommand),
-    Run(Command),
+    #[cfg(not(target_os = "linux"))]
+    HostUnsupported,
     AgentPreset(AgentPresetCommand),
     AgentStore(AgentStoreCommand),
 }
@@ -129,6 +118,7 @@ pub(super) enum HostOperation {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(target_os = "linux")]
 pub(super) struct HostCommand {
     pub(super) operation: HostOperation,
     pub(super) profile: HostProfileId,
@@ -602,336 +592,60 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
             "--detached-child is valid only for the internal serve child",
         ));
     }
-    Ok(Parse::Host(HostCommand {
-        operation,
-        profile,
-        force,
-        detached_child,
-    }))
-}
-
-impl Command {
-    pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
-        let arguments = arguments.into_iter().collect::<Vec<_>>();
-        if arguments.first().and_then(|argument| argument.to_str()) == Some("run") {
-            return Err(usage(
-                "the direct `run` command was removed; select a named Application Profile with `rsi --profile headless ...`",
-            ));
-        }
-        Self::parse(arguments)
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Parse::Host(HostCommand {
+            operation,
+            profile,
+            force,
+            detached_child,
+        }))
     }
-
-    fn empty() -> Self {
-        Self {
-            positional: None,
-            stdin: false,
-            cwd: None,
-            resume: None,
-            session_id: None,
-            message_id: None,
-            images: Vec::new(),
-            agent_preset: None,
-            trust_workspace: false,
-            deployment: None,
-            model: None,
-            sandbox: None,
-            output: OutputMode::Text,
-        }
-    }
-
-    #[allow(clippy::too_many_lines)] // One ordered CLI grammar owns option conflicts and exact diagnostics.
-    pub(super) fn parse(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
-        let mut arguments = arguments.into_iter();
-        let Some(first) = arguments.next() else {
-            return Err(usage("missing `run` command"));
-        };
-        let first = utf8(first)?;
-        if matches!(first.as_str(), "-h" | "--help") {
-            return Ok(Parse::Help(HELP));
-        }
-        if matches!(first.as_str(), "-V" | "--version") {
-            return Ok(Parse::Version);
-        }
-        if first == "--profile" {
-            let profile = arguments
-                .next()
-                .ok_or_else(|| usage("--profile requires an Application Profile name"))?;
-            let profile = ApplicationProfileId::new(utf8(profile)?)
-                .map_err(|error| usage(error.to_string()))?;
-            return Ok(Parse::Application(ApplicationInvocation {
-                profile,
-                arguments: arguments.collect(),
-            }));
-        }
-        if first == "profile" {
-            return parse_profile_command(arguments);
-        }
-        if first == "host" {
-            return parse_host_command(arguments);
-        }
-        if first == "agent-preset" {
-            return parse_agent_preset(arguments);
-        }
-        if first == "agent-store" {
-            return parse_agent_store(arguments);
-        }
-        if first != "run" {
-            return Err(usage(format!("unknown command `{first}`")));
-        }
-
-        let mut command = Self::empty();
-        let mut literal = false;
-        let mut sandbox_set = false;
-        let mut output_set = false;
-        while let Some(argument) = arguments.next() {
-            let argument = utf8(argument)?;
-            if !literal && argument == "--" {
-                literal = true;
-                continue;
-            }
-            if !literal && argument.starts_with('-') {
-                match argument.as_str() {
-                    "--stdin" => set_flag(&mut command.stdin, "--stdin")?,
-                    "--cwd" => set_option(
-                        &mut command.cwd,
-                        path_value(&mut arguments, "--cwd")?,
-                        "--cwd",
-                    )?,
-                    "--resume" => set_option(
-                        &mut command.resume,
-                        session_value(&mut arguments, "--resume")?,
-                        "--resume",
-                    )?,
-                    "--session-id" => {
-                        set_option(
-                            &mut command.session_id,
-                            session_value(&mut arguments, "--session-id")?,
-                            "--session-id",
-                        )?;
-                    }
-                    "--message-id" => set_option(
-                        &mut command.message_id,
-                        message_value(&mut arguments, "--message-id")?,
-                        "--message-id",
-                    )?,
-                    "-i" | "--image" => {
-                        command.images.push(path_value(&mut arguments, &argument)?);
-                    }
-                    "--agent-preset" => set_option(
-                        &mut command.agent_preset,
-                        run_preset_value(&mut arguments)?,
-                        "--agent-preset",
-                    )?,
-                    "--trust-workspace" => {
-                        set_flag(&mut command.trust_workspace, "--trust-workspace")?;
-                    }
-                    "--deployment" => {
-                        set_option(
-                            &mut command.deployment,
-                            string_value(&mut arguments, "--deployment")?,
-                            "--deployment",
-                        )?;
-                    }
-                    "--model" => set_option(
-                        &mut command.model,
-                        string_value(&mut arguments, "--model")?,
-                        "--model",
-                    )?,
-                    "--sandbox" => {
-                        if sandbox_set {
-                            return Err(usage("duplicate --sandbox"));
-                        }
-                        sandbox_set = true;
-                        command.sandbox = Some(sandbox_value(&mut arguments)?);
-                    }
-                    "--output" => {
-                        if output_set {
-                            return Err(usage("duplicate --output"));
-                        }
-                        output_set = true;
-                        command.output = output_value(&mut arguments)?;
-                    }
-                    "-h" | "--help" => return Ok(Parse::Help(HELP)),
-                    _ => return Err(usage(format!("unknown option `{argument}`"))),
-                }
-            } else if command.positional.replace(argument).is_some() {
-                return Err(usage("exactly one task positional is allowed"));
-            }
-        }
-        command.validate()?;
-        Ok(Parse::Run(command))
-    }
-
-    fn validate(&self) -> rsi::Result<()> {
-        if self.stdin == self.positional.is_some() {
-            return Err(usage("provide exactly one task positional or --stdin"));
-        }
-        if self.resume.is_some() && self.session_id.is_some() {
-            return Err(usage("--resume and --session-id are mutually exclusive"));
-        }
-        if self.resume.is_some() && self.agent_preset.is_some() {
-            return Err(usage("--resume and --agent-preset are mutually exclusive"));
-        }
-        if self.resume.is_some() && self.trust_workspace {
-            return Err(usage(
-                "--trust-workspace cannot change an existing Session's immutable authority",
-            ));
-        }
-        if self.deployment.is_some() != self.model.is_some() {
-            return Err(usage("--deployment and --model must be supplied together"));
-        }
-        if let (Some(deployment), Some(model)) = (&self.deployment, &self.model) {
-            ModelRef::new(deployment, model).map_err(|error| usage(error.to_string()))?;
-        }
-        Ok(())
-    }
-
-    pub(super) async fn task(&self) -> rsi::Result<String> {
-        if let Some(task) = &self.positional {
-            return Ok(task.clone());
-        }
-        let input = tokio::task::spawn_blocking(|| {
-            let mut input = Vec::new();
-            std::io::stdin()
-                .take(u64::try_from(MAXIMUM_TURN_TEXT_BYTES).unwrap_or(u64::MAX) + 1)
-                .read_to_end(&mut input)
-                .map(|_| input)
-        })
-        .await
-        .map_err(|error| RsiError::Boot(format!("stdin worker failed: {error}")))?
-        .map_err(|error| RsiError::Boot(format!("stdin read failed: {error}")))?;
-        if input.len() > MAXIMUM_TURN_TEXT_BYTES {
-            return Err(usage("stdin task exceeds the Agent text bound"));
-        }
-        String::from_utf8(input).map_err(|_| usage("stdin task is not UTF-8"))
-    }
-
-    pub(super) fn options(&self, task: String) -> rsi::Result<HeadlessTurnOptions> {
-        let session = match &self.resume {
-            Some(session_id) => SessionSelection::Resume {
-                session_id: session_id.clone(),
-                cwd: self.cwd.clone(),
-            },
-            None => SessionSelection::Fresh {
-                cwd: match &self.cwd {
-                    Some(cwd) => cwd.clone(),
-                    None => std::env::current_dir().map_err(|error| {
-                        RsiError::Boot(format!("current directory is unavailable: {error}"))
-                    })?,
-                },
-                session_id: self.session_id.clone(),
-                agent_preset_id: self.agent_preset.clone(),
-                workspace_trust: if self.trust_workspace {
-                    WorkspaceTrust::Trusted
-                } else {
-                    WorkspaceTrust::Untrusted
-                },
-            },
-        };
-        let model = self
-            .deployment
-            .as_ref()
-            .zip(self.model.as_ref())
-            .map(|(deployment, model)| {
-                ModelRef::new(deployment, model).map_err(|error| usage(error.to_string()))
-            })
-            .transpose()?;
-        Ok(HeadlessTurnOptions {
-            task,
-            session,
-            message_id: self.message_id.clone(),
-            images: self.images.clone(),
-            model,
-            sandbox: self.sandbox,
-            output: self.output,
-        })
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _validated = (operation, profile, force, detached_child);
+        Ok(Parse::HostUnsupported)
     }
 }
 
-pub(super) fn sandbox_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-) -> rsi::Result<SandboxMode> {
-    match string_value(arguments, "--sandbox")?.as_str() {
-        "read-only" => Ok(SandboxMode::ReadOnly),
-        "workspace-write" => Ok(SandboxMode::WorkspaceWrite),
-        "danger-full-access" => Ok(SandboxMode::DangerFullAccess),
-        _ => Err(usage("invalid --sandbox mode")),
+pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
+    let mut arguments = arguments.into_iter();
+    let Some(first) = arguments.next() else {
+        return Err(usage("missing application selection or management command"));
+    };
+    let first = utf8(first)?;
+    if matches!(first.as_str(), "-h" | "--help") {
+        return Ok(Parse::Help(HELP));
     }
-}
-
-pub(super) fn output_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-) -> rsi::Result<OutputMode> {
-    match string_value(arguments, "--output")?.as_str() {
-        "text" => Ok(OutputMode::Text),
-        "jsonl" => Ok(OutputMode::Jsonl),
-        _ => Err(usage("invalid --output mode")),
+    if matches!(first.as_str(), "-V" | "--version") {
+        return Ok(Parse::Version);
     }
-}
-
-pub(super) fn run_preset_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-) -> rsi::Result<AgentPresetId> {
-    let value = string_value(arguments, "--agent-preset")?;
-    AgentPresetId::new(value).map_err(|error| usage(error.to_string()))
-}
-
-pub(super) fn set_flag(value: &mut bool, name: &str) -> rsi::Result<()> {
-    if *value {
-        return Err(usage(format!("duplicate {name}")));
+    if first == "--profile" {
+        let profile = arguments
+            .next()
+            .ok_or_else(|| usage("--profile requires an Application Profile name"))?;
+        let profile =
+            ApplicationProfileId::new(utf8(profile)?).map_err(|error| usage(error.to_string()))?;
+        return Ok(Parse::Application(ApplicationInvocation {
+            profile,
+            arguments: arguments.collect(),
+        }));
     }
-    *value = true;
-    Ok(())
-}
-
-pub(super) fn set_option<T>(slot: &mut Option<T>, value: T, name: &str) -> rsi::Result<()> {
-    if slot.is_some() {
-        return Err(usage(format!("duplicate {name}")));
+    if first == "profile" {
+        return parse_profile_command(arguments);
     }
-    *slot = Some(value);
-    Ok(())
-}
-
-pub(super) fn path_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-    option: &str,
-) -> rsi::Result<PathBuf> {
-    arguments
-        .next()
-        .map(PathBuf::from)
-        .ok_or_else(|| usage(format!("{option} requires a value")))
-}
-
-pub(super) fn session_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-    option: &str,
-) -> rsi::Result<SessionId> {
-    let value = string_value(arguments, option)?;
-    SessionId::new(value).map_err(|error| usage(error.to_string()))
-}
-
-pub(super) fn message_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-    option: &str,
-) -> rsi::Result<MessageId> {
-    let value = string_value(arguments, option)?;
-    MessageId::new(value).map_err(|error| usage(error.to_string()))
-}
-
-pub(super) fn string_value(
-    arguments: &mut impl Iterator<Item = OsString>,
-    option: &str,
-) -> rsi::Result<String> {
-    let value = arguments
-        .next()
-        .ok_or_else(|| usage(format!("{option} requires a value")))?;
-    utf8(value)
-}
-
-pub(super) fn utf8(value: OsString) -> rsi::Result<String> {
-    value
-        .into_string()
-        .map_err(|_| usage("CLI arguments must be UTF-8"))
+    if first == "host" {
+        return parse_host_command(arguments);
+    }
+    if first == "agent-preset" {
+        return parse_agent_preset(arguments);
+    }
+    if first == "agent-store" {
+        return parse_agent_store(arguments);
+    }
+    Err(usage(format!(
+        "unknown command `{first}`; select an Application Profile with --profile"
+    )))
 }
 
 pub(super) fn usage(message: impl Into<String>) -> RsiError {

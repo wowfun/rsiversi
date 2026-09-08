@@ -2,7 +2,7 @@ use crate::agent_preset::{
     DEFAULT_AGENT_PRESET_ID, standard_agent_profile_compiler, user_agent_preset_root,
 };
 use crate::profiles::{CodingToolsLaunchIdentity, HostLaunchKey, HostProfileDocument};
-use crate::settings::{AgentSettingsContract, AgentSettingsFactory, SETTINGS_FACTORY};
+use crate::settings::{AgentSettingsFactory, SETTINGS_FACTORY};
 use async_trait::async_trait;
 use rsi_agent_composition::{AgentCompositionFactory, AgentContributionCatalog};
 use rsi_agent_composition_protocol::AgentCompositionContract;
@@ -38,12 +38,13 @@ use rsi_permission_presets::PermissionPresetsContract;
 use rsi_process::ProcessContract;
 use rsi_projection::ProjectionRegistryContract;
 use rsi_sandbox::SandboxContract;
+use rsi_session_protocol::AgentSettingsContract;
 use rsi_settings_protocol::{SettingsContract, SettingsProviderContract};
 use rsi_shell_bash::{BashJobProducerFactory, BashToolFactory};
 use rsi_storage::StorageHubContract;
 use rsi_storage_domain::DomainFacilityContract;
 use rsi_tools_protocol::{ToolCatalogProviderContract, ToolRegistrarContract};
-use rsi_workspace::WorkspaceRegistryContract;
+use rsi_workspace_protocol::WorkspaceRegistryContract;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -70,6 +71,8 @@ const SETTINGS_CORE_FACTORY: &str = "rsi.settings";
 const CREDENTIALS_FACTORY: &str = "rsi.credentials.local";
 const MEDIA_LOCAL_FACTORY: &str = "rsi.media.local";
 const MEDIA_FACTORY: &str = "rsi.media";
+const SESSION_FACTORY: &str = "rsi.session";
+const APPROVAL_BROKER_FACTORY: &str = "rsi.approval.broker";
 const QUESTIONS_FACTORY: &str = "rsi.user-questions";
 const QUESTION_TOOLS_FACTORY: &str = "rsi.agent.questions";
 const APPROVAL_FACTORY: &str = "rsi.approval";
@@ -104,6 +107,7 @@ const PORTABLE_AGENT_CONTRIBUTION_IDS: &[&str] = &[
 ];
 const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
 const AGENT_COMPOSITION_FACTORY: &str = "rsi.agent.composition";
+const AGENT_GENERATION_ROOT_FACTORY: &str = "rsi.agent.generation-root";
 const LANGUAGE_FACTORY: &str = "rsi.ai.language";
 const IMAGE_FACTORY: &str = "rsi.ai.image";
 
@@ -134,6 +138,7 @@ pub struct StandardComposition {
     credential_store: Arc<dyn SecretStore>,
     coding_tools: Option<StandardCodingTools>,
     agent_presets: Option<AgentPresetCatalog>,
+    service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
 }
 
 /// Frozen process inputs required by the standard Linux coding-tool generation.
@@ -851,6 +856,7 @@ impl StandardComposition {
             credential_store: Arc::new(KeyringSecretStore),
             coding_tools,
             agent_presets: None,
+            service_owner: None,
         }
     }
 
@@ -868,6 +874,23 @@ impl StandardComposition {
         self
     }
 
+    /// Supplies ownership already selected by the native process control plane.
+    pub fn with_service_owner(
+        mut self,
+        owner: Arc<rsi_service_host::HostOwnerLease>,
+        epoch: rsi_api_protocol::HostEpoch,
+    ) -> crate::Result<Self> {
+        let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&self.paths)
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        if owner.paths().owner_lock() != paths.owner_lock() {
+            return Err(crate::RsiError::Boot(
+                "service identity lease protects different Host paths".into(),
+            ));
+        }
+        self.service_owner = Some(rsi_service_host::ServiceOwnerFactory::new(owner, epoch));
+        Ok(self)
+    }
+
     /// Returns the frozen paths used by this candidate.
     pub const fn paths(&self) -> &HostPaths {
         &self.paths
@@ -882,7 +905,7 @@ impl StandardComposition {
         profile: &HostProfileDocument,
     ) -> crate::Result<StandardHostPreview> {
         let (host, presets) = self
-            .build_internal(false)
+            .build_internal(false, None)
             .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
         let composition_digest = host
             .composition_digest()
@@ -912,12 +935,19 @@ impl StandardComposition {
 
     /// Builds the generic Host without reading a Host Profile or activating plugins.
     pub fn build(self) -> rsi_host::Result<Host> {
-        self.build_internal(true).map(|(host, _presets)| host)
+        self.build_internal(true, None).map(|(host, _presets)| host)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn build_daemon(self, launch_key: &str) -> rsi_host::Result<Host> {
+        self.build_internal(true, Some(launch_key))
+            .map(|(host, _)| host)
     }
 
     fn build_internal(
         &self,
         materialize_assets: bool,
+        local_api: Option<&str>,
     ) -> rsi_host::Result<(Host, AgentPresetLaunchIdentity)> {
         let linux_tools_enabled = self.coding_tools.is_some();
         let paths = self.paths.clone();
@@ -958,11 +988,53 @@ impl StandardComposition {
             self.coding_tools.clone(),
             agent_composition,
         )?;
+        let owner = match self.service_owner.clone() {
+            Some(owner) => owner,
+            None => rsi_service_host::ServiceOwnerFactory::acquiring(
+                rsi_service_host::ServiceHostPaths::from_host_paths(&paths)
+                    .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?,
+            ),
+        };
+        builder.register_local_contract::<rsi_service_host::ServiceOwnerContract>()?;
+        builder.register_local_contract::<rsi_api_protocol::HostGenerationContract>()?;
+        register(
+            &mut builder,
+            "rsi.service.owner",
+            UpdateMode::RestartRequired,
+            owner,
+        )?;
+        builder.register_fragment(ProfileFragment::new(
+            "rsi.standard.owner",
+            [ProfileEntry::new(
+                "rsi.service.owner",
+                "rsi.service.owner",
+                Value::Null,
+            )],
+        ))?;
         builder.register_fragment(base_fragment(&paths, linux_tools_enabled))?;
         let agent = SessionAgentConfig::new(paths.state().join("agent"))
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
             .with_maximum_active_turns(STANDARD_MAXIMUM_ACTIVE_TURNS);
         builder.register_fragment(session_fragment(&agent))?;
+        builder.register_fragment(ProfileFragment::new(
+            "rsi.standard.session",
+            vec![ProfileEntry::new(
+                "rsi-session",
+                SESSION_FACTORY,
+                Value::Null,
+            )],
+        ))?;
+        crate::api_composition::register(&mut builder)?;
+        if let Some(launch_key) = local_api {
+            builder.register_fragment(ProfileFragment::new(
+                "rsi.standard.local-api",
+                [ProfileEntry::new(
+                    "rsi.api.local",
+                    "rsi.api.local",
+                    json!({"launch_key": launch_key}),
+                )],
+            ))?;
+        }
         builder.build().map(|host| (host, preset_identity))
     }
 }
@@ -1016,6 +1088,18 @@ fn register_factories(
         UpdateMode::RestartRequired,
         CredentialsLocalFactory::with_store(credential_store, captured_environment),
     )?;
+    register(
+        builder,
+        SESSION_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_session::SessionFactory,
+    )?;
+    register(
+        builder,
+        APPROVAL_BROKER_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_service_host::ApprovalBrokerFactory,
+    )?;
     register_runtime_factories(builder, coding_tools, agent_composition)?;
     register_agent_ai_factories(builder)
 }
@@ -1030,7 +1114,7 @@ fn register_runtime_factories(
         builder,
         QUESTIONS_FACTORY,
         UpdateMode::RestartRequired,
-        rsi_session_host::QuestionBrokerFactory,
+        rsi_service_host::QuestionBrokerFactory,
     )?;
     let sandbox_factory = if coding_tools.is_some() {
         rsi_sandbox_local::SandboxLocalFactory::default().require_restricted_backend()
@@ -1125,6 +1209,12 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
+        AGENT_GENERATION_ROOT_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_agent_composition::AgentGenerationRootFactory,
+    )?;
+    register(
+        builder,
         WORKSPACE_CONTEXT_FACTORY,
         UpdateMode::RestartRequired,
         WorkspaceContextFactory,
@@ -1199,7 +1289,12 @@ fn register_contracts(builder: &mut HostBuilder) -> rsi_host::Result<()> {
     builder.register_local_contract::<DomainFacilityContract>()?;
     builder.register_local_contract::<SettingsProviderContract>()?;
     builder.register_local_contract::<SettingsContract>()?;
+    builder.register_local_contract::<rsi_settings_protocol::SettingsAccessContract>()?;
     builder.register_local_contract::<AgentSettingsContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionIngressContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionApprovalControlContract>()?;
+    builder.register_local_contract::<rsi_service_host::ApprovalBrokerContract>()?;
     builder.register_local_contract::<CredentialsResolveContract>()?;
     builder.register_local_contract::<CredentialsAdminContract>()?;
     builder.register_local_contract::<MediaBackendContract>()?;
@@ -1219,8 +1314,10 @@ fn register_contracts(builder: &mut HostBuilder) -> rsi_host::Result<()> {
     builder.register_local_contract::<ToolCatalogProviderContract>()?;
     builder.register_local_contract::<ToolRegistrarContract>()?;
     builder.register_local_contract::<AgentCompositionContract>()?;
+    builder.register_local_contract::<rsi_agent_composition::AgentGenerationRootContract>()?;
     builder.register_local_contract::<WorkspaceContextContract>()?;
     builder.register_local_contract::<LanguageCallContract>()?;
+    builder.register_local_contract::<rsi_ai_protocol::LanguageModelsContract>()?;
     builder.register_local_contract::<ImageCallContract>()?;
     builder.register_local_contract::<LanguageRegistrarContract>()?;
     builder.register_local_contract::<ImageRegistrarContract>()?;
@@ -1231,6 +1328,7 @@ fn register_contracts(builder: &mut HostBuilder) -> rsi_host::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One ordered declaration keeps Base plugin dependencies reviewable.
 fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
     let mut entries = vec![
         ProfileEntry::new("rsi-storage", STORAGE_FACTORY, Value::Null),
@@ -1246,7 +1344,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             json!({ "path": paths.config().join("settings.json") }),
         ),
         ProfileEntry::new("rsi-settings", SETTINGS_CORE_FACTORY, Value::Null),
-        ProfileEntry::new("rsi-session-settings", SETTINGS_FACTORY, Value::Null),
+        ProfileEntry::new("rsi-agent-defaults", SETTINGS_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-credentials",
             CREDENTIALS_FACTORY,
@@ -1266,6 +1364,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ),
         ProfileEntry::new("rsi-media", MEDIA_FACTORY, Value::Null),
         ProfileEntry::new("rsi-approval", APPROVAL_FACTORY, Value::Null),
+        ProfileEntry::new("rsi-approval-broker", APPROVAL_BROKER_FACTORY, Value::Null),
         ProfileEntry::new("rsi-user-questions", QUESTIONS_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-permission-presets",
@@ -1316,6 +1415,11 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
             }),
         ),
         ProfileEntry::new(
+            "rsi-agent-generation-root",
+            AGENT_GENERATION_ROOT_FACTORY,
+            Value::Null,
+        ),
+        ProfileEntry::new(
             "rsi-agent-composition",
             AGENT_COMPOSITION_FACTORY,
             Value::Null,
@@ -1340,6 +1444,7 @@ pub fn capture_standard_environment() -> crate::Result<BTreeMap<String, SecretVa
         "OPENAI_API_KEY",
         "RSI_OPENAI_COMPATIBLE_API_KEY",
         "DEEPSEEK_API_KEY",
+        "RSI_API_DEVICE_TOKEN",
     ] {
         if let Some(value) = std::env::var_os(name) {
             let value = value.into_string().map_err(|_| {

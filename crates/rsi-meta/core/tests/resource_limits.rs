@@ -43,6 +43,11 @@ fn minimum_retained_plugin_limit(limits: &RuntimeLimits) -> usize {
 
 #[test]
 fn grouped_limits_validate_primitive_bounds_without_coupling_shutdown_wait() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     Runtime::new(RuntimeLimits {
         deadlines: DeadlineLimits {
             transition: Duration::from_secs(2),
@@ -110,6 +115,11 @@ fn grouped_limits_validate_primitive_bounds_without_coupling_shutdown_wait() {
 
 #[test]
 fn retained_plugin_budget_covers_desired_and_normalized_attempt_configurations() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let limits = |maximum_retained_plugin_bytes| RuntimeLimits {
         topology: TopologyLimits {
             maximum_dependency_edges: 1,
@@ -139,6 +149,11 @@ fn retained_plugin_budget_covers_desired_and_normalized_attempt_configurations()
 
 #[test]
 fn every_accepted_boundary_policy_constructs_without_panicking() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let tokio_maximum = tokio::sync::Semaphore::MAX_PERMITS;
     let accepted = [
         RuntimeLimits::default(),
@@ -200,6 +215,11 @@ fn every_accepted_boundary_policy_constructs_without_panicking() {
 
 #[test]
 fn duplicate_prepared_requirement_diagnostic_names_the_service() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::default();
     let spec = FactorySpec::new(FactoryIdentity::linked("duplicate-detail", "7"))
         .requiring(Requirement::new("same", "one", V1))
@@ -218,6 +238,11 @@ fn duplicate_prepared_requirement_diagnostic_names_the_service() {
 
 #[test]
 fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panicking() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let tokio_maximum = tokio::sync::Semaphore::MAX_PERMITS;
     let mut candidates = Vec::new();
     macro_rules! topology_candidates {
@@ -319,6 +344,11 @@ fn every_one_field_boundary_candidate_is_rejected_or_constructs_without_panickin
 
 #[test]
 fn json_depth_hard_ceiling_is_exact_and_precedes_recursive_encoding() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         payloads: PayloadLimits {
             maximum_json_depth: MAXIMUM_JSON_DEPTH,
@@ -398,7 +428,15 @@ fn deep_owned_config_boundaries_reject_or_drop_without_recursing() {
 }
 
 fn run_deep_config_scenario(scenario: &str) {
-    let runtime = Runtime::default();
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let runtime = Runtime::with_execution(
+        RuntimeLimits::default(),
+        rsi_meta::Execution::native(executor.handle().clone()),
+    )
+    .unwrap();
     let spec = || FactorySpec::new(FactoryIdentity::linked("deep-config", "1"));
     match scenario {
         "prepare-input" => assert!(matches!(
@@ -417,10 +455,6 @@ fn run_deep_config_scenario(scenario: &str) {
             ));
         }
         "drop-reconfigure" => {
-            let executor = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
             let fiber = executor
                 .block_on(runtime.root().apply(
                     crate::resolved(Arc::new(PassiveFactory(spec()))),
@@ -443,6 +477,11 @@ fn deep_json_value() -> Value {
 
 #[test]
 fn resource_snapshot_exposes_every_global_budget_with_its_validated_limit() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let limits = RuntimeLimits::default();
     let runtime = Runtime::new(limits.clone()).unwrap();
     let snapshot = runtime.resource_snapshot();
@@ -564,6 +603,11 @@ async fn prepared_proofs_are_runtime_bound_and_reserve_until_drop_or_disposal() 
 
 #[test]
 fn plugin_capacity_is_reserved_before_identity_observation() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_fibers: 1,
@@ -638,6 +682,11 @@ fn plugin_capacity_is_reserved_before_identity_observation() {
 
 #[test]
 fn preparation_validates_identity_requirements_and_json_shape_before_retention() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_requirements_per_fiber: 1,
@@ -808,6 +857,11 @@ async fn opaque_prepared_state_is_exactly_accounted_moved_and_dropped() {
 
 #[test]
 fn prepared_requirement_capacity_is_global_and_released_with_the_proof() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_fibers: 2,
@@ -855,6 +909,11 @@ fn prepared_requirement_capacity_is_global_and_released_with_the_proof() {
 
 #[test]
 fn context_scope_bounds_entries_and_identifiers() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let entry_runtime = Runtime::new(RuntimeLimits {
         topology: TopologyLimits {
             maximum_context_entries: 1,
@@ -1285,6 +1344,11 @@ impl PluginFactory for BlockingPreparationFactory {
 
 #[test]
 fn preparation_admission_is_fail_fast_and_reports_rejections() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = executor.enter();
     let runtime = Runtime::new(RuntimeLimits {
         execution: ExecutionLimits {
             maximum_concurrent_preparations: 1,

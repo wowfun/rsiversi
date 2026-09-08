@@ -1,0 +1,384 @@
+use super::{composition, fixture, host_profile};
+use rsi_ai_protocol::LanguageModels;
+use rsi_api_protocol::{
+    ApiClient, ApiDispatchContract, ConnectionDescriptionContract, DeviceAdministrationContract,
+    DeviceAuthenticationContract,
+};
+use rsi_credentials_protocol::CredentialRef;
+use rsi_session_protocol::SessionService;
+use rsi_settings_protocol::SettingsAccess;
+use rsi_workspace_protocol::WorkspaceRegistry;
+use std::sync::Arc;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daemon_reload_replaces_listener_diagnostics_and_preserves_owner_and_retained_clients() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let mut daemon = super::DaemonFixture::new(&fixture).await;
+    let identity = daemon.running.connection_description().unwrap();
+    let source = std::fs::read_to_string(&fixture.profile).unwrap();
+    let client = daemon.connection.language_models();
+    for maximum_active_turns in [3, 2] {
+        let previous = daemon.diagnostics.borrow_and_update().clone();
+        std::fs::write(&fixture.profile, format!("{source}\n[[steps]]\nkind = 'patch'\ntarget = 'rsi-agent-executor'\nconfig = {{ executor_id = 'rsi-agent-executor', maximum_active_turns = {maximum_active_turns} }}\n")).unwrap();
+        let outcome = daemon.running.reload().await.unwrap();
+        assert!(matches!(
+            outcome,
+            rsi_host::ReloadOutcome::Applied(_) | rsi_host::ReloadOutcome::Unchanged(_)
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            daemon.diagnostics.changed(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!daemon.task.is_finished());
+        assert_eq!(daemon.running.connection_description().unwrap(), identity);
+        let retired = previous.snapshot();
+        assert_eq!(client.list_models(None, 16).await.unwrap().models.len(), 1);
+        assert!(
+            daemon
+                .diagnostics
+                .borrow_and_update()
+                .snapshot()
+                .accepted_connections
+                > 0
+        );
+        assert_eq!(
+            previous.snapshot(),
+            retired,
+            "retired listener counters changed"
+        );
+    }
+    std::fs::write(
+        &fixture.profile,
+        "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'invalid'\nplugin = 'unknown.factory'\n",
+    )
+    .unwrap();
+    assert!(daemon.running.reload().await.is_err());
+    assert_eq!(client.list_models(None, 16).await.unwrap().models.len(), 1);
+    assert!(!daemon.task.is_finished());
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_local_and_uds_model_clients_follow_a_changed_provider_profile() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let daemon = super::DaemonFixture::new(&fixture).await;
+    let clients: [Arc<dyn LanguageModels>; 2] = [
+        daemon.running.language_models().unwrap(),
+        daemon.connection.language_models(),
+    ];
+    let identity = daemon.running.connection_description().unwrap();
+    for client in &clients {
+        assert_eq!(
+            client.list_models(None, 16).await.unwrap().models,
+            vec![rsi_ai_protocol::ModelRef::new("fixture", "fixture-model").unwrap()]
+        );
+    }
+    let source = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(
+        &fixture.profile,
+        source.replace(
+            "language_models.fixture-model",
+            "language_models.replacement-model",
+        ),
+    )
+    .unwrap();
+    daemon.running.reload().await.unwrap();
+    assert_eq!(daemon.running.connection_description().unwrap(), identity);
+    for client in &clients {
+        assert_eq!(
+            client.list_models(None, 16).await.unwrap().models,
+            vec![rsi_ai_protocol::ModelRef::new("fixture", "replacement-model").unwrap()]
+        );
+    }
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_service_profiles_share_an_application_runtime_with_isolated_lifetimes() {
+    let runtime = rsi_meta::Runtime::default();
+    let first = fixture("http://127.0.0.1:1");
+    let second = fixture("http://127.0.0.1:1");
+    let one = rsi::RunningRsi::boot_host_profile_in(
+        composition(first.paths.clone()),
+        &host_profile(&first),
+        &runtime.root(),
+    )
+    .await
+    .unwrap();
+    let two = rsi::RunningRsi::boot_host_profile_in(
+        composition(second.paths.clone()),
+        &host_profile(&second),
+        &runtime.root(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        one.connection_description().unwrap().endpoint_id,
+        two.connection_description().unwrap().endpoint_id
+    );
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_session_protocol::SessionContract>()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<ConnectionDescriptionContract>()
+            .is_none()
+    );
+    let service_instances = || {
+        runtime.snapshot().fibers.into_iter().filter(|fiber| {
+        fiber.state == rsi_meta::FiberState::Active &&
+        matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == "rsi.session")
+    }).count()
+    };
+    assert_eq!(
+        service_instances(),
+        2,
+        "both real Session plugins belong to the supplied Runtime"
+    );
+    assert!(one.shutdown().await.is_clean());
+    assert!(one.session_service().is_err());
+    assert_eq!(service_instances(), 1);
+    assert!(
+        two.session_service()
+            .unwrap()
+            .list_recent(None, 16)
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    two.reload().await.unwrap();
+    assert_eq!(
+        two.language_models()
+            .unwrap()
+            .list_models(None, 16)
+            .await
+            .unwrap()
+            .models
+            .len(),
+        1
+    );
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(two.session_service().is_err());
+    assert!(two.shutdown().await.is_clean());
+    rsi_service_host::HostOwnerLease::try_acquire(
+        rsi_service_host::ServiceHostPaths::from_host_paths(&second.paths).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn rejected_child_profile_leaves_the_parent_graph_and_backend_untouched() {
+    let runtime = rsi_meta::Runtime::default();
+    let fixture = fixture("http://127.0.0.1:1");
+    std::fs::write(
+        &fixture.profile,
+        "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'bad'\nplugin = 'unregistered.plugin'\n",
+    )
+    .unwrap();
+    let before = runtime.snapshot().fibers.len();
+    assert!(
+        rsi::RunningRsi::boot_host_profile_in(
+            composition(fixture.paths.clone()),
+            &host_profile(&fixture),
+            &runtime.root(),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(runtime.snapshot().fibers.len(), before);
+    let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
+    assert!(!paths.owner_lock().exists());
+    assert!(!fixture.paths.state().join("base.sqlite3").exists());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn owner_precedes_storage_and_runtime_identity_does_not_change_launch_preview() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let candidate = composition(fixture.paths.clone());
+    let profile = host_profile(&fixture);
+    let preview = candidate.preview_host(&profile).unwrap();
+    let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
+    assert!(!paths.owner_lock().exists());
+    let lease = Arc::new(rsi_service_host::HostOwnerLease::try_acquire(paths.clone()).unwrap());
+    let blocked = candidate
+        .clone()
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await;
+    assert!(blocked.is_err());
+    assert!(!fixture.paths.state().join("base.sqlite3").exists());
+    assert!(!fixture.paths.state().join("agent").exists());
+    let candidate = candidate
+        .with_service_owner(
+            lease.clone(),
+            rsi_api_protocol::HostEpoch::generate().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(candidate.preview_host(&profile).unwrap(), preview);
+    let host = candidate
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await
+        .unwrap();
+    assert!(
+        host.lookup_local::<ConnectionDescriptionContract>()
+            .is_some()
+    );
+    assert!(host.shutdown().await.is_clean());
+    drop(host);
+    drop(lease);
+    rsi_service_host::HostOwnerLease::try_acquire(paths).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // Observe complete product restart, authentication and API ownership together.
+async fn standard_api_plugins_share_durable_identity_and_serve_independent_domains() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let candidate = composition(fixture.paths.clone());
+    let host = candidate
+        .clone()
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await
+        .unwrap();
+    let description = host
+        .lookup_local::<ConnectionDescriptionContract>()
+        .unwrap();
+    let registered = host
+        .lookup_local::<DeviceAdministrationContract>()
+        .unwrap()
+        .register("standard API fixture")
+        .await
+        .unwrap();
+    let authentication = host.lookup_local::<DeviceAuthenticationContract>().unwrap();
+    let authority = authentication.authenticate(&registered.token).unwrap();
+    let dispatch = host.lookup_local::<ApiDispatchContract>().unwrap();
+    let domains = dispatch
+        .operations()
+        .into_iter()
+        .map(|spec| spec.id.domain().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        domains,
+        [
+            "connection",
+            "devices",
+            "media",
+            "models",
+            "output",
+            "session",
+            "settings",
+            "workspace"
+        ]
+        .map(str::to_owned)
+        .into()
+    );
+    assert!(
+        dispatch
+            .operations()
+            .iter()
+            .filter(|spec| spec.id.domain() == "devices")
+            .all(|spec| spec.access == rsi_api_protocol::OperationAccess::Local)
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind = listener.local_addr().unwrap();
+    let origin = format!("http://{bind}");
+    let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+    let server = rsi_api_http::HttpServer::from_listener(
+        execution.clone(),
+        listener,
+        rsi_api_http::HttpConfig {
+            bind,
+            public_origin: origin.clone(),
+            tls: None,
+            allow_loopback_http: true,
+        },
+        rsi_api_http::HttpServices {
+            dispatch: dispatch.clone(),
+            authentication,
+            endpoint: description.endpoint_id.clone(),
+            epoch: description.host_epoch.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(server.serve(stop.clone()));
+    let api = Arc::new(
+        rsi_api_http_client::HttpClient::connect(
+            execution,
+            rsi_api_http_client::HttpClientConfig {
+                origin,
+                endpoint_id: description.endpoint_id.clone(),
+                credential: CredentialRef::new("fixture", "device").unwrap(),
+                tls_ca: None,
+                allow_loopback_http: true,
+            },
+            registered.token.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(api.description(), description.as_ref());
+    let workspace = rsi_workspace_api::WorkspaceClient::new(api.clone()).unwrap();
+    let registered_workspace = workspace.get_or_create(&fixture.workspace).await.unwrap();
+    assert_eq!(
+        workspace.get(&registered_workspace.id).await.unwrap(),
+        registered_workspace
+    );
+    let settings = rsi_settings_api::SettingsClient::new(api.clone()).unwrap();
+    let snapshot = settings.read("rsi.agent").await.unwrap();
+    assert_eq!(snapshot.value["default_model"]["model"], "fixture-model");
+    let models = rsi_ai_models_api::ModelsClient::new(api.clone()).unwrap();
+    assert_eq!(models.list_models(None, 256).await.unwrap().models.len(), 1);
+    rsi_media_api::MediaClient::new(api.clone()).unwrap();
+    rsi_process_output_api::OutputClient::new(api.clone()).unwrap();
+    let sessions = rsi_session_api::SessionClient::new(api.clone()).unwrap();
+    assert!(
+        sessions
+            .list_recent(None, 8)
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    api.close().await;
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    assert!(host.shutdown().await.is_clean());
+    assert!(authority.revoked.is_cancelled());
+    assert!(dispatch.operations().is_empty());
+    let restarted = candidate
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await
+        .unwrap();
+    let next = restarted
+        .lookup_local::<ConnectionDescriptionContract>()
+        .unwrap();
+    assert_eq!(next.endpoint_id, description.endpoint_id);
+    assert_ne!(next.host_epoch, description.host_epoch);
+    assert_eq!(
+        restarted
+            .lookup_local::<DeviceAuthenticationContract>()
+            .unwrap()
+            .authenticate(&registered.token)
+            .unwrap()
+            .id,
+        registered.record.id
+    );
+    assert!(restarted.shutdown().await.is_clean());
+}

@@ -14,8 +14,8 @@ pub use error::{HostError, Result};
 pub use host::{Host, HostProfilePreview, HostProfilePreviewLeaf, RunningHost};
 pub use paths::HostPaths;
 pub use rsi_meta_profile::{
-    Profile, ProfileControl, ProfileControlContract, ProfileEntry, ProfileFragment, ProfileGroup,
-    ProfileHealth, ProfileInstanceState, ProfileInstanceStatus, ProfileLimits, ProfileNode,
-    ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus, ProfileStep, ProfileTargetStatus,
-    ReloadOutcome, SnapshotNode, WatcherHealth,
+    Profile, ProfileBootstrap, ProfileBundle, ProfileControl, ProfileControlContract, ProfileEntry,
+    ProfileFragment, ProfileGroup, ProfileHealth, ProfileInstanceState, ProfileInstanceStatus,
+    ProfileLimits, ProfileNode, ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus,
+    ProfileStep, ProfileTargetStatus, ReloadOutcome, SnapshotNode, WatcherHealth,
 };

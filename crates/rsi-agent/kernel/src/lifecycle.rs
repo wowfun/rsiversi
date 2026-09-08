@@ -1,6 +1,6 @@
 use super::*;
 
-impl SessionKernel {
+impl AgentKernel {
     /// Recovers every durable session and repairs unfinished tails before return.
     pub async fn recover(
         store: Arc<dyn SessionStore>,
@@ -44,7 +44,24 @@ impl SessionKernel {
         clock: Arc<dyn Clock>,
         limits: KernelLimits,
     ) -> Result<Self> {
-        limits.validate()?;
+        Self::recover_with_validated_limits(
+            store,
+            composition,
+            workspace_context,
+            clock,
+            ValidatedKernelLimits::new(limits)?,
+        )
+        .await
+    }
+
+    pub(super) async fn recover_with_validated_limits(
+        store: Arc<dyn SessionStore>,
+        composition: Arc<dyn AgentComposition>,
+        workspace_context: Arc<dyn WorkspaceContext>,
+        clock: Arc<dyn Clock>,
+        limits: ValidatedKernelLimits,
+    ) -> Result<Self> {
+        let limits = limits.0;
         let mut after = None;
         loop {
             let page = store
@@ -89,6 +106,7 @@ impl SessionKernel {
                 submission_admission: SubmissionAdmission::new(),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
+                session_changes: SessionWatchHub::default(),
                 flush_requested: Notify::new(),
                 settlement_requested: Notify::new(),
                 settlement_health: Mutex::new(SettlementHealth::default()),
@@ -98,6 +116,10 @@ impl SessionKernel {
                 process_pending_bytes: AtomicUsize::new(0),
                 process_pending_changed: Notify::new(),
                 active_observers: AtomicUsize::new(0),
+                observation_retention: ObservationRetention::new(
+                    limits.maximum_retained_observation_bytes,
+                )
+                .expect("validated Kernel retention limits"),
                 store_read_admission: Arc::new(Semaphore::new(limits.maximum_store_read_bytes)),
             }),
         };
@@ -205,7 +227,21 @@ impl SessionKernel {
                 continue;
             };
             let batch = prepared.into_store_batch();
+            let created_root = batch.header.as_ref().map(|header| {
+                header
+                    .fork_origin()
+                    .map_or(header.session_id(), |origin| &origin.root_session_id)
+                    .clone()
+            });
             let result = self.inner.store.append(batch).await;
+            if result.is_ok() {
+                self.inner.session_changes.committed(&session_id);
+            }
+            // Creation may have committed before its acknowledgement was lost.
+            // Membership notifications carry only a requery hint, as in commit_agent.
+            if let Some(root) = created_root {
+                self.inner.session_changes.created_in_tree(&root);
+            }
             self.complete_flush(&session_id, result);
         }
     }
@@ -431,7 +467,7 @@ impl SessionKernel {
         &self,
         mut commit: AtomicAgentCommit,
     ) -> TurnResult<std::result::Result<AtomicAgentCommitResult, StoreError>> {
-        let first = self.inner.store.commit_agent(commit.clone()).await;
+        let first = self.inner.commit_agent(commit.clone()).await;
         let Err(conflict @ StoreError::Conflict { .. }) = first else {
             return Ok(first);
         };
@@ -462,7 +498,7 @@ impl SessionKernel {
         if !refreshed {
             return Ok(Err(conflict));
         }
-        Ok(self.inner.store.commit_agent(commit).await)
+        Ok(self.inner.commit_agent(commit).await)
     }
 
     pub(super) async fn read_ready_roots(
@@ -607,7 +643,7 @@ impl SessionKernel {
             .ok_or(TurnError::StaleClaim)?;
         match &turn.claim {
             Some(owner)
-                if !owner.mutations.retiring.load(Ordering::Acquire)
+                if !owner.mutations.is_retiring()
                     && owner.executor == claim.executor_id()
                     && owner.registration == registration_id
                     && owner.claim == claim.claim_id()

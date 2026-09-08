@@ -1,7 +1,9 @@
 # rsi-sandbox-local
 
-This ordinary plugin probes only explicit absolute candidate paths. A
-bubblewrap candidate must create the same namespace and read-only-root shape
+This ordinary plugin probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
+filesystem canonicalization. Portable host-path DTOs may describe another
+platform; those spellings do not grant this native effect boundary a relative path.
+A bubblewrap candidate must create the same namespace and read-only-root shape
 used by restricted plans and propagate a reserved child exit code; an
 executable that merely exits successfully is not enforcement evidence.
 Landlock runners implement `--rsi-landlock-probe 23` and return exit code 23
@@ -11,6 +13,11 @@ consult `PATH`. Candidate staging is separately byte-bounded and does not
 consume that behavior budget; copying from a pinned regular-file handle is
 blocking filesystem work and is not falsely described as having a hard
 wall-clock deadline.
+
+A probe spawn reporting an executable still open for writing is retried within
+that same absolute two-second deadline. Concurrent native process creation can
+briefly inherit a staging writer until exec closes it. Only this transient spawn
+error is retried; an unsuccessful probe exit never establishes enforcement.
 
 Optional factory activation publishes a service even when no backend passes;
 restricted calls then fail closed while `danger-full-access` remains an explicit

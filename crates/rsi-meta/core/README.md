@@ -11,13 +11,17 @@ semaphore, counter, JSON traversal, and deadline. `resource_snapshot` reports
 logical retained ownership, high-water marks, and rejected reservations rather
 than allocator RSS.
 
-All public async operations require a Tokio runtime with time enabled. A Fiber
-captures its executor at insertion so Runtime-owned transitions, rollback, and
-cleanup remain schedulable when the initiating waiter is dropped on another
-thread. The embedding Tokio runtime must outlive `Runtime::shutdown`; a Tokio
-`Handle` does not retain an executor after its owner shuts down. Synchronous
-capability opening uses the captured executor and does not require an ambient
-Tokio context.
+`Runtime::with_execution` receives the execution dependency before any Fiber is
+created. Every transition, deadline, rollback, cleanup and empty-Runtime shutdown
+uses that dependency. Native `Runtime::new` and `Default` are conveniences that
+capture the current Tokio handle and require an entered runtime. The embedding
+executor must outlive `Runtime::shutdown`; an execution handle does not keep a
+stopped platform alive. Once constructed, calls and ownership transfer do not
+require an ambient Tokio context. Dropping a task waiter does not cancel its job.
+
+Browser execution runs in a Worker. Synchronous preparation must be bounded and
+cannot be preempted; its absolute deadline is checked before publication. A WASM
+trap is a Worker failure, not successful Rust cleanup or clean Runtime shutdown.
 
 `Runtime::snapshot` captures bounded registry membership under the Runtime
 lock, releases it, and then observes individual Fibers. It is an operational

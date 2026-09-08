@@ -2,7 +2,7 @@ use crate::{MetaError, Result};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
 
 /// Hard ceiling for any deadline accepted by core.
@@ -322,9 +322,10 @@ fn validate_deadlines(limits: &RuntimeLimits) -> Result<()> {
         limits.deadlines.service_call,
         limits.deadlines.shutdown_wait,
     ];
-    if deadlines.iter().any(|deadline| {
-        *deadline > MAXIMUM_OPERATION_DEADLINE || Instant::now().checked_add(*deadline).is_none()
-    }) {
+    if deadlines
+        .iter()
+        .any(|deadline| *deadline > MAXIMUM_OPERATION_DEADLINE)
+    {
         return Err(MetaError::InvalidInput(format!(
             "runtime deadlines must not exceed {} seconds",
             MAXIMUM_OPERATION_DEADLINE.as_secs()

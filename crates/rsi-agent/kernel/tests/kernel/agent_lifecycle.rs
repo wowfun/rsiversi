@@ -184,7 +184,7 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -696,7 +696,7 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
     let service: Arc<dyn SessionStore> = observed.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -1024,7 +1024,7 @@ async fn a_corrupt_ready_index_is_not_silently_reported_as_no_work() {
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = observed.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -1062,7 +1062,7 @@ async fn a_corrupt_ready_index_is_not_silently_reported_as_no_work() {
 }
 
 pub(super) async fn active_parent_and_child(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
 ) -> (
     rsi_agent_turn_protocol::TurnClaim,
     rsi_agent_turn_protocol::TurnClaim,
@@ -1232,7 +1232,7 @@ async fn later_ready_page_failures_back_off_even_when_other_claims_wake_the_sche
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -1303,7 +1303,7 @@ async fn transient_ready_root_enumeration_failure_keeps_the_executor_registered(
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -1343,10 +1343,9 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
         let service: Arc<dyn SessionStore> = store.clone();
-        let kernel =
-            SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
-                .await
-                .unwrap();
+        let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
         let worker = kernel.start_workers();
         let (parent, _child, _lease) = active_parent_and_child(&kernel).await;
         store.pause_second_next_descendant_snapshot();

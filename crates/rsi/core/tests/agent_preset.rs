@@ -13,6 +13,56 @@ fn write_preset(root: &Path, id: &str, composition: &str) {
 }
 
 #[tokio::test]
+async fn scoped_catalog_plugins_share_parent_runtime_and_retire_their_settings_ownership() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = rsi_meta::Runtime::default();
+    let mut managers = Vec::new();
+    for label in ["first", "second"] {
+        let root = temporary.path().join(label);
+        let paths =
+            HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+        let system = root.join("presets");
+        write_preset(&system, "standard", "format = 1\n");
+        let manager = AgentPresetManager::open_standard_in(&runtime.root(), paths, system, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.catalog().default_id().await.unwrap().as_str(),
+            "standard"
+        );
+        managers.push(manager);
+    }
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_settings_protocol::SettingsContract>()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
+            .is_none()
+    );
+    assert_eq!(runtime.snapshot().fibers.iter().filter(|fiber| {
+        matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == "rsi.agent.preset-catalog")
+            && fiber.state == rsi_meta::FiberState::Active
+    }).count(), 2);
+    let first = managers.remove(0);
+    let escaped = first.catalog().clone();
+    assert!(first.shutdown().await.is_clean());
+    assert!(escaped.default_id().await.is_err());
+    let second = managers.remove(0);
+    assert_eq!(
+        second.catalog().default_id().await.unwrap().as_str(),
+        "standard"
+    );
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(second.catalog().default_id().await.is_err());
+    assert!(second.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn manager_derives_settings_roots_user_root_and_default_override() {
     let temporary = tempfile::tempdir().unwrap();
     let config = temporary.path().join("config");
@@ -261,10 +311,10 @@ fn built_binary_rejects_a_non_absolute_configured_root() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
     assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("roots[].path` must be absolute")
+        diagnostic.contains("roots[].path` must be absolute"),
+        "{diagnostic}"
     );
 }
 
@@ -314,11 +364,12 @@ max_output_reserve_tokens = 16384
 "#,
         )
         .unwrap();
-        let application = config.join("application-profiles/test-headless/application.toml");
+        let application =
+            config.join("application-profiles/test-headless/application.profile.toml");
         fs::create_dir_all(application.parent().unwrap()).unwrap();
         fs::write(
             application,
-            "format = 1\napplication = \"headless\"\nhost_profile = \"test\"\n",
+            "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"connection\"\nplugin = \"rsi.application.connection\"\nconfig = { host_profile = \"test\" }\n[[steps]]\nkind = \"plugin\"\nid = \"application\"\nplugin = \"rsi.application.headless\"\n",
         )
         .unwrap();
         write_preset(

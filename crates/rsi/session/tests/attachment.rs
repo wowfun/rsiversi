@@ -21,16 +21,20 @@ use rsi_ai_protocol::{
 use rsi_approval_protocol::{ApprovalDecision, ApprovalRequest, ApprovalSubject};
 use rsi_media_protocol::{Media, MediaError, MediaRef, StoredMedia};
 use rsi_sandbox::SandboxMode;
-use rsi_session::{
-    AgentSettingsSource, CreateSession, LocalSessionApplication, NoApprovalControl,
-    SessionApplication, SessionApplicationError, SessionApprovalControl, SessionHandle,
-    SessionInput, SubmitDirectImage, SubmitInput, validate_session_input,
+use rsi_session::LocalSessionService;
+use rsi_session_protocol::{
+    AgentSettingsSource, CreateSession, NoApprovalControl, SessionApprovalControl, SessionError,
+    SessionHandle, SessionInput, SessionService, SubmitDirectImage, SubmitInput,
+    validate_session_input,
 };
 use rsi_tools_protocol::{
     PreparedToolCall, RetainedToolResult, ToolCall, ToolDefinition, ToolError, ToolResultIdentity,
     ToolRuntime,
 };
-use rsi_workspace::{WorkspaceId, WorkspaceRecord, WorkspaceRegistry, WorkspaceStatus};
+use rsi_workspace_protocol::{
+    WorkspaceCursor, WorkspaceId, WorkspacePage, WorkspaceRecord, WorkspaceRegistry,
+    WorkspaceStatus,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{
@@ -40,9 +44,13 @@ use std::sync::{
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+#[path = "attachment/drafts.rs"]
+mod drafts;
+
 #[derive(Debug, Default)]
 struct UnavailableTurns {
     tree: Option<Vec<SessionId>>,
+    live_tree: Option<Arc<LiveTree>>,
 }
 
 #[async_trait]
@@ -51,7 +59,36 @@ impl TurnService for UnavailableTurns {
         panic!("durable attachment must not prepare execution")
     }
 
+    fn watch_tree_membership(
+        &self,
+        _root: &SessionId,
+    ) -> TurnResult<rsi_agent_turn_protocol::TreeMembershipChanges> {
+        Ok(self.live_tree.as_ref().map_or_else(
+            || {
+                Box::pin(futures_util::stream::pending())
+                    as rsi_agent_turn_protocol::TreeMembershipChanges
+            },
+            |tree| {
+                Box::pin(futures_util::stream::unfold(
+                    tree.changes.subscribe(),
+                    |mut receiver| async move {
+                        receiver.changed().await.ok()?;
+                        Some(((), receiver))
+                    },
+                ))
+            },
+        ))
+    }
     async fn tree_sessions(&self, session_id: &SessionId) -> TurnResult<Vec<SessionId>> {
+        if let Some(tree) = &self.live_tree {
+            tree.reads.fetch_add(1, Ordering::SeqCst);
+            return tree
+                .members
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()));
+        }
         Ok(self
             .tree
             .clone()
@@ -194,19 +231,26 @@ struct UnavailableWorkspace;
 
 #[async_trait]
 impl WorkspaceRegistry for UnavailableWorkspace {
-    async fn list(&self) -> Vec<WorkspaceRecord> {
+    async fn get(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+        panic!("durable attachment must not look up a workspace")
+    }
+    async fn list(
+        &self,
+        _after: Option<WorkspaceCursor>,
+        _limit: usize,
+    ) -> rsi_workspace_protocol::Result<WorkspacePage> {
         panic!("not used")
     }
 
-    async fn get_or_create(&self, _path: &Path) -> rsi_workspace::Result<WorkspaceRecord> {
+    async fn get_or_create(&self, _path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         panic!("durable attachment must not register a workspace")
     }
 
-    async fn status(&self, _id: &WorkspaceId) -> rsi_workspace::Result<WorkspaceStatus> {
+    async fn status(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceStatus> {
         panic!("not used")
     }
 
-    async fn delete_registration(&self, _id: &WorkspaceId) -> rsi_workspace::Result<bool> {
+    async fn delete_registration(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<bool> {
         panic!("not used")
     }
 }
@@ -214,26 +258,42 @@ impl WorkspaceRegistry for UnavailableWorkspace {
 #[derive(Debug, Default)]
 struct RejectingWorkspace {
     registrations: AtomicUsize,
+    gate: Option<Arc<Semaphore>>,
 }
 
 #[async_trait]
 impl WorkspaceRegistry for RejectingWorkspace {
-    async fn list(&self) -> Vec<WorkspaceRecord> {
-        Vec::new()
+    async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+        AvailableWorkspace::at(&std::env::current_dir().unwrap())
+            .get(id)
+            .await
+    }
+    async fn list(
+        &self,
+        _after: Option<WorkspaceCursor>,
+        _limit: usize,
+    ) -> rsi_workspace_protocol::Result<WorkspacePage> {
+        Ok(WorkspacePage {
+            records: Vec::new(),
+            next: None,
+        })
     }
 
-    async fn get_or_create(&self, _path: &Path) -> rsi_workspace::Result<WorkspaceRecord> {
+    async fn get_or_create(&self, _path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         self.registrations.fetch_add(1, Ordering::AcqRel);
-        Err(rsi_workspace::WorkspaceError::Storage(
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        Err(rsi_workspace_protocol::WorkspaceError::Storage(
             "unexpected workspace mutation".into(),
         ))
     }
 
-    async fn status(&self, _id: &WorkspaceId) -> rsi_workspace::Result<WorkspaceStatus> {
+    async fn status(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceStatus> {
         panic!("not used")
     }
 
-    async fn delete_registration(&self, _id: &WorkspaceId) -> rsi_workspace::Result<bool> {
+    async fn delete_registration(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<bool> {
         panic!("not used")
     }
 }
@@ -387,6 +447,7 @@ impl TurnService for CompetingPublicationTurns {
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
         let attempt = self.submissions.fetch_add(1, Ordering::AcqRel);
         if attempt == 0 {
+            tokio::task::yield_now().await;
             assert!(matches!(&request.session, SubmitSession::Fresh(_)));
             let original = request.session.header();
             let header = if self.change_created_at {
@@ -409,7 +470,7 @@ impl TurnService for CompetingPublicationTurns {
                     session_id: header.session_id().clone(),
                     expected_seq: 0,
                     header: Some(header),
-                    facts: vec![
+                    facts: (vec![
                         SessionFact::new(
                             1,
                             1,
@@ -422,7 +483,10 @@ impl TurnService for CompetingPublicationTurns {
                             },
                         )
                         .unwrap(),
-                    ],
+                    ])
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 })
                 .await
                 .map_err(|error| rsi_agent_turn_protocol::TurnError::Store(error.to_string()))?;
@@ -495,12 +559,13 @@ impl TurnService for CompetingImagePublicationTurns {
         let attempt = self.submissions.fetch_add(1, Ordering::AcqRel);
         assert!(matches!(&request.session, SubmitSession::Fresh(_)));
         if attempt == 0 {
+            tokio::task::yield_now().await;
             self.store
                 .append(AppendBatch {
                     session_id: self.competing_header.session_id().clone(),
                     expected_seq: 0,
                     header: Some(self.competing_header.clone()),
-                    facts: vec![
+                    facts: (vec![
                         SessionFact::new(
                             1,
                             1,
@@ -511,7 +576,10 @@ impl TurnService for CompetingImagePublicationTurns {
                             },
                         )
                         .unwrap(),
-                    ],
+                    ])
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 })
                 .await
                 .unwrap();
@@ -558,26 +626,61 @@ impl TurnService for CompetingImagePublicationTurns {
 }
 
 #[derive(Debug)]
-struct AvailableWorkspace;
+struct AvailableWorkspace {
+    path: std::path::PathBuf,
+    available: std::sync::atomic::AtomicBool,
+    reads: AtomicUsize,
+}
+
+impl AvailableWorkspace {
+    fn at(path: &Path) -> Self {
+        Self {
+            path: path.canonicalize().unwrap(),
+            available: std::sync::atomic::AtomicBool::new(true),
+            reads: AtomicUsize::new(0),
+        }
+    }
+}
+
+fn workspace_id() -> WorkspaceId {
+    WorkspaceId::parse("a".repeat(64)).unwrap()
+}
 
 #[async_trait]
 impl WorkspaceRegistry for AvailableWorkspace {
-    async fn list(&self) -> Vec<WorkspaceRecord> {
-        Vec::new()
+    async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if !self.available.load(Ordering::SeqCst) || id != &workspace_id() {
+            return Err(rsi_workspace_protocol::WorkspaceError::Unknown(id.clone()));
+        }
+        Ok(WorkspaceRecord {
+            id: id.clone(),
+            path: self.path.clone(),
+        })
+    }
+    async fn list(
+        &self,
+        _after: Option<WorkspaceCursor>,
+        _limit: usize,
+    ) -> rsi_workspace_protocol::Result<WorkspacePage> {
+        Ok(WorkspacePage {
+            records: Vec::new(),
+            next: None,
+        })
     }
 
-    async fn get_or_create(&self, path: &Path) -> rsi_workspace::Result<WorkspaceRecord> {
+    async fn get_or_create(&self, path: &Path) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         Ok(WorkspaceRecord {
-            id: serde_json::from_str("\"workspace-test\"").unwrap(),
+            id: WorkspaceId::parse("a".repeat(64)).unwrap(),
             path: path.to_path_buf(),
         })
     }
 
-    async fn status(&self, _id: &WorkspaceId) -> rsi_workspace::Result<WorkspaceStatus> {
+    async fn status(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceStatus> {
         Ok(WorkspaceStatus::Ok)
     }
 
-    async fn delete_registration(&self, _id: &WorkspaceId) -> rsi_workspace::Result<bool> {
+    async fn delete_registration(&self, _id: &WorkspaceId) -> rsi_workspace_protocol::Result<bool> {
         Ok(false)
     }
 }
@@ -605,7 +708,7 @@ struct UnavailableMedia;
 
 #[async_trait]
 impl Media for UnavailableMedia {
-    async fn import_image(&self, _source: Arc<[u8]>) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image(&self, _source: bytes::Bytes) -> rsi_media_protocol::Result<MediaRef> {
         panic!("not used")
     }
 
@@ -636,20 +739,59 @@ impl ImageCall for AvailableImage {
 struct UnavailableSettings;
 
 impl AgentSettingsSource for UnavailableSettings {
-    fn current(&self) -> FrozenAgentSettings {
+    fn current(&self) -> rsi_session_protocol::Result<FrozenAgentSettings> {
         panic!("durable attachment must not read current settings")
     }
 }
 
 #[derive(Debug, Default)]
 struct TreeApprovals {
+    changes: Option<tokio::sync::watch::Sender<u64>>,
+    reads: AtomicUsize,
     pending: Mutex<BTreeMap<SessionId, Vec<ApprovalRequest>>>,
     answered: Mutex<Vec<(SessionId, String, ApprovalDecision)>>,
 }
 
 #[async_trait]
 impl SessionApprovalControl for TreeApprovals {
-    async fn pending(&self, session_id: &SessionId) -> rsi_session::Result<Vec<ApprovalRequest>> {
+    async fn pending_for_sessions(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_session_protocol::Result<Vec<ApprovalRequest>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .pending
+            .lock()
+            .await
+            .iter()
+            .filter(|(id, _)| sessions.contains(id))
+            .flat_map(|(_, requests)| requests.clone())
+            .collect())
+    }
+    fn watch_pending(
+        &self,
+        _sessions: &[SessionId],
+    ) -> rsi_session_protocol::Result<rsi_user_questions_protocol::PendingChanges> {
+        Ok(self.changes.as_ref().map_or_else(
+            || {
+                Box::pin(futures_util::stream::pending())
+                    as rsi_user_questions_protocol::PendingChanges
+            },
+            |changes| {
+                Box::pin(futures_util::stream::unfold(
+                    changes.subscribe(),
+                    |mut receiver| async move {
+                        receiver.changed().await.ok()?;
+                        Some(((), receiver))
+                    },
+                ))
+            },
+        ))
+    }
+    async fn pending(
+        &self,
+        session_id: &SessionId,
+    ) -> rsi_session_protocol::Result<Vec<ApprovalRequest>> {
         Ok(self
             .pending
             .lock()
@@ -664,7 +806,7 @@ impl SessionApprovalControl for TreeApprovals {
         session_id: &SessionId,
         approval_id: &str,
         decision: ApprovalDecision,
-    ) -> rsi_session::Result<bool> {
+    ) -> rsi_session_protocol::Result<bool> {
         let mut pending = self.pending.lock().await;
         let Some(requests) = pending.get_mut(session_id) else {
             return Ok(false);
@@ -689,15 +831,15 @@ impl SessionApprovalControl for TreeApprovals {
 struct ImageSettings;
 
 impl AgentSettingsSource for ImageSettings {
-    fn current(&self) -> FrozenAgentSettings {
-        FrozenAgentSettings::new(
+    fn current(&self) -> rsi_session_protocol::Result<FrozenAgentSettings> {
+        Ok(FrozenAgentSettings::new(
             "settings",
             "system",
             ModelRef::new("removed-provider", "removed-model").unwrap(),
             SandboxMode::WorkspaceWrite,
             false,
         )
-        .unwrap()
+        .unwrap())
     }
 }
 
@@ -705,8 +847,8 @@ impl AgentSettingsSource for ImageSettings {
 struct TextSettings;
 
 impl AgentSettingsSource for TextSettings {
-    fn current(&self) -> FrozenAgentSettings {
-        test_settings()
+    fn current(&self) -> rsi_session_protocol::Result<FrozenAgentSettings> {
+        Ok(test_settings())
     }
 }
 
@@ -721,11 +863,104 @@ fn test_settings() -> FrozenAgentSettings {
     .unwrap()
 }
 
+#[tokio::test]
+async fn new_drafts_read_current_defaults_while_existing_headers_remain_frozen() {
+    #[derive(Debug)]
+    struct MutableSettings(std::sync::Mutex<rsi_session_protocol::Result<FrozenAgentSettings>>);
+    impl AgentSettingsSource for MutableSettings {
+        fn current(&self) -> rsi_session_protocol::Result<FrozenAgentSettings> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let initial = test_settings();
+    let defaults = Arc::new(MutableSettings(std::sync::Mutex::new(Ok(initial.clone()))));
+    let service = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableTurns::default()),
+        Arc::new(MemoryStore::new()),
+        Arc::new(AvailableComposition),
+        Arc::new(AvailableWorkspace::at(directory.path())),
+        defaults.clone(),
+        Arc::new(AvailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        Arc::new(NoApprovalControl),
+    );
+    let request = |id| CreateSession {
+        workspace_id: workspace_id(),
+        session_id: SessionId::new(id).unwrap(),
+        agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),
+        workspace_trust: WorkspaceTrust::Untrusted,
+    };
+    let first = service.create(request("defaults-first")).await.unwrap();
+    let frozen = first.header().await.unwrap();
+    let replacement = FrozenAgentSettings::new(
+        "replacement",
+        "changed prompt",
+        ModelRef::new("fixture", "changed-model").unwrap(),
+        SandboxMode::ReadOnly,
+        true,
+    )
+    .unwrap();
+    *defaults.0.lock().unwrap() = Ok(replacement.clone());
+    let second = service.create(request("defaults-second")).await.unwrap();
+    assert_eq!(first.header().await.unwrap(), frozen);
+    assert_eq!(second.header().await.unwrap().settings(), &replacement);
+    *defaults.0.lock().unwrap() = Err(SessionError::Backend("defaults unavailable".into()));
+    assert!(
+        service
+            .create(request("defaults-unavailable"))
+            .await
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(
+        &first,
+        &service.create(request("defaults-first")).await.unwrap()
+    ));
+    assert_eq!(first.header().await.unwrap(), frozen);
+}
+
+#[tokio::test]
+async fn repeated_create_shares_one_live_draft_and_conflicts_on_changed_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableTurns::default()),
+        Arc::new(MemoryStore::new()),
+        Arc::new(AvailableComposition),
+        Arc::new(AvailableWorkspace::at(directory.path())),
+        Arc::new(TextSettings),
+        Arc::new(AvailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        Arc::new(NoApprovalControl),
+    );
+    let request = CreateSession {
+        workspace_id: workspace_id(),
+        session_id: SessionId::new("same-draft").unwrap(),
+        agent_preset_id: None,
+        workspace_trust: WorkspaceTrust::Untrusted,
+    };
+    let first = service.create(request.clone()).await.unwrap();
+    let second = service.create(request.clone()).await.unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "one registry shares one preparation and pin"
+    );
+    let mut conflict = request;
+    conflict.workspace_trust = WorkspaceTrust::Trusted;
+    assert!(matches!(
+        service.create(conflict).await,
+        Err(SessionError::DraftConflict { .. })
+    ));
+}
+
 async fn submit_text(
     handle: Arc<dyn SessionHandle>,
     message_id: &'static str,
     text: &'static str,
-) -> rsi_session::Result<MessageReceipt> {
+) -> rsi_session_protocol::Result<MessageReceipt> {
     handle
         .submit(SubmitInput {
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
@@ -767,7 +1002,13 @@ fn session_input_validation_is_complete_before_any_backend_operation() {
     }
     assert!(
         validate_session_input(&[SessionInput::Image {
-            bytes: Arc::from([]),
+            media: MediaRef {
+                id: rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
+                mime: "image/png".into(),
+                bytes: 0,
+                width: 1,
+                height: 1
+            },
         }])
         .is_err()
     );
@@ -776,7 +1017,13 @@ fn session_input_validation_is_complete_before_any_backend_operation() {
             text: "inspect".into(),
         },
         SessionInput::Image {
-            bytes: Arc::from([1_u8, 2, 3]),
+            media: MediaRef {
+                id: rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
+                mime: "image/png".into(),
+                bytes: 3,
+                width: 1,
+                height: 1,
+            },
         },
     ])
     .unwrap();
@@ -884,15 +1131,20 @@ impl TurnService for RejectingResumeTurns {
 
 #[tokio::test]
 async fn matching_competing_publication_attaches_a_fresh_handle_for_its_next_submit() {
-    assert_competing_message_publication(false).await;
+    assert_competing_message_publication(false, false).await;
 }
 
 #[tokio::test]
 async fn a_different_creation_time_does_not_attach_a_fresh_message_handle() {
-    assert_competing_message_publication(true).await;
+    assert_competing_message_publication(true, false).await;
 }
 
-async fn assert_competing_message_publication(change_created_at: bool) {
+#[tokio::test]
+async fn concurrent_submissions_reject_a_draft_expired_by_the_first_publication() {
+    assert_competing_message_publication(true, true).await;
+}
+
+async fn assert_competing_message_publication(change_created_at: bool, concurrent: bool) {
     let store = Arc::new(MemoryStore::new());
     let preset_id = AgentPresetId::new("image-preset").unwrap();
     let composition = AvailableComposition.pin(&preset_id).await.unwrap();
@@ -903,11 +1155,12 @@ async fn assert_competing_message_publication(change_created_at: bool) {
         submissions: AtomicUsize::new(0),
         change_created_at,
     });
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         turns.clone(),
         store,
         Arc::new(AvailableComposition),
-        Arc::new(AvailableWorkspace),
+        Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(TextSettings),
         Arc::new(AvailableLanguage),
         Arc::new(UnavailableImage),
@@ -916,13 +1169,23 @@ async fn assert_competing_message_publication(change_created_at: bool) {
     );
     let handle = application
         .create(CreateSession {
-            cwd: std::env::current_dir().unwrap(),
-            session_id: Some(SessionId::new("session-competing-publication").unwrap()),
+            workspace_id: workspace_id(),
+            session_id: SessionId::new("session-competing-publication").unwrap(),
             agent_preset_id: Some(preset_id),
             workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
+    if concurrent {
+        let (first, second) = tokio::join!(
+            submit_text(handle.clone(), "first", "first"),
+            submit_text(handle.clone(), "second", "second"),
+        );
+        assert!(first.is_err());
+        assert!(matches!(second, Err(SessionError::NotFound(_))));
+        assert_eq!(turns.submissions.load(Ordering::Acquire), 1);
+        return;
+    }
     assert!(
         handle
             .submit(SubmitInput {
@@ -937,6 +1200,14 @@ async fn assert_competing_message_publication(change_created_at: bool) {
             .await
             .is_err()
     );
+    if change_created_at {
+        assert!(matches!(
+            submit_text(handle, "must-not-resume-other-header", "retry").await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert_eq!(turns.submissions.load(Ordering::Acquire), 1);
+        return;
+    }
     let receipt = handle
         .submit(SubmitInput {
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
@@ -958,6 +1229,15 @@ async fn assert_competing_message_publication(change_created_at: bool) {
 
 #[tokio::test]
 async fn conflicting_image_publication_keeps_the_fresh_handle_detached() {
+    assert_competing_image_publication(false).await;
+}
+
+#[tokio::test]
+async fn concurrent_images_reject_a_draft_expired_by_the_first_publication() {
+    assert_competing_image_publication(true).await;
+}
+
+async fn assert_competing_image_publication(concurrent: bool) {
     let store = Arc::new(MemoryStore::new());
     let session_id = SessionId::new("session-conflicting-image-publication").unwrap();
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
@@ -973,11 +1253,12 @@ async fn conflicting_image_publication_keeps_the_fresh_handle_detached() {
         .unwrap(),
         submissions: AtomicUsize::new(0),
     });
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         turns.clone(),
         store,
         Arc::new(AvailableComposition),
-        Arc::new(AvailableWorkspace),
+        Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(ImageSettings),
         Arc::new(UnavailableLanguage),
         Arc::new(AvailableImage),
@@ -986,13 +1267,28 @@ async fn conflicting_image_publication_keeps_the_fresh_handle_detached() {
     );
     let handle = application
         .create(CreateSession {
-            cwd,
-            session_id: Some(session_id),
+            workspace_id: workspace_id(),
+            session_id,
             agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),
             workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await
         .unwrap();
+    if concurrent {
+        let input = |id| SubmitDirectImage {
+            turn_id: TurnId::new(id).unwrap(),
+            model: ModelRef::new("image-provider", "image-model").unwrap(),
+            request: ImageRequest::new("concurrent attempt", 1).unwrap(),
+        };
+        let (first, second) = tokio::join!(
+            handle.generate_image(input("first")),
+            handle.generate_image(input("second")),
+        );
+        assert!(first.is_err());
+        assert!(matches!(second, Err(SessionError::NotFound(_))));
+        assert_eq!(turns.submissions.load(Ordering::Acquire), 1);
+        return;
+    }
     assert!(
         handle
             .generate_image(SubmitDirectImage {
@@ -1009,10 +1305,9 @@ async fn conflicting_image_publication_keeps_the_fresh_handle_detached() {
             model: ModelRef::new("image-provider", "image-model").unwrap(),
             request: ImageRequest::new("second attempt", 1).unwrap(),
         })
-        .await
-        .unwrap();
-    assert_eq!(retried.accepted_seq, 1);
-    assert_eq!(turns.submissions.load(Ordering::Acquire), 2);
+        .await;
+    assert!(matches!(retried, Err(SessionError::NotFound(_))));
+    assert_eq!(turns.submissions.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]
@@ -1037,7 +1332,7 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header.clone()),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -1050,7 +1345,10 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
@@ -1066,11 +1364,12 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
         entered_notify: Notify::new(),
         release: Semaphore::new(0),
     });
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         turns.clone(),
         store,
         Arc::new(UnavailableComposition),
-        Arc::new(AvailableWorkspace),
+        Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
         Arc::new(UnavailableSettings),
         Arc::new(AvailableLanguage),
         Arc::new(UnavailableImage),
@@ -1111,7 +1410,8 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
 async fn fresh_preset_failure_precedes_workspace_registration() {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let workspace = Arc::new(RejectingWorkspace::default());
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableTurns::default()),
         store,
         Arc::new(FailingComposition),
@@ -1125,14 +1425,14 @@ async fn fresh_preset_failure_precedes_workspace_registration() {
 
     let result = application
         .create(CreateSession {
-            cwd: std::env::current_dir().unwrap(),
-            session_id: Some(SessionId::new("session-failing-fresh-preset").unwrap()),
+            workspace_id: workspace_id(),
+            session_id: SessionId::new("session-failing-fresh-preset").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("missing-preset").unwrap()),
             workspace_trust: WorkspaceTrust::Untrusted,
         })
         .await;
 
-    assert!(matches!(result, Err(SessionApplicationError::Backend(_))));
+    assert!(matches!(result, Err(SessionError::Backend(_))));
     assert_eq!(workspace.registrations.load(Ordering::Acquire), 0);
 }
 
@@ -1155,7 +1455,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -1177,13 +1477,17 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
     let store: Arc<dyn SessionStore> = store;
     let workspace = Arc::new(RejectingWorkspace::default());
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(RejectingResumeTurns),
         store,
         Arc::new(UnavailableComposition),
@@ -1208,7 +1512,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
         })
         .await;
 
-    assert!(matches!(result, Err(SessionApplicationError::Backend(_))));
+    assert!(matches!(result, Err(SessionError::Backend(_))));
     assert_eq!(workspace.registrations.load(Ordering::Acquire), 0);
 }
 
@@ -1250,12 +1554,16 @@ async fn attach_and_history_need_only_the_durable_store() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header.clone()),
-            facts: vec![accepted.clone()],
+            facts: (vec![accepted.clone()])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
     let store_service: Arc<dyn SessionStore> = store;
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableTurns::default()),
         store_service,
         Arc::new(UnavailableComposition),
@@ -1276,13 +1584,14 @@ async fn attach_and_history_need_only_the_durable_store() {
     assert!(handle.pending_approvals().await.unwrap().is_empty());
     assert!(
         !handle
-            .answer_approval("missing", ApprovalDecision::Deny)
+            .answer_approval(&session_id, "missing", ApprovalDecision::Deny)
             .await
             .unwrap()
     );
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One tree fixture proves duplicate tuples and rejection before dispatch.
 async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject() {
     let store = Arc::new(MemoryStore::new());
     let root = SessionId::new("session-approval-root").unwrap();
@@ -1301,7 +1610,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
             session_id: root.clone(),
             expected_seq: 0,
             header: Some(header),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -1314,7 +1623,10 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
@@ -1331,9 +1643,11 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
         .lock()
         .await
         .insert(child.clone(), vec![request.clone()]);
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableTurns {
             tree: Some(vec![root.clone(), child.clone()]),
+            ..Default::default()
         }),
         store,
         Arc::new(UnavailableComposition),
@@ -1350,33 +1664,44 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
         handle.pending_approvals().await.unwrap().as_slice(),
         std::slice::from_ref(&request)
     );
-    let mut ambiguous = request;
-    ambiguous.subject = ApprovalSubject::new(root.as_str(), "turn-root", "effect-root").unwrap();
+    let mut same_id_at_root = request;
+    same_id_at_root.subject =
+        ApprovalSubject::new(root.as_str(), "turn-root", "effect-root").unwrap();
     approvals
         .pending
         .lock()
         .await
-        .insert(root.clone(), vec![ambiguous]);
+        .insert(root.clone(), vec![same_id_at_root]);
     assert!(
-        matches!(handle.answer_approval("approval-child", ApprovalDecision::Deny).await,
-        Err(SessionApplicationError::Invalid(message)) if message.contains("ambiguous"))
+        matches!(handle.answer_approval(&SessionId::new("unrelated").unwrap(), "approval-child", ApprovalDecision::Deny).await,
+        Err(SessionError::Invalid(message)) if message.contains("outside"))
     );
     assert!(approvals.answered.lock().await.is_empty());
-    approvals.pending.lock().await.remove(&root);
     assert!(
         handle
-            .answer_approval("approval-child", ApprovalDecision::AllowOnce)
+            .answer_approval(&child, "approval-child", ApprovalDecision::AllowOnce)
             .await
             .unwrap()
     );
     assert_eq!(
         approvals.answered.lock().await.as_slice(),
-        &[(child, "approval-child".into(), ApprovalDecision::AllowOnce,)]
+        &[(
+            child.clone(),
+            "approval-child".into(),
+            ApprovalDecision::AllowOnce,
+        )]
+    );
+    assert_eq!(handle.pending_approvals().await.unwrap().len(), 1);
+    assert!(
+        handle
+            .answer_approval(&root, "approval-child", ApprovalDecision::Deny)
+            .await
+            .unwrap()
     );
     assert!(handle.pending_approvals().await.unwrap().is_empty());
     assert!(
         !handle
-            .answer_approval("approval-child", ApprovalDecision::Deny)
+            .answer_approval(&child, "approval-child", ApprovalDecision::Deny)
             .await
             .unwrap()
     );
@@ -1386,8 +1711,8 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
 async fn image_only_draft_defers_language_and_workspace_until_the_selected_operation_needs_them() {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let workspace = Arc::new(RejectingWorkspace::default());
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-    let application = LocalSessionApplication::new(
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(ImageTurns),
         store,
         Arc::new(AvailableComposition),
@@ -1400,8 +1725,8 @@ async fn image_only_draft_defers_language_and_workspace_until_the_selected_opera
     );
     let handle = application
         .create(CreateSession {
-            cwd,
-            session_id: Some(SessionId::new("session-image-only").unwrap()),
+            workspace_id: workspace_id(),
+            session_id: SessionId::new("session-image-only").unwrap(),
             agent_preset_id: None,
             workspace_trust: WorkspaceTrust::Untrusted,
         })
@@ -1426,6 +1751,20 @@ struct FailedQuestions(rsi_user_questions_protocol::QuestionError);
 
 #[async_trait]
 impl rsi_user_questions_protocol::UserQuestions for FailedQuestions {
+    async fn pending_for_sessions(
+        &self,
+        _sessions: &[String],
+    ) -> rsi_user_questions_protocol::Result<Vec<rsi_user_questions_protocol::QuestionRequest>>
+    {
+        self.pending("session").await
+    }
+    fn watch_pending(
+        &self,
+        _sessions: &[String],
+    ) -> rsi_user_questions_protocol::Result<rsi_user_questions_protocol::PendingChanges> {
+        Err(self.0.clone())
+    }
+
     async fn ask(
         &self,
         _: rsi_user_questions_protocol::QuestionRequest,
@@ -1454,28 +1793,26 @@ impl rsi_user_questions_protocol::UserQuestions for FailedQuestions {
 async fn question_operations_preserve_shutdown_and_capacity_errors() {
     use rsi_user_questions_protocol::{QuestionAnswer, QuestionError};
     for (error, expected) in [
-        (
-            QuestionError::Cancelled,
-            SessionApplicationError::ShuttingDown,
-        ),
-        (QuestionError::Capacity, SessionApplicationError::Capacity),
+        (QuestionError::Cancelled, SessionError::ShuttingDown),
+        (QuestionError::Capacity, SessionError::Capacity),
     ] {
-        let application = LocalSessionApplication::new(
+        let application = LocalSessionService::new(
+            rsi_meta::Execution::native(tokio::runtime::Handle::current()),
             Arc::new(ImageTurns),
             Arc::new(MemoryStore::new()),
             Arc::new(AvailableComposition),
-            Arc::new(UnavailableWorkspace),
+            Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
             Arc::new(ImageSettings),
             Arc::new(UnavailableLanguage),
             Arc::new(AvailableImage),
             Arc::new(UnavailableMedia),
             Arc::new(NoApprovalControl),
         )
-        .with_live_capabilities(Some(Arc::new(FailedQuestions(error))), None);
+        .with_questions(Some(Arc::new(FailedQuestions(error))));
         let handle = application
             .create(CreateSession {
-                cwd: std::env::current_dir().unwrap(),
-                session_id: Some(SessionId::new("question-errors").unwrap()),
+                workspace_id: workspace_id(),
+                session_id: SessionId::new("question-errors").unwrap(),
                 agent_preset_id: None,
                 workspace_trust: WorkspaceTrust::Untrusted,
             })
@@ -1494,4 +1831,195 @@ async fn question_operations_preserve_shutdown_and_capacity_errors() {
             Err(expected)
         );
     }
+}
+
+#[derive(Debug)]
+struct LiveTree {
+    members: std::sync::Mutex<Option<Vec<SessionId>>>,
+    changes: tokio::sync::watch::Sender<u64>,
+    reads: AtomicUsize,
+}
+impl LiveTree {
+    fn new() -> Self {
+        Self {
+            members: std::sync::Mutex::new(None),
+            changes: tokio::sync::watch::channel(0).0,
+            reads: AtomicUsize::new(0),
+        }
+    }
+    fn publish(&self, members: Vec<SessionId>) {
+        *self.members.lock().unwrap() = Some(members);
+        self.changes.send_modify(|revision| *revision += 1);
+    }
+}
+#[derive(Debug)]
+struct PinTracker(Arc<AtomicUsize>);
+#[derive(Debug)]
+struct TrackedLease(Arc<AtomicUsize>);
+impl Drop for TrackedLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl AgentComposition for PinTracker {
+    async fn default_preset_id(&self) -> Result<AgentPresetId, AgentCompositionError> {
+        Ok(AgentPresetId::new("tracked").unwrap())
+    }
+    async fn pin(
+        &self,
+        preset: &AgentPresetId,
+    ) -> Result<AgentCompositionPin, AgentCompositionError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        AgentCompositionPin::new(
+            preset.clone(),
+            "a".repeat(64),
+            Arc::new(EmptyTools),
+            Arc::new(TrackedLease(self.0.clone())),
+        )
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn fresh_interactions_release_composition_pin_and_follow_tree_publication_without_polling() {
+    use futures_util::StreamExt as _;
+    let tree = Arc::new(LiveTree::new());
+    let leases = Arc::new(AtomicUsize::new(0));
+    let approvals = Arc::new(TreeApprovals {
+        changes: Some(tokio::sync::watch::channel(0).0),
+        ..Default::default()
+    });
+    let application = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableTurns {
+            live_tree: Some(tree.clone()),
+            ..Default::default()
+        }),
+        Arc::new(MemoryStore::new()),
+        Arc::new(PinTracker(leases.clone())),
+        Arc::new(AvailableWorkspace::at(&std::env::current_dir().unwrap())),
+        Arc::new(TextSettings),
+        Arc::new(UnavailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        approvals.clone(),
+    );
+    let root = SessionId::new("interaction-root").unwrap();
+    let child = SessionId::new("interaction-child").unwrap();
+    let handle = application
+        .create(CreateSession {
+            workspace_id: workspace_id(),
+            session_id: root.clone(),
+            agent_preset_id: None,
+            workspace_trust: WorkspaceTrust::Untrusted,
+        })
+        .await
+        .unwrap();
+    assert_eq!(leases.load(Ordering::SeqCst), 1);
+    let mut stream = handle.observe_interactions().await.unwrap();
+    drop(handle);
+    assert_eq!(
+        leases.load(Ordering::SeqCst),
+        1,
+        "the service retains its draft lease"
+    );
+    tokio::time::advance(std::time::Duration::from_mins(61)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        leases.load(Ordering::SeqCst),
+        0,
+        "live stream retained the Fresh composition pin"
+    );
+    assert!(stream.next().await.unwrap().unwrap().approvals().is_empty());
+    assert_eq!(tree.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(approvals.reads.load(Ordering::SeqCst), 0);
+    {
+        let mut next = Box::pin(stream.next());
+        assert!(futures_util::poll!(&mut next).is_pending());
+        tokio::time::advance(std::time::Duration::from_mins(1)).await;
+        assert!(futures_util::poll!(&mut next).is_pending());
+    }
+    assert_eq!(tree.reads.load(Ordering::SeqCst), 1);
+    tree.publish(vec![root.clone()]);
+    assert!(stream.next().await.unwrap().unwrap().approvals().is_empty());
+    let request = ApprovalRequest {
+        review: None,
+        id: "child-request".into(),
+        subject: ApprovalSubject::new(child.as_str(), "turn", "effect").unwrap(),
+        action: "write".into(),
+        reason: "test".into(),
+    };
+    approvals
+        .pending
+        .lock()
+        .await
+        .insert(child.clone(), vec![request.clone()]);
+    tree.publish(vec![root, child]);
+    assert_eq!(
+        stream.next().await.unwrap().unwrap().approvals(),
+        &[request]
+    );
+    let tree_reads = tree.reads.load(Ordering::SeqCst);
+    approvals.pending.lock().await.clear();
+    approvals
+        .changes
+        .as_ref()
+        .unwrap()
+        .send_modify(|revision| *revision += 1);
+    assert!(stream.next().await.unwrap().unwrap().approvals().is_empty());
+    assert_eq!(
+        tree.reads.load(Ordering::SeqCst),
+        tree_reads,
+        "broker-only change reread tree metadata"
+    );
+}
+
+#[tokio::test]
+async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = Arc::new(AvailableWorkspace::at(directory.path()));
+    let canonical = workspace.path.clone();
+    directory.close().unwrap();
+    let service = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableTurns::default()),
+        Arc::new(MemoryStore::new()),
+        Arc::new(AvailableComposition),
+        workspace.clone(),
+        Arc::new(TextSettings),
+        Arc::new(UnavailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        Arc::new(NoApprovalControl),
+    );
+    let request = CreateSession {
+        workspace_id: workspace_id(),
+        session_id: SessionId::new("registered-draft").unwrap(),
+        agent_preset_id: None,
+        workspace_trust: WorkspaceTrust::Untrusted,
+    };
+    let first = service.create(request.clone()).await.unwrap();
+    assert_eq!(
+        first.header().await.unwrap().canonical_cwd(),
+        canonical.to_str().unwrap()
+    );
+    workspace.available.store(false, Ordering::SeqCst);
+    assert!(Arc::ptr_eq(
+        &first,
+        &service.create(request.clone()).await.unwrap()
+    ));
+    let mut changed = request.clone();
+    changed.workspace_id = WorkspaceId::parse("b".repeat(64)).unwrap();
+    assert!(matches!(
+        service.create(changed).await,
+        Err(SessionError::DraftConflict { .. })
+    ));
+    assert_eq!(workspace.reads.load(Ordering::SeqCst), 1);
+    let mut next = request;
+    next.session_id = SessionId::new("new-unknown-workspace").unwrap();
+    assert!(
+        matches!(service.create(next).await, Err(SessionError::Invalid(message)) if message.contains("not registered"))
+    );
+    assert_eq!(workspace.reads.load(Ordering::SeqCst), 2);
+    service.stop().await;
 }

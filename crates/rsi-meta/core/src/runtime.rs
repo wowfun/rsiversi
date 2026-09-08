@@ -95,6 +95,7 @@ impl fmt::Debug for Runtime {
 }
 
 struct RuntimeInner {
+    execution: crate::Execution,
     limits: ValidatedRuntimeLimits,
     resources: RuntimeResources,
     state: Mutex<RuntimeState>,
@@ -154,7 +155,7 @@ struct Fiber {
     id: FiberId,
     depth: usize,
     runtime: Weak<RuntimeInner>,
-    executor: tokio::runtime::Handle,
+    executor: crate::Execution,
     parent: Option<Owner>,
     base_context: ContextScope,
     configuration: Arc<AsyncMutex<()>>,
@@ -417,8 +418,25 @@ pub struct FiberHandle {
 }
 
 impl Runtime {
+    /// Validates execution-independent policy without constructing a Runtime.
+    pub fn validate_limits(limits: &RuntimeLimits) -> Result<()> {
+        ValidatedRuntimeLimits::new(limits.clone()).map(|_| ())
+    }
+
     /// Creates an empty Runtime after validating capacities, arithmetic, and deadlines.
+    /// Captures the currently entered native Tokio executor.
+    #[cfg(not(target_family = "wasm"))]
     pub fn new(limits: RuntimeLimits) -> Result<Self> {
+        // Validate before looking up execution so invalid policies remain ordinary errors.
+        Self::validate_limits(&limits)?;
+        let handle = tokio::runtime::Handle::try_current().map_err(|error| {
+            MetaError::InvalidInput(format!("Runtime needs explicit execution: {error}"))
+        })?;
+        Self::with_execution(limits, crate::Execution::native(handle))
+    }
+
+    /// Creates an empty Runtime with explicit platform execution authority.
+    pub fn with_execution(limits: RuntimeLimits, execution: crate::Execution) -> Result<Self> {
         let limits = ValidatedRuntimeLimits::new(limits)?;
         let resources = RuntimeResources::new(limits.configured());
         let preparation_admission = Arc::new(Semaphore::new(
@@ -437,6 +455,7 @@ impl Runtime {
         ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                execution,
                 limits,
                 resources,
                 state: Mutex::new(RuntimeState {
@@ -490,6 +509,11 @@ impl Runtime {
             encoded_bytes: 0,
             trace: None,
         }
+    }
+
+    /// Returns the execution authority retained by this Runtime.
+    pub fn execution(&self) -> &crate::Execution {
+        &self.inner.execution
     }
 
     /// Returns the immutable limits selected at construction.
@@ -563,7 +587,7 @@ impl Runtime {
         &self,
         parent: &Context,
         prepared: PreparedPlugin,
-    ) -> Result<FiberHandle> {
+    ) -> Result<PendingApplyOwnership> {
         let PreparedPlugin {
             runtime,
             admission,
@@ -641,7 +665,7 @@ impl Runtime {
             id,
             depth,
             runtime: Arc::downgrade(&self.inner),
-            executor: tokio::runtime::Handle::current(),
+            executor: self.inner.execution.clone(),
             parent: parent.owner,
             base_context,
             configuration: Arc::new(AsyncMutex::new(())),
@@ -723,7 +747,7 @@ impl Runtime {
         // of the shutdown root snapshot; the proof's external admission can
         // be released before reconciliation continues.
         drop(admission);
-        let mut ownership = PendingApplyOwnership {
+        let ownership = PendingApplyOwnership {
             runtime: Arc::downgrade(&self.inner),
             fiber: Arc::clone(&fiber),
             armed: true,
@@ -735,11 +759,7 @@ impl Runtime {
             }
         })
         .await;
-        ownership.armed = false;
-        Ok(FiberHandle {
-            runtime: self.clone(),
-            fiber,
-        })
+        Ok(ownership)
     }
 
     fn owner_fiber(&self, owner: Owner) -> Result<Arc<Fiber>> {
@@ -787,6 +807,7 @@ impl Runtime {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Default for Runtime {
     fn default() -> Self {
         Self::new(RuntimeLimits::default()).expect("default runtime limits are valid")

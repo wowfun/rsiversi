@@ -141,6 +141,10 @@ impl fmt::Debug for ChatCompletionsAdapter {
 }
 
 impl LanguageAdapter for ChatCompletionsAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        &self.config.language_models
+    }
+
     fn describe(&self, model: &str) -> Result<LanguageProfile, AiError> {
         let limits = self.config.model_limits(model)?;
         Ok(LanguageProfile::new(

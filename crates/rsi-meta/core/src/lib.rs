@@ -6,8 +6,8 @@
 //! Package discovery, persistence, file watching, and product semantics belong
 //! in plugins or callers.
 //!
-//! Async operations must be polled inside a Tokio runtime with time enabled;
-//! they use Tokio-owned tasks, channels, cancellation, and deadlines. Cloned
+//! Async operations use the Runtime's explicit execution dependency for owned
+//! tasks and deadlines. Native convenience constructors capture Tokio. Cloned
 //! contexts and handles retain the runtime allocation, so dropping another
 //! [`Runtime`] clone does not invalidate them. Call [`Runtime::shutdown`] when
 //! deterministic teardown and its [`ShutdownOutcome`] are required.
@@ -44,6 +44,7 @@ pub use plugin::{
     ResolvedFactory, UpdateMode,
 };
 pub use rsi_meta_contract::LocalEventKey;
+pub use rsi_meta_execution::{Deadline, Execution, Task};
 pub use runtime::{
     CallerEffect, Context, DeadlineLimits, DetachedCapability, EffectHandle, EffectTxn,
     ExecutionLimits, FiberHandle, FiberSnapshot, FiberState, LocalEventHandle, LocalSupplyHandle,

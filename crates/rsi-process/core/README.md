@@ -47,3 +47,8 @@ time, and are neither Session archives nor per-Session access-control tokens.
 A completed stream is at most 64 MiB. Pages must advance by their exact raw byte
 length, stay within that total, and return a nonempty page before EOF. Remote
 consumers validate this contract before exposing provider data.
+
+Completed pages use immutable shared bytes. API clients transfer their received
+buffer owner into the page; clones and slices retain the original receive lease
+until the last byte owner drops. `ProcessError::Api` preserves transport failure
+classification. Raw bytes and cursors remain independent of display decoding.

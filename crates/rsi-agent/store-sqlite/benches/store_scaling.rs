@@ -1,10 +1,11 @@
 #![allow(clippy::cast_precision_loss)] // Benchmark reports convert integral nanoseconds to f64.
 
 use rsi_agent_session_protocol::{
-    AgentPresetId, EffectId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, TurnId, TurnOutcome,
+    ActivationId, AgentControlRecord, AgentControlRecordBody, AgentPresetId, EffectId,
+    FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    TurnOutcome,
 };
-use rsi_agent_store_protocol::{AppendBatch, SessionStore};
+use rsi_agent_store_protocol::{AppendBatch, AtomicAgentCommit, AtomicSessionAppend, SessionStore};
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_ai_protocol::{ContentDelta, LanguageEvent, ModelRef};
 use rsi_sandbox::SandboxMode;
@@ -59,6 +60,12 @@ async fn run() {
 
     for sessions in [128, 256, 512] {
         benchmark_metadata(sessions).await;
+    }
+    for sessions in [257, 512] {
+        benchmark_operational_working_set(sessions).await;
+    }
+    for controls in [1_000, 10_000, 50_000] {
+        benchmark_control_history(controls).await;
     }
     for fact_count in counts {
         for payload_bytes in [256, 16 * 1024] {
@@ -213,7 +220,7 @@ async fn append_session(
                 session_id: session.clone(),
                 expected_seq: next_seq - 1 - u64::try_from(facts.len()).unwrap(),
                 header: first.then(|| header(session.clone())),
-                facts,
+                facts: (facts).into_iter().map(Into::into).collect(),
             })
             .await
             .expect("populate append");
@@ -359,7 +366,7 @@ async fn benchmark_metadata(sessions: usize) {
                     session_id: write_id,
                     expected_seq: seq - 1,
                     header: None,
-                    facts: vec![
+                    facts: (vec![
                         SessionFact::new(
                             seq,
                             seq,
@@ -381,7 +388,10 @@ async fn benchmark_metadata(sessions: usize) {
                             },
                         )
                         .unwrap(),
-                    ],
+                    ])
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 };
                 let (read, write) =
                     tokio::join!(store.list_recent_sessions(None, 256), store.append(batch));
@@ -399,4 +409,136 @@ async fn benchmark_metadata(sessions: usize) {
     report("first_session_validation", &first_validation);
     report("one_call_control_subtree_snapshot", &snapshots);
     report("mixed_recent_read_and_append", &mixed);
+}
+
+async fn benchmark_operational_working_set(sessions: usize) {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    for index in 0..sessions {
+        append_session(&store, index, 2, 256, true).await;
+    }
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut durations = Vec::new();
+    let mut returned = 0;
+    for _ in 0..3 {
+        for index in 0..sessions {
+            let id = SessionId::new(format!("session-{index:03}")).unwrap();
+            durations.push(
+                timed_async(async {
+                    let page = store.read_facts(&id, 0, 1).await.unwrap();
+                    returned += page.facts.len();
+                    black_box(page);
+                })
+                .await,
+            );
+        }
+    }
+    println!(
+        "operational_case sessions={sessions} cycles=3 fact_page_calls={} returned_facts={returned}",
+        durations.len()
+    );
+    report("operational_one_fact_page", &durations);
+}
+
+#[allow(clippy::too_many_lines)] // Report setup, fixed-page workload, and concurrent sampling together.
+async fn benchmark_control_history(count: u64) {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    append_session(&store, 0, 2, 256, true).await;
+    append_session(&store, 1, 2, 256, true).await;
+    let cold = SessionId::new("session-000").unwrap();
+    let warm = SessionId::new("session-001").unwrap();
+    for start in (0..count).step_by(500) {
+        let mut controls = Vec::new();
+        for offset in (0..500).step_by(2) {
+            let sequence = start + offset + 1;
+            let activation_id = ActivationId::new(format!("activation-{sequence}")).unwrap();
+            controls.push(
+                AgentControlRecord::new(
+                    sequence,
+                    sequence,
+                    AgentControlRecordBody::ActivationStarted {
+                        activation_id: activation_id.clone(),
+                        parent_session_id: None,
+                        root_session_id: cold.clone(),
+                        path: rsi_agent_session_protocol::AgentPath::root(),
+                    },
+                )
+                .unwrap(),
+            );
+            controls.push(
+                AgentControlRecord::new(
+                    sequence + 1,
+                    sequence + 1,
+                    AgentControlRecordBody::ActivationSettled {
+                        activation_id,
+                        outcome: rsi_agent_session_protocol::ActivationOutcome::Completed,
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: cold.clone(),
+                    expected_fact_seq: 2,
+                    expected_control_seq: start,
+                    header: None,
+                    facts: vec![],
+                    controls,
+                }],
+                required_active_activations: vec![],
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+    }
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+    let mut cold_pages = Vec::new();
+    let mut warm_pages = Vec::new();
+    let mut concurrent_headers = Vec::new();
+    let mut returned = 0;
+    for _ in 0..20 {
+        let store = SqliteStore::open(root.path()).unwrap();
+        store.validate_session(&warm).await.unwrap();
+        let worker = store.clone();
+        let candidate = cold.clone();
+        let job = tokio::spawn(async move {
+            let started = Instant::now();
+            let page = worker.read_facts(&candidate, 0, 1).await.unwrap();
+            (started.elapsed(), page.facts.len())
+        });
+        // This samples overlap, not a deterministic synchronization assertion.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        while !job.is_finished() {
+            concurrent_headers.push(
+                timed_async(async {
+                    black_box(store.header(&warm).await.unwrap());
+                })
+                .await,
+            );
+        }
+        let (elapsed, count) = job.await.unwrap();
+        cold_pages.push(elapsed);
+        returned += count;
+        warm_pages.push(
+            timed_async(async {
+                black_box(store.read_facts(&cold, 0, 1).await.unwrap());
+            })
+            .await,
+        );
+    }
+    println!(
+        "control_case controls={count} cold_page_calls={} returned_facts={returned} warm_header_calls={}",
+        cold_pages.len(),
+        concurrent_headers.len()
+    );
+    report("cold_control_one_fact_page", &cold_pages);
+    report("warm_control_one_fact_page", &warm_pages);
+    if !concurrent_headers.is_empty() {
+        report("concurrent_warm_header", &concurrent_headers);
+    }
 }

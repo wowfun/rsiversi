@@ -14,6 +14,10 @@ is the generic static composition SDK: it freezes explicit factory and marker
 catalogs plus the Profile environment, then bootstraps exactly one Profile
 without owning product implementations or introducing a second runtime.
 
+[`rsi-api`](../crates/rsi-api/README.md) owns transport-independent API identities
+and retained wire-buffer budgets. Domain operations and durable semantics remain
+with their owning product; the API foundation does not import those products.
+
 Base capability families own Storage, Settings, Credentials, Media, Tools,
 Commands, Approval, User Questions, Sandbox, Process, Shell, Jobs, Apply-Patch, Workspace, Permission Presets, and derived
 projections. Their protocols and deterministic test support are libraries;
@@ -27,7 +31,7 @@ provider implementations export ordinary plugin factories; no family-level
 Meta adapter owns their lifecycle.
 
 [`rsi-agent`](../crates/rsi-agent/README.md) owns durable session, turn, and
-Store contracts, the session Kernel, context construction, execution, and
+Store contracts, the Agent Kernel, context construction, execution, and
 Store adapters. It also owns bounded preset discovery/authoring and immutable
 per-preset composition generations. Global providers create unpublished Tool
 catalog stages; Agent-only contribution plugins register through a write-only
@@ -37,12 +41,18 @@ Runtime-composed implementations are independent ordinary plugins; protocol
 and test-support packages are libraries.
 
 The standard [`rsi`](../crates/rsi/README.md) product owns Base composition,
-Session applications, and the single local Session Host for one standard
+applications, and the single local Service Host for one standard
 `HostPaths` identity. Its library owns product factories, product-owned Profile
 fragments, Application and Host Profile catalogs, the transport-independent
-Session interface, and local/Unix-domain-socket adapters. The binary owns CLI
-parsing, terminal interaction, explicit daemon process control, process
-signals, and construction of the Tokio runtime. The Agent Kernel remains the sole durable session state-machine
+Session domain plugin, and local/Unix-domain-socket adapters. The terminal package
+owns native application parsing, terminal interaction and application signals.
+The Serve application owns authenticated HTTP configuration and signals, consuming
+an independently composed service generation within that same Runtime.
+The Web application runs Rust Meta, Profiles and shared client controllers in a
+Dedicated Worker; its document bridge renders two independent conversation panes.
+Static Web assets are supplied by their own plugin to the HTTP listener.
+The binary owns launcher and management parsing, explicit daemon process control,
+process signals, and construction of the Tokio runtime. The Agent Kernel remains the sole durable session state-machine
 owner; the product Host adds live multiplexing and process ownership without
 moving Agent semantics into a wire adapter.
 

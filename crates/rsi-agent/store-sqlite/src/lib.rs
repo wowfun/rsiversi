@@ -40,9 +40,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Semaphore;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
@@ -257,11 +257,20 @@ struct StoreInner {
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
     validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
-    validation_gates: Arc<Mutex<BTreeMap<SessionId, Weak<AsyncMutex<()>>>>>,
+    validation_admission: Arc<Semaphore>,
     #[cfg(test)]
     validation_runs: Arc<AtomicU64>,
     #[cfg(test)]
     fact_materializations: Arc<AtomicU64>,
+    #[cfg(test)]
+    control_decodes: AtomicU64,
+    #[cfg(test)]
+    validation_barrier: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     cas_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
@@ -270,10 +279,9 @@ struct StoreInner {
 }
 
 struct DatabaseConnections {
-    // Rust drops fields in declaration order. Keeping the reader first makes
-    // the writer SQLite's last connection on clean shutdown, which checkpoints
-    // and removes the WAL after all Store operations release this shared pair.
+    // Readers close before the final writer, which checkpoints the WAL.
     reader: Mutex<Connection>,
+    validation_reader: Mutex<Connection>,
     writer: Mutex<Connection>,
 }
 
@@ -356,20 +364,31 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         configure_reader(&reader_connection)?;
+        let validation_connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(sql_error)?;
+        configure_reader(&validation_connection)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 connections: DatabaseConnections {
                     reader: Mutex::new(reader_connection),
+                    validation_reader: Mutex::new(validation_connection),
                     writer: Mutex::new(writer_connection),
                 },
                 writer_admission: Arc::new(Semaphore::new(1)),
                 reader_admission: Arc::new(Semaphore::new(1)),
                 validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
-                validation_gates: Arc::new(Mutex::new(BTreeMap::new())),
+                validation_admission: Arc::new(Semaphore::new(1)),
                 #[cfg(test)]
                 validation_runs: Arc::new(AtomicU64::new(0)),
                 #[cfg(test)]
                 fact_materializations: Arc::new(AtomicU64::new(0)),
+                #[cfg(test)]
+                control_decodes: AtomicU64::new(0),
+                #[cfg(test)]
+                validation_barrier: Mutex::new(None),
                 cas_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
                 cas_dir: Arc::new(cas_dir),
@@ -484,43 +503,101 @@ impl SqliteStore {
         self.inner.touch_validated_session(session_id)
     }
 
-    fn validation_gate(&self, session_id: &SessionId) -> Result<Arc<AsyncMutex<()>>> {
-        let mut gates = self
-            .inner
-            .validation_gates
-            .lock()
-            .map_err(|_| StoreError::Io("session-validation gate mutex was poisoned".into()))?;
-        gates.retain(|_, gate| gate.strong_count() != 0);
-        if let Some(gate) = gates.get(session_id).and_then(Weak::upgrade) {
-            return Ok(gate);
-        }
-        let gate = Arc::new(AsyncMutex::new(()));
-        gates.insert(session_id.clone(), Arc::downgrade(&gate));
-        Ok(gate)
+    async fn with_validation<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let owner = Arc::clone(&self.inner);
+        Self::with_database(
+            Arc::clone(&self.inner.validation_admission),
+            "SQLite validation admission closed",
+            move || {
+                let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
+                    StoreError::Io("SQLite validation connection mutex was poisoned".into())
+                })?;
+                operation(&mut connection)
+            },
+        )
+        .await
     }
 
     async fn ensure_session_validated(&self, session_id: &SessionId) -> Result<()> {
         if self.touch_validated_session(session_id) {
             return Ok(());
         }
-        let gate = self.validation_gate(session_id)?;
-        let _gate = gate.lock().await;
+        let permit = Arc::clone(&self.inner.validation_admission)
+            .acquire_owned()
+            .await
+            .map_err(|_| StoreError::Io("SQLite validation admission closed".into()))?;
         if self.touch_validated_session(session_id) {
             return Ok(());
         }
         let candidate = session_id.clone();
-        #[cfg(test)]
-        self.inner.validation_runs.fetch_add(1, Ordering::Relaxed);
-        self.with_reader(move |connection| {
+        let owner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
+                StoreError::Io("SQLite validation connection mutex was poisoned".into())
+            })?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            validate_session(&transaction, &candidate)?;
-            transaction.commit().map_err(sql_error)
+            owner.validate_selected(&transaction, &candidate)?;
+            transaction.commit().map_err(sql_error)?;
+            if let Ok(mut cache) = owner.validated_sessions.lock() {
+                cache.insert(candidate);
+            }
+            Ok(())
         })
-        .await?;
-        self.mark_session_validated(session_id.clone());
-        Ok(())
+        .await
+        .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
+    }
+
+    async fn with_subtree_reader<T, F>(&self, root: &SessionId, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Transaction<'_>, StoreAgentSubtreeSnapshot) -> Result<T> + Send + 'static,
+    {
+        let candidate = root.clone();
+        let owner = Arc::clone(&self.inner);
+        let attempt = self
+            .with_reader(move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .map_err(sql_error)?;
+                let snapshot = session_store::read_agent_subtree(&transaction, &candidate)?;
+                if !owner
+                    .missing_subtree_proofs(&snapshot, &BTreeSet::new())
+                    .is_empty()
+                {
+                    return Ok(Err(operation));
+                }
+                let result = operation(&transaction, snapshot)?;
+                transaction.commit().map_err(sql_error)?;
+                Ok(Ok(result))
+            })
+            .await?;
+        match attempt {
+            Ok(result) => Ok(result),
+            Err(operation) => {
+                let candidate = root.clone();
+                let owner = Arc::clone(&self.inner);
+                self.with_validation(move |connection| {
+                    let transaction = connection
+                        .transaction_with_behavior(TransactionBehavior::Deferred)
+                        .map_err(sql_error)?;
+                    let snapshot = owner.read_validated_agent_subtree(&transaction, &candidate)?;
+                    // Publish only after the complete snapshot operation succeeds.
+                    let validated = snapshot.clone();
+                    let result = operation(&transaction, snapshot)?;
+                    transaction.commit().map_err(sql_error)?;
+                    owner.mark_subtree_validated(&validated);
+                    Ok(result)
+                })
+                .await
+            }
+        }
     }
 
     async fn session_exists(&self, session_id: &SessionId) -> Result<bool> {

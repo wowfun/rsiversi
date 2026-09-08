@@ -1,7 +1,7 @@
 use super::*;
 
 #[async_trait]
-impl TurnFinalization for SessionKernel {
+impl TurnFinalization for AgentKernel {
     fn register(
         &self,
         name: String,
@@ -100,7 +100,7 @@ impl TurnFinalization for SessionKernel {
 }
 
 #[async_trait]
-impl TurnExecution for SessionKernel {
+impl TurnExecution for AgentKernel {
     async fn park_human_wait(
         &self,
         claim: &TurnClaim,
@@ -462,8 +462,8 @@ impl TurnExecution for SessionKernel {
                 .map_err(|error| TurnError::Invalid(error.to_string()))
             })
             .collect::<TurnResult<Vec<_>>>()?;
+        let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
         self.inner
-            .store
             .commit_agent(AtomicAgentCommit {
                 sessions: vec![AtomicSessionAppend {
                     session_id: claim.session_id().clone(),
@@ -976,7 +976,7 @@ pub(super) enum PublishAdmission {
 
 #[allow(clippy::too_many_lines)] // Staging keeps budget, intent fences, and speculative suffix mutation all-or-nothing.
 pub(super) fn try_publish_once(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     claim: &TurnClaim,
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<PublishAdmission> {

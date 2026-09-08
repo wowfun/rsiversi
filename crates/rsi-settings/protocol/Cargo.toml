@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

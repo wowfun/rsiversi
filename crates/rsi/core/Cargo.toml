@@ -15,6 +15,26 @@ name = "rsi"
 path = "src/main.rs"
 
 [dependencies]
+rsi-client-composition = { path = "../client-composition" }
+rsi-web-assets = { path = "../web-assets" }
+rsi-api-http-client = { path = "../../rsi-api/http-client" }
+rsi-api-device-api = { path = "../../rsi-api/device-api" }
+rsi-terminal = { path = "../terminal" }
+rsi-application = { path = "../application" }
+rsi-serve = { path = "../serve" }
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-client = { path = "../client" }
+rsi-api = { path = "../../rsi-api/core" }
+rsi-api-auth = { path = "../../rsi-api/auth" }
+rsi-ai-models-api = { path = "../../rsi-ai/models-api" }
+rsi-workspace-api = { path = "../../rsi-workspace/api" }
+rsi-settings-api = { path = "../../rsi-settings/api" }
+rsi-media-api = { path = "../../rsi-media/api" }
+rsi-process-output-api = { path = "../../rsi-process/output-api" }
+rsi-session-api = { path = "../session-api" }
+bytes.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
@@ -62,7 +82,7 @@ rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
 rsi-session = { path = "../session" }
-rsi-session-host = { path = "../session-host" }
+rsi-service-host = { path = "../service-host" }
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-settings-local = { path = "../../rsi-settings/local" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
@@ -72,21 +92,29 @@ rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
 rsi-tools = { path = "../../rsi-tools/core" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 rsi-workspace = { path = "../../rsi-workspace/core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+rusqlite.workspace = true
+base64.workspace = true
+rsi-session-testkit = { path = "../session-testkit" }
+rsi-settings-testkit = { path = "../../rsi-settings/testkit" }
+portable-pty.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 axum.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+rsi-api-uds-client = { path = "../../rsi-api/uds-client" }
 libc.workspace = true
 rustix.workspace = true
 

@@ -1,4 +1,4 @@
-//! Transport-independent standard-product Session interface and local adapter.
+//! Native standard-product Session domain service.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -9,316 +9,41 @@ use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionPin, AgentSessionDraft, PreparedFreshSession,
 };
 use rsi_agent_session_protocol::{
-    AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, FrozenAgentSettings,
-    MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS, MAXIMUM_FACTS_PER_READ, MessageId, MessageOptions,
-    SessionFact, SessionHeader, SessionId, TurnId, WorkspaceTrust,
+    AgentMessage, AgentMessageContent, AgentMessageSource, MAXIMUM_FACTS_PER_READ, MessageId,
+    MessageOptions, SessionHeader, SessionId,
 };
 use rsi_agent_store_protocol::{
     MAXIMUM_SESSIONS_PER_READ, SessionStore, StoreError, StoreRecentSessionCursor,
 };
 use rsi_agent_turn_protocol::{
     CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SessionObservationStream,
-    SubmitImage, SubmitMessage as SubmitAgentMessage, SubmitSession, SubmittedTurn, TurnError,
-    TurnService,
+    SubmitImage, SubmitMessage as SubmitAgentMessage, SubmitSession, TurnError, TurnService,
 };
-use rsi_ai_protocol::{ImageCall, ImageRequest, LanguageCall, ModelRef};
+use rsi_ai_protocol::{ImageCall, LanguageCall};
 use rsi_approval_protocol::{ApprovalDecision, ApprovalRequest};
 use rsi_media_protocol::{Media, MediaError};
-use rsi_sandbox::SandboxMode;
-use rsi_workspace::WorkspaceRegistry;
+use rsi_workspace_protocol::WorkspaceRegistry;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use thiserror::Error;
 use tokio::sync::Mutex;
 
-/// Maximum aggregate encoded image bytes accepted by one Session message.
-pub const MAXIMUM_SESSION_INPUT_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+mod drafts;
+mod interactions;
+mod plugin;
+pub use plugin::SessionFactory;
 
-/// Current immutable Agent settings for newly created sessions.
-pub trait AgentSettingsSource: fmt::Debug + Send + Sync + 'static {
-    /// Returns one bounded redacted settings snapshot.
-    fn current(&self) -> FrozenAgentSettings;
-}
-
-/// Live approval control injected into one Session adapter.
-#[async_trait]
-pub trait SessionApprovalControl: fmt::Debug + Send + Sync + 'static {
-    /// Lists bounded pending requests for one exact session.
-    async fn pending(&self, session_id: &SessionId) -> Result<Vec<ApprovalRequest>>;
-    /// Settles or confirms an identical retained answer; `false` means unavailable.
-    async fn answer(
-        &self,
-        session_id: &SessionId,
-        approval_id: &str,
-        decision: ApprovalDecision,
-    ) -> Result<bool>;
-}
-
-/// Approval control used by non-capable local applications.
-#[derive(Debug, Default)]
-pub struct NoApprovalControl;
-
-#[async_trait]
-impl SessionApprovalControl for NoApprovalControl {
-    async fn pending(&self, _session_id: &SessionId) -> Result<Vec<ApprovalRequest>> {
-        Ok(Vec::new())
-    }
-
-    async fn answer(
-        &self,
-        _session_id: &SessionId,
-        _approval_id: &str,
-        _decision: ApprovalDecision,
-    ) -> Result<bool> {
-        Ok(false)
-    }
-}
-
-/// Request to create one process-local draft without durable mutation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CreateSession {
-    /// Canonicalized before the draft Header is built.
-    pub cwd: PathBuf,
-    /// Optional caller-preallocated session identity.
-    pub session_id: Option<SessionId>,
-    /// Explicit preset or the current catalog default.
-    pub agent_preset_id: Option<AgentPresetId>,
-    /// Explicit immutable authority for project-controlled instructions and skills.
-    pub workspace_trust: WorkspaceTrust,
-}
-
-/// One transport-independent user-input block.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SessionInput {
-    /// Safe UTF-8 text entering model context directly.
-    Text {
-        /// Exact text bytes.
-        text: String,
-    },
-    /// Encoded image bytes imported through Media before durable admission.
-    Image {
-        /// Complete encoded image body.
-        bytes: Arc<[u8]>,
-    },
-}
-
-/// Validates one complete Session input before provider, Media, Store, or transport work.
-pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
-    if content.is_empty() || content.len() > MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS {
-        return Err(SessionApplicationError::Invalid(format!(
-            "Session input must contain 1..={MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS} blocks"
-        )));
-    }
-    let mut text_bytes = 0_usize;
-    let mut image_bytes = 0_usize;
-    for block in content {
-        match block {
-            SessionInput::Text { text } => {
-                if text.is_empty()
-                    || text.len() > rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES
-                    || text
-                        .chars()
-                        .any(|character| character == '\0' || character == '\u{7f}')
-                {
-                    return Err(SessionApplicationError::Invalid(format!(
-                        "Session message text must contain 1..={} safe UTF-8 bytes",
-                        rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES
-                    )));
-                }
-                text_bytes = text_bytes.checked_add(text.len()).ok_or_else(|| {
-                    SessionApplicationError::Invalid(
-                        "Session input text byte total overflowed".into(),
-                    )
-                })?;
-            }
-            SessionInput::Image { bytes } => {
-                if bytes.is_empty() {
-                    return Err(SessionApplicationError::Invalid(
-                        "Session input image must not be empty".into(),
-                    ));
-                }
-                image_bytes = image_bytes.checked_add(bytes.len()).ok_or_else(|| {
-                    SessionApplicationError::Invalid("Session input image bytes overflowed".into())
-                })?;
-            }
-        }
-    }
-    if text_bytes > rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES {
-        return Err(SessionApplicationError::Invalid(format!(
-            "Session message text exceeds {} aggregate bytes",
-            rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES
-        )));
-    }
-    if image_bytes > MAXIMUM_SESSION_INPUT_IMAGE_BYTES {
-        return Err(SessionApplicationError::Invalid(format!(
-            "Session input images exceed {MAXIMUM_SESSION_INPUT_IMAGE_BYTES} aggregate bytes"
-        )));
-    }
-    Ok(())
-}
-
-/// One idempotent multimodal mailbox submission.
-#[derive(Clone, Debug)]
-pub struct SubmitInput {
-    /// Immutable human ingress intent: `NextTurn` or `Steer`.
-    pub delivery: rsi_agent_session_protocol::MessageDelivery,
-    /// Caller-preallocated durable message identity.
-    pub message_id: MessageId,
-    /// Nonempty ordered text and image content.
-    pub content: Vec<SessionInput>,
-    /// Optional invocation-scoped model route.
-    pub model: Option<ModelRef>,
-    /// Optional invocation-scoped sandbox mode.
-    pub sandbox: Option<SandboxMode>,
-}
-
-/// One idempotent direct Image submission.
-#[derive(Clone, Debug)]
-pub struct SubmitDirectImage {
-    /// Caller-preallocated durable identity.
-    pub turn_id: TurnId,
-    /// Exact invocation-scoped Image route.
-    pub model: ModelRef,
-    /// Complete provider-neutral request.
-    pub request: ImageRequest,
-}
-
-/// Durable acceptance receipt.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TurnReceipt {
-    /// Exact session identity.
-    pub session_id: SessionId,
-    /// Exact caller-preallocated turn identity.
-    pub turn_id: TurnId,
-    /// Durable acceptance sequence.
-    pub accepted_seq: u64,
-}
-
-impl From<SubmittedTurn> for TurnReceipt {
-    fn from(value: SubmittedTurn) -> Self {
-        Self {
-            session_id: value.session_id,
-            turn_id: value.turn_id,
-            accepted_seq: value.accepted_seq,
-        }
-    }
-}
-
-/// One bounded ascending page immediately before an exclusive cursor.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionHistoryPage {
-    /// Effective exclusive cursor used by the Store.
-    pub before_seq: u64,
-    /// Contiguous Facts in ascending sequence order.
-    pub facts: Vec<SessionFact>,
-    /// Exact durable tail at read time.
-    pub durable_seq: u64,
-    /// Whether an earlier page exists.
-    pub has_more: bool,
-}
-
-/// Public cursor for recent-session listing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecentSessionCursor {
-    /// Durable creation timestamp in Unix milliseconds.
-    pub created_at_ms: u64,
-    /// Descending identity tie-breaker.
-    pub session_id: SessionId,
-}
-
-/// One recent durable session summary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionSummary {
-    /// Complete immutable durable Header.
-    pub header: SessionHeader,
-}
-
-impl SessionSummary {
-    /// Returns the cursor selecting summaries after this one.
-    pub fn cursor(&self) -> RecentSessionCursor {
-        RecentSessionCursor {
-            created_at_ms: self.header.created_at_ms(),
-            session_id: self.header.session_id().clone(),
-        }
-    }
-}
-
-/// One bounded recent-session page.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecentSessionPage {
-    /// Exact summaries in descending creation order.
-    pub sessions: Vec<SessionSummary>,
-    /// Whether a later page exists.
-    pub has_more: bool,
-}
-
-/// One attached Session interface.
-#[async_trait]
-pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
-    /// Reads the immutable candidate or durable Header.
-    async fn header(&self) -> Result<SessionHeader>;
-    /// Accepts one multimodal message and waits for durable mailbox acceptance.
-    async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt>;
-    /// Reads the latest durable claim or discard state for one message.
-    async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt>;
-    /// Accepts one direct Image generation turn and waits for durable acceptance.
-    async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt>;
-    /// Idempotently cancels an unclaimed message or an accepted Turn.
-    async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult>;
-    /// Reads one bounded backward history page.
-    async fn history_before(
-        &self,
-        exclusive_before_seq: Option<u64>,
-        limit: usize,
-    ) -> Result<SessionHistoryPage>;
-    /// Reconnectably observes durable control records and Facts after exact cursors.
-    async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream>;
-    /// Captures one atomic durable inspection of this Session and subtree.
-    async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection>;
-    /// Lists this root Session's live pending human questions.
-    async fn pending_questions(&self) -> Result<Vec<rsi_user_questions_protocol::QuestionRequest>>;
-    /// Accepts or retries a live answer without promising durable Tool settlement.
-    async fn answer_question(
-        &self,
-        id: &str,
-        answer: rsi_user_questions_protocol::QuestionAnswer,
-    ) -> Result<bool>;
-    /// Reads one bounded raw-byte page by completed output identity.
-    async fn read_output(
-        &self,
-        id: &str,
-        offset: u64,
-        limit: usize,
-    ) -> Result<rsi_process::OutputPage>;
-    /// Lists live pending approvals for this complete Agent tree.
-    async fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>>;
-    /// Attempts to settle one live approval in this Agent tree.
-    ///
-    /// `false` means no matching pending request remains, including an unknown
-    /// identity. An identity pending in multiple Sessions is rejected as ambiguous.
-    async fn answer_approval(&self, approval_id: &str, decision: ApprovalDecision) -> Result<bool>;
-}
-
-/// Product-level Session application interface.
-#[async_trait]
-pub trait SessionApplication: fmt::Debug + Send + Sync + 'static {
-    /// Creates one unpublished draft handle after rejecting a durable identity collision.
-    async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>>;
-    /// Attaches to one exact durable session.
-    async fn attach(&self, session_id: &SessionId) -> Result<Arc<dyn SessionHandle>>;
-    /// Lists one bounded creation-time-descending page.
-    async fn list_recent(
-        &self,
-        after: Option<&RecentSessionCursor>,
-        limit: usize,
-    ) -> Result<RecentSessionPage>;
-}
+use rsi_session_protocol::{
+    AgentSettingsSource, CreateSession, InteractionRetention, RecentSessionCursor,
+    RecentSessionPage, Result, SessionApprovalControl, SessionError, SessionHandle,
+    SessionHistoryPage, SessionInput, SessionService, SessionSummary, SubmitDirectImage,
+    SubmitInput, TurnReceipt, validate_session_input,
+};
 
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
-pub struct LocalSessionApplication {
+pub struct LocalSessionService {
     turns: Arc<dyn TurnService>,
     store: Arc<dyn SessionStore>,
     composition: Arc<dyn AgentComposition>,
@@ -329,21 +54,23 @@ pub struct LocalSessionApplication {
     media: Arc<dyn Media>,
     approvals: Arc<dyn SessionApprovalControl>,
     questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
-    output: Option<Arc<dyn rsi_process::ProcessOutputCache>>,
+    interaction_retention: InteractionRetention,
+    drafts: Arc<drafts::Drafts>,
 }
 
-impl fmt::Debug for LocalSessionApplication {
+impl fmt::Debug for LocalSessionService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LocalSessionApplication")
+            .debug_struct("LocalSessionService")
             .finish_non_exhaustive()
     }
 }
 
-impl LocalSessionApplication {
+impl LocalSessionService {
     /// Creates one local adapter from already-owned Host dependencies.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        execution: rsi_meta::Execution,
         turns: Arc<dyn TurnService>,
         store: Arc<dyn SessionStore>,
         composition: Arc<dyn AgentComposition>,
@@ -365,19 +92,18 @@ impl LocalSessionApplication {
             media,
             approvals,
             questions: None,
-            output: None,
+            interaction_retention: InteractionRetention::default(),
+            drafts: drafts::Drafts::new(execution),
         }
     }
 
-    /// Supplies optional Host-generation human interaction and completed output capabilities.
+    /// Supplies the Host-generation human question capability.
     #[must_use]
-    pub fn with_live_capabilities(
+    pub fn with_questions(
         mut self,
         questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
-        output: Option<Arc<dyn rsi_process::ProcessOutputCache>>,
     ) -> Self {
         self.questions = questions;
-        self.output = output;
         self
     }
 
@@ -385,9 +111,12 @@ impl LocalSessionApplication {
         &self,
         header: SessionHeader,
         state: HandleState,
-    ) -> Arc<dyn SessionHandle> {
+        lease: Option<drafts::DraftLease>,
+    ) -> Arc<LocalSessionHandle> {
         Arc::new(LocalSessionHandle {
             header,
+            published: std::sync::atomic::AtomicBool::new(matches!(state, HandleState::Attached)),
+            lease,
             state: Mutex::new(state),
             turns: Arc::clone(&self.turns),
             store: Arc::clone(&self.store),
@@ -397,40 +126,53 @@ impl LocalSessionApplication {
             media: Arc::clone(&self.media),
             approvals: Arc::clone(&self.approvals),
             questions: self.questions.clone(),
-            output: self.output.clone(),
+            interaction_retention: self.interaction_retention.clone(),
         })
     }
 }
 
-#[async_trait]
-impl SessionApplication for LocalSessionApplication {
-    async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
-        let cwd = canonical_workspace_directory(&request.cwd).await?;
+impl LocalSessionService {
+    /// Stops draft admission and waits for service-owned preparation and sweeping.
+    pub async fn stop(&self) {
+        self.drafts.stop().await;
+    }
+
+    async fn prepare_draft(
+        &self,
+        request: CreateSession,
+        lease: drafts::DraftLease,
+    ) -> Result<Arc<LocalSessionHandle>> {
+        let workspace = self
+            .workspace
+            .get(&request.workspace_id)
+            .await
+            .map_err(|error| map_workspace_error(&error))?;
+        let cwd = workspace.path;
         let agent_preset_id = match request.agent_preset_id {
             Some(id) => id,
             None => self
                 .composition
                 .default_preset_id()
                 .await
-                .map_err(|error| SessionApplicationError::Backend(error.to_string()))?,
+                .map_err(|error| SessionError::Backend(error.to_string()))?,
         };
-        let settings = self.settings.current();
+        let settings = self.settings.current()?;
         settings
             .validate()
-            .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
-        let session_id = request.session_id.map_or_else(generated_session_id, Ok)?;
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let session_id = request.session_id;
         match self.store.header(&session_id).await {
             Ok(_) => {
-                return Err(SessionApplicationError::Invalid(format!(
+                return Err(SessionError::Invalid(format!(
                     "Session identity `{session_id}` already exists in the durable Store"
                 )));
             }
             Err(StoreError::NotFound(_)) => {}
             Err(error) => return Err(map_store_error(error)),
         }
-        let canonical_cwd = cwd.to_str().ok_or_else(|| {
-            SessionApplicationError::Invalid("canonical workspace path is not UTF-8".into())
-        })?;
+        let canonical_cwd = cwd
+            .to_str()
+            .ok_or_else(|| SessionError::Invalid("canonical workspace path is not UTF-8".into()))?;
         let header = SessionHeader::new(
             session_id,
             now_ms()?,
@@ -439,21 +181,39 @@ impl SessionApplication for LocalSessionApplication {
             settings,
         )
         .and_then(|header| header.with_workspace_trust(request.workspace_trust))
-        .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| SessionError::Invalid(error.to_string()))?;
         let draft = AgentSessionDraft::new(header.clone(), Arc::clone(&self.composition))
             .await
-            .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+            .map_err(|error| SessionError::Backend(error.to_string()))?;
         let composition = draft.composition().clone();
-        Ok(self.handle_from_header(header, HandleState::Fresh(composition)))
+        Ok(self.handle_from_header(header, HandleState::Fresh(composition), Some(lease)))
+    }
+}
+
+#[async_trait]
+impl SessionService for LocalSessionService {
+    async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
+        self.drafts.accepting()?;
+        self.drafts
+            .create(self.clone(), request, None)
+            .await
+            .map(|handle| handle as Arc<dyn SessionHandle>)
     }
 
     async fn attach(&self, session_id: &SessionId) -> Result<Arc<dyn SessionHandle>> {
+        if let Some(handle) = self.drafts.get(session_id).await? {
+            match handle.header().await {
+                Ok(_) => return Ok(handle),
+                Err(SessionError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let header = self
             .store
             .header(session_id)
             .await
             .map_err(map_store_error)?;
-        Ok(self.handle_from_header(header, HandleState::Attached))
+        Ok(self.handle_from_header(header, HandleState::Attached, None))
     }
 
     async fn list_recent(
@@ -462,7 +222,7 @@ impl SessionApplication for LocalSessionApplication {
         limit: usize,
     ) -> Result<RecentSessionPage> {
         if limit == 0 || limit > MAXIMUM_SESSIONS_PER_READ {
-            return Err(SessionApplicationError::Invalid(format!(
+            return Err(SessionError::Invalid(format!(
                 "recent-session limit must be within 1..={MAXIMUM_SESSIONS_PER_READ}"
             )));
         }
@@ -487,14 +247,35 @@ impl SessionApplication for LocalSessionApplication {
     }
 }
 
+#[async_trait]
+impl rsi_session_protocol::SessionIngress for LocalSessionService {
+    async fn create_from(
+        &self,
+        request: CreateSession,
+        origin: rsi_api_protocol::CallOrigin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        let device = match origin {
+            rsi_api_protocol::CallOrigin::Local => None,
+            rsi_api_protocol::CallOrigin::Device(device) => Some(device.id),
+        };
+        self.drafts
+            .create(self.clone(), request, device)
+            .await
+            .map(|handle| handle as Arc<dyn SessionHandle>)
+    }
+}
+
 enum HandleState {
     Fresh(AgentCompositionPin),
     Attached,
+    Expired,
 }
 
 struct LocalSessionHandle {
     header: SessionHeader,
     state: Mutex<HandleState>,
+    lease: Option<drafts::DraftLease>,
+    published: std::sync::atomic::AtomicBool,
     turns: Arc<dyn TurnService>,
     store: Arc<dyn SessionStore>,
     workspace: Arc<dyn WorkspaceRegistry>,
@@ -503,7 +284,7 @@ struct LocalSessionHandle {
     media: Arc<dyn Media>,
     approvals: Arc<dyn SessionApprovalControl>,
     questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
-    output: Option<Arc<dyn rsi_process::ProcessOutputCache>>,
+    interaction_retention: InteractionRetention,
 }
 
 impl fmt::Debug for LocalSessionHandle {
@@ -516,17 +297,92 @@ impl fmt::Debug for LocalSessionHandle {
 }
 
 impl LocalSessionHandle {
+    fn begin_activity(&self) -> Result<Option<drafts::Activity>> {
+        if self.published.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(None);
+        }
+        self.lease
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("draft lease".into()))?
+            .begin()
+            .map(Some)
+    }
+
+    fn expire_draft(&self) {
+        if self.published.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let mut state = self
+            .state
+            .try_lock()
+            .expect("only an inactive final draft lease expires");
+        if matches!(*state, HandleState::Fresh(_)) {
+            let old = std::mem::replace(&mut *state, HandleState::Expired);
+            drop(state);
+            drop(old);
+        }
+    }
+
+    async fn reconcile_fresh_submission(&self, state: &mut HandleState, accepted: bool) {
+        let matching = if accepted {
+            true
+        } else {
+            let Ok(header) = self.store.header(self.header.session_id()).await else {
+                return;
+            };
+            header == self.header
+        };
+        self.finish_fresh(state, matching);
+    }
+
+    fn finish_fresh(&self, state: &mut HandleState, matching: bool) {
+        if matching {
+            *state = HandleState::Attached;
+            self.published
+                .store(true, std::sync::atomic::Ordering::Release);
+        } else {
+            *state = HandleState::Expired;
+        }
+        if let Some(lease) = &self.lease {
+            lease.published();
+        }
+    }
+
+    /// Serializes a fresh read with publication and returns whether Store history exists.
+    async fn reconcile_fresh_read(&self) -> Result<bool> {
+        let mut state = self.state.lock().await;
+        match &*state {
+            HandleState::Attached => return Ok(true),
+            HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
+            HandleState::Fresh(_) => {}
+        }
+        let durable = match self.store.header(self.header.session_id()).await {
+            Ok(header) => header,
+            Err(StoreError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(map_store_error(error)),
+        };
+        let matching = durable == self.header;
+        self.finish_fresh(&mut state, matching);
+        if matching {
+            Ok(true)
+        } else {
+            Err(SessionError::NotFound(
+                "draft Header conflicts with durable Session".into(),
+            ))
+        }
+    }
+
     async fn prepare_workspace(&self) -> Result<()> {
         let cwd = canonical_workspace_directory(Path::new(self.header.canonical_cwd())).await?;
         if cwd.to_str() != Some(self.header.canonical_cwd()) {
-            return Err(SessionApplicationError::Invalid(
+            return Err(SessionError::Invalid(
                 "durable Session workspace no longer resolves to its canonical path".into(),
             ));
         }
         self.workspace
             .get_or_create(&cwd)
             .await
-            .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+            .map_err(|error| SessionError::Backend(error.to_string()))?;
         Ok(())
     }
 
@@ -536,13 +392,13 @@ impl LocalSessionHandle {
         for block in request.content {
             content.push(match block {
                 SessionInput::Text { text } => AgentMessageContent::Text { text },
-                SessionInput::Image { bytes } => AgentMessageContent::Image {
-                    media: self
-                        .media
-                        .import_image(bytes)
+                SessionInput::Image { media } => {
+                    self.media
+                        .read(&media)
                         .await
-                        .map_err(|error| map_media_import_error(&error))?,
-                },
+                        .map_err(|error| map_media_error(&error))?;
+                    AgentMessageContent::Image { media }
+                }
             });
         }
         let message = AgentMessage {
@@ -556,22 +412,53 @@ impl LocalSessionHandle {
         };
         message
             .validate()
-            .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
         Ok(message)
     }
 }
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn read_message(
+        &self,
+        message_id: &MessageId,
+        accepted_control_seq: u64,
+    ) -> Result<AgentMessage> {
+        let _activity = self.begin_activity()?;
+        let after = accepted_control_seq.checked_sub(1).ok_or_else(|| {
+            SessionError::Invalid("acceptance control cursor must be positive".into())
+        })?;
+        let page = self
+            .store
+            .read_controls(self.header.session_id(), after, 1)
+            .await
+            .map_err(map_store_error)?;
+        let record = page
+            .records
+            .first()
+            .filter(|record| record.seq() == accepted_control_seq)
+            .ok_or_else(|| SessionError::NotFound("exact message acceptance".into()))?;
+        if let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
+            message, ..
+        } = record.body()
+            && message.message_id == *message_id
+        {
+            return Ok(message.clone());
+        }
+        Err(SessionError::NotFound("exact message acceptance".into()))
+    }
     async fn header(&self) -> Result<SessionHeader> {
+        let _activity = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
         Ok(self.header.clone())
     }
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
+        let _activity = self.begin_activity()?;
         validate_session_input(&request.content)?;
         let delivery = request.delivery;
         if delivery == rsi_agent_session_protocol::MessageDelivery::NextStep {
-            return Err(SessionApplicationError::Invalid(
+            return Err(SessionError::Invalid(
                 "human Session input requires NextTurn or Steer intent".into(),
             ));
         }
@@ -604,11 +491,11 @@ impl SessionHandle for LocalSessionHandle {
                 .map_err(map_turn_error);
         }
         let HandleState::Fresh(composition) = &*state else {
-            unreachable!("attached state returned before fresh submission")
+            return Err(SessionError::NotFound("draft lease".into()));
         };
         let session = PreparedFreshSession::new(self.header.clone(), composition.clone())
             .map(SubmitSession::Fresh)
-            .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+            .map_err(|error| SessionError::Backend(error.to_string()))?;
         let message = self.prepare_message(request).await?;
         let result = self
             .turns
@@ -618,21 +505,13 @@ impl SessionHandle for LocalSessionHandle {
                 delivery,
             })
             .await;
-        let durable_header_matches = if result.is_err() {
-            self.store
-                .header(self.header.session_id())
-                .await
-                .is_ok_and(|header| header == self.header)
-        } else {
-            false
-        };
-        if result.is_ok() || durable_header_matches {
-            *state = HandleState::Attached;
-        }
+        self.reconcile_fresh_submission(&mut state, result.is_ok())
+            .await;
         result.map_err(map_turn_error)
     }
 
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt> {
+        let _activity = self.begin_activity()?;
         self.turns
             .message_status(self.header.session_id(), message_id)
             .await
@@ -640,6 +519,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt> {
+        let _activity = self.begin_activity()?;
         self.image
             .describe(&request.model)
             .map_err(|error| map_ai_error(&error))?;
@@ -665,11 +545,11 @@ impl SessionHandle for LocalSessionHandle {
                 .map_err(map_turn_error);
         }
         let HandleState::Fresh(composition) = &*state else {
-            unreachable!("attached state returned before fresh image submission")
+            return Err(SessionError::NotFound("draft lease".into()));
         };
         let session = PreparedFreshSession::new(self.header.clone(), composition.clone())
             .map(SubmitSession::Fresh)
-            .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+            .map_err(|error| SessionError::Backend(error.to_string()))?;
         let result = self
             .turns
             .submit_image(SubmitImage {
@@ -679,21 +559,13 @@ impl SessionHandle for LocalSessionHandle {
                 request: request.request,
             })
             .await;
-        let durable_header_matches = if result.is_err() {
-            self.store
-                .header(self.header.session_id())
-                .await
-                .is_ok_and(|header| header == self.header)
-        } else {
-            false
-        };
-        if result.is_ok() || durable_header_matches {
-            *state = HandleState::Attached;
-        }
+        self.reconcile_fresh_submission(&mut state, result.is_ok())
+            .await;
         result.map(TurnReceipt::from).map_err(map_turn_error)
     }
 
     async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult> {
+        let _activity = self.begin_activity()?;
         self.turns
             .cancel_target(self.header.session_id(), target, reason)
             .await
@@ -705,12 +577,13 @@ impl SessionHandle for LocalSessionHandle {
         exclusive_before_seq: Option<u64>,
         limit: usize,
     ) -> Result<SessionHistoryPage> {
+        let _activity = self.begin_activity()?;
         if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
-            return Err(SessionApplicationError::Invalid(format!(
+            return Err(SessionError::Invalid(format!(
                 "history limit must be within 1..={MAXIMUM_FACTS_PER_READ}"
             )));
         }
-        if matches!(*self.state.lock().await, HandleState::Fresh(_)) {
+        if !self.reconcile_fresh_read().await? {
             return Ok(SessionHistoryPage {
                 before_seq: 1,
                 facts: Vec::new(),
@@ -736,6 +609,7 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream> {
+        let _activity = self.begin_activity()?;
         self.turns
             .observe_session(self.header.session_id(), cursor)
             .await
@@ -743,13 +617,15 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
+        let _activity = self.begin_activity()?;
         self.store
             .inspect_session(self.header.session_id())
             .await
-            .map_err(|error| SessionApplicationError::Backend(error.to_string()))
+            .map_err(|error| SessionError::Backend(error.to_string()))
     }
 
     async fn pending_questions(&self) -> Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
+        let _activity = self.begin_activity()?;
         let Some(questions) = &self.questions else {
             return Ok(Vec::new());
         };
@@ -764,8 +640,9 @@ impl SessionHandle for LocalSessionHandle {
         id: &str,
         answer: rsi_user_questions_protocol::QuestionAnswer,
     ) -> Result<bool> {
+        let _activity = self.begin_activity()?;
         let questions = self.questions.as_ref().ok_or_else(|| {
-            SessionApplicationError::Invalid("human questions are unavailable in this Host".into())
+            SessionError::Invalid("human questions are unavailable in this Host".into())
         })?;
         questions
             .answer(self.header.session_id().as_str(), id, answer)
@@ -773,73 +650,50 @@ impl SessionHandle for LocalSessionHandle {
             .map_err(map_question_error)
     }
 
-    async fn read_output(
-        &self,
-        id: &str,
-        offset: u64,
-        limit: usize,
-    ) -> Result<rsi_process::OutputPage> {
-        let output = self.output.as_ref().ok_or_else(|| {
-            SessionApplicationError::Invalid(
-                "completed output cache is unavailable in this Host".into(),
-            )
-        })?;
-        let page = output
-            .read(id, offset, limit)
-            .await
-            .map_err(map_output_error)?;
-        page.validate_for(id, offset, limit)
-            .map_err(map_output_error)?;
-        Ok(page)
-    }
-
     async fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>> {
-        let mut pending = Vec::new();
-        for session_id in self
-            .turns
-            .tree_sessions(self.header.session_id())
-            .await
-            .map_err(map_turn_error)?
-        {
-            pending.extend(self.approvals.pending(&session_id).await?);
-        }
-        Ok(pending)
-    }
-
-    async fn answer_approval(&self, approval_id: &str, decision: ApprovalDecision) -> Result<bool> {
+        let _activity = self.begin_activity()?;
         let sessions = self
             .turns
             .tree_sessions(self.header.session_id())
             .await
             .map_err(map_turn_error)?;
-        let mut selected = None;
-        for session in &sessions {
-            if self
-                .approvals
-                .pending(session)
-                .await?
-                .iter()
-                .any(|request| request.id == approval_id)
-                && selected.replace(session).is_some()
-            {
-                return Err(SessionApplicationError::Invalid(
-                    "approval identity is ambiguous within the Agent tree".into(),
-                ));
-            }
+        self.approvals.pending_for_sessions(&sessions).await
+    }
+
+    async fn answer_approval(
+        &self,
+        owner: &SessionId,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<bool> {
+        let _activity = self.begin_activity()?;
+        let sessions = self
+            .turns
+            .tree_sessions(self.header.session_id())
+            .await
+            .map_err(map_turn_error)?;
+        if !sessions.contains(owner) {
+            return Err(SessionError::Invalid(
+                "approval owner is outside the Agent tree".into(),
+            ));
         }
-        if let Some(session) = selected {
-            return self.approvals.answer(session, approval_id, decision).await;
-        }
-        for session in &sessions {
-            if self
-                .approvals
-                .answer(session, approval_id, decision)
-                .await?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        self.approvals.answer(owner, approval_id, decision).await
+    }
+
+    async fn observe_interactions(&self) -> Result<rsi_session_protocol::InteractionStream> {
+        let _activity = self.begin_activity()?;
+        interactions::observe(
+            self.header.session_id().clone(),
+            self.header
+                .fork_origin()
+                .map_or(self.header.session_id(), |origin| &origin.root_session_id)
+                .clone(),
+            self.turns.clone(),
+            self.approvals.clone(),
+            self.questions.clone(),
+            self.interaction_retention.clone(),
+        )
+        .await
     }
 }
 
@@ -851,152 +705,94 @@ impl SessionHandle for LocalSessionHandle {
 pub async fn canonical_workspace_directory(path: &Path) -> Result<PathBuf> {
     let canonical = tokio::fs::canonicalize(path)
         .await
-        .map_err(|error| SessionApplicationError::Invalid(format!("workspace: {error}")))?;
+        .map_err(|error| SessionError::Invalid(format!("workspace: {error}")))?;
     let metadata = tokio::fs::symlink_metadata(&canonical)
         .await
-        .map_err(|error| SessionApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| SessionError::Invalid(error.to_string()))?;
     if !metadata.is_dir() {
-        return Err(SessionApplicationError::Invalid(
+        return Err(SessionError::Invalid(
             "workspace path is not a directory".into(),
         ));
     }
     Ok(canonical)
 }
 
-fn generated_session_id() -> Result<SessionId> {
-    let mut entropy = [0_u8; 16];
-    getrandom::fill(&mut entropy)
-        .map_err(|error| SessionApplicationError::Backend(format!("OS entropy failed: {error}")))?;
-    SessionId::new(format!("session-{:032x}", u128::from_le_bytes(entropy)))
-        .map_err(|error| SessionApplicationError::Invalid(error.to_string()))
-}
-
 fn now_ms() -> Result<u64> {
     let value = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| SessionApplicationError::Backend(error.to_string()))?;
+        .map_err(|error| SessionError::Backend(error.to_string()))?;
     Ok(u64::try_from(value.as_millis()).unwrap_or(u64::MAX).max(1))
 }
 
-fn map_turn_error(error: TurnError) -> SessionApplicationError {
+fn map_turn_error(error: TurnError) -> SessionError {
     match error {
-        TurnError::Invalid(message) => SessionApplicationError::Invalid(message),
-        TurnError::SessionNotFound(session) => SessionApplicationError::NotFound(session),
+        TurnError::Invalid(message) => SessionError::Invalid(message),
+        TurnError::SessionNotFound(session) => SessionError::NotFound(session),
         TurnError::MessageNotFound { session, message } => {
-            SessionApplicationError::NotFound(format!("{session}/{message}"))
+            SessionError::NotFound(format!("{session}/{message}"))
         }
         TurnError::TurnNotFound { session, turn } => {
-            SessionApplicationError::NotFound(format!("{session}/{turn}"))
+            SessionError::NotFound(format!("{session}/{turn}"))
         }
-        TurnError::SubmissionConflict { session, turn } => {
-            SessionApplicationError::Conflict { session, turn }
-        }
+        TurnError::SubmissionConflict { session, turn } => SessionError::Conflict { session, turn },
         TurnError::MessageConflict { session, message } => {
-            SessionApplicationError::MessageConflict { session, message }
+            SessionError::MessageConflict { session, message }
         }
-        TurnError::Capacity | TurnError::ObserverCapacity => SessionApplicationError::Capacity,
-        TurnError::ShuttingDown => SessionApplicationError::ShuttingDown,
-        other => SessionApplicationError::Backend(other.to_string()),
+        TurnError::Capacity | TurnError::ObserverCapacity => SessionError::Capacity,
+        TurnError::ShuttingDown => SessionError::ShuttingDown,
+        other => SessionError::Backend(other.to_string()),
     }
 }
 
-fn map_store_error(error: StoreError) -> SessionApplicationError {
+fn map_store_error(error: StoreError) -> SessionError {
     match error {
-        StoreError::Invalid(message) => SessionApplicationError::Invalid(message),
-        StoreError::NotFound(value) => SessionApplicationError::NotFound(value),
+        StoreError::Invalid(message) => SessionError::Invalid(message),
+        StoreError::NotFound(value) => SessionError::NotFound(value),
         StoreError::TurnNotFound { session, turn } => {
-            SessionApplicationError::NotFound(format!("{session}/{turn}"))
+            SessionError::NotFound(format!("{session}/{turn}"))
         }
-        other => SessionApplicationError::Backend(other.to_string()),
+        other => SessionError::Backend(other.to_string()),
     }
 }
 
-fn map_ai_error(error: &rsi_ai_protocol::AiError) -> SessionApplicationError {
-    SessionApplicationError::Invalid(error.to_string())
+fn map_ai_error(error: &rsi_ai_protocol::AiError) -> SessionError {
+    SessionError::Invalid(error.to_string())
 }
 
-fn map_output_error(error: rsi_process::ProcessError) -> SessionApplicationError {
-    use rsi_process::ProcessError;
+fn map_workspace_error(error: &rsi_workspace_protocol::WorkspaceError) -> SessionError {
+    use rsi_workspace_protocol::WorkspaceError;
     match error {
-        ProcessError::InvalidInput(message) => SessionApplicationError::Invalid(message),
-        ProcessError::Capacity => SessionApplicationError::Capacity,
-        ProcessError::ShuttingDown => SessionApplicationError::ShuttingDown,
-        other => SessionApplicationError::Backend(other.to_string()),
+        WorkspaceError::Api(error) => SessionError::Api(error.clone()),
+        WorkspaceError::InvalidInput(_) | WorkspaceError::Unknown(_) => {
+            SessionError::Invalid(error.to_string())
+        }
+        WorkspaceError::Capacity => SessionError::Capacity,
+        WorkspaceError::ShuttingDown => SessionError::ShuttingDown,
+        WorkspaceError::Storage(_) | WorkspaceError::Corrupt(_) => {
+            SessionError::Backend(error.to_string())
+        }
     }
 }
 
-fn map_media_import_error(error: &MediaError) -> SessionApplicationError {
+fn map_media_error(error: &MediaError) -> SessionError {
     let message = error.to_string();
     match error {
-        MediaError::InvalidInput(_) | MediaError::Codec(_) => {
-            SessionApplicationError::Invalid(message)
-        }
-        MediaError::AdmissionFull(_) => SessionApplicationError::Capacity,
+        MediaError::Api(error) => SessionError::Api(error.clone()),
+        MediaError::InvalidInput(_) | MediaError::Codec(_) => SessionError::Invalid(message),
+        MediaError::AdmissionFull(_) => SessionError::Capacity,
         MediaError::NotFound(_) | MediaError::Corrupt(_) | MediaError::Io(_) => {
-            SessionApplicationError::Backend(message)
+            SessionError::Backend(message)
         }
     }
 }
 
-/// Closed Session application failure taxonomy shared by all adapters.
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum SessionApplicationError {
-    /// Malformed, oversized, or state-incompatible request.
-    #[error("invalid Session operation: {0}")]
-    Invalid(String),
-    /// Selected durable identity is absent.
-    #[error("Session object was not found: {0}")]
-    NotFound(String),
-    /// A preallocated Turn identity names a different canonical submission.
-    #[error("Session `{session}` turn `{turn}` conflicts with an existing submission")]
-    Conflict {
-        /// Exact session identity.
-        session: String,
-        /// Exact turn identity.
-        turn: String,
-    },
-    /// A preallocated Message identity names different canonical input.
-    #[error("Session `{session}` message `{message}` conflicts with accepted input")]
-    MessageConflict {
-        /// Exact Session identity.
-        session: String,
-        /// Exact Message identity.
-        message: String,
-    },
-    /// Transport failed after a caller-owned idempotency identity was allocated;
-    /// retry or query that exact message identity to reconcile the durable outcome.
-    #[error(
-        "Session `{session}` message `{message}` has an unknown durable outcome; retry with the same message identity"
-    )]
-    MessageOutcomeUnknown {
-        /// Exact Session identity.
-        session: String,
-        /// Caller-owned Message identity safe to retry or query.
-        message: String,
-    },
-    /// A bounded live resource is exhausted.
-    #[error("Session capacity is exhausted")]
-    Capacity,
-    /// Host admission has stopped.
-    #[error("Session Host is shutting down")]
-    ShuttingDown,
-    /// Local implementation or durable dependency failed.
-    #[error("Session backend failed: {0}")]
-    Backend(String),
-}
-
-/// Session application result.
-pub type Result<T> = std::result::Result<T, SessionApplicationError>;
-
-fn map_question_error(
-    error: rsi_user_questions_protocol::QuestionError,
-) -> SessionApplicationError {
+fn map_question_error(error: rsi_user_questions_protocol::QuestionError) -> SessionError {
     use rsi_user_questions_protocol::QuestionError;
     match error {
-        QuestionError::Cancelled => SessionApplicationError::ShuttingDown,
-        QuestionError::Capacity => SessionApplicationError::Capacity,
+        QuestionError::Cancelled => SessionError::ShuttingDown,
+        QuestionError::Capacity => SessionError::Capacity,
         error @ (QuestionError::Invalid(_) | QuestionError::Conflict) => {
-            SessionApplicationError::Invalid(error.to_string())
+            SessionError::Invalid(error.to_string())
         }
     }
 }

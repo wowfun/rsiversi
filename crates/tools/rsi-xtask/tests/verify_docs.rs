@@ -150,6 +150,47 @@ fn run(repository: &Path, arguments: &[&str]) -> Output {
         .expect("rsi-xtask should run")
 }
 
+#[test]
+fn fixture_readmes_follow_their_existing_product_namespace() {
+    let repository = valid_repository();
+    let root = repository.path();
+    write(root, "crates/rsi-api/AGENTS.md", "Govern the API family.\n");
+    write(
+        root,
+        "crates/rsi-api/README.md",
+        "# API family\n\nOwn API contracts.\n",
+    );
+    write(
+        root,
+        "fixtures/rsi-api/AGENTS.md",
+        "Verify public API behavior.\n",
+    );
+    write(
+        root,
+        "fixtures/rsi-api/browser-probe/Cargo.toml",
+        &manifest("api-probe"),
+    );
+    write(
+        root,
+        "fixtures/rsi-api/browser-probe/README.md",
+        &readme("api-probe", "Exercises the API inside a real Worker."),
+    );
+    let output = run(root, &["verify-docs"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    write(
+        root,
+        "fixtures/rsi-api/browser-probe/README.md",
+        &readme("wrong", "Still authored fixture documentation."),
+    );
+    let output = run(root, &["verify-docs"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("api-probe"));
+}
+
 fn verify(repository: &Path) -> Output {
     run(repository, &["verify-docs"])
 }

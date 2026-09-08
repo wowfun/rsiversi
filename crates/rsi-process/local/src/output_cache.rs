@@ -593,7 +593,7 @@ impl Worker {
             offset,
             next_offset: offset + count as u64,
             total_bytes: entry.bytes,
-            bytes,
+            bytes: bytes.into(),
         })
     }
 }
@@ -674,7 +674,7 @@ mod tests {
 
     fn config(path: &Path) -> OutputCacheConfig {
         OutputCacheConfig {
-            directory: path.join("output"),
+            directory: path.canonicalize().unwrap().join("output"),
             maximum_stream_bytes: 64,
             maximum_total_bytes: 128,
             maximum_files: 2,
@@ -757,7 +757,7 @@ mod tests {
         let capture = complete(&cache, "a中b".as_bytes()).await;
         let id = capture.reference().unwrap();
         let first = cache.read(&id, 0, 2).await.unwrap();
-        assert_eq!(first.bytes, [b'a', 0xe4]);
+        assert_eq!(first.bytes.as_ref(), &[b'a', 0xe4]);
         assert_eq!(
             (first.offset, first.next_offset, first.total_bytes),
             (0, 2, 5)
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(capture.reference(), Some(id.clone()));
         let reopened = Cache::open(config).unwrap();
         assert_eq!(
-            reopened.read(&id, 2, 64).await.unwrap().bytes,
+            reopened.read(&id, 2, 64).await.unwrap().bytes.as_ref(),
             [0xb8, 0xad, b'b']
         );
         assert!(reopened.read(&id, 5, 1).await.unwrap().bytes.is_empty());
@@ -820,7 +820,8 @@ mod tests {
                 .read(&second.reference().unwrap(), 0, 1)
                 .await
                 .unwrap()
-                .bytes,
+                .bytes
+                .as_ref(),
             [2]
         );
         assert_eq!(
@@ -828,7 +829,8 @@ mod tests {
                 .read(&third.reference().unwrap(), 0, 1)
                 .await
                 .unwrap()
-                .bytes,
+                .bytes
+                .as_ref(),
             [3]
         );
         let active1 = cache.capture().unwrap();
@@ -842,7 +844,8 @@ mod tests {
                 .read(&active1.reference().unwrap(), 0, 64)
                 .await
                 .unwrap()
-                .bytes,
+                .bytes
+                .as_ref(),
             b"kept"
         );
         drop(active2);
@@ -1021,7 +1024,7 @@ mod tests {
             } else if completed.exists() {
                 // Directory enumeration may encounter the partial first. Its
                 // removal leaves a safe single-link completed file to account.
-                assert_eq!(page.unwrap().bytes, b"crash");
+                assert_eq!(page.unwrap().bytes.as_ref(), b"crash");
             } else {
                 assert!(page.is_err());
             }

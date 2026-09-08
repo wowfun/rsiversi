@@ -41,7 +41,10 @@ pub async fn assert_mechanical_store_contract(
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header.clone()),
-            facts: vec![accepted.clone()],
+            facts: (vec![accepted.clone()])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .expect("create session");
@@ -64,7 +67,10 @@ pub async fn assert_mechanical_store_contract(
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: None,
-                facts: vec![accepted.clone()],
+                facts: (vec![accepted.clone()])
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             })
             .await,
         Err(StoreError::Conflict {
@@ -78,7 +84,7 @@ pub async fn assert_mechanical_store_contract(
             session_id: session_id.clone(),
             expected_seq: 1,
             header: None,
-            facts: vec![event.clone()],
+            facts: (vec![event.clone()]).into_iter().map(Into::into).collect(),
         })
         .await
         .expect("append open-turn event");
@@ -130,7 +136,10 @@ pub async fn assert_mechanical_store_contract(
             session_id: session_id.clone(),
             expected_seq: 2,
             header: None,
-            facts: vec![terminal.clone()],
+            facts: (vec![terminal.clone()])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .expect("close turn");
@@ -440,7 +449,10 @@ pub async fn assert_mechanical_store_contract(
                 expected_fact_seq: 3,
                 expected_control_seq: 1,
                 header: None,
-                facts: message_facts.clone(),
+                facts: (message_facts.clone())
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 controls: vec![
                     AgentControlRecord::new(
                         2,
@@ -588,7 +600,7 @@ pub async fn assert_mechanical_store_contract(
             session_id: session_id.clone(),
             expected_seq: 7,
             header: None,
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     8,
                     13,
@@ -601,7 +613,10 @@ pub async fn assert_mechanical_store_contract(
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();

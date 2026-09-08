@@ -51,8 +51,8 @@ async fn different_source_encodings_normalize_to_one_durable_identity() {
         .await
         .unwrap();
     let media = runtime.root().lookup_local::<MediaContract>().unwrap();
-    let png_ref = media.import_image(Arc::from(png)).await.unwrap();
-    let bmp_ref = media.import_image(Arc::from(bmp)).await.unwrap();
+    let png_ref = media.import_image(bytes::Bytes::from(png)).await.unwrap();
+    let bmp_ref = media.import_image(bytes::Bytes::from(bmp)).await.unwrap();
     assert_eq!(png_ref, bmp_ref);
     let stored = media.read(&png_ref).await.unwrap();
     assert_eq!(stored.bytes.len(), usize::try_from(png_ref.bytes).unwrap());
@@ -73,7 +73,7 @@ async fn different_source_encodings_normalize_to_one_durable_identity() {
     );
 
     assert_eq!(
-        media.import_image(Arc::from([])).await,
+        media.import_image(bytes::Bytes::new()).await,
         Err(MediaError::InvalidInput(
             "source image length must be within 1..=1048576 bytes".into()
         ))
@@ -117,7 +117,7 @@ async fn one_image_larger_than_the_decode_gate_is_rejected_without_waiting() {
 
     let error = tokio::time::timeout(
         Duration::from_millis(100),
-        media.import_image(Arc::from(png)),
+        media.import_image(bytes::Bytes::from(png)),
     )
     .await
     .expect("an impossible semaphore weight must not wait forever")
@@ -190,10 +190,10 @@ async fn concurrent_valid_sources_report_transient_admission_pressure() {
         .await
         .unwrap();
     let media = runtime.root().lookup_local::<MediaContract>().unwrap();
-    let source: Arc<[u8]> = Arc::from(png);
+    let source: bytes::Bytes = bytes::Bytes::from(png);
 
     let (first, second) = tokio::join!(
-        media.import_image(Arc::clone(&source)),
+        media.import_image(source.clone()),
         media.import_image(source)
     );
     let outcomes = [first, second];

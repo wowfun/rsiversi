@@ -645,7 +645,7 @@ struct MediaFixture {
 
 #[async_trait]
 impl Media for MediaFixture {
-    async fn import_image(&self, source: Arc<[u8]>) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image(&self, source: bytes::Bytes) -> rsi_media_protocol::Result<MediaRef> {
         let index = self.imports.fetch_add(1, Ordering::AcqRel);
         if index > 0 {
             assert_latest_is(&self.store, |body| {

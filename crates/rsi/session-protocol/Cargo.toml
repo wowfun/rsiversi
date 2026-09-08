@@ -1,0 +1,28 @@
+[package]
+name = "rsi-session-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+async-trait.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+
+[lints]
+workspace = true

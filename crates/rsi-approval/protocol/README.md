@@ -1,5 +1,9 @@
 # rsi-approval-protocol
 
+Prepared-review working directories use the
+[host-path grammar](../../rsi-workspace/path/README.md), independently of the
+reviewer's platform. Reviewing a path grants no filesystem authority.
+
 `ApprovalRequest::encoded_len` measures its canonical JSON bytes without allocating
 another payload buffer; live owners use that size for aggregate admission.
 

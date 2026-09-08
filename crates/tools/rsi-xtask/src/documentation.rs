@@ -6,7 +6,14 @@ use std::path::{Component, Path, PathBuf};
 use percent_encoding::percent_decode_str;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-const IGNORED_DIRECTORIES: &[&str] = &[".git", ".local", ".references", ".rsi-meta", "target"];
+const IGNORED_DIRECTORIES: &[&str] = &[
+    ".git",
+    ".local",
+    ".references",
+    ".rsi-meta",
+    "target",
+    "node_modules",
+];
 const DOCS_SUBDIRECTORIES: &[&str] = &["cookbook", "postmortem", "subsystems", "user"];
 const ROOT_AGENT_WORD_LIMIT: usize = 400;
 const SUBTREE_AGENT_WORD_LIMIT: usize = 300;
@@ -501,7 +508,8 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
             Component::Normal(_),
         ] if (*first == OsStr::new("plugins")
             && (*second == OsStr::new("rsi-agent") || *second == OsStr::new("rsi-meta")))
-            || (*first == OsStr::new("fixtures") && *second == OsStr::new("rsi-meta")) =>
+            || (*first == OsStr::new("fixtures")
+                && repository.join("crates").join(second).is_dir()) =>
         {
             true
         }
@@ -1062,6 +1070,23 @@ mod tests {
     }
 
     #[test]
+    fn installed_browser_dependencies_do_not_hide_authored_fixture_link_errors() {
+        let repository = TempDir::new().unwrap();
+        let fixture = repository.path().join("fixtures/rsi-meta/browser-probe");
+        let dependency = fixture.join("node_modules/example");
+        fs::create_dir_all(&dependency).unwrap();
+        fs::write(dependency.join("README.md"), "[vendor link](absent.md)").unwrap();
+        fs::write(fixture.join("README.md"), "[authored link](absent.md)").unwrap();
+        let mut diagnostics = Vec::new();
+        super::validate_markdown_links(repository.path(), &mut diagnostics);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].path,
+            "fixtures/rsi-meta/browser-probe/README.md"
+        );
+    }
+
+    #[test]
     fn relative_paths_cannot_escape_the_repository() {
         let repository = Path::new("/repo");
         let source = Path::new("/repo/docs/page.md");
@@ -1098,9 +1123,16 @@ mod tests {
             repository,
             Path::new("/repo/crates/rsi-storage/domain")
         ));
+        let fixture_repository = tempfile::tempdir().unwrap();
+        let fixture_root = fixture_repository.path();
+        fs::create_dir_all(fixture_root.join("crates/rsi-meta")).unwrap();
         assert!(is_recognized_package_path(
-            repository,
-            Path::new("/repo/fixtures/rsi-meta/echo-bidi")
+            fixture_root,
+            &fixture_root.join("fixtures/rsi-meta/echo-bidi")
+        ));
+        assert!(!is_recognized_package_path(
+            fixture_root,
+            &fixture_root.join("fixtures/unowned/echo-bidi")
         ));
         assert!(!is_recognized_package_path(
             repository,

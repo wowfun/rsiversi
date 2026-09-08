@@ -14,7 +14,7 @@ async fn fresh_empty_workspace_snapshot_publishes_no_replacement_or_tombstone() 
         }])),
         calls: AtomicUsize::new(0),
     });
-    let kernel = SessionKernel::recover_with_context_clock_and_limits(
+    let kernel = AgentKernel::recover_with_context_clock_and_limits(
         store.clone(),
         composition(),
         context.clone(),
@@ -93,7 +93,7 @@ async fn workspace_refresh_durably_tombstones_removed_instructions_and_suppresse
         ])),
         calls: AtomicUsize::new(0),
     });
-    let kernel = SessionKernel::recover_with_context_clock_and_limits(
+    let kernel = AgentKernel::recover_with_context_clock_and_limits(
         store.clone(),
         composition(),
         context.clone(),
@@ -184,7 +184,7 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
         snapshots: Mutex::new(VecDeque::from([snapshot.clone()])),
         calls: AtomicUsize::new(0),
     });
-    let first = SessionKernel::recover_with_context_clock_and_limits(
+    let first = AgentKernel::recover_with_context_clock_and_limits(
         store.clone(),
         composition(),
         first_context,
@@ -222,7 +222,7 @@ async fn cold_resume_restores_workspace_digests_without_duplicate_replacements()
         snapshots: Mutex::new(VecDeque::from([snapshot])),
         calls: AtomicUsize::new(0),
     });
-    let second = SessionKernel::recover_with_context_clock_and_limits(
+    let second = AgentKernel::recover_with_context_clock_and_limits(
         store.clone(),
         composition(),
         second_context,

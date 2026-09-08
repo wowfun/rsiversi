@@ -912,9 +912,9 @@ context_window_tokens = 128000
 default_output_reserve_tokens = 8192
 max_output_reserve_tokens = 16384
 ''')
-    app = config / "application-profiles/live/application.toml"
+    app = config / "application-profiles/live/application.profile.toml"
     app.parent.mkdir(parents=True)
-    app.write_text('format = 1\napplication = "headless"\nhost_profile = "live"\n')
+    app.write_text('format = 1\n[[steps]]\nkind = "plugin"\nid = "connection"\nplugin = "rsi.application.connection"\nconfig = { host_profile = "live" }\n[[steps]]\nkind = "plugin"\nid = "application"\nplugin = "rsi.application.headless"\n')
     return settings
 
 

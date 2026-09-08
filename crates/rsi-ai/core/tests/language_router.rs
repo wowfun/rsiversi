@@ -24,6 +24,134 @@ fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactor
     ResolvedFactory::linked(id, "test", UpdateMode::Replayable, factory)
 }
 
+#[derive(Debug)]
+struct EnumeratedAdapter(rsi_ai_protocol::LanguageModelProfiles);
+
+impl LanguageAdapter for EnumeratedAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        &self.0
+    }
+    fn describe(&self, _: &str) -> Result<LanguageProfile, rsi_ai_protocol::AiError> {
+        panic!("enumeration must not call describe")
+    }
+    fn validate_request(
+        &self,
+        _: &str,
+        _: &LanguageRequest,
+    ) -> Result<(), rsi_ai_protocol::AiError> {
+        panic!("enumeration must not prepare")
+    }
+    fn prepare(
+        &self,
+        _: PrepareContext,
+        _: String,
+        _: LanguageRequest,
+    ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, rsi_ai_protocol::AiError>> {
+        panic!("enumeration must not perform I/O")
+    }
+}
+
+#[tokio::test]
+async fn model_enumeration_pages_across_deployments_and_obeys_registration_gates() {
+    let runtime = Runtime::default();
+    let credentials = runtime
+        .root()
+        .apply(
+            linked("rsi.credentials", Arc::new(MemoryCredentialsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let router = runtime
+        .root()
+        .apply(
+            linked("rsi.ai.language", Arc::new(LanguageRouterFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let calls = runtime
+        .root()
+        .lookup_local::<rsi_ai_protocol::LanguageModelsContract>()
+        .unwrap();
+    let registrar = runtime
+        .root()
+        .lookup_local::<LanguageRegistrarContract>()
+        .unwrap();
+    let mut leases = Vec::new();
+    let mut gates = Vec::new();
+    for deployment in ["z-models", "a-models"] {
+        let mut models = rsi_ai_protocol::LanguageModelProfiles::default();
+        for index in 0..256 {
+            models
+                .insert(
+                    format!("model-{index:03}"),
+                    rsi_ai_protocol::LanguageModelLimits::new(8192, 512, 1024).unwrap(),
+                )
+                .unwrap();
+        }
+        let registration = Arc::new(
+            ProviderRegistration::builder(deployment, "enumeration-test")
+                .unwrap()
+                .with_config_generation(1)
+                .with_language(EnumeratedAdapter(models))
+                .build()
+                .unwrap(),
+        );
+        let gate = RegistrationGate::new();
+        leases.push(
+            registrar
+                .register_language(registration, gate.clone())
+                .unwrap(),
+        );
+        gates.push(gate);
+    }
+    assert!(
+        calls
+            .list_models(None, 256)
+            .await
+            .unwrap()
+            .models
+            .is_empty()
+    );
+    gates[0].commit();
+    gates[1].commit();
+    let first = calls.list_models(None, 256).await.unwrap();
+    first.validate(None, 256).unwrap();
+    assert!(first.has_more);
+    assert!(
+        first
+            .models
+            .iter()
+            .all(|model| model.deployment() == "a-models")
+    );
+    let second = calls.list_models(first.models.last(), 256).await.unwrap();
+    second.validate(first.models.last(), 256).unwrap();
+    assert!(!second.has_more);
+    assert_eq!(second.models.len(), 256);
+    assert!(
+        second
+            .models
+            .iter()
+            .all(|model| model.deployment() == "z-models")
+    );
+    assert!(calls.list_models(None, 0).await.is_err());
+    assert!(calls.list_models(None, 257).await.is_err());
+    drop(leases);
+    assert!(
+        calls
+            .list_models(None, 256)
+            .await
+            .unwrap()
+            .models
+            .is_empty()
+    );
+    drop(calls);
+    drop(registrar);
+    assert!(router.dispose().await.is_clean());
+    assert!(credentials.dispose().await.is_clean());
+}
+
 #[derive(Clone)]
 struct Adapter {
     starts: Arc<AtomicUsize>,
@@ -43,6 +171,12 @@ impl fmt::Debug for Adapter {
 }
 
 impl LanguageAdapter for Adapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        static MODELS: std::sync::LazyLock<rsi_ai_protocol::LanguageModelProfiles> =
+            std::sync::LazyLock::new(rsi_ai_protocol::LanguageModelProfiles::default);
+        &MODELS
+    }
+
     fn describe(&self, _model: &str) -> Result<LanguageProfile, rsi_ai_protocol::AiError> {
         Ok(LanguageProfile::new(
             8_192,

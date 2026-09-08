@@ -390,6 +390,16 @@ impl ReconciliationTicket {
     }
 }
 
+impl PendingApplyOwnership {
+    pub(super) fn acknowledge(mut self, runtime: Runtime) -> FiberHandle {
+        self.armed = false;
+        FiberHandle {
+            runtime,
+            fiber: self.fiber.clone(),
+        }
+    }
+}
+
 impl Drop for PendingApplyOwnership {
     fn drop(&mut self) {
         if !self.armed {
@@ -397,7 +407,6 @@ impl Drop for PendingApplyOwnership {
         }
         self.fiber.apply_cancellation.cancel();
         if let Some(inner) = self.runtime.upgrade() {
-            let _executor_guard = self.fiber.executor.enter();
             Runtime { inner }.request_disposal(&self.fiber);
         }
     }
@@ -601,7 +610,7 @@ impl Runtime {
         except: Option<FiberId>,
     ) -> (
         Vec<(FiberId, ReconciliationTicket)>,
-        Option<tokio::runtime::Handle>,
+        Option<crate::Execution>,
     ) {
         let affected = Self::dependent_ids(state, services, except);
         let mut tickets = Vec::with_capacity(affected.len());
@@ -632,7 +641,7 @@ impl Runtime {
         except: Option<FiberId>,
     ) -> (
         Vec<(FiberId, ReconciliationTicket)>,
-        Option<tokio::runtime::Handle>,
+        Option<crate::Execution>,
     ) {
         let affected = Self::local_dependent_ids(state, services, except);
         let mut tickets = Vec::with_capacity(affected.len());
@@ -657,7 +666,7 @@ impl Runtime {
         (tickets, should_spawn.then_some(executor).flatten())
     }
 
-    pub(super) fn start_reconciliation_requests(&self, executor: Option<tokio::runtime::Handle>) {
+    pub(super) fn start_reconciliation_requests(&self, executor: Option<crate::Execution>) {
         if let Some(executor) = executor {
             self.spawn_reconciliation_worker(&executor);
         }
@@ -692,7 +701,7 @@ impl Runtime {
             .collect()
     }
 
-    fn spawn_reconciliation_worker(&self, executor: &tokio::runtime::Handle) {
+    fn spawn_reconciliation_worker(&self, executor: &crate::Execution) {
         let usage = self
             .inner
             .resources

@@ -41,7 +41,7 @@ fn test_fact(sequence: u64) -> SessionFact {
 }
 
 #[tokio::test]
-async fn activation_validator_enforces_the_individual_control_bound_independently() {
+async fn control_projection_replay_enforces_the_individual_control_bound() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("activation-control-bound");
@@ -50,7 +50,7 @@ async fn activation_validator_enforces_the_individual_control_bound_independentl
             session_id: header.session_id().clone(),
             expected_seq: 0,
             header: Some(header.clone()),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -66,7 +66,7 @@ async fn activation_validator_enforces_the_individual_control_bound_independentl
     .unwrap();
     writer.execute("INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,1,?2 || printf('%*s',?3,''))",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
-    let result = crate::validation::validate_active_activation_index(&writer, header.session_id());
+    let result = crate::validation::validate_agent_indexes(&writer, &header);
     assert!(
         matches!(result, Err(StoreError::Corrupt(message)) if message.contains("encoded bytes")),
         "activation projection admitted an individually oversized control"
@@ -90,7 +90,7 @@ async fn poisoned_validation_hint_cannot_fail_a_valid_store_commit() {
             session_id: id.clone(),
             expected_seq: 0,
             header: Some(header),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .expect("optional cache failure overrode Store admission or commit");
@@ -203,7 +203,7 @@ async fn concurrent_first_access_runs_one_session_validation() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(test_header(session_id.as_str())),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -239,7 +239,7 @@ async fn repeated_recent_listing_does_not_validate_history() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(test_header(session_id.as_str())),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -278,7 +278,7 @@ async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
             session_id: first.clone(),
             expected_seq: 0,
             header: Some(test_header(first.as_str())),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -289,7 +289,7 @@ async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: Some(test_header(session_id.as_str())),
-                facts: vec![test_fact(1)],
+                facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
@@ -304,21 +304,6 @@ async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
 }
 
-#[test]
-fn validation_gates_are_shared_only_within_one_session() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let first = SessionId::new("session-first").unwrap();
-    let second = SessionId::new("session-second").unwrap();
-
-    let first_gate = store.validation_gate(&first).unwrap();
-    let same_session_gate = store.validation_gate(&first).unwrap();
-    let other_session_gate = store.validation_gate(&second).unwrap();
-
-    assert!(Arc::ptr_eq(&first_gate, &same_session_gate));
-    assert!(!Arc::ptr_eq(&first_gate, &other_session_gate));
-}
-
 #[tokio::test]
 async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
     let root = tempfile::tempdir().unwrap();
@@ -329,7 +314,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(test_header(session_id.as_str())),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -348,7 +333,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
             session_id: writer_session,
             expected_seq: 1,
             header: None,
-            facts: vec![test_fact(2)],
+            facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
         };
         admit_append(&transaction, &batch).unwrap();
         insert_fact(&transaction, &batch.session_id, &batch.facts[0]).unwrap();
@@ -387,7 +372,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
 
 #[tokio::test]
 async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
-    for kind in ["reader", "writer", "cas"] {
+    for kind in ["reader", "validation", "writer", "cas"] {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
         let owner = Arc::downgrade(&store.inner);
@@ -401,6 +386,7 @@ async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
             };
             match kind {
                 "reader" => store.with_reader(move |_| operation()).await,
+                "validation" => store.with_validation(move |_| operation()).await,
                 "writer" => store.with_writer(move |_| operation()).await,
                 _ => store.with_cas(operation).await,
             }
@@ -465,7 +451,7 @@ async fn missing_subtree_session_is_corruption() {
             session_id: header.session_id().clone(),
             expected_seq: 0,
             header: Some(header.clone()),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -536,26 +522,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
         let root = tempfile::tempdir().unwrap();
         let parent = test_header("cold-proof-parent");
         let child_id = SessionId::new("cold-proof-child").unwrap();
-        let child = parent
-            .forked_child(
-                child_id.clone(),
-                2,
-                rsi_agent_session_protocol::ForkOrigin {
-                    parent_session_id: parent.session_id().clone(),
-                    root_session_id: parent.session_id().clone(),
-                    path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
-                    task_name: "child".into(),
-                    parent_header_fingerprint: parent.fingerprint().unwrap(),
-                    invoking_turn_id: TurnId::new("turn-1").unwrap(),
-                    resolved_after_seq: 0,
-                    resolved_terminal_seq: 0,
-                    terminal_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256([])
-                        .unwrap(),
-                    requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
-                    effective_turns: 0,
-                },
-            )
-            .unwrap();
+        let child = test_child_header(&parent, child_id.as_str());
         let store = SqliteStore::open(root.path()).unwrap();
         for header in [parent.clone(), child] {
             store
@@ -563,7 +530,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
                     session_id: header.session_id().clone(),
                     expected_seq: 0,
                     header: Some(header),
-                    facts: vec![test_fact(1)],
+                    facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
                 })
                 .await
                 .unwrap();
@@ -651,7 +618,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
                         expected_fact_seq: 1,
                         expected_control_seq: 0,
                         header: None,
-                        facts: vec![test_fact(2)],
+                        facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
                         controls: Vec::new()
                     }],
                     required_active_activations: Vec::new(),
@@ -681,7 +648,7 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
                 session_id: SessionId::new(id).unwrap(),
                 expected_seq: 0,
                 header: Some(test_header(id)),
-                facts: vec![test_fact(1)],
+                facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
@@ -765,7 +732,7 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
             session_id: id.clone(),
             expected_seq: 0,
             header: Some(test_header(id.as_str())),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -788,7 +755,7 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
                 session_id: id.clone(),
                 expected_seq: seq - 1,
                 header: None,
-                facts: vec![fact],
+                facts: (vec![fact]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
@@ -829,7 +796,7 @@ async fn control_pages_admit_stored_lengths_before_materializing_the_next_body()
             session_id: header.session_id().clone(),
             expected_seq: 0,
             header: Some(header.clone()),
-            facts: vec![test_fact(1)],
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
         })
         .await
         .unwrap();
@@ -892,7 +859,7 @@ async fn metadata_catalog_larger_than_validation_cache_never_validates_history()
                 session_id: id.clone(),
                 expected_seq: 0,
                 header: Some(test_header(id.as_str())),
-                facts: vec![test_fact(1)],
+                facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
             })
             .await
             .unwrap();
@@ -924,5 +891,450 @@ async fn metadata_catalog_larger_than_validation_cache_never_validates_history()
             .unwrap()
             .recency
             .is_empty()
+    );
+}
+
+fn pause_next_validation(
+    store: &SqliteStore,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *store.inner.validation_barrier.lock().unwrap() = Some((entered_tx, release_rx));
+    (entered_rx, release_tx)
+}
+
+async fn seed_session(store: &SqliteStore, name: &str) -> SessionId {
+    let id = SessionId::new(name).unwrap();
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: Some(test_header(name)),
+            facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn paused_cold_validation_does_not_block_foreground_reads_or_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let cold = seed_session(&store, "cold").await;
+    let warm = seed_session(&store, "warm").await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    store.read_facts(&warm, 0, 1).await.unwrap();
+    let (entered, release) = pause_next_validation(&store);
+    let worker = store.clone();
+    let validation = tokio::spawn(async move { worker.read_facts(&cold, 0, 1).await });
+    entered.await.unwrap();
+    let foreground = tokio::time::timeout(Duration::from_secs(2), async {
+        store.header(&warm).await.unwrap();
+        store.read_facts(&warm, 0, 1).await.unwrap();
+        store
+            .append(AppendBatch {
+                session_id: warm.clone(),
+                expected_seq: 1,
+                header: None,
+                facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
+            })
+            .await
+            .unwrap();
+        store.inspect_session(&warm).await.unwrap();
+        store.read_agent_subtree_snapshot(&warm).await.unwrap();
+    })
+    .await;
+    release.send(()).unwrap();
+    validation.await.unwrap().unwrap();
+    foreground.expect("cold validation held a foreground connection");
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn cancelled_admitted_validation_publishes_proof_before_next_waiter() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "cancelled-validator").await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let (entered, release) = pause_next_validation(&store);
+    let worker = store.clone();
+    let candidate = id.clone();
+    let first = tokio::spawn(async move { worker.validate_session(&candidate).await });
+    entered.await.unwrap();
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let worker = store.clone();
+    let candidate = id.clone();
+    let second = tokio::spawn(async move { worker.read_facts(&candidate, 0, 1).await });
+    release.send(()).unwrap();
+    second.await.unwrap().unwrap();
+    assert!(store.touch_validated_session(&id));
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn cancelled_queued_validation_never_dispatches_a_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "queued-validator").await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let permit = store
+        .inner
+        .validation_admission
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let worker = store.clone();
+    let first = tokio::spawn(async move { worker.validate_session(&id).await });
+    tokio::task::yield_now().await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    drop(permit);
+    let _drained = store
+        .inner
+        .validation_admission
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn operational_reads_over_257_and_512_sessions_revalidate_evicted_proofs() {
+    for count in [257, 512] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let mut sessions = Vec::new();
+        for index in 0..count {
+            sessions.push(seed_session(&store, &format!("operational-{index}")).await);
+        }
+        drop(store);
+        let store = SqliteStore::open(root.path()).unwrap();
+        for cycle in 1..=2 {
+            for id in &sessions {
+                let page = store.read_facts(id, 0, 1).await.unwrap();
+                assert_eq!(page.facts.len(), 1);
+            }
+            assert_eq!(
+                store.inner.validation_runs.load(Ordering::Relaxed),
+                count * cycle
+            );
+            assert_eq!(
+                store.inner.validated_sessions.lock().unwrap().recency.len(),
+                256
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cold_control_replay_decodes_each_record_once() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "single-decode").await;
+    let mut controls = Vec::new();
+    for seq in (1..=500).step_by(2) {
+        let message_id = MessageId::new(format!("message-{seq}")).unwrap();
+        controls.push(
+            AgentControlRecord::new(
+                seq,
+                seq,
+                AgentControlRecordBody::MessageAccepted {
+                    message: AgentMessage {
+                        message_id: message_id.clone(),
+                        source: AgentMessageSource::Human,
+                        content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+                            text: "bounded".into(),
+                        }],
+                        options: rsi_agent_session_protocol::MessageOptions::default(),
+                    },
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                    bound_turn_id: None,
+                    root_session_id: id.clone(),
+                    target: MessageTarget::NextTurn,
+                    wake_required: true,
+                },
+            )
+            .unwrap(),
+        );
+        controls.push(
+            AgentControlRecord::new(
+                seq + 1,
+                seq + 1,
+                AgentControlRecordBody::MessageDiscarded {
+                    message_id,
+                    reason: MessageDiscardReason::Cancelled,
+                },
+            )
+            .unwrap(),
+        );
+    }
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: id.clone(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![],
+                controls,
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    store.read_facts(&id, 0, 1).await.unwrap();
+    store.read_agent_mailbox(&id, None).await.unwrap();
+    assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(store.inner.control_decodes.load(Ordering::Relaxed), 500);
+    assert_one_header_read_for_control_validation(&store, &id).await;
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+}
+
+async fn assert_one_header_read_for_control_validation(store: &SqliteStore, id: &SessionId) {
+    let id = id.clone();
+    let reads = store
+        .with_validation(move |connection| {
+            crate::validation::HEADER_READS.set(0);
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            validate_session(&transaction, &id)?;
+            Ok(crate::validation::HEADER_READS.get())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        reads, 1,
+        "immutable Header must be shared across all control projections"
+    );
+}
+
+#[tokio::test]
+async fn cold_activation_replay_reads_the_immutable_header_once() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "activation-header-reads").await;
+    let controls = (1..=500)
+        .step_by(2)
+        .flat_map(|seq| {
+            let activation_id = ActivationId::new(format!("activation-{seq}")).unwrap();
+            [
+                AgentControlRecord::new(
+                    seq,
+                    seq,
+                    AgentControlRecordBody::ActivationStarted {
+                        activation_id: activation_id.clone(),
+                        parent_session_id: None,
+                        root_session_id: id.clone(),
+                        path: rsi_agent_session_protocol::AgentPath::root(),
+                    },
+                )
+                .unwrap(),
+                AgentControlRecord::new(
+                    seq + 1,
+                    seq + 1,
+                    AgentControlRecordBody::ActivationSettled {
+                        activation_id,
+                        outcome: rsi_agent_session_protocol::ActivationOutcome::Completed,
+                    },
+                )
+                .unwrap(),
+            ]
+        })
+        .collect();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: id.clone(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: Vec::new(),
+                controls,
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert_one_header_read_for_control_validation(&store, &id).await;
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+}
+
+fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
+    parent
+        .forked_child(
+            SessionId::new(id).unwrap(),
+            2,
+            rsi_agent_session_protocol::ForkOrigin {
+                parent_session_id: parent.session_id().clone(),
+                root_session_id: parent.session_id().clone(),
+                path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
+                task_name: "child".into(),
+                parent_header_fingerprint: parent.fingerprint().unwrap(),
+                invoking_turn_id: TurnId::new("turn-1").unwrap(),
+                resolved_after_seq: 0,
+                resolved_terminal_seq: 0,
+                terminal_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256([]).unwrap(),
+                requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
+                effective_turns: 0,
+            },
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
+    for operation in ["subtree", "inspection", "quiescence"] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let parent = test_header("tree-root");
+        seed_session(&store, parent.session_id().as_str()).await;
+        let other = seed_session(&store, "unrelated-warm").await;
+        let child = test_child_header(&parent, "cold-child");
+        store
+            .append(AppendBatch {
+                session_id: child.session_id().clone(),
+                expected_seq: 0,
+                header: Some(child),
+                facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = SqliteStore::open(root.path()).unwrap();
+        store.validate_session(parent.session_id()).await.unwrap();
+        store.validate_session(&other).await.unwrap();
+        let (entered, release) = pause_next_validation(&store);
+        let worker = store.clone();
+        let candidate = parent.session_id().clone();
+        let task = tokio::spawn(async move {
+            match operation {
+                "subtree" => worker
+                    .read_agent_subtree_snapshot(&candidate)
+                    .await
+                    .map(|_| ()),
+                "inspection" => worker.inspect_session(&candidate).await.map(|_| ()),
+                _ => worker
+                    .commit_agent(AtomicAgentCommit {
+                        sessions: vec![AtomicSessionAppend {
+                            session_id: candidate.clone(),
+                            expected_fact_seq: 1,
+                            expected_control_seq: 0,
+                            header: None,
+                            facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
+                            controls: vec![],
+                        }],
+                        required_active_activations: vec![],
+                        quiescent_descendants_of: Some(candidate),
+                    })
+                    .await
+                    .map(|_| ()),
+            }
+        });
+        entered.await.unwrap();
+        let progress = tokio::time::timeout(Duration::from_secs(2), async {
+            store.header(&other).await.unwrap();
+            store.read_facts(&other, 0, 1).await.unwrap();
+            store
+                .append(AppendBatch {
+                    session_id: other,
+                    expected_seq: 1,
+                    header: None,
+                    facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
+                })
+                .await
+                .unwrap();
+        })
+        .await;
+        release.send(()).unwrap();
+        let result = task.await.unwrap();
+        progress.unwrap_or_else(|_| {
+            panic!("{operation} held foreground or writer during cold validation")
+        });
+        if operation == "quiescence" {
+            assert!(matches!(
+                result,
+                Err(StoreError::SessionNotQuiescent { .. })
+            ));
+            assert_eq!(
+                store
+                    .read_facts(parent.session_id(), 0, 1)
+                    .await
+                    .unwrap()
+                    .durable_seq,
+                1
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[tokio::test]
+async fn quiescence_checks_children_created_by_the_same_commit_without_caching_rollback() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = test_header("new-child-guard");
+    seed_session(&store, parent.session_id().as_str()).await;
+    let child = test_child_header(&parent, "uncommitted-child");
+    let child_id = child.session_id().clone();
+    let result = store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![
+                AtomicSessionAppend {
+                    session_id: parent.session_id().clone(),
+                    expected_fact_seq: 1,
+                    expected_control_seq: 0,
+                    header: None,
+                    facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
+                    controls: vec![],
+                },
+                AtomicSessionAppend {
+                    session_id: child_id.clone(),
+                    expected_fact_seq: 0,
+                    expected_control_seq: 0,
+                    header: Some(child),
+                    facts: (vec![test_fact(1)]).into_iter().map(Into::into).collect(),
+                    controls: vec![],
+                },
+            ],
+            required_active_activations: vec![],
+            quiescent_descendants_of: Some(parent.session_id().clone()),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(StoreError::SessionNotQuiescent { session }) if session == child_id.as_str())
+    );
+    assert!(matches!(
+        store.header(&child_id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(!store.touch_validated_session(&child_id));
+    assert_eq!(
+        store
+            .read_facts(parent.session_id(), 0, 1)
+            .await
+            .unwrap()
+            .durable_seq,
+        1
     );
 }

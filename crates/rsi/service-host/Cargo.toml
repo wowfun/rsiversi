@@ -1,0 +1,44 @@
+[package]
+name = "rsi-service-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-storage = { path = "../../rsi-storage/core" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-api-uds-client = { path = "../../rsi-api/uds-client" }
+rsi-api-auth = { path = "../../rsi-api/auth" }
+rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix = { workspace = true, features = ["net"] }
+
+[lints]
+workspace = true

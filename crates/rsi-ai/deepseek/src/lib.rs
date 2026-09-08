@@ -77,6 +77,10 @@ impl fmt::Debug for DeepSeekAdapter {
 }
 
 impl LanguageAdapter for DeepSeekAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        self.inner.models()
+    }
+
     fn describe(&self, model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
         self.inner.describe(model)
     }

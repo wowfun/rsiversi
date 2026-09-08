@@ -165,7 +165,7 @@ durable. Within an Agent tree, ready messages retain their durable timestamp,
 Session, and control-sequence order. A bounded root scan skips trees already at
 the three-running-Turn cap, so the standard four-lane product retains progress
 for an independent Session. This admission is process-local; the standard
-Session Host's exclusive owner keeps the scheduler singular, and the Store does
+Service Host's exclusive owner keeps the scheduler singular, and the Store does
 not advertise a distributed multi-Kernel lane lease. Parked activations hold no
 executor lane and count only against the 256-node durable tree bound. One activation coordinator owns
 lane shutdown and shared retained-effect cleanup; there is no second scheduler

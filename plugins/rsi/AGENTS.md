@@ -1,0 +1,3 @@
+- This product namespace owns RSI application assets and build bridges. Rust application behavior and lifecycle contracts remain with `crates/rsi/`; JavaScript forwards bounded input and renders Rust-owned views.
+- Keep browser assets self-contained under the HTTP asset policy. Do not persist device tokens or move submission, reconciliation, observation cursors, or Profile ownership into JavaScript.
+- Validate Web changes with the owning Rust tests and the real product browser fixture in `fixtures/rsi/web-product/`. Keep providers and user state isolated by default; live runs are opt-in.

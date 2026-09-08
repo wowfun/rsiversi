@@ -1,0 +1,173 @@
+import assert from "node:assert/strict";
+import { dirname, resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, writeFile, copyFile, chmod, rm } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { chromium, firefox } from "playwright";
+import { boundedRun, startService } from "./service.mjs";
+import { verifyDom } from "./dom.mjs";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const report = process.env.RSI_WEB_REPORT ?? await mkdtemp(join(tmpdir(), "rsi-web-report-"));
+await mkdir(report, { recursive: true });
+const assets = process.env.RSI_WEB_ASSETS ?? join(report, "assets");
+const sourceBinary = process.env.RSI_WEB_BINARY ?? join(root, "target/debug/rsi");
+if (!process.env.RSI_WEB_ASSETS) boundedRun("node", ["plugins/rsi/web/build.mjs", assets], { cwd: root, stdio: "inherit", timeout: 600_000 });
+if (!process.env.RSI_WEB_BINARY) boundedRun("cargo", ["build", "--locked", "-p", "rsi", "--bin", "rsi"], { cwd: root, stdio: "inherit", timeout: 600_000 });
+if (process.env.RSI_WEB_BROWSER && !["chromium", "firefox"].includes(process.env.RSI_WEB_BROWSER)) throw new Error("Unknown RSI_WEB_BROWSER");
+const binaryDirectory = await mkdtemp(join(root, "target/web-product-"));
+const binary = join(binaryDirectory, "rsi");
+await copyFile(sourceBinary, binary); await chmod(binary, 0o700);
+const hash = createHash("sha256");
+for await (const chunk of createReadStream(binary)) hash.update(chunk);
+await writeFile(join(report, "binary.json"), JSON.stringify({ source: sourceBinary, sha256: hash.digest("hex") }));
+let service;
+const results = [];
+const providerRequests = [];
+try {
+  for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+    if (process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER !== name) continue;
+    const serviceReport = join(report, name);
+    await mkdir(serviceReport, { recursive: true });
+    service = await startService({ binary, assets, report: serviceReport });
+    const browser = await engine.launch({ headless: true });
+    const errors = [];
+    const exchanges = [];
+    try {
+      await verifyDom(browser, root);
+      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
+      context.on("response", async response => {
+        if (!response.url().includes("/api/v1/")) return;
+        const headers = await response.allHeaders();
+        if (response.url().endsWith("/login")) {
+          const sent = await response.request().allHeaders();
+          exchanges.push({ path: "/api/v1/login", status: response.status(), protocol: headers["x-rsi-http-version"], origin: sent.origin, site: sent["sec-fetch-site"], cookie: !!sent.cookie, bearer: sent.authorization?.startsWith("Bearer ") }); return;
+        }
+        const exchange = { path: new URL(response.url()).pathname, status: response.status(), headers };
+        exchanges.push(exchange);
+        if (headers["content-type"]?.includes("application/json")) {
+          exchange.body = (await response.text().catch(() => "unavailable")).slice(0, 4096);
+        }
+      });
+      context.on("requestfailed", request => exchanges.push({ path: new URL(request.url()).pathname, failed: request.failure()?.errorText }));
+      const page = await context.newPage(); page.setDefaultTimeout(30_000);
+      page.on("pageerror", error => errors.push(error.message));
+      await page.goto(service.origin);
+      await page.screenshot({ path: join(report, `${name}-login.png`) });
+      const receipt = service.register(`${name} product browser`);
+      await page.locator("#receipt").fill(JSON.stringify(receipt));
+      await page.getByRole("button", { name: "Connect", exact: true }).click();
+      await page.locator("#workbench").waitFor({ state: "visible" });
+      assert.equal(await page.locator("#receipt").inputValue(), "");
+      assert.equal(await page.evaluate(() => document.cookie), "");
+      assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), ["rsi.endpoint"]);
+      assert.equal((await context.cookies())[0].httpOnly, true);
+      await page.locator("#workspace-path").fill(service.workspace);
+      await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+      await page.locator("#workspaces .nav-item").first().click();
+      const left = page.getByRole("region", { name: "Left conversation", exact: true });
+      const right = page.getByRole("region", { name: "Right conversation", exact: true });
+      await left.getByRole("textbox", { name: "Left message" }).fill("A saved left draft");
+      await page.locator("#pane-tab-1").click();
+      await page.locator("#workspaces .nav-item").first().click();
+      await right.getByRole("textbox", { name: "Right message" }).fill("Review the right workspace");
+      await right.getByRole("button", { name: "Send ↗" }).click();
+      await right.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+      assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "A saved left draft");
+      assert.match(await right.locator(".transcript").innerText(), /Reviewed: Review the right workspace/);
+      assert.equal(await page.evaluate(() => window.untrustedExecuted), undefined);
+      await left.getByRole("textbox", { name: "Left message" }).fill("Please ask a question about the workspace");
+      await left.getByRole("button", { name: "Send ↗" }).click();
+      await left.locator(".pending button").filter({ hasText: "Answer:" }).click();
+      await page.getByRole("button", { name: "Teal", exact: true }).click();
+      await page.getByRole("textbox", { name: "What matters for this change?" }).fill("Preserve independent drafts and explicit ownership.");
+      await page.screenshot({ path: join(report, `${name}-question.png`) });
+      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      await page.locator("#detail").waitFor({ state: "hidden" });
+      await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+      await page.screenshot({ path: join(report, `${name}-two-panes.png`) });
+      await left.getByRole("textbox", { name: "Left message" }).fill("Keep this draft while switching");
+      const leftIdentity = await left.locator(".pane-session").innerText();
+      await page.locator("#refresh").click();
+      await page.locator("#sessions .nav-item").filter({ has: page.locator("small", { hasText: (await right.locator(".pane-session").innerText()).split(" · ").at(-1) }) }).click();
+      await left.locator(".pane-session").filter({ hasText: (await right.locator(".pane-session").innerText()).split(" · ").at(-1) }).waitFor();
+      await page.locator("#sessions .nav-item").filter({ has: page.locator("small", { hasText: leftIdentity.split(" · ").at(-1) }) }).click();
+      await left.locator(".pane-session").filter({ hasText: leftIdentity.split(" · ").at(-1) }).waitFor();
+      assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "Keep this draft while switching");
+      await left.getByRole("textbox", { name: "Left message" }).fill("hold this turn until I cancel");
+      await left.getByRole("button", { name: "Send ↗" }).click();
+      await left.locator(".transcript").getByText("Waiting for cancellation.", { exact: true }).waitFor();
+      await left.getByRole("button", { name: "Cancel", exact: true }).click();
+      await left.locator(".pane-status").filter({ hasText: "Cancelled" }).waitFor();
+      await left.getByRole("textbox", { name: "Left message" }).fill("Produce a long streamed reply");
+      await left.getByRole("button", { name: "Send ↗" }).click();
+      await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+      await page.locator("#refresh").click();
+      await page.locator("#sessions .nav-item").filter({ has: page.locator("small", { hasText: leftIdentity.split(" · ").at(-1) }) }).click();
+      await left.locator(".transcript > .omitted").waitFor();
+      assert.equal(await left.locator(".transcript > :first-child").getAttribute("class"), "omitted");
+      assert.doesNotMatch(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
+      await left.locator(".transcript").evaluate(node => { node.scrollTop = 0; });
+      await page.screenshot({ path: join(report, `${name}-partial-history.png`) });
+      await left.getByRole("button", { name: "Earlier history", exact: true }).click();
+      await left.locator(".pane-status").filter({ hasText: "History" }).waitFor();
+      assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
+      await left.getByRole("button", { name: "Back to live", exact: true }).click();
+      await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+      assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
+      assert.equal(await left.locator(".transcript > :first-child").getAttribute("class"), "omitted");
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("button", { name: "Read settings", exact: true }).click();
+      const editor = page.getByRole("textbox", { name: "Settings JSON" });
+      const settings = JSON.parse(await editor.inputValue()); settings.require_approval = true;
+      await editor.fill(JSON.stringify(settings, null, 2));
+      const savingEditor = await editor.elementHandle();
+      await page.getByRole("button", { name: "Save settings", exact: true }).click();
+      await page.waitForFunction(previous => !previous.isConnected, savingEditor);
+      await savingEditor.dispose();
+      await editor.waitFor();
+      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await page.locator("#workspaces .nav-item").first().click();
+      await left.getByRole("textbox", { name: "Left message" }).fill("Please run the failing command");
+      await left.getByRole("button", { name: "Send ↗" }).click();
+      await left.locator(".pending button").filter({ hasText: "Review:" }).click();
+      await page.screenshot({ path: join(report, `${name}-approval.png`) });
+      await page.getByRole("button", { name: "Allow once", exact: true }).click();
+      await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+      assert.match(await left.locator(".transcript").innerText(), /Tool · failed/);
+      assert.match(await left.locator(".transcript").innerText(), /fixture stdout/);
+      await page.screenshot({ path: join(report, `${name}-tool-failure.png`) });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.screenshot({ path: join(report, `${name}-narrow.png`), fullPage: true });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      await page.locator("#pane-tab-1").click();
+      assert.match(await right.locator(".transcript").innerText(), /Review the right workspace/);
+      await page.setViewportSize({ width: 1440, height: 980 });
+      await page.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));
+      await page.locator("#sign-out").click();
+      await page.locator("#login").waitFor({ state: "visible" });
+      assert.deepEqual(await page.evaluate(() => window.closedResources), { pending_timers: 0, active_alarms: 0, active_requests: 0 });
+      assert.equal((await context.cookies()).length, 0);
+      assert.deepEqual(errors, []);
+      results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
+      console.log(JSON.stringify(results.at(-1)));
+      await context.close();
+    } catch (error) {
+      await writeFile(join(report, `${name}-failure.txt`), `${error.stack}\nPage errors: ${JSON.stringify(errors)}`);
+      const page = browser.contexts()[0]?.pages()[0];
+      if (page) { await page.screenshot({ path: join(report, `${name}-failure.png`), fullPage: true }).catch(() => {}); await writeFile(join(report, `${name}-failure-dom.txt`), await page.locator("body").innerText().catch(() => "unavailable")); }
+      throw error;
+    } finally {
+      await writeFile(join(report, `${name}-exchanges.json`), JSON.stringify(exchanges, null, 2));
+      await browser.close();
+      providerRequests.push({ browser: name, requests: service.provider.requests });
+      await service.close(); service = undefined;
+    }
+  }
+} finally {
+  await writeFile(join(report, "results.json"), JSON.stringify({ results, provider_requests: providerRequests }, null, 2));
+  await service?.close();
+  await rm(binaryDirectory, { recursive: true, force: true });
+}

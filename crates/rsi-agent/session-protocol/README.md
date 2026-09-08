@@ -4,6 +4,12 @@ This package owns the exact pre-release durable Session format: immutable
 headers, bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
+Canonical workspace paths in Headers and Facts describe their originating host.
+They use the [Workspace host-path grammar](../../rsi-workspace/path/README.md).
+Decoding never asks the reader's native filesystem whether that foreign path is
+absolute. This lexical validation grants no filesystem authority; the native
+Workspace, context and process owners validate the actual directory they use.
+
 Agent control records form a second append-only digest chain beside Facts.
 They own mailbox acceptance/claim/discard, activation and wait transitions,
 delivery-horizon promotion, completion reservations, and durable tree

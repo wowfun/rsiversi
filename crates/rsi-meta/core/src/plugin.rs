@@ -144,6 +144,8 @@ mod tests {
 
     #[test]
     fn wrong_type_preserves_single_owner_state_and_success_consumes_it() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         // Cell is Send but not Sync, proving the single-owner interface does
         // not impose a false sharing requirement.
         let state = PreparedState::new(Cell::new(7_u8), 1);

@@ -1,30 +1,89 @@
 # rsi
 
+The native application connection is an ordinary plugin: it mounts its preset
+and embedded-service or UDS-client Profiles beneath its own Context, then publishes
+independent application-facing domain capabilities. Terminal application factories
+come from rsi-terminal. Initial Profile preparation validates application arguments
+before this connection plugin activates. The launcher invokes ApplicationRun and
+disposes the one enclosing Runtime.
+
 This package implements the standard RSIversi product described by the product
 [contract](../README.md). The library owns the explicit linked factory catalog,
-standard composition, product-owned Profile catalogs, and construction of the
-transport-independent `SessionApplication`. The binary owns command-line
-parsing, Session/headless orchestration, terminal input and rendering, process
-signals, and the Tokio runtime. There is no parallel library-owned headless
-runner.
+standard composition and product-owned Profile catalogs. The Session plugin
+publishes the transport-independent `SessionService`. Its trusted `SessionIngress`
+is registered in the same Host catalog for server endpoint composition; remote
+clients receive only the application-facing Session contract.
+The binary owns launcher/management parsing, process control and the Tokio runtime.
+[rsi-terminal](../terminal/README.md) owns the native application factories, their
+argument grammars, renderer sinks, terminal input and task lifetime. Shared
+submission reconciliation and observation cursor/retry policy live in
+[rsi-client](../client/README.md).
 
 The standard catalog links providers but does not select or enable a deployment.
 A persistent Profile instantiates the intended provider, while Settings names
 the exact default deployment and model. Tests can inject a credential store at
 the public composition seam without consulting real user state.
 
+The standard service Profile installs an API registry, persistent service identity,
+connection negotiation and the domain endpoint plugins. Identity uses the same
+exclusive native owner lease as process startup. Direct library startup acquires
+that lease during activation; daemon/embedded selection injects its existing lease
+and fresh epoch. These runtime values do not change the frozen catalog or launch
+preview. EndpointId persists in Base Storage independently of Session history.
+Daemon startup adds the ordinary Local API listener to that service Profile and
+publishes metadata after the complete Profile is active. Native publication is a
+process role excluded from the shared service launch key, so embedded and daemon
+owners select the same desired service composition. The listener's factory is
+always in the frozen native catalog; its launch-key configuration is supplied by
+startup after pure service preview. Remote connections use the independent UDS
+connection plugin and the domain client plugins. Detaching retires only those
+client capabilities and their local transport work.
+
+`RunningRsi::boot_host_profile_in` mounts the same standard service composition
+below a caller-owned application Context. It uses that Runtime's Execution and
+global limits and the shared [ScopedProfile](../application/README.md) owner,
+with a real meta-scope child Fiber and fresh Local identities for the service
+catalog. Shutdown disposes only that subtree. Native daemon/library root
+startup retains its independent Runtime. The caller owns the parent lifecycle,
+including cancellation during child bootstrap; no scoped Host owns parent shutdown.
+Local selection takes this application Context for both modes: embedded service
+plugins and remote connection/domain-client plugins mount isolated child Profiles.
+The application disposes its connection subtree before shutting down its Runtime.
+
+`StandardServiceDaemon::start_in` mounts the publishing daemon in a caller-owned
+Runtime with the same isolated child-Profile lifetime. It consumes the exact
+preacquired owner lease and publishes metadata only after the Local API listener
+is active. The standard Serve application composes this service owner with an
+independent authenticated HTTP application. Transport configuration does not move
+domain ownership into the application or create another Runtime.
+
+Daemon lifetime follows the owning Profile. Normal listener retirement during
+Profile convergence waits for the replacement; listener failure, a stopped
+Profile, or convergence without a usable listener ends serving. Parent teardown
+can fence the restart-required owner before Profile cleanup reports Stopped;
+that owner withdrawal is normal termination. Listener
+diagnostics are observed per replacement, and shutdown resolves the current
+approval broker. Neither observation nor retained application handles keep an
+obsolete service generation active.
+
+The Serve composition resolves the current dispatcher, device verifier and
+administration owner at each new call. Admitted calls retain their selected
+generation and are never replayed across reload. During replacement, unavailable
+capabilities reject new calls. The process owner, EndpointId, HostEpoch and local
+launch identity remain stable across a supported Profile reload; connection
+description is therefore independent of listener replacement.
+
 `rsi --profile NAME [application arguments]` selects one named Application
 Profile. The built-in `headless` application accepts one positional task or
-`--stdin`; `session` is the line-oriented interactive application. Both drive
-the same `SessionApplication` surface, subscribe strictly after the durable
+`--stdin`; `cli` is the line-oriented interactive application. Both drive
+the same `SessionService` surface, subscribe strictly after the durable
 acceptance sequence, and render the subsequent live Facts. The acceptance and
-terminal envelopes are binary-owned presentation records rather than a second
+terminal envelopes are terminal-owned presentation records rather than a second
 Agent execution API.
 
-Application startup keeps the Agent-preset Settings host only when it becomes
-part of an embedded Session Host. A compatible remote daemon needs the preset
-catalog only to derive its launch preview, so the client shuts that Settings
-host down before running the application command.
+The connection plugin retains its scoped preset catalog through connection
+cleanup. Remote mode uses that catalog to derive the strict local launch preview;
+it never owns or shuts down the independently running daemon.
 
 Exit status 0 means a completed turn; an interactive Session also treats its
 user's locally cancelled turn as a successful control action. Status 1 covers
@@ -51,6 +110,16 @@ generation. Copy names both identities explicitly as `copy --from SOURCE --id
 ID [--name NAME]`. JSON roster and show rows always expose `id`, a `metadata`
 object containing `name` and `description`, independent `source` and `trust`,
 flat `status` and nullable `reason`, and `default`.
+
+The preset catalog and its Settings namespace registration belong to an ordinary
+catalog plugin. AgentPresetManager observes that capability and owns its Profile
+lifetime; it does not register a second Settings owner outside the plugin graph.
+Withdrawal drops the namespace registration together with the catalog publication.
+The catalog owner retains one bounded startup diagnostic for its management caller;
+generic Profile lifecycle diagnostics continue to redact plugin error text.
+`AgentPresetManager::open_standard_in` mounts that Profile below the application's
+existing Context with isolated Settings/catalog identities. Standalone management
+keeps an independent root Profile; the scoped manager never owns parent shutdown.
 
 The shipped `standard` asset is materialized below a digest-addressed,
 owner-writable cache, but the catalog grants System authority only to that

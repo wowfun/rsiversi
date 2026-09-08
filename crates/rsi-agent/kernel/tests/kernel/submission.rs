@@ -53,7 +53,7 @@ async fn submission_without_a_running_write_behind_worker_fails_within_a_bound()
 async fn permanent_flush_failure_rejects_later_mailbox_submission() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
-    let kernel = SessionKernel::recover_with_clock(
+    let kernel = AgentKernel::recover_with_clock(
         store.clone() as Arc<dyn SessionStore>,
         composition(),
         Arc::new(FixedClock),
@@ -130,7 +130,7 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
-            facts: vec![
+            facts: (vec![
                 SessionFact::new(
                     1,
                     1,
@@ -152,12 +152,15 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
                     },
                 )
                 .unwrap(),
-            ],
+            ])
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         })
         .await
         .unwrap();
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel = SessionKernel::recover_with_clock(
+    let kernel = AgentKernel::recover_with_clock(
         store.clone() as Arc<dyn SessionStore>,
         composition(),
         Arc::new(FixedClock),
@@ -247,7 +250,7 @@ async fn indexed_turn_boundary_reads_share_the_process_store_read_admission() {
     append_terminal_history(&memory, "session-boundary-admission-a", 1).await;
     append_terminal_history(&memory, "session-boundary-admission-b", 1).await;
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store.clone() as Arc<dyn SessionStore>,
         composition(),
         Arc::new(FixedClock),
@@ -367,13 +370,10 @@ async fn resident_session_keeps_its_pin_while_a_new_session_uses_the_new_generat
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
 
     let first_header = header("session-generation-a");
@@ -502,13 +502,10 @@ async fn unavailable_cold_preset_fails_before_fact_log_materialization() {
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     composition.set_unavailable();
     store.reset_header_read_attempts();
     store.reset_read_attempts();
@@ -547,13 +544,10 @@ async fn dropping_an_unsubmitted_cold_resume_releases_its_pin_without_hydration(
     });
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     store.reset_read_attempts();
     store.reset_open_turn_read_attempts();
 
@@ -606,7 +600,7 @@ async fn resume_token_from_another_kernel_is_rejected_and_releases_its_pin() {
     });
     let source_store_contract: Arc<dyn SessionStore> = source_store;
     let composition_contract: Arc<dyn AgentComposition> = composition;
-    let source = SessionKernel::recover_with_clock(
+    let source = AgentKernel::recover_with_clock(
         source_store_contract,
         composition_contract,
         Arc::new(FixedClock),
@@ -642,13 +636,10 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     let session_header = header("session-resident-damaged-source");
     let pin = composition
@@ -693,13 +684,10 @@ async fn cold_resume_after_process_restart_pins_the_current_generation() {
     composition.select_digest('b');
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition;
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
 
     kernel
@@ -735,13 +723,10 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     let session_header = header("session-evicted-generation-b");
     let pin = composition
@@ -811,7 +796,7 @@ async fn cold_composition_failure_has_a_utf8_safe_bounded_diagnostic() {
     append_terminal_history(&memory, "session-unbounded-composition", 1).await;
     let store: Arc<dyn SessionStore> = memory;
     let composition: Arc<dyn AgentComposition> = Arc::new(UnboundedDiagnosticComposition);
-    let kernel = SessionKernel::recover_with_clock(store, composition, Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(store, composition, Arc::new(FixedClock))
         .await
         .unwrap();
 
@@ -831,7 +816,7 @@ async fn store_read_failure_has_a_utf8_safe_bounded_turn_diagnostic() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     store.fail_next_read(format!(
@@ -1197,7 +1182,7 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = kernel.start_workers();
@@ -1244,7 +1229,7 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
 async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
@@ -1318,7 +1303,7 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = kernel.start_workers();
@@ -1441,7 +1426,7 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = kernel.start_workers();

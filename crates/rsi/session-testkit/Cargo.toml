@@ -1,0 +1,17 @@
+[package]
+name = "rsi-session-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+futures-util.workspace = true
+rsi-meta-execution = { path = "../../rsi-meta/execution" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+
+[lints]
+workspace = true

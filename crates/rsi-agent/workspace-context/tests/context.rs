@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn header(cwd: &Path, trust: WorkspaceTrust) -> SessionHeader {
+    let cwd = fs::canonicalize(cwd).unwrap();
     SessionHeader::new(
         SessionId::new("workspace-context-session").unwrap(),
         1,

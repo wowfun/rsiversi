@@ -18,7 +18,8 @@ fallback route.
 ## Ordinary plugins
 
 Routers publish `LanguageCallContract` and `ImageCallContract` as Local
-services. Provider plugins require the registrar contracts they enable and the
+services. The Language router also publishes the read-only
+`LanguageModelsContract` from the same route registry. Provider plugins require the registrar contracts they enable and the
 Base contracts needed by their adapters. Their registrations are bound to the
 provider Fiber generation. Removing or replacing that Fiber withdraws the
 registrations after generation-local prepared calls drain.

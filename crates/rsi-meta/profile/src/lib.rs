@@ -15,13 +15,17 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::fs::File;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod bundle;
 mod control;
+pub use bundle::ProfileBundle;
+#[cfg(not(target_family = "wasm"))]
+mod native_source;
+#[cfg(not(target_family = "wasm"))]
+use native_source::read_profile_source;
 
 pub use control::{
     ProfileBootstrap, ProfileControl, ProfileControlContract, ProfileGenerationPlan, ProfileHealth,
@@ -89,9 +93,7 @@ impl ProfileLimits {
 /// Frozen values visible to pure Profile expressions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileEnvironment {
-    config: PathBuf,
-    state: PathBuf,
-    cache: PathBuf,
+    paths: Option<[PathBuf; 3]>,
     platform: String,
     defines: BTreeMap<String, ConfigValue>,
 }
@@ -115,27 +117,43 @@ impl ProfileEnvironment {
             ));
         }
         Ok(Self {
-            config,
-            state,
-            cache,
+            paths: Some([config, state, cache]),
             platform,
             defines,
         })
     }
 
-    /// Frozen configuration root.
-    pub fn config(&self) -> &Path {
-        &self.config
+    /// Creates an environment without filesystem authority.
+    pub fn without_paths(
+        platform: impl Into<String>,
+        defines: BTreeMap<String, ConfigValue>,
+    ) -> Result<Self> {
+        let platform = platform.into();
+        if platform.is_empty() {
+            return Err(ProfileError::InvalidEnvironment(
+                "platform must not be empty".into(),
+            ));
+        }
+        Ok(Self {
+            paths: None,
+            platform,
+            defines,
+        })
+    }
+
+    /// Frozen configuration root, when supplied.
+    pub fn config(&self) -> Option<&Path> {
+        self.paths.as_ref().map(|paths| paths[0].as_path())
     }
 
     /// Frozen state root.
-    pub fn state(&self) -> &Path {
-        &self.state
+    pub fn state(&self) -> Option<&Path> {
+        self.paths.as_ref().map(|paths| paths[1].as_path())
     }
 
     /// Frozen cache root.
-    pub fn cache(&self) -> &Path {
-        &self.cache
+    pub fn cache(&self) -> Option<&Path> {
+        self.paths.as_ref().map(|paths| paths[2].as_path())
     }
 
     /// Frozen application-selected platform name.
@@ -385,12 +403,15 @@ pub struct ProfileProgram {
 
 #[derive(Clone, Debug, PartialEq)]
 enum ProgramRoot {
+    #[cfg(not(target_family = "wasm"))]
     File(PathBuf),
     Memory(Profile),
+    Bundle(ProfileBundle),
 }
 
 impl ProfileProgram {
     /// Uses one required root file and enables transitive watching.
+    #[cfg(not(target_family = "wasm"))]
     pub fn from_file(path: impl Into<PathBuf>) -> Self {
         Self {
             root: ProgramRoot::File(path.into()),
@@ -403,6 +424,15 @@ impl ProfileProgram {
     pub fn from_profile(profile: Profile) -> Self {
         Self {
             root: ProgramRoot::Memory(profile),
+            linked: Vec::new(),
+            launch_patches: Vec::new(),
+        }
+    }
+
+    /// Uses one immutable bounded source bundle.
+    pub fn from_bundle(bundle: ProfileBundle) -> Self {
+        Self {
+            root: ProgramRoot::Bundle(bundle),
             linked: Vec::new(),
             launch_patches: Vec::new(),
         }
@@ -546,6 +576,10 @@ impl ProfileCompiler {
         validate_limits(&self.limits)?;
         self.validate_environment()?;
         let mut state = CompileState::new(self);
+        if let ProgramRoot::Bundle(bundle) = &program.root {
+            bundle.validate(&self.limits)?;
+            state.bundle = Some(bundle);
+        }
         for fragment in &program.linked {
             state.hash_fragment(fragment);
             state.charge_identifier("fragment", &fragment.id)?;
@@ -560,9 +594,14 @@ impl ProfileCompiler {
             }
         }
         match &program.root {
+            #[cfg(not(target_family = "wasm"))]
             ProgramRoot::File(path) => {
                 state.hash_marker(b"root-file");
-                state.execute_file(path, 1)?;
+                state.execute_source(path, 1)?;
+            }
+            ProgramRoot::Bundle(bundle) => {
+                state.hash_marker(b"root-bundle");
+                state.execute_source(Path::new(bundle.root()), 1)?;
             }
             ProgramRoot::Memory(profile) => {
                 state.hash_marker(b"root-memory");
@@ -761,6 +800,8 @@ struct PluginNode {
 
 struct CompileState<'a> {
     compiler: &'a ProfileCompiler,
+    bundle: Option<&'a ProfileBundle>,
+    seen_sources: BTreeSet<PathBuf>,
     tree: Vec<TreeNode>,
     instance_ids: HashSet<String>,
     node_count: usize,
@@ -778,21 +819,20 @@ impl<'a> CompileState<'a> {
     fn new(compiler: &'a ProfileCompiler) -> Self {
         let mut digest = Sha256::new();
         digest_component(&mut digest, b"format", b"rsi-meta-profile-source-v1");
-        digest_component(
-            &mut digest,
-            b"environment-config",
-            compiler.environment.config.as_os_str().as_encoded_bytes(),
-        );
-        digest_component(
-            &mut digest,
-            b"environment-state",
-            compiler.environment.state.as_os_str().as_encoded_bytes(),
-        );
-        digest_component(
-            &mut digest,
-            b"environment-cache",
-            compiler.environment.cache.as_os_str().as_encoded_bytes(),
-        );
+        if let Some(paths) = &compiler.environment.paths {
+            for (label, path) in [
+                b"environment-config".as_slice(),
+                b"environment-state",
+                b"environment-cache",
+            ]
+            .into_iter()
+            .zip(paths)
+            {
+                digest_component(&mut digest, label, path.as_os_str().as_encoded_bytes());
+            }
+        } else {
+            digest_component(&mut digest, b"environment-paths", b"absent");
+        }
         digest_component(
             &mut digest,
             b"environment-platform",
@@ -806,6 +846,8 @@ impl<'a> CompileState<'a> {
         );
         Self {
             compiler,
+            bundle: None,
+            seen_sources: BTreeSet::new(),
             tree: Vec::new(),
             instance_ids: HashSet::new(),
             node_count: 0,
@@ -942,35 +984,51 @@ impl<'a> CompileState<'a> {
         }
     }
 
-    fn execute_file(&mut self, requested: &Path, depth: usize) -> Result<()> {
+    fn load_source(&self, requested: &Path) -> Result<(PathBuf, Arc<[u8]>)> {
+        let (canonical, bytes): (PathBuf, Arc<[u8]>) = if let Some(bundle) = self.bundle {
+            bundle.read(requested)?
+        } else {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let (canonical, bytes) =
+                    read_profile_source(requested, self.compiler.limits.maximum_document_bytes)
+                        .map_err(|error| {
+                            if error.kind() == std::io::ErrorKind::InvalidData {
+                                ProfileError::CapacityExceeded {
+                                    resource: "document bytes",
+                                    maximum: self.compiler.limits.maximum_document_bytes,
+                                }
+                            } else {
+                                ProfileError::Source {
+                                    message: bound_message(
+                                        format!("cannot read required source: {error}"),
+                                        self.compiler.limits.maximum_identifier_bytes,
+                                    ),
+                                }
+                            }
+                        })?;
+                (canonical, bytes.into())
+            }
+            #[cfg(target_family = "wasm")]
+            return Err(ProfileError::Source {
+                message: "native Profile sources are unavailable".into(),
+            });
+        };
+        Ok((canonical, bytes))
+    }
+
+    fn execute_source(&mut self, requested: &Path, depth: usize) -> Result<()> {
         if depth > self.compiler.limits.maximum_include_depth {
             return Err(ProfileError::CapacityExceeded {
                 resource: "include depth",
                 maximum: self.compiler.limits.maximum_include_depth,
             });
         }
-        let (canonical, bytes) =
-            read_profile_source(requested, self.compiler.limits.maximum_document_bytes).map_err(
-                |error| {
-                    if error.kind() == std::io::ErrorKind::InvalidData {
-                        ProfileError::CapacityExceeded {
-                            resource: "document bytes",
-                            maximum: self.compiler.limits.maximum_document_bytes,
-                        }
-                    } else {
-                        ProfileError::Source {
-                            message: bound_message(
-                                format!("cannot read required source: {error}"),
-                                self.compiler.limits.maximum_identifier_bytes,
-                            ),
-                        }
-                    }
-                },
-            )?;
+        let (canonical, bytes) = self.load_source(requested)?;
         if self.include_stack.contains(&canonical) {
             return Err(ProfileError::IncludeCycle { path: canonical });
         }
-        if !self.watch_paths.contains(&canonical) {
+        if self.seen_sources.insert(canonical.clone()) {
             self.source_files =
                 self.source_files
                     .checked_add(1)
@@ -1015,17 +1073,19 @@ impl<'a> CompileState<'a> {
             canonical.as_os_str().as_encoded_bytes(),
         );
         digest_component(&mut self.digest, b"source-bytes", &bytes);
-        let fingerprint: [u8; 32] = Sha256::digest(&bytes).into();
-        if let Some(previous) = self
-            .source_fingerprints
-            .insert(canonical.clone(), fingerprint)
-            && previous != fingerprint
-        {
-            return Err(ProfileError::Source {
-                message: "a required source changed during Profile rebuild".to_owned(),
-            });
+        if self.bundle.is_none() {
+            let fingerprint: [u8; 32] = Sha256::digest(&bytes).into();
+            if let Some(previous) = self
+                .source_fingerprints
+                .insert(canonical.clone(), fingerprint)
+                && previous != fingerprint
+            {
+                return Err(ProfileError::Source {
+                    message: "a required source changed during Profile rebuild".to_owned(),
+                });
+            }
+            self.watch_paths.insert(canonical.clone());
         }
-        self.watch_paths.insert(canonical.clone());
         self.include_stack.push(canonical.clone());
         let base = canonical.parent().ok_or_else(|| ProfileError::Source {
             message: "required source has no parent directory".to_owned(),
@@ -1042,13 +1102,17 @@ impl<'a> CompileState<'a> {
     fn execute_step(&mut self, step: RawStep, base: &Path, depth: usize) -> Result<()> {
         match step {
             RawStep::Include { path } => {
+                if self.bundle.is_some() {
+                    let requested = bundle::resolve_include(base, &path)?;
+                    return self.execute_source(&requested, depth + 1);
+                }
                 let path = PathBuf::from(path);
                 let path = if path.is_absolute() {
                     path
                 } else {
                     base.join(path)
                 };
-                self.execute_file(&path, depth + 1)
+                self.execute_source(&path, depth + 1)
             }
             RawStep::Group(raw) => {
                 let node = self.compile_group(raw)?;
@@ -1475,23 +1539,11 @@ impl<'a> CompileState<'a> {
         }
         let mut scope = Scope::new();
         let mut paths = Map::new();
-        paths.insert(
-            "config".into(),
-            self.compiler
-                .environment
-                .config
-                .display()
-                .to_string()
-                .into(),
-        );
-        paths.insert(
-            "state".into(),
-            self.compiler.environment.state.display().to_string().into(),
-        );
-        paths.insert(
-            "cache".into(),
-            self.compiler.environment.cache.display().to_string().into(),
-        );
+        if let Some(values) = &self.compiler.environment.paths {
+            for (label, path) in ["config", "state", "cache"].into_iter().zip(values) {
+                paths.insert(label.into(), path.display().to_string().into());
+            }
+        }
         scope.push("paths", paths);
         scope.push("platform", self.compiler.environment.platform.clone());
         scope.push(
@@ -1606,122 +1658,6 @@ impl<'a> CompileState<'a> {
             source_digest,
         })
     }
-}
-
-fn read_profile_source(path: &Path, maximum_bytes: usize) -> std::io::Result<(PathBuf, Vec<u8>)> {
-    let initial = path.symlink_metadata()?;
-    if !initial.file_type().is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Profile source must be a regular non-symlink file",
-        ));
-    }
-    let file = open_profile_file(path)?;
-    let opened = file.metadata()?;
-    let current = path.symlink_metadata()?;
-    if !opened.file_type().is_file() || !current.file_type().is_file() {
-        return Err(changed_profile_source());
-    }
-    #[cfg(not(windows))]
-    if !same_file_identity(&initial, &opened) || !same_file_identity(&current, &opened) {
-        return Err(changed_profile_source());
-    }
-    #[cfg(windows)]
-    let opened_identity = profile_file_identity(&file)?;
-    #[cfg(windows)]
-    if profile_path_identity(path)? != opened_identity {
-        return Err(changed_profile_source());
-    }
-    let canonical = path.canonicalize()?;
-    #[cfg(not(windows))]
-    if !same_file_identity(&canonical.symlink_metadata()?, &opened) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Profile source identity changed while resolving its canonical path",
-        ));
-    }
-    #[cfg(windows)]
-    if profile_path_identity(&canonical)? != opened_identity {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Profile source identity changed while resolving its canonical path",
-        ));
-    }
-    read_open_file_bounded(file, maximum_bytes).map(|bytes| (canonical, bytes))
-}
-
-fn open_profile_file(path: &Path) -> std::io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        const FILE_SHARE_READ: u32 = 0x0000_0001;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
-}
-
-fn changed_profile_source() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        "Profile source changed while opening or is not a regular file",
-    )
-}
-
-pub(crate) fn read_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u8>> {
-    read_profile_source(path, maximum_bytes).map(|(_, bytes)| bytes)
-}
-
-fn read_open_file_bounded(file: File, maximum_bytes: usize) -> std::io::Result<Vec<u8>> {
-    if file.metadata()?.len() > maximum_bytes as u64 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Profile source exceeds its document bound",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(maximum_bytes as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > maximum_bytes {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Profile source exceeds its document bound",
-        ));
-    }
-    Ok(bytes)
-}
-
-#[cfg(unix)]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(windows)]
-fn profile_file_identity(file: &File) -> std::io::Result<same_file::Handle> {
-    same_file::Handle::from_file(file.try_clone()?)
-}
-
-#[cfg(windows)]
-fn profile_path_identity(path: &Path) -> std::io::Result<same_file::Handle> {
-    same_file::Handle::from_file(open_profile_file(path)?)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    left.len() == right.len()
-        && left.modified().ok() == right.modified().ok()
-        && left.file_type().is_file()
-        && right.file_type().is_file()
 }
 
 #[derive(Deserialize)]

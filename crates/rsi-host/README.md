@@ -1,5 +1,12 @@
 # rsi-host
 
+Generic composition accepts a frozen environment with or without filesystem
+paths. `HostBuilder::without_paths` supports embedders such as browser Workers;
+its Profile source is an immutable bundle or programmatic document. Native file
+entry points and watchers are target-specific. The caller injects platform
+Execution before starting the single Runtime. Host path access is optional and
+does not invent storage authority for a path-free application.
+
 `rsi-host` is the generic static composition SDK above
 [`rsi-meta`](../rsi-meta/README.md) and
 [`rsi-meta-profile`](../rsi-meta/profile/README.md). It owns an explicit per-Host
@@ -18,6 +25,32 @@ Before startup, `Host::preview_file` can purely compile the frozen fragments,
 selected source, environment, and launch patches and resolve every enabled
 plugin. Preview performs no factory preparation, Runtime activation, credential
 resolution, or Store lease acquisition.
+
+Building validates and freezes Runtime policy without creating an executor or
+Runtime. `HostBuilder::execution` can freeze explicit platform execution;
+startup constructs the Runtime from it. Native startup without an explicit
+backend captures its entered Tokio handle. Preview remains usable without Tokio.
+
+An existing application Runtime can consume `Host::prepare_in` to prepare an
+ordinary child Profile with the frozen catalog, environment and Profile limits.
+Preparation borrows the frozen Host; independent child Profiles may reuse that
+catalog while retaining separate control and generation ownership.
+That Runtime supplies execution and global resource policy. The caller installs
+the returned bootstrap through Meta in its owned Context and retains its control
+handle. Scope creation, Local isolation and child disposal belong to that caller;
+preparation neither creates nor shuts down a Runtime. This supports embedded
+compositions under the same Runtime/Context/Fiber authority as their application.
+
+`Host::isolate_local_context` derives a caller-supplied Context with fresh Local
+identities for the frozen contract/event catalog and Profile control. It creates
+no Fiber or Runtime and does not activate a provider. Unregistered contracts and
+Portable identities keep the caller's mappings; explicit Profile groups own any
+additional isolation. This lets a product isolate a complete child catalog
+without duplicating its marker list, while retaining chosen uncatalogued parent
+dependencies. The caller still owns the real child Scope and its cleanup.
+This is catalog name isolation, not a capability allowlist or a security sandbox.
+Supply a parent Context exposing only authority intended for the child; inherited
+Portable services and uncatalogued Locals must be fenced explicitly by that caller.
 
 Because limits remain mutable until build, build revalidates every previously
 registered identifier, marker, fragment, define, and launch patch against the

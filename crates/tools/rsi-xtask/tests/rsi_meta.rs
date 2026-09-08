@@ -203,6 +203,7 @@ fn every_workspace_package_belongs_to_one_ci_failure_domain() {
     let meta_packages = BTreeSet::from([
         "rsi-meta",
         "rsi-meta-contract",
+        "rsi-meta-execution",
         "rsi-meta-native-loader",
         "rsi-meta-native",
         "rsi-meta-profile",

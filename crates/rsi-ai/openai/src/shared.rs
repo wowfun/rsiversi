@@ -63,7 +63,7 @@ pub(super) fn authorized_request(
     })
 }
 
-pub(super) type MultipartPart = (String, Option<String>, Option<String>, Arc<[u8]>);
+pub(super) type MultipartPart = (String, Option<String>, Option<String>, bytes::Bytes);
 
 pub(super) fn multipart(boundary: &str, parts: Vec<MultipartPart>) -> Result<ByteStream, AiError> {
     multipart_with_limit(boundary, parts, MAX_PROVIDER_REQUEST_BODY_BYTES)
@@ -107,7 +107,7 @@ fn multipart_with_limit(
     Ok(Box::pin(stream! {
         for (header, body) in encoded {
             yield Ok(header);
-            yield Ok(Bytes::from_owner(body));
+            yield Ok(body);
             yield Ok(Bytes::from_static(b"\r\n"));
         }
         yield Ok(closing);
@@ -131,7 +131,7 @@ mod tests {
     fn multipart_projection_counts_framing_before_stream_construction() {
         let Err(error) = multipart_with_limit(
             "boundary",
-            vec![("field".into(), None, None, Arc::from([]))],
+            vec![("field".into(), None, None, Bytes::new())],
             1,
         ) else {
             panic!("multipart framing alone exceeds the test limit");

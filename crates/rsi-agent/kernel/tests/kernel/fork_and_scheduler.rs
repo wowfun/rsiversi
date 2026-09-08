@@ -557,7 +557,7 @@ async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_backgr
         }])),
         calls: AtomicUsize::new(0),
     });
-    let initial = SessionKernel::recover_with_context_clock_and_limits(
+    let initial = AgentKernel::recover_with_context_clock_and_limits(
         store.clone(),
         composition(),
         context,
@@ -741,7 +741,7 @@ async fn fresh_message_cannot_publish_over_an_unflushed_fresh_turn_header() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -783,7 +783,7 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -851,7 +851,7 @@ async fn cancellation_cannot_diverge_resident_state_from_an_applied_activation_t
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();

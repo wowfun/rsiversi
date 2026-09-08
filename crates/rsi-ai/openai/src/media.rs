@@ -34,23 +34,18 @@ impl ImageAdapter for OpenAiImageAdapter {
                         )
                     } else {
                         let mut parts: Vec<MultipartPart> = vec![
-                            (
-                                "model".to_owned(),
-                                None,
-                                None,
-                                Arc::from(model.into_bytes()),
-                            ),
+                            ("model".to_owned(), None, None, model.into_bytes().into()),
                             (
                                 "prompt".to_owned(),
                                 None,
                                 None,
-                                Arc::from(request.prompt().as_bytes()),
+                                bytes::Bytes::copy_from_slice(request.prompt().as_bytes()),
                             ),
                             (
                                 "n".to_owned(),
                                 None,
                                 None,
-                                Arc::from(request.count().to_string().into_bytes()),
+                                request.count().to_string().into_bytes().into(),
                             ),
                         ];
                         for (index, media) in request.inputs().iter().enumerate() {

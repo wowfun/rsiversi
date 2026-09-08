@@ -91,12 +91,11 @@ impl ProfileResolver for LinkedCatalog {
 
 /// Frozen generic Host before its single top-level Profile starts.
 pub struct Host {
-    paths: HostPaths,
-    platform: String,
-    defines: BTreeMap<String, ConfigValue>,
+    paths: Option<HostPaths>,
+    environment: ProfileEnvironment,
     limits: HostLimits,
     runtime_limits: rsi_meta::RuntimeLimits,
-    runtime: Runtime,
+    execution: Option<rsi_meta::Execution>,
     catalog: Arc<LinkedCatalog>,
 }
 
@@ -105,8 +104,8 @@ impl std::fmt::Debug for Host {
         formatter
             .debug_struct("Host")
             .field("paths", &self.paths)
-            .field("platform", &self.platform)
-            .field("defines", &self.defines.keys())
+            .field("platform", &self.environment.platform())
+            .field("defines", &self.environment.defines().keys())
             .field("plugins", &self.catalog.linked.keys())
             .finish_non_exhaustive()
     }
@@ -114,28 +113,26 @@ impl std::fmt::Debug for Host {
 
 impl Host {
     pub(crate) fn new(
-        paths: HostPaths,
-        platform: String,
-        defines: BTreeMap<String, ConfigValue>,
+        paths: Option<HostPaths>,
+        environment: ProfileEnvironment,
         limits: HostLimits,
         runtime_limits: rsi_meta::RuntimeLimits,
-        runtime: Runtime,
+        execution: Option<rsi_meta::Execution>,
         catalog: LinkedCatalog,
     ) -> Self {
         Self {
             paths,
-            platform,
-            defines,
+            environment,
             limits,
             runtime_limits,
-            runtime,
+            execution,
             catalog: Arc::new(catalog),
         }
     }
 
     /// Returns the frozen filesystem authority.
-    pub const fn paths(&self) -> &HostPaths {
-        &self.paths
+    pub const fn paths(&self) -> Option<&HostPaths> {
+        self.paths.as_ref()
     }
 
     /// Returns a canonical digest of the generic Host inputs frozen by its builder.
@@ -201,18 +198,14 @@ impl Host {
     }
 
     /// Purely compiles and resolves one Profile file without Runtime mutation.
+    #[cfg(not(target_family = "wasm"))]
     pub fn preview_file(&self, path: impl Into<std::path::PathBuf>) -> Result<HostProfilePreview> {
         self.preview_program(ProfileProgram::from_file(path))
     }
 
-    fn preview_program(&self, program: ProfileProgram) -> Result<HostProfilePreview> {
-        let environment = ProfileEnvironment::new(
-            self.paths.config().to_path_buf(),
-            self.paths.state().to_path_buf(),
-            self.paths.cache().to_path_buf(),
-            self.platform.clone(),
-            self.defines.clone(),
-        )?;
+    /// Purely compiles and resolves one explicit immutable source program.
+    pub fn preview_program(&self, program: ProfileProgram) -> Result<HostProfilePreview> {
+        let environment = self.environment.clone();
         let program = program
             .with_linked_fragments(self.catalog.fragments.clone())
             .with_launch_patches(self.catalog.launch_patches.clone());
@@ -240,33 +233,81 @@ impl Host {
     }
 
     /// Starts one required root file with transitive source watching.
+    #[cfg(not(target_family = "wasm"))]
     pub async fn start_file(self, path: impl Into<std::path::PathBuf>) -> Result<RunningHost> {
         self.start_program(ProfileProgram::from_file(path)).await
     }
 
-    /// Starts the one direct Profile bootstrap from an explicit source program.
-    pub async fn start_program(self, program: ProfileProgram) -> Result<RunningHost> {
-        let environment = ProfileEnvironment::new(
-            self.paths.config().to_path_buf(),
-            self.paths.state().to_path_buf(),
-            self.paths.cache().to_path_buf(),
-            self.platform.clone(),
-            self.defines.clone(),
-        )?;
+    /// Prepares this frozen composition for an existing Runtime without starting another.
+    /// The caller applies the bootstrap in an owned, explicitly isolated child Context
+    /// and retains its control handle. Supplied Runtime execution and limits govern work.
+    pub async fn prepare_in(
+        &self,
+        runtime: &Runtime,
+        program: ProfileProgram,
+    ) -> Result<ProfileBootstrap> {
+        self.prepare_profile(runtime, program).await
+    }
+
+    /// Derives fresh Local identities for this catalog and Profile control, without Fibers.
+    /// Unregistered and Portable mappings remain inherited from the supplied Context.
+    /// This is not an authority allowlist: callers must supply a least-authority
+    /// parent or explicitly isolate additional inherited capabilities.
+    pub fn isolate_local_context(&self, mut context: Context) -> Result<Context> {
+        context = context.isolate_local_fresh::<ProfileControlContract>()?.0;
+        for (key, contract) in &self.catalog.local_contracts {
+            context = context.isolate_local_type_fresh(*contract, key.as_str())?.0;
+        }
+        for (key, event) in &self.catalog.local_events {
+            context = context.isolate_event_type_fresh(*event, key.as_str())?.0;
+        }
+        Ok(context)
+    }
+
+    async fn prepare_profile(
+        &self,
+        runtime: &Runtime,
+        program: ProfileProgram,
+    ) -> Result<ProfileBootstrap> {
+        let environment = self.environment.clone();
         let program = program
             .with_linked_fragments(self.catalog.fragments.clone())
             .with_launch_patches(self.catalog.launch_patches.clone());
-        let runtime = self.runtime.clone();
+        let preparation_runtime = runtime.clone();
         let resolver = Arc::clone(&self.catalog) as Arc<dyn ProfileResolver>;
         let limits = self.limits.profile.clone();
-        let bootstrap = tokio::task::spawn_blocking(move || {
-            ProfileBootstrap::prepare(&runtime, resolver, program, environment, limits)
-        })
-        .await
-        .map_err(|_| HostError::Bootstrap("Profile preparation task failed".to_owned()))??;
+        runtime
+            .execution()
+            .prepare(move || {
+                ProfileBootstrap::prepare(
+                    &preparation_runtime,
+                    resolver,
+                    program,
+                    environment,
+                    limits,
+                )
+            })
+            .await
+            .map_err(|_| HostError::Bootstrap("Profile preparation task failed".to_owned()))?
+            .map_err(Into::into)
+    }
+
+    /// Starts the one direct Profile bootstrap from an explicit source program.
+    pub async fn start_program(self, program: ProfileProgram) -> Result<RunningHost> {
+        let runtime = match self.execution.clone() {
+            Some(execution) => Runtime::with_execution(self.runtime_limits.clone(), execution)?,
+            #[cfg(not(target_family = "wasm"))]
+            None => Runtime::new(self.runtime_limits.clone())?,
+            #[cfg(target_family = "wasm")]
+            None => {
+                return Err(HostError::Bootstrap(
+                    "explicit browser execution is required".into(),
+                ));
+            }
+        };
+        let bootstrap = self.prepare_profile(&runtime, program).await?;
         let control = bootstrap.control();
-        let applied = self
-            .runtime
+        let applied = runtime
             .root()
             .apply(
                 ResolvedFactory::linked(
@@ -282,19 +323,19 @@ impl Host {
             Ok(handle) if matches!(handle.snapshot().state, FiberState::Active) => handle,
             Ok(handle) => {
                 let state = handle.snapshot().state;
-                let _ = self.runtime.shutdown().await;
+                let _ = runtime.shutdown().await;
                 return Err(HostError::Bootstrap(format!(
                     "Profile Fiber settled as {state:?}"
                 )));
             }
             Err(error) => {
-                let _ = self.runtime.shutdown().await;
+                let _ = runtime.shutdown().await;
                 return Err(error.into());
             }
         };
         Ok(RunningHost {
             paths: self.paths,
-            runtime: self.runtime,
+            runtime,
             catalog: self.catalog,
             profile_fiber,
             control,
@@ -558,7 +599,7 @@ fn hash_runtime_execution_limits(digest: &mut Sha256, execution: &rsi_meta::Exec
 
 /// Running single-Profile Host with typed observation and deterministic shutdown.
 pub struct RunningHost {
-    paths: HostPaths,
+    paths: Option<HostPaths>,
     runtime: Runtime,
     catalog: Arc<LinkedCatalog>,
     profile_fiber: FiberHandle,
@@ -577,8 +618,8 @@ impl std::fmt::Debug for RunningHost {
 
 impl RunningHost {
     /// Returns the frozen filesystem authority.
-    pub const fn paths(&self) -> &HostPaths {
-        &self.paths
+    pub const fn paths(&self) -> Option<&HostPaths> {
+        self.paths.as_ref()
     }
 
     /// Returns bounded status from typed Profile control.

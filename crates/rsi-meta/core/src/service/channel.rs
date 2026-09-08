@@ -2,12 +2,12 @@ use super::message::{BufferedMessage, Message, PreparedMessage};
 use super::message_admission::BufferedMessageAdmission;
 use super::message_waiter::MessageChannel;
 use super::{CancellationObserver, InvocationContext};
+use crate::Deadline;
 use crate::runtime::ResourceLedger;
 use crate::{Context, MetaError, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct MessageBudget<'call> {
@@ -19,7 +19,7 @@ pub(super) struct MessageBudget<'call> {
     pub(super) byte_resources: &'call Arc<ResourceLedger>,
     pub(super) capability_resources: &'call Arc<ResourceLedger>,
     pub(super) cancellation: &'call CancellationToken,
-    pub(super) deadline: Instant,
+    pub(super) deadline: Deadline,
 }
 
 pub(super) async fn send_message<T: Send>(
@@ -34,7 +34,7 @@ pub(super) async fn send_message<T: Send>(
         budget.maximum_message_bytes,
         budget.maximum_capabilities_per_message,
     )?;
-    if Instant::now() >= budget.deadline {
+    if budget.deadline.has_elapsed() {
         budget.cancellation.cancel();
         return Err(MetaError::Timeout("service call"));
     }
@@ -48,10 +48,10 @@ pub(super) async fn send_message<T: Send>(
         budget.byte_resources,
         budget.capability_resources,
         budget.cancellation,
-        budget.deadline,
+        budget.deadline.clone(),
     )
     .await?;
-    if Instant::now() >= budget.deadline {
+    if budget.deadline.has_elapsed() {
         budget.cancellation.cancel();
         return Err(MetaError::Timeout("service call"));
     }
@@ -59,7 +59,7 @@ pub(super) async fn send_message<T: Send>(
         return Err(MetaError::Cancelled);
     }
     message.validate_transfer()?;
-    if Instant::now() >= budget.deadline {
+    if budget.deadline.has_elapsed() {
         budget.cancellation.cancel();
         return Err(MetaError::Timeout("service call"));
     }
@@ -109,7 +109,7 @@ pub struct ProviderChannel<'call> {
     pub(crate) byte_resources: &'call Arc<ResourceLedger>,
     pub(crate) capability_resources: &'call Arc<ResourceLedger>,
     pub(crate) cancellation: &'call CancellationToken,
-    pub(crate) deadline: Instant,
+    pub(crate) deadline: Deadline,
     pub(crate) maximum_message_bytes: usize,
     pub(crate) maximum_capabilities_per_message: usize,
 }
@@ -120,7 +120,7 @@ impl ProviderChannel<'_> {
         tokio::select! {
             biased;
             () = self.cancellation.cancelled() => None,
-            () = tokio::time::sleep_until(self.deadline) => {
+            () = self.deadline.wait() => {
                 self.cancellation.cancel();
                 None
             }
@@ -145,7 +145,7 @@ impl ProviderChannel<'_> {
                 byte_resources: self.byte_resources,
                 capability_resources: self.capability_resources,
                 cancellation: self.cancellation,
-                deadline: self.deadline,
+                deadline: self.deadline.clone(),
             },
         )
         .await

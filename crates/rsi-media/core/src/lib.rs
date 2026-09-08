@@ -135,7 +135,7 @@ struct Service {
 
 #[async_trait]
 impl Media for Service {
-    async fn import_image(&self, source: Arc<[u8]>) -> Result<MediaRef> {
+    async fn import_image(&self, source: bytes::Bytes) -> Result<MediaRef> {
         if source.is_empty() || source.len() > self.config.maximum_input_bytes {
             return Err(MediaError::InvalidInput(format!(
                 "source image length must be within 1..={} bytes",
@@ -286,7 +286,7 @@ impl PluginFactory for MediaFactory {
     }
 }
 
-fn normalize(source: Arc<[u8]>, maximum_pixels: u64) -> Result<StoredMedia> {
+fn normalize(source: bytes::Bytes, maximum_pixels: u64) -> Result<StoredMedia> {
     let reader = ImageReader::new(Cursor::new(source))
         .with_guessed_format()
         .map_err(|error| MediaError::Codec(error.to_string()))?;
@@ -345,7 +345,7 @@ fn normalize(source: Arc<[u8]>, maximum_pixels: u64) -> Result<StoredMedia> {
     reference.validate()?;
     Ok(StoredMedia {
         reference,
-        bytes: Arc::from(bytes),
+        bytes: bytes.into(),
     })
 }
 

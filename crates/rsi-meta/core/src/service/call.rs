@@ -3,6 +3,7 @@ use super::message::validate_message_bounds;
 use super::{
     BufferedMessage, BufferedMessageAdmission, LeaseGuard, Message, MessageChannel, ResponseMessage,
 };
+use crate::Deadline;
 use crate::runtime::{ResourceLedger, ResourceReservation};
 use crate::{
     Context, ContractId, ContractVersion, FiberGeneration, FiberId, MetaError, Result, ServiceKey,
@@ -10,7 +11,6 @@ use crate::{
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct CallLease {
@@ -84,7 +84,7 @@ pub struct CapabilityCall {
     pub(crate) byte_resources: Arc<ResourceLedger>,
     pub(crate) capability_resources: Arc<ResourceLedger>,
     pub(crate) cancellation: CancellationToken,
-    pub(crate) deadline: Instant,
+    pub(crate) deadline: Deadline,
     pub(crate) maximum_message_bytes: usize,
     pub(crate) maximum_capabilities_per_message: usize,
     pub(crate) lease: Option<Arc<CallLease>>,
@@ -115,7 +115,7 @@ impl CapabilityCall {
                 byte_resources: &self.byte_resources,
                 capability_resources: &self.capability_resources,
                 cancellation: &self.cancellation,
-                deadline: self.deadline,
+                deadline: self.deadline.clone(),
             },
         )
         .await
@@ -145,7 +145,7 @@ impl CapabilityCall {
         let message = tokio::select! {
             biased;
             message = responses.recv() => message,
-            () = tokio::time::sleep_until(self.deadline) => {
+            () = self.deadline.wait() => {
                 self.cancellation.cancel();
                 return self.observe_terminal(Err(MetaError::Timeout("service call")));
             }
@@ -158,7 +158,7 @@ impl CapabilityCall {
                 tokio::select! {
                     biased;
                     message = responses.recv() => message,
-                    () = tokio::time::sleep_until(self.deadline) => {
+                    () = self.deadline.wait() => {
                         return self.observe_terminal(Err(MetaError::Timeout("service call")));
                     }
                 }
