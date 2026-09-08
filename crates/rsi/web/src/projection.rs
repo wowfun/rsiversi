@@ -4,6 +4,7 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_turn_protocol::SessionObservation;
 use rsi_ai_protocol::{ContentDelta, LanguageEvent};
+use rsi_conversation::{FieldWindow, ToolOutcome};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -183,16 +184,17 @@ impl Transcript {
                 ..
             } => {
                 let key = format!("tool:{effect_id}");
-                let arguments = arguments.to_string();
+                let arguments = FieldWindow::json(arguments, 0, MAX_BLOCK_BYTES / 2)
+                    .expect("bounded Tool arguments");
                 self.add(
                     key.clone(),
                     "tool",
                     &format!("{name} · running"),
-                    short(&arguments, MAX_BLOCK_BYTES / 2),
+                    &arguments.text,
                     false,
                 );
                 if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                    block.clipped |= arguments.len() > MAX_BLOCK_BYTES / 2;
+                    block.clipped |= arguments.more;
                     block.tool = Some(ToolPreview {
                         name: Some(name.clone()),
                         intent_seq: Some(self.seq),
@@ -203,26 +205,17 @@ impl Transcript {
             SessionFactBody::ToolResult {
                 effect_id, result, ..
             } => {
-                let failed = result.is_error
-                    || result
-                        .value
-                        .get("exit_code")
-                        .and_then(serde_json::Value::as_i64)
-                        .is_some_and(|code| code != 0)
-                    || result
-                        .value
-                        .get("signal")
-                        .is_some_and(|value| !value.is_null());
+                let outcome = match ToolOutcome::from_result(result) {
+                    ToolOutcome::Completed => "completed",
+                    ToolOutcome::ToolFailed => "tool failed",
+                    ToolOutcome::ProcessFailed => "command failed",
+                };
                 let key = format!("tool:{effect_id}");
                 let previous = self.blocks.iter().find(|block| block.key == key);
                 let mut tool = previous
                     .and_then(|block| block.tool.clone())
                     .unwrap_or_default();
-                let title = format!(
-                    "{} · {}",
-                    tool.name.as_deref().unwrap_or("Tool"),
-                    if failed { "failed" } else { "completed" }
-                );
+                let title = format!("{} · {}", tool.name.as_deref().unwrap_or("Tool"), outcome);
                 if tool.intent_seq.is_some() {
                     self.add(key.clone(), "tool", &title, "\n\n", true);
                 }
@@ -234,7 +227,12 @@ impl Transcript {
                     }
                 }
                 if first {
-                    self.add(key.clone(), "tool", &title, &result.value.to_string(), true);
+                    let value = FieldWindow::json(&result.value, 0, MAX_BLOCK_BYTES)
+                        .expect("bounded Tool result");
+                    self.add(key.clone(), "tool", &title, &value.text, true);
+                    if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                        block.clipped |= value.more;
+                    }
                 }
                 tool.result_seq = Some(self.seq);
                 if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
@@ -298,7 +296,7 @@ mod tests {
         use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
         for (exit_code, expected_status, command) in [
             (0, "completed", "cargo test".to_owned()),
-            (7, "failed", "cargo test".to_owned()),
+            (7, "command failed", "cargo test".to_owned()),
             (
                 0,
                 "completed",

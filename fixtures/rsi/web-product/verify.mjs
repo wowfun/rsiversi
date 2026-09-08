@@ -159,7 +159,7 @@ try {
       await page.getByRole("button", { name: "Allow once", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       const failedTool = await left.locator(".transcript").innerText();
-      assert.match(failedTool, /bash · failed/);
+      assert.match(failedTool, /bash · command failed/);
       assert.match(failedTool, /"command":.*exit 7/);
       assert.match(failedTool, /fixture stdout/);
       assert.match(failedTool, /fixture stderr/);

@@ -16,6 +16,7 @@ hex.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-application = { path = "../application" }
 rsi-client = { path = "../client" }
+rsi-conversation = { path = "../conversation" }
 rsi-client-composition = { path = "../client-composition" }
 rsi-host = { path = "../../rsi-host/core" }
 rsi-meta = { path = "../../rsi-meta/core" }

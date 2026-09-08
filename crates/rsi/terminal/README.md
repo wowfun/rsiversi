@@ -81,6 +81,9 @@ behavior and presentation bounds. Input against an older rendered frame resolves
 its Session identity and source anchors in the current projection; removed
 sources are inert until redraw. Accepted-message detail uses a bounded JSON
 window with an explicit truncation marker.
+The shared [conversation source contract](../conversation/README.md) owns closed
+Fact fields, raw UTF-8/JSON windows and Tool outcome classification. The TUI adds
+sanitization and display/source mapping while preserving the raw window offsets.
 The producer submits complete cell buffers and their source maps through a
 coalescing channel. Only the output writer computes cell differences against its
 last completely written frame. Interrupted or short writes never advance that

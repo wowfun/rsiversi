@@ -3519,6 +3519,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-conversation"
+version = "0.0.1"
+dependencies = [
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-media-protocol",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rsi-credentials-local"
 version = "0.0.1"
 dependencies = [
@@ -4201,6 +4215,7 @@ dependencies = [
  "rsi-application",
  "rsi-approval-protocol",
  "rsi-client",
+ "rsi-conversation",
  "rsi-host",
  "rsi-media-protocol",
  "rsi-meta",
@@ -4288,6 +4303,7 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-client",
  "rsi-client-composition",
+ "rsi-conversation",
  "rsi-credentials-protocol",
  "rsi-host",
  "rsi-meta",

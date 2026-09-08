@@ -11,6 +11,7 @@ zeroize.workspace = true
 rsi-api-device-api = { path = "../../rsi-api/device-api" }
 rsi-application = { path = "../application" }
 rsi-client = { path = "../client" }
+rsi-conversation = { path = "../conversation" }
 bytes.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-session-protocol = { path = "../session-protocol" }

@@ -1,18 +1,14 @@
 //! Partial historical projection; no model-context replay or retained observation leases.
 use super::super::{ContentDelta, LanguageEvent, SessionFact, SessionFactBody, ToolContent};
 use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
+pub(super) use rsi_conversation::SourceRef as Source;
+use rsi_conversation::{FactField, FieldWindow, ToolOutcome};
 use std::collections::VecDeque;
 
 pub(super) const MAX_BLOCKS: usize = 512;
 pub(super) const MAX_TEXT: usize = 4 * 1024 * 1024;
 pub(super) const MAX_METADATA: usize = 8 * 1024 * 1024;
 pub(super) const WINDOW: usize = 256 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct Source {
-    pub(super) seq: u64,
-    pub(super) field: u16,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Anchor {
@@ -38,51 +34,20 @@ pub(super) struct Piece {
 
 impl Piece {
     fn json(source: Source, value: &impl serde::Serialize, start: usize) -> Self {
-        struct Slice {
-            bytes: Vec<u8>,
-            position: usize,
-            start: usize,
-        }
-        impl std::io::Write for Slice {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                let from = self.start.saturating_sub(self.position).min(bytes.len());
-                let count = (bytes.len() - from).min((WINDOW + 4).saturating_sub(self.bytes.len()));
-                self.bytes.extend_from_slice(&bytes[from..from + count]);
-                self.position += bytes.len();
-                if self.bytes.len() == WINDOW + 4 {
-                    return Err(std::io::Error::other("window complete"));
-                }
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut slice = Slice {
-            bytes: Vec::new(),
-            position: 0,
-            start,
-        };
-        let more = serde_json::to_writer_pretty(&mut slice, value).is_err();
-        let mut skip = 0;
-        while skip < slice.bytes.len() && slice.bytes[skip] & 0xc0 == 0x80 {
-            skip += 1;
-        }
-        let bytes = &slice.bytes[skip..];
-        let text = match std::str::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(problem) => {
-                std::str::from_utf8(&bytes[..problem.valid_up_to()]).expect("valid UTF-8 prefix")
-            }
-        };
-        let mut piece = Self::new(source, text, 0, WINDOW);
-        let raw_start = start.min(slice.position) + skip;
+        Self::from_window(
+            source,
+            &FieldWindow::json(value, start, WINDOW).expect("bounded linked JSON serialization"),
+        )
+    }
+
+    fn from_window(source: Source, window: &FieldWindow) -> Self {
+        let mut piece = Self::new(source, &window.text, 0, WINDOW);
         for run in &mut piece.mapping {
-            run.source += raw_start;
+            run.source += window.start;
         }
-        piece.start = raw_start;
-        piece.truncated_after |= more;
-        piece.omitted |= raw_start > 0 || more;
+        piece.start = window.start;
+        piece.truncated_after |= window.more;
+        piece.omitted |= window.start > 0 || window.more;
         piece
     }
 
@@ -269,46 +234,10 @@ impl Transcript {
     }
 
     pub(super) fn window(fact: &SessionFact, source: Source, start: usize) -> Option<Piece> {
-        if fact.seq() != source.seq {
-            return None;
-        }
-        let text = match fact.body() {
-            SessionFactBody::TurnAccepted { text, .. } if source.field == 0 => text,
-            SessionFactBody::InputMessageEntered { content, .. } => {
-                match content.get(usize::from(source.field))? {
-                    AgentMessageContent::Text { text } => text,
-                    AgentMessageContent::Image { .. } => return None,
-                }
-            }
-            SessionFactBody::ModelEvent {
-                event:
-                    LanguageEvent::ContentDelta {
-                        delta: ContentDelta::Text(text) | ContentDelta::Reasoning(text),
-                        ..
-                    },
-                ..
-            } if source.field == 0 => text,
-            SessionFactBody::ToolIntent { arguments, .. } if source.field == 0 => {
-                return Some(Piece::json(source, arguments, start));
-            }
-            SessionFactBody::ToolResult { result, .. } => {
-                if result.content.is_empty() && source.field == 1 {
-                    return Some(Piece::json(source, &result.value, start));
-                }
-                match result
-                    .content
-                    .get(usize::from(source.field).checked_sub(1)?)?
-                {
-                    ToolContent::Text { text } => text,
-                    ToolContent::Image { .. } => return None,
-                }
-            }
-            SessionFactBody::TurnTerminal { outcome, .. } if source.field == 0 => {
-                return Some(Piece::json(source, outcome, start));
-            }
-            _ => return None,
-        };
-        Some(Piece::new(source, text, start, WINDOW))
+        let window = rsi_conversation::select_field(fact, source)?
+            .window(start, WINDOW)
+            .ok()?;
+        Some(Piece::from_window(source, &window))
     }
 
     #[allow(clippy::too_many_lines)] // One exhaustive projection owns the supported Fact payload fields.
@@ -323,7 +252,7 @@ impl Transcript {
                 format!("input:{turn_id}"),
                 "You".into(),
                 Role::User,
-                0,
+                FactField::TurnInput,
                 text,
             ),
             SessionFactBody::InputMessageEntered {
@@ -345,7 +274,10 @@ impl Transcript {
                             key.clone(),
                             title.into(),
                             role,
-                            u16::try_from(index).unwrap_or(u16::MAX),
+                            FactField::InputText {
+                                index: u16::try_from(index)
+                                    .expect("validated message content index"),
+                            },
                             text,
                         );
                     }
@@ -356,16 +288,23 @@ impl Transcript {
                 event: LanguageEvent::ContentDelta { index, delta },
                 ..
             } => {
-                let (role, title, text) = match delta {
-                    ContentDelta::Text(text) => (Role::Assistant, "Assistant", text),
-                    ContentDelta::Reasoning(text) => (Role::Reasoning, "Reasoning", text),
+                let (role, title, text, field) = match delta {
+                    ContentDelta::Text(text) => {
+                        (Role::Assistant, "Assistant", text, FactField::ModelText)
+                    }
+                    ContentDelta::Reasoning(text) => (
+                        Role::Reasoning,
+                        "Reasoning",
+                        text,
+                        FactField::ModelReasoning,
+                    ),
                     ContentDelta::ToolArguments(_) => return,
                 };
                 add(
                     format!("model:{effect_id}:{index}"),
                     title.into(),
                     role,
-                    0,
+                    field,
                     text,
                 );
             }
@@ -380,7 +319,14 @@ impl Transcript {
                     key.clone(),
                     &format!("{name} · running"),
                     Role::Tool,
-                    Piece::json(Source { seq, field: 0 }, arguments, 0),
+                    Piece::json(
+                        Source {
+                            seq,
+                            field: FactField::ToolArguments,
+                        },
+                        arguments,
+                        0,
+                    ),
                 );
                 if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
                     let status = block
@@ -394,21 +340,10 @@ impl Transcript {
                 effect_id, result, ..
             } => {
                 let key = format!("tool:{effect_id}");
-                let process_failed = result
-                    .value
-                    .get("exit_code")
-                    .and_then(serde_json::Value::as_i64)
-                    .is_some_and(|code| code != 0)
-                    || result
-                        .value
-                        .get("signal")
-                        .is_some_and(|value| !value.is_null());
-                let outcome = if result.is_error {
-                    "tool failed"
-                } else if process_failed {
-                    "command failed"
-                } else {
-                    "completed"
+                let outcome = match ToolOutcome::from_result(result) {
+                    ToolOutcome::Completed => "completed",
+                    ToolOutcome::ToolFailed => "tool failed",
+                    ToolOutcome::ProcessFailed => "command failed",
                 };
                 for (index, content) in result.content.iter().enumerate() {
                     if let ToolContent::Text { text } = content {
@@ -416,7 +351,9 @@ impl Transcript {
                             key.clone(),
                             format!("Tool · {outcome}"),
                             Role::Tool,
-                            u16::try_from(index + 1).unwrap_or(u16::MAX),
+                            FactField::ToolText {
+                                index: u16::try_from(index).expect("validated Tool content index"),
+                            },
                             text,
                         );
                     }
@@ -426,7 +363,14 @@ impl Transcript {
                         key.clone(),
                         &format!("Tool · {outcome}"),
                         Role::Tool,
-                        Piece::json(Source { seq, field: 1 }, &result.value, 0),
+                        Piece::json(
+                            Source {
+                                seq,
+                                field: FactField::ToolValue,
+                            },
+                            &result.value,
+                            0,
+                        ),
                     );
                 }
                 if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
@@ -450,7 +394,14 @@ impl Transcript {
                     format!("outcome:{turn_id}"),
                     "Turn result",
                     Role::Status,
-                    Piece::json(Source { seq, field: 0 }, outcome, 0),
+                    Piece::json(
+                        Source {
+                            seq,
+                            field: FactField::TurnOutcome,
+                        },
+                        outcome,
+                        0,
+                    ),
                 );
             }
             SessionFactBody::ModelEvent {
@@ -461,7 +412,7 @@ impl Transcript {
                     format!("error:{seq}"),
                     "Model error".into(),
                     Role::Status,
-                    0,
+                    FactField::ModelFailure,
                     &error.to_string(),
                 );
             }
@@ -608,24 +559,9 @@ impl Transcript {
 }
 
 pub(super) fn json_window(value: &impl serde::Serialize) -> String {
-    struct Window(Vec<u8>);
-    impl std::io::Write for Window {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let count = bytes.len().min(WINDOW.saturating_sub(self.0.len()));
-            self.0.extend_from_slice(&bytes[..count]);
-            if count != bytes.len() {
-                return Err(std::io::Error::other("display window full"));
-            }
-            Ok(count)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut bytes = Window(Vec::new());
-    let truncated = serde_json::to_writer_pretty(&mut bytes, value).is_err();
-    let mut text = String::from_utf8_lossy(&bytes.0).into_owned();
-    if truncated {
+    let window = FieldWindow::json(value, 0, WINDOW).expect("bounded linked JSON serialization");
+    let mut text = window.text;
+    if window.more {
         text.push_str("\n[JSON display window truncated]");
     }
     text
@@ -635,7 +571,15 @@ pub(super) fn json_window(value: &impl serde::Serialize) -> String {
 mod tests {
     use super::*;
     fn piece(seq: u64, text: &str) -> Piece {
-        Piece::new(Source { seq, field: 0 }, text, 0, WINDOW)
+        Piece::new(
+            Source {
+                seq,
+                field: FactField::ModelText,
+            },
+            text,
+            0,
+            WINDOW,
+        )
     }
 
     #[test]
@@ -749,7 +693,15 @@ mod tests {
     #[test]
     fn source_window_mapping_accounts_for_replaced_controls() {
         let raw = "\x1b中a\u{202e}👩🏽‍💻end";
-        let piece = Piece::new(Source { seq: 7, field: 2 }, raw, 0, WINDOW);
+        let piece = Piece::new(
+            Source {
+                seq: 7,
+                field: FactField::InputText { index: 2 },
+            },
+            raw,
+            0,
+            WINDOW,
+        );
         for (offset, _) in piece.text.char_indices() {
             let anchor = piece.anchor(offset);
             assert!(raw.is_char_boundary(anchor.offset));
@@ -788,20 +740,36 @@ mod tests {
         let mut transcript = Transcript::default();
         transcript.apply(&fact);
         assert!(transcript.budgets().0 <= WINDOW);
-        let source = Source { seq: 7, field: 1 };
+        let source = Source {
+            seq: 7,
+            field: FactField::ToolText { index: 0 },
+        };
         let first = Transcript::window(&fact, source, 0).unwrap();
         let next = first.anchor(first.text.len()).offset;
         let second = Transcript::window(&fact, source, next).unwrap();
         assert_eq!(second.start, next);
         assert_eq!(second.text, text[next..next + second.text.len()]);
-        assert!(Transcript::window(&fact, Source { seq: 8, field: 1 }, 0).is_none());
+        assert!(
+            Transcript::window(
+                &fact,
+                Source {
+                    seq: 8,
+                    field: FactField::ToolText { index: 0 }
+                },
+                0
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn json_source_windows_advance_beyond_the_initial_prefix_without_full_serialization() {
         let value = serde_json::json!({"body":"中a".repeat(WINDOW)});
         let complete = serde_json::to_string_pretty(&value).unwrap();
-        let source = Source { seq: 1, field: 0 };
+        let source = Source {
+            seq: 1,
+            field: FactField::ToolArguments,
+        };
         let mut offset = 0;
         let mut recovered = String::new();
         loop {
