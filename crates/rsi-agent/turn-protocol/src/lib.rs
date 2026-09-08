@@ -21,6 +21,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 mod command;
+mod projection;
+pub use projection::{SessionProjectionChanges, SessionProjections, SessionProjectionsContract};
 mod domain;
 pub use command::{SessionCommands, SessionCommandsContract};
 mod observation;

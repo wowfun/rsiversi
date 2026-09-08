@@ -80,6 +80,7 @@ enum WaitResumeFault {
 #[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
+    stale_domain_read: AtomicBool,
     preparation_gate: Mutex<Option<Arc<mutations::GatedPreparation>>>,
     block_header_reads: AtomicBool,
     blocked_header_session: Mutex<Option<SessionId>>,
@@ -145,6 +146,7 @@ impl FactReadRaceStore {
     fn new(inner: Arc<MemoryStore>) -> Self {
         Self {
             inner,
+            stale_domain_read: AtomicBool::new(false),
             preparation_gate: Mutex::new(None),
             block_header_reads: AtomicBool::new(false),
             blocked_header_session: Mutex::new(None),
@@ -403,6 +405,9 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         horizon: Option<u64>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        if self.stale_domain_read.load(Ordering::Acquire) {
+            return self.inner.read_domain_states(session_id, Some(1)).await;
+        }
         self.inner.read_domain_states(session_id, horizon).await
     }
 

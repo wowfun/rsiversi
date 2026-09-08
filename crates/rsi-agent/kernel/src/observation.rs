@@ -44,6 +44,11 @@ pub(super) async fn read_domain_states_bounded(
     drop(permit);
     let page = result?;
     page.validate()?;
+    if page.selected_control_seq != at_control_seq.unwrap_or(page.durable_control_seq) {
+        return Err(StoreError::Corrupt(
+            "domain read changed its requested control horizon".into(),
+        ));
+    }
     Ok(page)
 }
 

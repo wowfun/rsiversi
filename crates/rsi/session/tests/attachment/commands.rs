@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "commands/preset.rs"]
 mod preset;
+#[path = "commands/projections.rs"]
+mod projections;
 use rsi_agent_composition_protocol::{
     ContributionCatalog, ContributionKind, ContributionRegistration, ContributionResult,
     DomainCatalog, DomainDefinition, DomainHandle, SessionCommand, SessionCommandContext,
@@ -19,6 +21,27 @@ struct Toggle {
     calls: AtomicUsize,
     entered: Semaphore,
     release: Semaphore,
+    view_gate: std::sync::Mutex<Option<Arc<projections::Gate>>>,
+}
+
+#[async_trait]
+impl rsi_agent_composition_protocol::SessionProjection for Toggle {
+    async fn project(
+        &self,
+        context: &rsi_agent_composition_protocol::SessionProjectionContext,
+        token: CancellationToken,
+    ) -> ContributionResult<rsi_agent_session_protocol::ProjectionValue> {
+        let gate = self.view_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.tokens.lock().unwrap().push(token);
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
+        let value = self.handle.decode(&context.domains()[0].snapshot).unwrap();
+        rsi_agent_session_protocol::ProjectionValue::new(value.into()).map_err(|error| {
+            rsi_agent_composition_protocol::ContributionError::Invalid(error.to_string())
+        })
+    }
 }
 
 #[async_trait]
@@ -113,20 +136,31 @@ impl Fixture {
             calls: AtomicUsize::new(0),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
+            view_gate: std::sync::Mutex::new(None),
         });
         let id = ContributionId::new("fixture.toggle").unwrap();
-        let contributions = ContributionCatalog::freeze(vec![(
-            ContributionRegistration::new(
-                id.clone(),
-                0,
-                ContributionKind::Command(SessionCommandRegistration::new(
-                    SessionCommandDescriptor::new(id, "toggle", "Toggle draft state", true)
-                        .unwrap(),
-                    callback.clone(),
-                )),
+        let contributions = ContributionCatalog::freeze(vec![
+            (
+                ContributionRegistration::new(
+                    id.clone(),
+                    0,
+                    ContributionKind::Command(SessionCommandRegistration::new(
+                        SessionCommandDescriptor::new(id, "toggle", "Toggle draft state", true)
+                            .unwrap(),
+                        callback.clone(),
+                    )),
+                ),
+                position.clone(),
             ),
-            position,
-        )])
+            (
+                ContributionRegistration::new(
+                    ContributionId::new("fixture.view").unwrap(),
+                    0,
+                    ContributionKind::Projection(callback.clone()),
+                ),
+                position,
+            ),
+        ])
         .unwrap();
         let composition = Arc::new(Composition {
             pin: AgentCompositionPin::new(
@@ -149,6 +183,7 @@ impl Fixture {
         let workers = kernel.start_workers();
         let service = Arc::new(LocalSessionService::new(
             rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+            Arc::new(kernel.clone()),
             Arc::new(kernel.clone()),
             Arc::new(kernel.clone()),
             store.clone(),

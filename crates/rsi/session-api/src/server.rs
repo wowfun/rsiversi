@@ -130,9 +130,13 @@ impl SessionApi {
         for (operation, handler) in handle_operations(&service, &scratch) {
             registrations.push(registrar.register(operation.spec(), handler)?);
         }
-        for (operation, service) in [Operation::Observe, Operation::Interactions]
-            .into_iter()
-            .zip([service.clone(), service])
+        for (operation, service) in [
+            Operation::Observe,
+            Operation::Interactions,
+            Operation::Projections,
+        ]
+        .into_iter()
+        .zip([service.clone(), service.clone(), service])
         {
             registrations.push(registrar.register(
                 operation.spec(),

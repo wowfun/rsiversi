@@ -28,6 +28,25 @@ Publication and expiry reject late selection results. A transport failure leaves
 the caller to reattach and inspect the current draft; selection is not replayed
 automatically. Creation input remains the original lease identity after a switch.
 
+`observe_projections` returns a complete initial extension snapshot, then
+coalesced replacements derived at one draft revision or durable Fact/control
+cut. Each snapshot binds its Session, Header fingerprint and captured generation.
+The subscription retains that Header binding: a preset change ends it, requiring
+reattach and a new subscription. Same-preset draft revisions and publication may
+continue; neither durable watermark may regress. Individual producer failures
+remain entries and do not affect core history.
+
+Projection snapshots use a separate 64 MiB canonical-byte retention pool per
+Session service or client decoder. Native capture reserves 7 MiB before copying
+the bounded Header/domain inputs and computing at most 5 MiB of output; completed
+snapshots retain only their exact encoded charge until their last clone drops.
+This bounds canonical payload ownership, not allocator RSS or arbitrary native
+plugin allocation. Decoders reserve before decoding and transfer that lease
+before releasing transport bytes. Capture is cancelled on drop or service
+retirement and bounded by 30 seconds. Idle subscriptions hold no draft activity
+lease or composition pin, so observing cannot prevent expiry. Changes subscribe
+before capture; no periodic polling or Fact replay is needed.
+
 Creation, input, receipt and page values have closed Serde representations.
 They describe domain API values, not a new durable Session or Store format.
 

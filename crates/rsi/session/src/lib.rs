@@ -31,6 +31,7 @@ mod commands;
 mod drafts;
 mod interactions;
 mod plugin;
+mod projections;
 pub use plugin::SessionFactory;
 
 use rsi_session_protocol::{
@@ -43,6 +44,10 @@ use rsi_session_protocol::{
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
+    projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
+    projection_retention: rsi_session_protocol::ProjectionRetention,
+    projection_stopped: tokio_util::sync::CancellationToken,
+    execution: rsi_meta::Execution,
     turns: Arc<dyn TurnService>,
     commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
     draft_commands: Arc<commands::DraftCommands>,
@@ -73,6 +78,7 @@ impl LocalSessionService {
     pub fn new(
         execution: rsi_meta::Execution,
         commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
+        projections: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
         turns: Arc<dyn TurnService>,
         store: Arc<dyn SessionStore>,
         composition: Arc<dyn AgentComposition>,
@@ -84,6 +90,10 @@ impl LocalSessionService {
         approvals: Arc<dyn SessionApprovalControl>,
     ) -> Self {
         Self {
+            projection_service: projections,
+            projection_retention: rsi_session_protocol::ProjectionRetention::default(),
+            projection_stopped: tokio_util::sync::CancellationToken::new(),
+            execution: execution.clone(),
             turns,
             commands,
             draft_commands: commands::DraftCommands::new(),
@@ -117,6 +127,11 @@ impl LocalSessionService {
         lease: Option<drafts::DraftLease>,
     ) -> Arc<LocalSessionHandle> {
         Arc::new(LocalSessionHandle {
+            projection_service: self.projection_service.clone(),
+            projection_retention: self.projection_retention.clone(),
+            projection_stopped: self.projection_stopped.clone(),
+            execution: self.execution.clone(),
+            projection_changes: Arc::new(tokio::sync::watch::channel(()).0),
             session_id: state
                 .header()
                 .expect("new handle has a Header")
@@ -146,6 +161,7 @@ impl LocalSessionService {
 impl LocalSessionService {
     /// Stops draft admission and waits for service-owned preparation and sweeping.
     pub async fn stop(&self) {
+        self.projection_stopped.cancel();
         tokio::join!(self.draft_commands.stop(), self.drafts.stop());
     }
 
@@ -294,6 +310,11 @@ impl HandleState {
 
 #[derive(Clone)]
 struct LocalSessionHandle {
+    projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
+    projection_retention: rsi_session_protocol::ProjectionRetention,
+    projection_stopped: tokio_util::sync::CancellationToken,
+    execution: rsi_meta::Execution,
+    projection_changes: Arc<tokio::sync::watch::Sender<()>>,
     session_id: SessionId,
     state: Arc<Mutex<HandleState>>,
     lease: Option<drafts::DraftLease>,
@@ -350,6 +371,7 @@ impl LocalSessionHandle {
             .expect("only an inactive final draft lease expires");
         if matches!(*state, HandleState::Fresh(_)) {
             let old = std::mem::replace(&mut *state, HandleState::Expired);
+            self.projection_changed();
             drop(state);
             drop(old);
         }
@@ -382,6 +404,7 @@ impl LocalSessionHandle {
         if let Some(lease) = &self.lease {
             lease.published();
         }
+        self.projection_changed();
     }
 
     /// Serializes a fresh read with publication and returns whether Store history exists.
@@ -459,6 +482,9 @@ impl LocalSessionHandle {
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn observe_projections(&self) -> Result<rsi_session_protocol::ProjectionStream> {
+        self.projection_stream().await
+    }
     async fn draft_snapshot(&self) -> Result<rsi_session_protocol::SessionDraftView> {
         self.read_draft_snapshot().await
     }

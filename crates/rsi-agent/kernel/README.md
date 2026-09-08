@@ -20,6 +20,14 @@ use the current healthy source generation. The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
+The independent Session projection read service retains an existing resident pin
+without acquiring a claim. A cold view may resolve the current generation without
+hydrating the Session or validating unrelated codecs; each projection unit owns
+its semantic decode. Capture uses the Store's simultaneous durable Fact/control
+watermarks and verifies the requested selected horizon before presenting state.
+Bounded capture admission and cancellation are independent of mutation admission;
+projection callbacks never run under the Kernel state or Session mutation lock.
+
 Turn domain mutations accept exact-generation validated proposals and optional
 Facts as one request. Kernel assigns the claimed Turn as their source, flushes
 the preceding speculative suffix, validates the entire candidate state and

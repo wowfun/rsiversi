@@ -98,7 +98,9 @@ impl Driver {
                                 .contribute(&run.context, settled, run.token.clone())
                                 .await
                         }
-                        ContributionKind::ToolPolicy(_) | ContributionKind::Command(_) => {
+                        ContributionKind::ToolPolicy(_)
+                        | ContributionKind::Command(_)
+                        | ContributionKind::Projection(_) => {
                             unreachable!("non-execution callbacks use their own dispatch")
                         }
                     }

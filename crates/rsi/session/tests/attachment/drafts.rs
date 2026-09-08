@@ -133,6 +133,7 @@ fn service(path: &Path, preparation: Arc<dyn AgentComposition>) -> Arc<LocalSess
     Arc::new(LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
         preparation,
@@ -268,6 +269,7 @@ async fn an_active_operation_owns_its_pin_until_completion_then_gets_a_fresh_idl
     let service = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
         preparation.clone(),
@@ -384,6 +386,7 @@ async fn fresh_reads_reconcile_competing_publications_without_submitting() {
             let service = LocalSessionService::new(
                 rsi_meta::Execution::native(tokio::runtime::Handle::current()),
                 Arc::new(UnavailableCommands),
+                Arc::new(UnavailableProjections),
                 Arc::new(UnavailableTurns::default()),
                 store.clone(),
                 preparation.clone(),
@@ -478,6 +481,7 @@ async fn stop_during_fresh_publication_keeps_the_active_lease_until_io_finishes(
     let service = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
         preparation.clone(),

@@ -5,6 +5,13 @@ Store, Agent composition, Workspace and Media. Its transport-independent
 [contract](../session-protocol/README.md) owns requests, handles, receipts,
 observation retention and errors. Application roots consume Session services.
 
+Extension capture uses the Agent's independent `SessionProjections` service for
+durable state and the actual retained draft for unpublished state. Draft mutation,
+publication and expiry publish coalesced notifications under their state admission;
+callbacks run after releasing it. A live stream subscribes to both draft changes
+and Kernel commit hints before its first capture and retains only the immutable
+Header fingerprint while waiting. Service retirement cancels all live streams.
+
 `SessionFactory` publishes `SessionContract` and trusted `SessionIngressContract`
 from one service generation, injecting its exact
 Kernel, Store, composition, Workspace, Settings and live capabilities through

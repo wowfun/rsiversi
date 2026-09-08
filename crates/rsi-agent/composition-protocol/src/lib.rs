@@ -20,6 +20,7 @@ pub use command::{
     SessionCommandRegistration,
 };
 mod domain;
+mod projection;
 pub use contribution::{
     ContextContributor, ContributionBatch, ContributionCatalog, ContributionContext,
     ContributionError, ContributionFactPage, ContributionFactReader, ContributionHorizon,
@@ -33,6 +34,7 @@ pub use domain::{
     DomainError, DomainHandle, DomainRegistrar, DomainRegistrarContract, DomainRegistration,
     ValidatedDomainProposal,
 };
+pub use projection::{SessionProjection, SessionProjectionAdapter, SessionProjectionContext};
 
 /// Opaque lifetime owner retained by one composition pin.
 pub trait AgentGenerationOwner: fmt::Debug + Send + Sync + 'static {}

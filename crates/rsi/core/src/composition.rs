@@ -1401,6 +1401,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<SessionStoreContract>()?;
     builder.register_local_contract::<TurnServiceContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionCommandsContract>()?;
+    builder.register_local_contract::<rsi_agent_turn_protocol::SessionProjectionsContract>()?;
     builder.register_local_contract::<TurnExecutionContract>()?;
     builder.register_local_contract::<TurnFinalizationContract>()?;
     Ok(())

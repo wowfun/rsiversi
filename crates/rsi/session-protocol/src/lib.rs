@@ -22,8 +22,12 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod interactions;
+mod projections;
 pub use interactions::{
     InteractionCollection, InteractionRetention, InteractionSnapshot, InteractionStream,
+};
+pub use projections::{
+    ProjectionCollection, ProjectionRetention, ProjectionSnapshot, ProjectionStream,
 };
 
 /// Maximum aggregate canonical media bytes referenced by one Session message.
@@ -352,6 +356,8 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream>;
     /// Observes a complete initial live interaction snapshot and coalesced changes.
     async fn observe_interactions(&self) -> Result<InteractionStream>;
+    /// Observes complete extension views at one draft revision or durable dual cursor.
+    async fn observe_projections(&self) -> Result<ProjectionStream>;
     /// Captures one atomic durable inspection of this Session and subtree.
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection>;
     /// Lists this root Session's live pending human questions.

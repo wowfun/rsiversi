@@ -25,6 +25,10 @@ matching codec and exact predecessor revision. Same request identity with
 different content conflicts. Querying a committed request recovers the exact
 receipt after an unknown result. Selecting a historical state uses the paired
 terminal control horizon, so later idle mutations cannot enter that fork.
+Domain read consumers bind the returned selected horizon to their request:
+an explicit cursor must match exactly, and a current-state read must select the
+reported durable control tail. Structural page validation alone cannot distinguish
+a valid historical page returned in place of current state.
 
 ## Correlated terminal commits
 

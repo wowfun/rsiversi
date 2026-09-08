@@ -13,6 +13,16 @@ After validation, the Kernel owns the state-only commit through reconciliation
 even if the caller disconnects. Commands do not create Turns, execution Facts,
 Workspace registrations or external effects.
 
+`SessionProjections` independently captures disposable extension views. It selects
+the resident composition pin or a current cold read generation, waits for an
+already admitted resident load, and rechecks concurrent publication. It never
+hydrates a Session or issues execution authority. Cold projection does not require
+unrelated domain codecs; a unit's semantic decode failure affects that unit only.
+The Store supplies a simultaneous Fact/control cut and complete current domain
+states. At most 16 captures run per Kernel, with a 30-second deadline covering
+admission, generation selection, Store capture and projection. Shutdown cancels
+captures; dropping a read drops its callback and resource leases.
+
 `SubmitMessage.delivery` is immutable ingress intent: fixed next Turn, fixed
 next Step, or Human steering. The Kernel resolves steering atomically while
 holding Session submission admission. A receipt means durable acceptance; it
@@ -191,3 +201,10 @@ final flush. A terminal Turn cannot start a human wait.
 `ready_health` reports cumulative ready-scheduler failures and the latest bounded
 diagnostic without Store I/O. The diagnostic remains available after recovery;
 transient enumeration and per-root failures retry without withdrawing executors.
+
+`SessionProjections::watch_projection_changes` subscribes to coalesced Session
+commit hints before capture, including an unpublished identity. Hints contain no
+Facts, domain values or execution authority. They share the Kernel observer
+count bound, terminate on shutdown, and release their registry entry on final
+drop. Consumers requery a complete snapshot and compare both durable cursors;
+duplicate hints never establish progress by themselves.

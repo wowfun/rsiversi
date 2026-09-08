@@ -234,6 +234,7 @@ struct KernelInner {
     state: Mutex<KernelState>,
     submission_admission: SubmissionAdmission,
     commands: commands::CommandRequests,
+    projection_admission: Arc<Semaphore>,
     ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
     session_changes: SessionWatchHub,
@@ -793,6 +794,7 @@ mod finalization;
 mod human_wait;
 mod lifecycle;
 mod notifications;
+mod projection;
 use notifications::{SessionWatch, SessionWatchHub};
 mod observation;
 mod recovery;
@@ -1008,10 +1010,26 @@ impl PluginFactory for KernelFactory {
                 return Err(error);
             }
         };
+        let projections_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionProjectionsContract>(
+            Arc::new(kernel.clone()),
+        ) {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(commands_supply);
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
         plan.defer(
             "shutdown Agent Kernel",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(projections_supply);
                     drop(commands_supply);
                     drop(finalization_supply);
                     drop(execution_supply);

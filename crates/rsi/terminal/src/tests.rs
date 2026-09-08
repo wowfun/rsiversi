@@ -145,6 +145,11 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         Err(SessionError::NotFound("fixture message body".into()))
     }
 
+    async fn observe_projections(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
+        panic!("unexpected projection observation")
+    }
     async fn observe_interactions(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::InteractionStream> {

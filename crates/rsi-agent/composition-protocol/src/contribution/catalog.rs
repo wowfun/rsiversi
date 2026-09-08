@@ -20,6 +20,8 @@ pub enum ContributionStage {
     ToolPolicy,
     /// Explicit Session command dispatch, outside the execution loop.
     Command,
+    /// Disposable extension view over a captured Session state.
+    Projection,
 }
 
 /// One narrow callback registered in an Agent-only composition.
@@ -33,6 +35,8 @@ pub enum ContributionKind {
     ToolPolicy(Arc<dyn ToolPolicy>),
     /// Effect-free Session command with bounded discovery metadata.
     Command(crate::SessionCommandRegistration),
+    /// Read-only complete Session view, isolated from other projection failures.
+    Projection(Arc<dyn crate::SessionProjection>),
 }
 
 /// Stable identity, explicit priority and one callback.
@@ -67,6 +71,7 @@ impl ContributionRegistration {
             ContributionKind::PostTool(_) => ContributionStage::AfterTools,
             ContributionKind::ToolPolicy(_) => ContributionStage::ToolPolicy,
             ContributionKind::Command(_) => ContributionStage::Command,
+            ContributionKind::Projection(_) => ContributionStage::Projection,
         }
     }
 }

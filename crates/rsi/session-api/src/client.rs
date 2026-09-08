@@ -31,6 +31,7 @@ pub(super) struct State {
     pub api: Arc<dyn ApiClient>,
     pub observations: ObservationRetention,
     pub interactions: InteractionRetention,
+    pub projections: rsi_session_protocol::ProjectionRetention,
 }
 /// Shared Session application proxy over one negotiated API generation.
 #[derive(Clone, Debug)]
@@ -51,6 +52,7 @@ impl SessionClient {
                 api,
                 observations: ObservationRetention::default(),
                 interactions: InteractionRetention::default(),
+                projections: rsi_session_protocol::ProjectionRetention::default(),
             }),
         })
     }
@@ -305,6 +307,11 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn observe_projections(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
+        crate::client_stream::projections(self).await
+    }
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {

@@ -2,7 +2,9 @@ use crate::LocalSessionService;
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::AgentCompositionContract;
 use rsi_agent_store_protocol::SessionStoreContract;
-use rsi_agent_turn_protocol::{SessionCommandsContract, TurnServiceContract};
+use rsi_agent_turn_protocol::{
+    SessionCommandsContract, SessionProjectionsContract, TurnServiceContract,
+};
 use rsi_ai_protocol::{ImageCallContract, LanguageCallContract};
 use rsi_media_protocol::MediaContract;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -28,6 +30,7 @@ impl PluginFactory for SessionFactory {
         Ok(PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<TurnServiceContract>()
             .requiring_local::<SessionCommandsContract>()
+            .requiring_local::<SessionProjectionsContract>()
             .requiring_local::<SessionStoreContract>()
             .requiring_local::<AgentCompositionContract>()
             .requiring_local::<WorkspaceRegistryContract>()
@@ -43,6 +46,7 @@ impl PluginFactory for SessionFactory {
         let service = LocalSessionService::new(
             plan.context().runtime().execution().clone(),
             plan.local::<SessionCommandsContract>()?,
+            plan.local::<SessionProjectionsContract>()?,
             plan.local::<TurnServiceContract>()?,
             plan.local::<SessionStoreContract>()?,
             plan.local::<AgentCompositionContract>()?,

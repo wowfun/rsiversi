@@ -74,6 +74,17 @@ pub async fn assert_session_contract(
     let draft = handle.draft_snapshot().await.unwrap();
     assert_eq!(draft.header, header);
     assert_eq!(draft.revision, 0);
+    let mut projections = handle.observe_projections().await.unwrap();
+    let initial_projection = projections.next().await.unwrap().unwrap();
+    assert_eq!(initial_projection.snapshot().session_id(), &session_id);
+    assert_eq!(
+        initial_projection.snapshot().header_sha256(),
+        header.fingerprint().unwrap()
+    );
+    assert_eq!(
+        initial_projection.snapshot().cursor(),
+        rsi_agent_session_protocol::ProjectionCursor::Draft { revision: 0 }
+    );
     assert_eq!(
         handle.commands().await.unwrap().revision(),
         rsi_agent_session_protocol::CommandRevision::Draft { revision: 0 }
@@ -96,6 +107,17 @@ pub async fn assert_session_contract(
         .unwrap();
     assert_eq!(selected.header, header);
     assert_eq!(selected.revision, 1);
+    let reset_projection = execution
+        .deadline_after(std::time::Duration::from_secs(10))
+        .timeout(projections.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reset_projection.snapshot().cursor(),
+        rsi_agent_session_protocol::ProjectionCursor::Draft { revision: 1 }
+    );
     assert_eq!(
         application
             .create(create.clone())
@@ -130,6 +152,17 @@ pub async fn assert_session_contract(
         sandbox: None,
     };
     let first = handle.submit(submission.clone()).await.unwrap();
+    let durable_projection = execution
+        .deadline_after(std::time::Duration::from_secs(10))
+        .timeout(projections.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(durable_projection.snapshot().cursor(), rsi_agent_session_protocol::ProjectionCursor::Durable { fact_seq, control_seq } if fact_seq >= first.observed_fact_seq && control_seq >= first.accepted_control_seq)
+    );
+    drop(projections);
     let message = handle
         .read_message(&message_id, first.accepted_control_seq)
         .await

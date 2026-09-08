@@ -133,6 +133,7 @@ impl AgentKernel {
                 }),
                 submission_admission: SubmissionAdmission::new(),
                 commands: commands::CommandRequests::default(),
+                projection_admission: Arc::new(Semaphore::new(projection::MAXIMUM_CAPTURES)),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
                 session_changes: SessionWatchHub::default(),

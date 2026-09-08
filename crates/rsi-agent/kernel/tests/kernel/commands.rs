@@ -10,6 +10,41 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_turn_protocol::SessionCommands;
 
+#[tokio::test]
+async fn current_domain_reads_reject_a_structurally_valid_historical_page() {
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let fixture = Fixture::start(store.clone(), false).await;
+    let historical = store
+        .inner
+        .read_domain_states(&fixture.session_id, Some(1))
+        .await
+        .unwrap();
+    historical.validate().unwrap();
+    assert!(historical.durable_control_seq > historical.selected_control_seq);
+    let prepared = fixture
+        .kernel
+        .prepare_resume(&fixture.session_id)
+        .await
+        .unwrap();
+    store.stale_domain_read.store(true, Ordering::Release);
+    assert!(fixture.kernel.list(prepared).await.is_err());
+    store.stale_domain_read.store(false, Ordering::Release);
+    assert!(
+        fixture
+            .kernel
+            .list(
+                fixture
+                    .kernel
+                    .prepare_resume(&fixture.session_id)
+                    .await
+                    .unwrap()
+            )
+            .await
+            .is_ok()
+    );
+    fixture.stop().await;
+}
+
 #[derive(Debug)]
 struct Toggle {
     handle: DomainHandle<bool>,
@@ -42,17 +77,40 @@ impl SessionCommand for Toggle {
 }
 
 #[derive(Debug)]
-struct CommandComposition(AgentCompositionPin);
+struct CommandComposition {
+    pin: std::sync::RwLock<AgentCompositionPin>,
+    calls: AtomicUsize,
+    reject: AtomicBool,
+    gate: std::sync::Mutex<Option<Arc<projection::PinGate>>>,
+}
 #[async_trait]
 impl AgentComposition for CommandComposition {
     async fn default_preset_id(&self) -> rsi_agent_composition_protocol::Result<AgentPresetId> {
-        Ok(self.0.preset_id().clone())
+        Ok(self.pin.read().unwrap().preset_id().clone())
     }
     async fn pin(
         &self,
         _: &AgentPresetId,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
-        Ok(self.0.clone())
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+            return Err(
+                rsi_agent_composition_protocol::AgentCompositionError::InvalidInput(
+                    "injected cold failure".into(),
+                ),
+            );
+        }
+        if self.reject.load(Ordering::SeqCst) {
+            return Err(
+                rsi_agent_composition_protocol::AgentCompositionError::InvalidInput(
+                    "injected unavailable generation".into(),
+                ),
+            );
+        }
+        Ok(self.pin.read().unwrap().clone())
     }
 }
 
@@ -61,6 +119,7 @@ struct Fixture {
     kernel: AgentKernel,
     workers: rsi_agent_kernel::KernelWorkers,
     callback: Arc<Toggle>,
+    projection: Arc<projection::ToggleView>,
     session_id: SessionId,
     store: Arc<dyn SessionStore>,
     composition: Arc<CommandComposition>,
@@ -96,17 +155,30 @@ impl Fixture {
         let descriptor =
             SessionCommandDescriptor::new(id.clone(), "toggle", "Toggle the fixture state", true)
                 .unwrap();
-        let commands = ContributionCatalog::freeze(vec![(
-            ContributionRegistration::new(
-                id,
-                0,
-                ContributionKind::Command(SessionCommandRegistration::new(
-                    descriptor,
-                    callback.clone(),
-                )),
+        let projection = Arc::new(projection::ToggleView::new(
+            domains.bind(&definition).unwrap(),
+        ));
+        let commands = ContributionCatalog::freeze(vec![
+            (
+                ContributionRegistration::new(
+                    id,
+                    0,
+                    ContributionKind::Command(SessionCommandRegistration::new(
+                        descriptor,
+                        callback.clone(),
+                    )),
+                ),
+                position.clone(),
             ),
-            position,
-        )])
+            (
+                ContributionRegistration::new(
+                    ContributionId::new("fixture.projection").unwrap(),
+                    0,
+                    ContributionKind::Projection(projection.clone()),
+                ),
+                position,
+            ),
+        ])
         .unwrap();
         let pin = AgentCompositionPin::new(
             AgentPresetId::new("test-agent").unwrap(),
@@ -118,7 +190,12 @@ impl Fixture {
             Arc::new(()),
         )
         .unwrap();
-        let composition = Arc::new(CommandComposition(pin.clone()));
+        let composition = Arc::new(CommandComposition {
+            pin: std::sync::RwLock::new(pin.clone()),
+            calls: AtomicUsize::new(0),
+            reject: AtomicBool::new(false),
+            gate: std::sync::Mutex::new(None),
+        });
         let kernel = AgentKernel::recover(store.clone(), composition.clone())
             .await
             .unwrap();
@@ -135,23 +212,13 @@ impl Fixture {
             })
             .await
             .unwrap();
-        // Complete the original Turn so subsequent commands are genuinely idle controls.
-        let executor = kernel.register("fixture".into()).unwrap();
-        let claim = kernel
-            .claim("fixture", CancellationToken::new())
-            .await
-            .unwrap()
-            .unwrap();
-        kernel
-            .finish_turn(&claim, &TurnOutcome::Completed)
-            .await
-            .unwrap();
-        drop(executor);
+        finish_initial_turn(&kernel).await;
         Self {
             runtime,
             kernel,
             workers,
             callback,
+            projection,
             session_id,
             store,
             composition,
@@ -177,6 +244,24 @@ impl Fixture {
         assert!(self.runtime.shutdown().await.is_clean());
     }
 }
+
+async fn finish_initial_turn(kernel: &AgentKernel) {
+    // Complete the original Turn so subsequent commands are genuinely idle controls.
+    let executor = kernel.register("fixture".into()).unwrap();
+    let claim = kernel
+        .claim("fixture", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(executor);
+}
+
+#[path = "commands/projection.rs"]
+mod projection;
 
 #[tokio::test]
 async fn commands_commit_idle_state_once_and_query_after_cold_recovery_without_callbacks() {

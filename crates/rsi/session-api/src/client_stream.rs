@@ -71,6 +71,31 @@ fn turn_error(error: &SessionError) -> TurnError {
         _ => TurnError::Invariant("invalid or failed remote Session observation".into()),
     }
 }
+
+pub(super) async fn projections(
+    handle: &Handle,
+) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
+    let handle = handle.frozen();
+    let operation = Operation::Projections;
+    let mut source = open(&handle, operation, ()).await?;
+    Ok(Box::pin(async_stream::try_stream! {
+        let mut cursor = None;
+        while let Some(message) = source.next().await {
+            let message = message.map_err(|error| stream_error(operation, error))?;
+            let reservation = handle.state.projections.reserve_decode()?;
+            let snapshot: rsi_agent_session_protocol::SessionProjectionSnapshot = decode(&handle, operation, &message)?;
+            if snapshot.session_id() != &handle.target().session_id
+                || snapshot.header_sha256() != handle.target().header_key
+                || cursor.is_some_and(|previous| !snapshot.cursor().can_follow(previous)) {
+                Err(client::malformed(operation))?;
+            }
+            cursor = Some(snapshot.cursor());
+            let retained = reservation.retain(snapshot)?;
+            drop(message);
+            yield retained;
+        }
+    }))
+}
 pub(super) async fn observe(
     handle: &Handle,
     cursor: ObservationCursor,

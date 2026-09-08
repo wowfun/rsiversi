@@ -118,3 +118,21 @@ Preset preparation also returns an owned future and a move-only staged result,
 so plugin generation construction runs outside the Session mutation lock. Final
 selection checks the same draft identity and predecessor before replacing the
 Header, pin and defaults together.
+
+## Extension projections
+
+Projection callbacks enter the same registrar and immutable generation as other
+Agent contributions. A framework adapter supplies the exact Header, a draft
+revision or simultaneous durable Fact/control horizon, and the complete bounded
+domain set at that cut. Callbacks derive a whole JSON view from those captured
+values; they receive no mutation or external-effect capability and do not own
+subscriptions. Core conversation history remains independently readable.
+
+The adapter attributes each value to its registered producer and validates it
+before publishing a complete snapshot. Failure, panic or oversized output from
+one callback becomes only that producer's bounded failure entry. Cooperative
+callbacks have a one-second individual deadline within a 30-second whole-capture
+deadline; cancellation drops unfinished callbacks. As with other linked Rust
+callbacks, a blocking poll cannot be preempted. All callbacks run outside
+registration, Session mutation and lifecycle locks. Projection values are
+derived and never written back as domain state or used as mutation authority.

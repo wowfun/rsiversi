@@ -25,10 +25,15 @@ pub use command::{
     SessionCommandReceipt, SessionCommandsView,
 };
 mod domain;
+mod projection;
 pub use domain::{
     DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
     DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue, DomainStateView,
     MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_DOMAIN_STATE_BYTES, MAXIMUM_SESSION_DOMAINS,
+};
+pub use projection::{
+    MAXIMUM_PROJECTION_VALUE_BYTES, MAXIMUM_SESSION_PROJECTION_BYTES, MAXIMUM_SESSION_PROJECTIONS,
+    ProjectionCursor, ProjectionEntry, ProjectionValue, SessionProjectionSnapshot,
 };
 
 /// Exact durable format accepted by this pre-release implementation.

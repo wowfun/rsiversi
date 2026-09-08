@@ -884,6 +884,7 @@ async fn new_drafts_read_current_defaults_while_existing_headers_remain_frozen()
     let service = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
         Arc::new(AvailableComposition),
@@ -934,6 +935,7 @@ async fn repeated_create_shares_one_live_draft_and_conflicts_on_changed_input() 
     let service = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
         Arc::new(AvailableComposition),
@@ -1166,6 +1168,7 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         turns.clone(),
         store,
         Arc::new(AvailableComposition),
@@ -1265,6 +1268,7 @@ async fn assert_competing_image_publication(concurrent: bool) {
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         turns.clone(),
         store,
         Arc::new(AvailableComposition),
@@ -1377,6 +1381,7 @@ async fn attached_handle_does_not_serialize_independent_resume_preparation() {
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         turns.clone(),
         store,
         Arc::new(UnavailableComposition),
@@ -1424,6 +1429,7 @@ async fn fresh_preset_failure_precedes_workspace_registration() {
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         store,
         Arc::new(FailingComposition),
@@ -1503,6 +1509,7 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(RejectingResumeTurns),
         store,
         Arc::new(UnavailableComposition),
@@ -1580,6 +1587,7 @@ async fn attach_and_history_need_only_the_durable_store() {
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         store_service,
         Arc::new(UnavailableComposition),
@@ -1662,6 +1670,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns {
             tree: Some(vec![root.clone(), child.clone()]),
             ..Default::default()
@@ -1731,6 +1740,7 @@ async fn image_only_draft_defers_language_and_workspace_until_the_selected_opera
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(ImageTurns),
         store,
         Arc::new(AvailableComposition),
@@ -1817,6 +1827,7 @@ async fn question_operations_preserve_shutdown_and_capacity_errors() {
         let application = LocalSessionService::new(
             rsi_meta::Execution::native(tokio::runtime::Handle::current()),
             Arc::new(UnavailableCommands),
+            Arc::new(UnavailableProjections),
             Arc::new(ImageTurns),
             Arc::new(MemoryStore::new()),
             Arc::new(AvailableComposition),
@@ -1914,6 +1925,7 @@ async fn fresh_interactions_release_composition_pin_and_follow_tree_publication_
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns {
             live_tree: Some(tree.clone()),
             ..Default::default()
@@ -2006,6 +2018,7 @@ async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_rem
     let service = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
+        Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
         Arc::new(MemoryStore::new()),
         Arc::new(AvailableComposition),
@@ -2050,6 +2063,24 @@ async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_rem
 
 #[derive(Debug)]
 struct UnavailableCommands;
+#[derive(Debug)]
+struct UnavailableProjections;
+#[async_trait]
+impl rsi_agent_turn_protocol::SessionProjections for UnavailableProjections {
+    fn watch_projection_changes(
+        &self,
+        _: &SessionId,
+    ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::SessionProjectionChanges> {
+        panic!("unexpected projection subscription")
+    }
+    async fn projection_snapshot(
+        &self,
+        _: &SessionId,
+    ) -> rsi_agent_turn_protocol::Result<rsi_agent_session_protocol::SessionProjectionSnapshot>
+    {
+        panic!("unexpected projection capture")
+    }
+}
 #[async_trait]
 impl rsi_agent_turn_protocol::SessionCommands for UnavailableCommands {
     async fn list(

@@ -11,6 +11,8 @@ pub(crate) const LARGE_REPLY: usize = rsi_api_protocol::MAXIMUM_API_BYTES;
 pub(crate) const OBSERVATION_REPLY: usize =
     rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 64 * 1024;
 pub(crate) const INTERACTION_REPLY: usize = 32 * 1024 * 1024 + 64 * 1024;
+pub(crate) const PROJECTION_REPLY: usize =
+    rsi_agent_session_protocol::MAXIMUM_SESSION_PROJECTION_BYTES + 64 * 1024;
 pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_REPLY;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +33,7 @@ pub(crate) enum Operation {
     History,
     Observe,
     Interactions,
+    Projections,
     Inspect,
     Questions,
     AnswerQuestion,
@@ -38,7 +41,7 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Create,
         Self::Attach,
         Self::Recent,
@@ -55,6 +58,7 @@ impl Operation {
         Self::History,
         Self::Observe,
         Self::Interactions,
+        Self::Projections,
         Self::Inspect,
         Self::Questions,
         Self::AnswerQuestion,
@@ -81,6 +85,7 @@ impl Operation {
             Self::History => ("history", Data, Read, 8192, LARGE_REPLY),
             Self::Observe => ("observe", Subscription, Read, 8192, OBSERVATION_REPLY),
             Self::Interactions => ("interactions", Subscription, Read, 8192, INTERACTION_REPLY),
+            Self::Projections => ("projections", Subscription, Read, 8192, PROJECTION_REPLY),
             Self::Inspect => ("inspect", Data, Read, 8192, LARGE_REPLY),
             Self::Questions => ("questions", Data, Read, 8192, INTERACTION_REPLY),
             Self::AnswerQuestion => ("answer-question", Control, Mutation, 128 * 1024, 8192),

@@ -26,8 +26,10 @@ owns PluginContext, ToolRejected, stable ordering, bounded execution stages and
 workspace/time migration. The
 [Session command decision](../../implemented/architecture/2026-09-09-session-command-admission.md)
 owns command dispatch, draft values, preset selection and transport binding.
-This proposal continues with projections and planning policy, consuming those
-established interfaces.
+The [extension projection decision](../../implemented/architecture/2026-09-09-session-extension-projections.md)
+owns complete dual-watermark capture, isolated producers, draft subscriptions
+and retained API values. This proposal continues with planning policy and
+repeat-tool reminders consuming those established interfaces.
 
 ## Alternatives considered
 

@@ -1,4 +1,7 @@
 use async_trait::async_trait;
+
+#[path = "contracts/projection.rs"]
+mod projection;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionError, AgentCompositionPin, AgentSessionDraft,
 };

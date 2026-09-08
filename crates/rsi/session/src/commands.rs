@@ -210,6 +210,7 @@ impl LocalSessionHandle {
         draft
             .apply_preset_selection(prepared)
             .map_err(draft_error)?;
+        self.projection_changed();
         draft_view(&state)
     }
     pub(super) async fn list_commands(&self) -> Result<SessionCommandsView> {
@@ -322,7 +323,9 @@ impl LocalSessionHandle {
         let HandleState::Fresh(draft) = &mut *state else {
             return Err(SessionError::NotFound("unpublished draft".into()));
         };
-        draft.apply_command(mutation).map_err(draft_error)
+        let receipt = draft.apply_command(mutation).map_err(draft_error)?;
+        self.projection_changed();
+        Ok(receipt)
     }
 }
 

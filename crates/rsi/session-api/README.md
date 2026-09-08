@@ -35,6 +35,15 @@ resolving a compact receipt or command catalog can still load Headers, canonical
 controls and complete domain snapshots. Its wire response remains independently
 bounded (512 KiB for discovery, 8 KiB for receipts).
 
+The authenticated `session/projections` Subscription returns complete retained
+extension snapshots with a separate 5 MiB payload plus 64 KiB envelope limit.
+Both the envelope and snapshot bind the captured Session/Header; the client also
+checks monotone draft or durable dual cursors. A preset change ends the old
+subscription. Each decoder reserves its bounded projection collection before
+JSON decode and retains the resulting snapshot before releasing wire ownership.
+Server capture admission belongs to the Session service, independently of API
+delivery-byte admission; idle streams reserve no maximum reply buffer.
+
 Create, input, direct Image and interaction answers are owned mutations. Unknown
 message outcomes retain the caller's MessageId for status/retry reconciliation.
 No operation is replayed automatically. Short cancellation, message status and

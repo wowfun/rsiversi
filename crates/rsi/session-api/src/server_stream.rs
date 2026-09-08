@@ -30,6 +30,9 @@ impl ApiHandler for Handler {
             ));
         };
         match self.operation {
+            Operation::Projections => {
+                projections(self.service.as_ref(), input, budget, maximum).await
+            }
             Operation::Observe => {
                 let request: wire::Observe = serde_json::from_slice(input.as_bytes())
                     .map_err(|_| ApiError::Invalid("invalid Session observation request".into()))?;
@@ -89,6 +92,40 @@ impl ApiHandler for Handler {
             )),
         }
     }
+}
+async fn projections(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    let request: HandleRequest<()> = serde_json::from_slice(input.as_bytes())
+        .map_err(|_| ApiError::Invalid("invalid Session projection request".into()))?;
+    let result = async {
+        handle(service, &request.target)
+            .await?
+            .observe_projections()
+            .await
+    }
+    .await;
+    let mut source = match wire::domain(result)? {
+        Ok(source) => source,
+        Err(failure) => return Err(ApiError::Domain(budget.encode(&failure, maximum)?)),
+    };
+    Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+        while let Some(snapshot) = source.next().await {
+            let snapshot = match wire::domain(snapshot)? {
+                Ok(snapshot) => snapshot,
+                Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))?,
+            };
+            if snapshot.snapshot().session_id() != &request.target.session_id
+                || snapshot.snapshot().header_sha256() != request.target.header_key {
+                Err(ApiError::Backend("Session projection binding changed".into()))?;
+            }
+            let json = budget.encode(&HandleReply { target: request.target.clone(), body: snapshot }, maximum)?;
+            yield ApiMessage { json, binary: None };
+        }
+    })))
 }
 fn turn_error(error: &rsi_agent_turn_protocol::TurnError) -> ApiError {
     match error {

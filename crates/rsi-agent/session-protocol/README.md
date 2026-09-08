@@ -1,5 +1,16 @@
 # rsi-agent-session-protocol
 
+## Derived extension snapshots
+
+Session projection DTOs are disposable read values, outside the durable record
+format. A snapshot binds the exact Session, Header fingerprint, composition digest
+and either draft revision or a simultaneous durable Fact/control horizon. Each
+registered producer contributes one complete value or one bounded failure. There
+are at most 64 unique producers, each value fits 64 KiB of canonical JSON, each
+failure fits 4 KiB of diagnostic text, and the complete envelope fits 5 MiB.
+Decode validates all of those bounds and identities. Consumers advance both
+durable cursors monotonically; a durable view never regresses to a draft.
+
 ## Session commands
 
 Command invocations bind a ContributionId, DomainRequestId, typed draft or
