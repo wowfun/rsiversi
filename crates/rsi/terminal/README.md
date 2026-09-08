@@ -90,9 +90,11 @@ window with an explicit truncation marker.
 The shared [conversation source contract](../conversation/README.md) owns closed
 Fact fields, raw UTF-8/JSON windows and Tool outcome classification. The TUI adds
 sanitization and display/source mapping while preserving the raw window offsets.
-Closing or replacing a TUI detail cancels its exact-source read in the shared
-controller. Its view revision also rejects a result that completed concurrently
-with replacement. Cancellation of this read has no effect on the running Turn.
+Closing or replacing a TUI detail cancels its pending source, output, message,
+or child-history read. Exact-source reads remain owned by the shared controller;
+other detail reads drop their local I/O future. Its view revision rejects both
+results and errors completed concurrently with replacement. Closing a view has
+no effect on the running Turn or an admitted mutation.
 The producer submits complete cell buffers and their source maps through a
 coalescing channel. Only the output writer computes cell differences against its
 last completely written frame. Interrupted or short writes never advance that

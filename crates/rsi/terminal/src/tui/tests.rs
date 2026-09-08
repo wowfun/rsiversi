@@ -129,7 +129,7 @@ async fn extension_inspection_tracks_replacements_without_reopening_a_closed_det
 #[tokio::test]
 async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() {
     let fixture = Arc::new(UnknownThenAcceptedHandle {
-        history_gate: Some(Arc::new(tokio::sync::Semaphore::new(0))),
+        read_gate: Some(Arc::new(tokio::sync::Semaphore::new(0))),
         ..UnknownThenAcceptedHandle::default()
     });
     let (mut client, handle, runtime, surface) = client_with(fixture).await;
@@ -143,11 +143,7 @@ async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() 
     ));
     assert!(futures_util::poll!(client.tasks.next()).is_pending());
     tokio::time::timeout(Duration::from_secs(1), async {
-        while handle
-            .history_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-            != 1
-        {
+        while handle.read_active.load(std::sync::atomic::Ordering::SeqCst) != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -159,9 +155,7 @@ async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() 
         .unwrap()
         .unwrap();
     assert_eq!(
-        handle
-            .history_active
-            .load(std::sync::atomic::Ordering::SeqCst),
+        handle.read_active.load(std::sync::atomic::Ordering::SeqCst),
         0
     );
     assert!(work.result.is_err());
@@ -170,6 +164,49 @@ async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() 
     assert!(handle.cancellations.lock().unwrap().is_empty());
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn closing_other_details_drops_io_and_fences_errors_without_cancelling_mutations() {
+    for action in [
+        Action::Output("fixture-output".into(), 0),
+        Action::Child(SessionId::new("fixture-child").unwrap()),
+        Action::Message(rsi_agent_store_protocol::StorePendingMessage {
+            message_id: MessageId::new("fixture-message").unwrap(),
+            delivery: MessageDelivery::NextTurn,
+            target: rsi_agent_session_protocol::MessageTarget::NextTurn,
+            permits_promotion: false,
+            bound_turn_id: None,
+            accepted_control_seq: 1,
+        }),
+    ] {
+        let fixture = Arc::new(UnknownThenAcceptedHandle {
+            read_gate: Some(Arc::new(tokio::sync::Semaphore::new(0))),
+            ..Default::default()
+        });
+        let (mut client, handle, runtime, surface) = client_with(fixture).await;
+        client.state.open_detail("previous detail".into());
+        client.action(action);
+        assert!(futures_util::poll!(client.tasks.next()).is_pending());
+        assert_eq!(
+            handle.read_active.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        client.state.escape();
+        let work = tokio::time::timeout(Duration::from_secs(1), client.tasks.next())
+            .await
+            .expect("closed detail kept its I/O alive")
+            .unwrap();
+        assert_eq!(
+            handle.read_active.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(work.result.is_err());
+        assert!(work.superseded(&client));
+        assert!(handle.cancellations.lock().unwrap().is_empty());
+        surface.stop().await;
+        assert!(runtime.shutdown().await.is_clean());
+    }
 }
 
 #[derive(Debug)]

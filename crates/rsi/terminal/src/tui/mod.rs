@@ -255,6 +255,20 @@ impl Client {
         self.spawn_as(WorkKind::Read, task);
     }
 
+    fn spawn_detail(
+        &mut self,
+        task: impl std::future::Future<Output = Result<Update>> + Send + 'static,
+    ) {
+        let stop = self.state.detail_stop.clone();
+        self.spawn_as(WorkKind::Detail, async move {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => Err(error("Detail closed")),
+                result = task => result,
+            }
+        });
+    }
+
     fn spawn_as(
         &mut self,
         kind: WorkKind,
@@ -693,7 +707,7 @@ impl Client {
                 } else { ("Agents · history inspection", snapshot.tree.descendants.into_iter().map(|child| (format!("{} · {}", child.task_name, child.status.session_id), Action::Child(child.status.session_id))).collect()) };
                 Ok(Update::Menu(Menu { title: title.into(), items, selected: 0 }))
             }),
-            Action::Child(id) => self.spawn(async move {
+            Action::Child(id) => self.spawn_detail(async move {
                 let child = read(|| application.attach(&id)).await?;
                 let page = read(|| child.history_before(None, 128)).await?;
                 let mut transcript = transcript::Transcript::default();
@@ -703,7 +717,7 @@ impl Client {
             }),
             Action::Message(message) => {
                 self.state.menu = Some(Menu { title: format!("{} · {:?}", message.message_id, message.target), selected: 0, items: vec![("Cancel this pending input".into(), Action::CancelMessage(message.message_id.clone()))] });
-                self.spawn(async move { read(|| handle.read_message(&message.message_id, message.accepted_control_seq)).await.map(Update::Message) });
+                self.spawn_detail(async move { read(|| handle.read_message(&message.message_id, message.accepted_control_seq)).await.map(Update::Message) });
             },
             Action::CancelMessage(id) => self.spawn(async move { let result = handle.cancel(CancelTarget::Message(id), None).await.map_err(error)?; Ok(Update::Notice(format!("Cancellation accepted: {}", result.accepted))) }),
             Action::Questions => self.state.menu = Some(Menu { title: "Live questions".into(), selected: 0, items: self.interactions.as_ref().map_or_else(Vec::new, |snapshot| snapshot.questions().iter().map(|request| (format!("{} · {}", request.id, request.questions[0].prompt), Action::Question(request.clone()))).collect()) }),
@@ -749,7 +763,7 @@ impl Client {
             },
             Action::Output(id, offset) => {
                 let output_cache = self.output_cache.clone();
-                self.spawn(async move {
+                self.spawn_detail(async move {
                     let page = output_cache.read(&id, offset, 16 * 1024).await.map_err(error)?;
                     Ok(Update::Output(page))
                 });

@@ -106,8 +106,25 @@ pub(crate) struct UnknownThenAcceptedHandle {
     pub(crate) pending_question:
         std::sync::Mutex<Option<rsi_user_questions_protocol::QuestionRequest>>,
     pub(crate) history_error: Option<SessionError>,
-    pub(crate) history_gate: Option<Arc<tokio::sync::Semaphore>>,
-    pub(crate) history_active: std::sync::atomic::AtomicUsize,
+    pub(crate) read_gate: Option<Arc<tokio::sync::Semaphore>>,
+    pub(crate) read_active: std::sync::atomic::AtomicUsize,
+}
+
+impl UnknownThenAcceptedHandle {
+    async fn wait_read(&self) {
+        if let Some(gate) = &self.read_gate {
+            struct Active<'a>(&'a std::sync::atomic::AtomicUsize);
+            impl Drop for Active<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            self.read_active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _active = Active(&self.read_active);
+            gate.acquire().await.unwrap().forget();
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -164,6 +181,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         _message_id: &MessageId,
         _accepted_control_seq: u64,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::AgentMessage> {
+        self.wait_read().await;
         Err(SessionError::NotFound("fixture message body".into()))
     }
 
@@ -323,18 +341,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         _exclusive_before_seq: Option<u64>,
         _limit: usize,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionHistoryPage> {
-        if let Some(gate) = &self.history_gate {
-            struct Active<'a>(&'a std::sync::atomic::AtomicUsize);
-            impl Drop for Active<'_> {
-                fn drop(&mut self) {
-                    self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                }
-            }
-            self.history_active
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let _active = Active(&self.history_active);
-            gate.acquire().await.unwrap().forget();
-        }
+        self.wait_read().await;
         if let Some(error) = &self.history_error {
             return Err(error.clone());
         }
@@ -885,7 +892,8 @@ impl rsi_process::ProcessOutputCache for UnknownThenAcceptedHandle {
         _: u64,
         _: usize,
     ) -> rsi_process::Result<rsi_process::OutputPage> {
-        unreachable!("submission fixture does not read Process output")
+        self.wait_read().await;
+        unreachable!("submission fixture does not finish Process output")
     }
 }
 
