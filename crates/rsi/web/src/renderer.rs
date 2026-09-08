@@ -35,7 +35,25 @@ pub(crate) struct RenderState {
     pub interactions: Option<InteractionSnapshot>,
     pub projections: Option<rsi_session_protocol::ProjectionSnapshot>,
     pub projection_notice: String,
-    pub notice: String,
+    fact_notice: String,
+    interaction_notice: String,
+}
+
+impl RenderState {
+    pub fn notice(&self) -> String {
+        [self.fact_notice.as_str(), self.interaction_notice.as_str()]
+            .into_iter()
+            .filter(|notice| !notice.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn notice_mut(&mut self, kind: ObservationKind) -> &mut String {
+        match kind {
+            ObservationKind::Facts => &mut self.fact_notice,
+            ObservationKind::Interactions => &mut self.interaction_notice,
+            ObservationKind::Projections => &mut self.projection_notice,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -48,6 +66,9 @@ pub(crate) struct Renderer {
 impl Renderer {
     pub fn seed(&self, transcript: Transcript, before: Option<u64>, more: bool) {
         let mut state = self.state.lock().expect("Web renderer poisoned");
+        if self.stop.is_cancelled() {
+            return;
+        }
         state.transcript = transcript;
         state.history_before = before;
         state.history_more = more;
@@ -104,20 +125,25 @@ impl ObservationSink for Renderer {
         update: rsi_agent_turn_protocol::SessionObservation,
     ) -> Result<(), ObservationFailure> {
         self.ready().await?;
-        self.state
-            .lock()
-            .expect("Web renderer poisoned")
-            .transcript
-            .observation(&update);
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        if self.stop.is_cancelled() {
+            return Err(ObservationFailure::SinkStopped);
+        }
+        state.transcript.observation(&update);
+        state.fact_notice.clear();
+        drop(state);
         self.changed();
         Ok(())
     }
     async fn interactions(&self, snapshot: InteractionSnapshot) -> Result<(), ObservationFailure> {
         self.ready().await?;
-        self.state
-            .lock()
-            .expect("Web renderer poisoned")
-            .interactions = Some(snapshot);
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        if self.stop.is_cancelled() {
+            return Err(ObservationFailure::SinkStopped);
+        }
+        state.interactions = Some(snapshot);
+        state.interaction_notice.clear();
+        drop(state);
         self.changed();
         Ok(())
     }
@@ -143,11 +169,10 @@ impl ObservationSink for Renderer {
     ) -> Result<(), ObservationFailure> {
         self.ready().await?;
         let mut state = self.state.lock().expect("Web renderer poisoned");
-        let notice = if kind == ObservationKind::Projections {
-            &mut state.projection_notice
-        } else {
-            &mut state.notice
-        };
+        if self.stop.is_cancelled() {
+            return Err(ObservationFailure::SinkStopped);
+        }
+        let notice = state.notice_mut(kind);
         *notice = short(&format!("Reconnecting {kind:?}: {error}"), 4096).into();
         drop(state);
         self.changed();
@@ -158,11 +183,10 @@ impl ObservationSink for Renderer {
             return;
         }
         let mut state = self.state.lock().expect("Web renderer poisoned");
-        let notice = if kind == ObservationKind::Projections {
-            &mut state.projection_notice
-        } else {
-            &mut state.notice
-        };
+        if self.stop.is_cancelled() {
+            return;
+        }
+        let notice = state.notice_mut(kind);
         *notice = short(
             &format!("{kind:?} observation stopped; reattach to continue: {error}"),
             4096,
@@ -216,11 +240,7 @@ impl PluginFactory for RendererFactory {
             Box::new(move || {
                 Box::pin(async move {
                     renderer.stop.cancel();
-                    renderer
-                        .state
-                        .lock()
-                        .expect("Web renderer poisoned")
-                        .projections = None;
+                    *renderer.state.lock().expect("Web renderer poisoned") = RenderState::default();
                     drop(supplies);
                     Ok(())
                 })
@@ -234,6 +254,73 @@ mod tests {
     use super::*;
     use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId, TurnOutcome};
     use rsi_agent_turn_protocol::{ObservationRetention, SessionObservation};
+    #[tokio::test]
+    async fn a_recovered_interaction_stream_clears_its_notice() {
+        let renderer = Renderer {
+            state: Mutex::new(RenderState::default()),
+            ready: watch::channel(true).0,
+            changed: watch::channel(0).0,
+            stop: CancellationToken::new(),
+        };
+        renderer
+            .reconnecting(
+                ObservationKind::Interactions,
+                &ObservationFailure::Session(rsi_session_protocol::SessionError::Capacity),
+            )
+            .await
+            .unwrap();
+        assert!(
+            renderer
+                .state
+                .lock()
+                .unwrap()
+                .notice()
+                .contains("Reconnecting")
+        );
+        renderer
+            .interactions(
+                rsi_session_protocol::InteractionRetention::default()
+                    .retain(vec![], vec![])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            renderer.state.lock().unwrap().notice().is_empty(),
+            "accepted replacement must clear stale reconnect notice"
+        );
+    }
+    async fn verify_independent_recovery(
+        renderer: &Renderer,
+        update: &SessionObservation,
+    ) -> rsi_session_protocol::InteractionRetention {
+        renderer
+            .reconnecting(ObservationKind::Facts, &ObservationFailure::Ended)
+            .await
+            .unwrap();
+        renderer
+            .reconnecting(ObservationKind::Interactions, &ObservationFailure::Ended)
+            .await
+            .unwrap();
+        let interactions = rsi_session_protocol::InteractionRetention::default();
+        renderer
+            .interactions(interactions.retain(vec![], vec![]).unwrap())
+            .await
+            .unwrap();
+        assert!(renderer.state.lock().unwrap().notice().contains("Facts"));
+        assert!(
+            !renderer
+                .state
+                .lock()
+                .unwrap()
+                .notice()
+                .contains("Interactions")
+        );
+        assert!(interactions.retained_bytes() > 0);
+        renderer.observation(update.clone()).await.unwrap();
+        assert!(renderer.state.lock().unwrap().notice().is_empty());
+        interactions
+    }
     fn failed_projection(
         pool: &rsi_session_protocol::ProjectionRetention,
     ) -> rsi_session_protocol::ProjectionSnapshot {
@@ -307,6 +394,7 @@ mod tests {
             renderer.state.lock().unwrap().transcript.status,
             "Completed"
         );
+        let interactions = verify_independent_recovery(&renderer, &update).await;
         let pool = rsi_session_protocol::ProjectionRetention::default();
         let snapshot = failed_projection(&pool);
         renderer.projections(snapshot.clone()).await.unwrap();
@@ -320,7 +408,7 @@ mod tests {
                     .projection_notice
                     .contains("Projections observation stopped")
             );
-            assert!(state.notice.is_empty());
+            assert!(state.notice().is_empty());
             assert!(
                 state.projections.as_ref().unwrap().snapshot().entries()[0]
                     .failure()
@@ -336,6 +424,8 @@ mod tests {
         );
         assert!(runtime.shutdown().await.is_clean());
         assert!(renderer.state.lock().unwrap().projections.is_none());
+        assert!(renderer.state.lock().unwrap().interactions.is_none());
+        assert_eq!(interactions.retained_bytes(), 0);
         assert!(matches!(
             renderer.projections(snapshot).await,
             Err(ObservationFailure::SinkStopped)

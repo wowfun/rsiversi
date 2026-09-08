@@ -6,6 +6,11 @@ failures are rendered as text. Snapshot replacement releases the prior retention
 attachment withdrawal releases the latest value. Projection-stream failure leaves
 core history observation independent and marks extension state unavailable.
 
+Fact, interaction and extension-state observation notices are independent.
+An accepted update clears only its own stream's previous notice. Withdrawal
+releases all retained renderer snapshots and projections, even if another owner
+still holds the renderer handle; late deliveries cannot reacquire that retention.
+
 Each conversation exposes its discovered Session commands and saved command
 receipt. Registered slash names execute through the shared controller; unknown
 names remain Human input for workspace skills. One unresolved invocation per

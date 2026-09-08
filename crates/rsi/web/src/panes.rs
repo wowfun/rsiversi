@@ -257,7 +257,7 @@ impl Pane {
             "unresolved_text":current.draft.unresolved.lock().expect("Web submission poisoned").as_ref().and_then(|request| request.content.first()).and_then(|input| match input { SessionInput::Text { text } => Some(text.clone()), SessionInput::Image { .. } => None }),
             "draft":*current.draft.text.lock().expect("Web draft poisoned"), "model":*current.model.lock().expect("Web model poisoned"),
             "transcript":state.history.as_ref().unwrap_or(&state.transcript), "historical":state.history.is_some(),
-            "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice, "pending":pending,
+            "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
         })
     }
 }
