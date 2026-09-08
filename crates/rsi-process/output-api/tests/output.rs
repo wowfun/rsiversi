@@ -101,7 +101,7 @@ async fn local_capture(path: &std::path::Path) -> (Runtime, String, Vec<u8>) {
         (
             "process",
             Arc::new(rsi_process_local::ProcessLocalFactory) as Arc<dyn PluginFactory>,
-            json!({"output_cache":{"directory":path.join("output")}}),
+            json!({"output_cache":{"directory":path.canonicalize().unwrap().join("output")}}),
         ),
         ("api", Arc::new(rsi_api::ApiFactory), Value::Null),
         ("output-api", Arc::new(OutputApiFactory), Value::Null),

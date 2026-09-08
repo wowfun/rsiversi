@@ -1,7 +1,10 @@
+#[cfg(target_os = "linux")]
+use rsi::StandardCodingTools;
 use rsi::{
     ApplicationProfileId, HostProfileDocument, HostProfileId, ProfileCatalog, ProfileCatalogError,
-    ProfileSource, StandardCodingTools, StandardComposition,
+    ProfileSource, StandardComposition,
 };
+#[cfg(target_os = "linux")]
 use rsi_credentials_protocol::SecretValue;
 use rsi_host::HostPaths;
 use std::fs;
