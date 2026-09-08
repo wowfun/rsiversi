@@ -11,8 +11,11 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
         temporary.path().join("cache"),
     )
     .unwrap();
-    let (host, diagnostics) =
-        standard_application_host(paths.clone(), vec![], BTreeMap::new(), None).unwrap();
+    let (host, diagnostics) = standard_application_host(
+        rsi::StandardComposition::new(paths.clone(), BTreeMap::new(), None),
+        vec![],
+    )
+    .unwrap();
     let program = rsi_host::ProfileProgram::from_profile(rsi_host::Profile::new(vec![
         rsi_host::ProfileEntry::new(
             "credentials",
@@ -37,10 +40,8 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
         vec!["list", "unexpected"],
     ] {
         let (host, diagnostics) = standard_application_host(
-            paths.clone(),
+            rsi::StandardComposition::new(paths.clone(), BTreeMap::new(), None),
             arguments.into_iter().map(Into::into).collect(),
-            BTreeMap::new(),
-            None,
         )
         .unwrap();
         #[cfg(target_os = "linux")]
@@ -105,10 +106,8 @@ async fn invalid_serve_transport_policy_is_rejected_before_service_activation() 
             .application(&ApplicationProfileId::new("serve").unwrap())
             .unwrap();
         let (host, diagnostics) = standard_application_host(
-            paths.clone(),
+            rsi::StandardComposition::new(paths.clone(), BTreeMap::new(), None),
             args.into_iter().map(Into::into).collect(),
-            BTreeMap::new(),
-            None,
         )
         .unwrap();
         assert!(
@@ -150,7 +149,7 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         .application(&ApplicationProfileId::new("serve").unwrap())
         .unwrap();
     let (host, diagnostics) = standard_application_host(
-        paths.clone(),
+        rsi::StandardComposition::new(paths.clone(), BTreeMap::new(), None),
         [
             "--bind",
             "127.0.0.1:0",
@@ -160,8 +159,6 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         ]
         .map(Into::into)
         .to_vec(),
-        BTreeMap::new(),
-        None,
     )
     .unwrap();
     let running = host
@@ -250,10 +247,8 @@ async fn invalid_application_arguments_fail_before_any_standard_backend_or_asset
         .application(&ApplicationProfileId::new("headless").unwrap())
         .unwrap();
     let (host, diagnostics) = standard_application_host(
-        paths.clone(),
+        rsi::StandardComposition::new(paths.clone(), BTreeMap::new(), None),
         vec!["--unknown".into()],
-        BTreeMap::new(),
-        None,
     )
     .unwrap();
     assert!(
@@ -294,8 +289,11 @@ async fn ordinary_application_source_errors_are_rejected_by_the_shared_compiler_
     for source in ["format = 2\n", "format = 1\nunknown = true\n"] {
         std::fs::write(&path, source).unwrap();
         let program = catalog.application(&id).unwrap().program().unwrap();
-        let (host, diagnostics) =
-            standard_application_host(paths.clone(), Vec::new(), BTreeMap::new(), None).unwrap();
+        let (host, diagnostics) = standard_application_host(
+            rsi::StandardComposition::new(paths.clone(), BTreeMap::new(), None),
+            Vec::new(),
+        )
+        .unwrap();
         assert!(host.start_program(program).await.is_err());
         assert!(
             diagnostics.take().is_none(),
@@ -323,10 +321,8 @@ async fn retained_service_observation_does_not_keep_native_ownership_after_shutd
     )
     .unwrap();
     let (host, _) = rsi::standard_application_host(
-        paths.clone(),
+        rsi::StandardComposition::new(paths.clone(), std::collections::BTreeMap::new(), None),
         vec![],
-        std::collections::BTreeMap::new(),
-        None,
     )
     .unwrap();
     let running = host

@@ -1,8 +1,8 @@
-use rsi_host::{HostBuilder, ProfileEntry, ProfileFragment};
+use rsi_host::{ProfileEntry, ProfileFragment};
 use rsi_meta::UpdateMode;
 use serde_json::{Value, json};
 
-pub(crate) fn register(builder: &mut HostBuilder) -> rsi_host::Result<()> {
+pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::Result<()> {
     use rsi_api_protocol::{
         ApiDispatchContract, ApiRegistrarContract, ConnectionDescriptionContract,
         DeviceAdministrationContract, DeviceAuthenticationContract, EndpointIdentityContract,

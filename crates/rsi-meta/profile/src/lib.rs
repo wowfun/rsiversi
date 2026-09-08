@@ -264,6 +264,23 @@ pub struct ProfileFragment {
 }
 
 impl ProfileFragment {
+    /// Fingerprints this declaration using the Profile source identity encoding.
+    /// This performs no expression evaluation, target lookup, or configuration validation.
+    /// A patch may therefore refer to a target supplied by another fragment.
+    pub fn source_digest(&self) -> String {
+        let compiler = ProfileCompiler::new(
+            ProfileEnvironment {
+                paths: None,
+                platform: "fragment-identity".into(),
+                defines: BTreeMap::new(),
+            },
+            ProfileLimits::default(),
+        );
+        let mut state = CompileState::new(&compiler);
+        state.hash_fragment(self);
+        hex_lower(state.digest.finalize().as_slice())
+    }
+
     /// Creates an ordered linked fragment of plugin leaves.
     pub fn new(id: impl Into<String>, entries: impl IntoIterator<Item = ProfileEntry>) -> Self {
         Self {

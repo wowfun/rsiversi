@@ -134,20 +134,13 @@ async fn prepare_standard_composition(
     let coding_tools = None;
     let system_root =
         standard_agent_preset_root(&paths).map_err(|error| RsiError::Boot(error.to_string()))?;
+    let composition = StandardComposition::new(paths, environment, coding_tools);
     let presets = if let Some(parent) = parent {
-        AgentPresetManager::open_standard_in(
-            parent,
-            paths.clone(),
-            system_root,
-            coding_tools.is_some(),
-        )
-        .await?
+        AgentPresetManager::open_standard_in(parent, &composition, system_root).await?
     } else {
-        AgentPresetManager::open_standard(paths.clone(), system_root, coding_tools.is_some())
-            .await?
+        AgentPresetManager::open_standard(&composition, system_root).await?
     };
-    let composition = StandardComposition::new(paths, environment, coding_tools)
-        .with_agent_presets(presets.catalog().clone());
+    let composition = composition.with_agent_presets(&presets)?;
     Ok((composition, presets))
 }
 

@@ -38,6 +38,7 @@ pub(crate) async fn connect(
     owner: &HostOwnerMetadata,
     parent: &rsi_meta::Context,
     paths: rsi_host::HostPaths,
+    addons: &crate::StandardAddonSet,
 ) -> Result<crate::ProfileOwner> {
     let config = configuration(owner)?;
     let (mut builder, mut entries) =
@@ -58,11 +59,20 @@ pub(crate) async fn connect(
             serde_json::to_value(config).map_err(error)?,
         ),
     );
+    builder
+        .register_fragment(rsi_host::ProfileFragment::new(
+            "rsi.standard.clients",
+            entries,
+        ))
+        .map_err(error)?;
+    addons
+        .register_into(&mut builder, crate::AddonScope::Client)
+        .map_err(error)?;
     crate::ProfileOwner::start_scoped(
         builder.build().map_err(error)?,
         paths,
         parent,
-        ProfileProgram::from_profile(Profile::new(entries)),
+        ProfileProgram::from_profile(Profile::default()),
     )
     .await
 }

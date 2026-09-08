@@ -73,6 +73,7 @@ struct UserSettingsWire<'a> {
 pub struct AgentPresetManager {
     catalog: Arc<AgentPresetCatalog>,
     host: ProfileOwner,
+    composition_identity: String,
 }
 
 #[derive(Debug)]
@@ -87,12 +88,11 @@ impl AgentPresetManager {
     /// Product-owned system roots are injected in precedence order. Settings
     /// contributes configured read-only roots after them, and
     /// `<config>/agent-presets` is always the final writable user root. The
-    /// coding-tools flag freezes the same standard Profile define and
-    /// contribution allowlist later used by the standard composition.
+    /// composition supplies the exact Profile defines and contribution allowlist
+    /// used by service startup.
     pub async fn open<I, P>(
-        paths: HostPaths,
+        composition: &crate::StandardComposition,
         system_roots: I,
-        coding_tools_enabled: bool,
     ) -> Result<Self>
     where
         I: IntoIterator<Item = P>,
@@ -100,12 +100,11 @@ impl AgentPresetManager {
     {
         Self::open_with_system_sources(
             None,
-            paths,
+            composition,
             system_roots
                 .into_iter()
                 .map(|root| SystemPresetSource::Root(root.into()))
                 .collect(),
-            coding_tools_enabled,
         )
         .await
     }
@@ -113,44 +112,33 @@ impl AgentPresetManager {
     /// Opens the standard Settings document with the sole byte-verified
     /// built-in preset, without trusting sibling cache directories.
     pub async fn open_standard(
-        paths: HostPaths,
+        composition: &crate::StandardComposition,
         system_root: impl Into<PathBuf>,
-        coding_tools_enabled: bool,
     ) -> Result<Self> {
-        Self::open_standard_with_context(None, paths, system_root.into(), coding_tools_enabled)
-            .await
+        Self::open_standard_with_context(None, composition, system_root.into()).await
     }
 
     /// Mounts the standard catalog and Settings plugins below an existing Context.
     pub async fn open_standard_in(
         parent: &rsi_meta::Context,
-        paths: HostPaths,
+        composition: &crate::StandardComposition,
         system_root: impl Into<PathBuf>,
-        coding_tools_enabled: bool,
     ) -> Result<Self> {
-        Self::open_standard_with_context(
-            Some(parent),
-            paths,
-            system_root.into(),
-            coding_tools_enabled,
-        )
-        .await
+        Self::open_standard_with_context(Some(parent), composition, system_root.into()).await
     }
 
     async fn open_standard_with_context(
         parent: Option<&rsi_meta::Context>,
-        paths: HostPaths,
+        composition: &crate::StandardComposition,
         system_root: PathBuf,
-        coding_tools_enabled: bool,
     ) -> Result<Self> {
         let id = AgentPresetId::new(DEFAULT_AGENT_PRESET_ID)
             .map_err(|error| RsiError::Boot(error.to_string()))?;
         let path = system_root.join(id.as_str());
         Self::open_with_system_sources(
             parent,
-            paths,
+            composition,
             vec![SystemPresetSource::Exact { id, path }],
-            coding_tools_enabled,
         )
         .await
     }
@@ -159,26 +147,23 @@ impl AgentPresetManager {
     ///
     /// The built-in preset contributes its deterministic final cache location
     /// to launch identity without materializing that asset.
-    pub async fn open_standard_preview(
-        paths: HostPaths,
-        coding_tools_enabled: bool,
-    ) -> Result<Self> {
+    pub async fn open_standard_preview(composition: &crate::StandardComposition) -> Result<Self> {
         Self::open_standard(
-            paths.clone(),
-            crate::composition::standard_agent_preset_root_candidate(&paths),
-            coding_tools_enabled,
+            composition,
+            crate::composition::standard_agent_preset_root_candidate(composition.paths()),
         )
         .await
     }
 
     async fn open_with_system_sources(
         parent: Option<&rsi_meta::Context>,
-        paths: HostPaths,
+        composition: &crate::StandardComposition,
         system_sources: Vec<SystemPresetSource>,
-        coding_tools_enabled: bool,
     ) -> Result<Self> {
+        let composition_identity = composition.agent_compiler_identity()?;
+        let paths = composition.paths().clone();
         let factory = Arc::new(plugin::CatalogFactory {
-            compiler: standard_agent_profile_compiler(&paths, coding_tools_enabled)?,
+            compiler: composition.agent_profile_compiler()?,
             paths: paths.clone(),
             sources: system_sources,
             diagnostic: std::sync::Mutex::new(None),
@@ -190,7 +175,15 @@ impl AgentPresetManager {
                 "Agent-preset catalog plugin did not become active".into(),
             ));
         };
-        Ok(Self { catalog, host })
+        Ok(Self {
+            catalog,
+            host,
+            composition_identity,
+        })
+    }
+
+    pub(crate) fn composition_identity(&self) -> &str {
+        &self.composition_identity
     }
 
     /// Returns the live catalog backed by this manager's Settings scope.
@@ -207,26 +200,52 @@ impl AgentPresetManager {
 pub(crate) fn standard_agent_profile_compiler(
     paths: &HostPaths,
     linux_tools_enabled: bool,
+    addons: &crate::StandardAddonSet,
 ) -> Result<AgentPresetProfileCompiler> {
+    Ok(AgentPresetProfileCompiler::new(
+        standard_agent_compiler(paths, linux_tools_enabled, addons)?,
+        addons
+            .descriptions()
+            .filter(|factory| factory.scope == crate::AddonScope::Agent)
+            .map(|factory| factory.plugin.clone()),
+    ))
+}
+
+pub(crate) fn standard_agent_compiler_identity(
+    paths: &HostPaths,
+    linux_tools_enabled: bool,
+    addons: &crate::StandardAddonSet,
+) -> Result<String> {
+    let candidate = standard_agent_compiler(paths, linux_tools_enabled, addons)?
+        .compile(&ProfileProgram::from_profile(Profile::default()))
+        .map_err(|error| RsiError::Boot(error.to_string()))?;
+    Ok(candidate.source_digest().to_owned())
+}
+
+fn standard_agent_compiler(
+    paths: &HostPaths,
+    linux_tools_enabled: bool,
+    addons: &crate::StandardAddonSet,
+) -> Result<ProfileCompiler> {
     let environment = ProfileEnvironment::new(
         paths.config(),
         paths.state(),
         paths.cache(),
         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        BTreeMap::from([(
-            "standard_linux_coding_tools".to_owned(),
-            Value::Bool(linux_tools_enabled),
-        )]),
+        BTreeMap::from([
+            (
+                "standard_linux_coding_tools".to_owned(),
+                Value::Bool(linux_tools_enabled),
+            ),
+            (
+                "rsi_standard_addons".to_owned(),
+                Value::String(addons.digest().map_err(host_boot)?),
+            ),
+        ]),
     )
     .map_err(|error| RsiError::Boot(error.to_string()))?;
-    Ok(AgentPresetProfileCompiler::new(
-        ProfileCompiler::new(environment, ProfileLimits::default()),
-        crate::composition::standard_agent_contribution_ids(linux_tools_enabled)
-            .iter()
-            .copied(),
-    ))
+    Ok(ProfileCompiler::new(environment, ProfileLimits::default()))
 }
-
 /// Derives the sole writable Agent-preset root from frozen standard paths.
 pub fn user_agent_preset_root(paths: &HostPaths) -> PathBuf {
     paths.config().join(USER_AGENT_PRESET_DIRECTORY)

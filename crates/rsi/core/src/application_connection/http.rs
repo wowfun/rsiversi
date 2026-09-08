@@ -43,13 +43,24 @@ impl HttpFactory {
                 serde_json::to_value(config).map_err(activation)?,
             ),
         );
+        builder
+            .register_fragment(rsi_host::ProfileFragment::new(
+                "rsi.standard.clients",
+                entries,
+            ))
+            .map_err(activation)?;
+        self.0
+            .composition
+            .addons()
+            .register_into(&mut builder, crate::AddonScope::Client)
+            .map_err(activation)?;
         // Credentials is inherited explicitly; each domain and API marker is isolated by the child Host catalog.
         let connection = Arc::new(
             crate::ProfileOwner::start_scoped(
                 builder.build().map_err(activation)?,
-                self.0.paths.clone(),
+                self.0.composition.paths().clone(),
                 plan.context(),
-                ProfileProgram::from_profile(Profile::new(entries)),
+                ProfileProgram::from_profile(Profile::default()),
             )
             .await
             .map_err(activation)?,
@@ -67,6 +78,10 @@ impl HttpFactory {
                 })
             }),
         )?;
+        self.0
+            .composition
+            .addons()
+            .publish_domains(&mut plan, crate::addon::DomainLookup::Remote(&connection))?;
         macro_rules! facet {
             ($contract:ty) => {{
                 let service = connection.lookup_local::<$contract>().ok_or_else(|| {

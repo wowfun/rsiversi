@@ -149,3 +149,9 @@ source identities and bytes, and every environment path/platform/define input;
 it never depends on Rust `Debug` formatting. Because native path bytes and the
 explicit platform value are inputs, the digest is a host-platform-scoped
 identity and must not be used as a cross-platform cache key.
+
+`ProfileFragment::source_digest` fingerprints a linked declaration with the same
+source encoding used by the compiler, under a fixed path-free identity domain.
+It evaluates no expressions or patch targets. It is suitable for catalog source
+identity before assembly; it does not replace whole-program preflight or prove
+that any plugin configuration will activate.

@@ -187,14 +187,14 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
     };
     #[cfg(not(target_os = "linux"))]
     let coding = None;
-    let presets =
-        match AgentPresetManager::open_standard_preview(paths.clone(), coding.is_some()).await {
-            Ok(presets) => presets,
-            Err(error) => return report_error(&error),
-        };
-    let preview = StandardComposition::new(paths, BTreeMap::new(), coding)
-        .with_agent_presets(presets.catalog().clone())
-        .preview_host(&document);
+    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let presets = match AgentPresetManager::open_standard_preview(&composition).await {
+        Ok(presets) => presets,
+        Err(error) => return report_error(&error),
+    };
+    let preview = composition
+        .with_agent_presets(&presets)
+        .and_then(|composition| composition.preview_host(&document));
     let shutdown = presets.shutdown().await;
     let result = preview.and_then(|preview| {
         if !shutdown.is_clean() {
@@ -210,6 +210,8 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
                 "launch_key": preview.launch_key.as_str(),
                 "source_digest": preview.profile.source_digest,
                 "source_paths": preview.profile.source_paths,
+                "configuration_validation": "not_prepared",
+                "factories": preview.factories,
                 "leaves": preview.profile.leaves.iter().map(|leaf| serde_json::json!({
                     "instance_id": leaf.instance_id,
                     "plugin_id": leaf.plugin_id,
@@ -349,13 +351,15 @@ pub(super) async fn run_agent_preset(command: AgentPresetCommand) -> u8 {
         Ok(root) => root,
         Err(error) => return report_error(&RsiError::Boot(error.to_string())),
     };
-    let manager = match AgentPresetManager::open_standard(
-        paths,
-        system_root,
-        cfg!(target_os = "linux"),
-    )
-    .await
-    {
+    #[cfg(target_os = "linux")]
+    let coding = match super::standard_coding_tools() {
+        Ok(coding) => coding,
+        Err(error) => return report_error(&error),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let coding = None;
+    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let manager = match AgentPresetManager::open_standard(&composition, system_root).await {
         Ok(manager) => manager,
         Err(error) => return report_error(&error),
     };

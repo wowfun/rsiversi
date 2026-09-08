@@ -238,6 +238,16 @@ impl HostBuilder {
         Ok(self)
     }
 
+    /// Reports whether this exact Local contract marker has already been registered.
+    pub fn has_local_contract<C: LocalContract>(&self) -> bool {
+        self.local_contract_keys.get(&LocalContractKey::new(C::KEY)) == Some(&TypeId::of::<C>())
+    }
+
+    /// Reports whether this exact Local event marker has already been registered.
+    pub fn has_local_event<E: LocalEvent>(&self) -> bool {
+        self.local_event_keys.get(&LocalEventKey::new(E::KEY)) == Some(&TypeId::of::<E>())
+    }
+
     /// Registers one exact Rust Local contract marker for Profile naming.
     pub fn register_local_contract<C: LocalContract>(&mut self) -> Result<&mut Self> {
         if self.local_contract_keys.len() >= self.limits.maximum_local_contracts {

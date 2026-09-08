@@ -23,9 +23,13 @@ async fn scoped_catalog_plugins_share_parent_runtime_and_retire_their_settings_o
             HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
         let system = root.join("presets");
         write_preset(&system, "standard", "format = 1\n");
-        let manager = AgentPresetManager::open_standard_in(&runtime.root(), paths, system, false)
-            .await
-            .unwrap();
+        let manager = AgentPresetManager::open_standard_in(
+            &runtime.root(),
+            &rsi::StandardComposition::new(paths, std::collections::BTreeMap::new(), None),
+            system,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             manager.catalog().default_id().await.unwrap().as_str(),
             "standard"
@@ -88,9 +92,12 @@ async fn manager_derives_settings_roots_user_root_and_default_override() {
     .unwrap();
     let paths = HostPaths::new(config.clone(), state, cache).unwrap();
 
-    let manager = AgentPresetManager::open(paths, [system.clone()], false)
-        .await
-        .unwrap();
+    let manager = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths, std::collections::BTreeMap::new(), None),
+        [system.clone()],
+    )
+    .await
+    .unwrap();
     let roster = manager.catalog().roster().await.unwrap();
     assert_eq!(
         roster
@@ -163,12 +170,18 @@ async fn independent_managers_detect_a_concurrent_default_write_without_clobberi
         write_preset(&system, id, &format!("format = 1\n# {id}\n"));
     }
     let paths = HostPaths::new(config, state, cache).unwrap();
-    let first = AgentPresetManager::open(paths.clone(), [system.clone()], false)
-        .await
-        .unwrap();
-    let second = AgentPresetManager::open(paths.clone(), [system.clone()], false)
-        .await
-        .unwrap();
+    let first = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths.clone(), std::collections::BTreeMap::new(), None),
+        [system.clone()],
+    )
+    .await
+    .unwrap();
+    let second = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths.clone(), std::collections::BTreeMap::new(), None),
+        [system.clone()],
+    )
+    .await
+    .unwrap();
     let minimal = AgentPresetId::new("minimal").unwrap();
     let review = AgentPresetId::new("review").unwrap();
 
@@ -192,9 +205,12 @@ async fn independent_managers_detect_a_concurrent_default_write_without_clobberi
     assert!(first.shutdown().await.is_clean());
     assert!(second.shutdown().await.is_clean());
 
-    let reopened = AgentPresetManager::open(paths, [system], false)
-        .await
-        .unwrap();
+    let reopened = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths, std::collections::BTreeMap::new(), None),
+        [system],
+    )
+    .await
+    .unwrap();
     let selected = reopened.catalog().default_id().await.unwrap();
     assert!(matches!(selected.as_str(), "minimal" | "review"));
     assert!(reopened.shutdown().await.is_clean());

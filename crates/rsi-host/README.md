@@ -87,3 +87,8 @@ test suites run on those systems.
 
 The SDK is usable by custom Rust applications. The standard product composition
 belongs to the [`rsi` product](../rsi/README.md), not this family.
+
+During explicit product assembly, builder `has_local_contract` and
+`has_local_event` report exact marker membership without mutation. An embedder
+may use these to share repeated declarations. The registering methods continue
+to reject duplicates and conflicting keys; no factory code runs during lookup.

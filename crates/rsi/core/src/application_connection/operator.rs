@@ -28,7 +28,7 @@ impl PluginFactory for OperatorFactory {
 impl OperatorFactory {
     async fn activate_inner(&self, plan: ActivationPlan) -> Result<(), MetaError> {
         let convert = |error: String| MetaError::Activation(error);
-        let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&self.0.paths)
+        let paths = rsi_service_host::ServiceHostPaths::from_host_paths(self.0.composition.paths())
             .map_err(|error| convert(error.to_string()))?;
         let owner = paths
             .read_metadata()
@@ -61,7 +61,7 @@ impl OperatorFactory {
             builder
                 .build()
                 .map_err(|error| convert(error.to_string()))?,
-            self.0.paths.clone(),
+            self.0.composition.paths().clone(),
             plan.context(),
             ProfileProgram::from_profile(Profile::new(vec![ProfileEntry::new(
                 "connection",

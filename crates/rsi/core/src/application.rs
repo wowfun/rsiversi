@@ -36,10 +36,8 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
     #[cfg(not(target_os = "linux"))]
     let coding = None;
     let (host, diagnostics) = rsi::standard_application_host(
-        paths,
+        rsi::StandardComposition::new(paths, capture_standard_environment()?, coding),
         invocation.arguments,
-        capture_standard_environment()?,
-        coding,
     )?;
     let program = profile
         .program()

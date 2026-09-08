@@ -125,3 +125,39 @@ The shipped `standard` asset is materialized below a digest-addressed,
 owner-writable cache, but the catalog grants System authority only to that
 exact verified `standard` identity and directory. Other cache siblings are not
 discovered as presets and cannot inherit System source or trust.
+
+Linked addons use `StandardAddonBuilder`, immutable `StandardAddon`, and
+`StandardAddonSet`. A declaration owns its linked factories, exact Local/Event
+markers, explicit Profile fragments, target platforms and descriptive factory
+metadata. Factories have explicit Service, Agent, Application or Client scope;
+registering a factory does not instantiate it. A Profile entry or declared
+fragment selects activation. Domain endpoint and client factories are declared
+by their addon in their respective scopes; an endpoint is remotely exposed only
+when its Profile enables it. Build-time UI assets are ordinary application
+factories consuming the existing assets contract, with their build revision
+included in the frozen identity. No runtime JavaScript discovery is implied.
+
+`StandardComposition::with_addons` carries the same immutable declarations into
+preview and embedded/daemon startup. The Agent compiler and contribution catalog
+are derived from the declared Agent factories, including the built-in tools.
+Every resulting Host catalog freezes before activation and rejects duplicate
+factory/fragment identities, including collisions with built-ins. Exact repeated
+marker declarations are shared; two Rust marker types claiming the same key are
+rejected. Explicit unsupported platform declarations fail before activation.
+Factory metadata contains a bounded summary and optional JSON configuration
+schema. It is descriptive: preview never calls `PluginFactory::prepare` and
+cannot establish that a configuration will activate. Prepare remains the sole
+factory authority for semantic validation, normalization and requirements.
+Settings retains its separate validator. Schema is never used as a second
+activation validator.
+
+`export_domain<C>` explicitly forwards the declared Local domain from the
+selected embedded service or remote Client into the application. It declares
+that marker in all three catalogs, and its ordinary connection Fiber owns the
+publication and withdrawal. It does not turn an arbitrary Local capability into
+an API: the addon must still supply and enable an endpoint and a matching client.
+Missing exports fail application activation with connection cleanup retained.
+Factory metadata uses the public addon byte/depth/platform/count limits; schema
+traversal retains only a depth-bounded iterator stack. A preset manager records
+its declaring composition identity, and attaching or later changing addon inputs
+cannot silently pair an old compiler with a different contribution catalog.

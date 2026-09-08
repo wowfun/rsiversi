@@ -4,7 +4,13 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod addon;
 mod agent_preset;
+pub use addon::{
+    AddonFactoryDescription, AddonScope, MAXIMUM_ADDON_DESCRIPTION_BYTES, MAXIMUM_ADDON_PLATFORMS,
+    MAXIMUM_ADDON_SCHEMA_DEPTH, MAXIMUM_FACTORY_DESCRIPTION_BYTES, MAXIMUM_STANDARD_ADDONS,
+    StandardAddon, StandardAddonBuilder, StandardAddonSet,
+};
 mod application_connection;
 pub use application_connection::{ApplicationDiagnostics, standard_application_host};
 mod api_composition;
@@ -55,6 +61,12 @@ pub struct RunningRsi {
 }
 
 impl RunningRsi {
+    pub(crate) fn lookup_addon<C: rsi_meta::LocalContract>(
+        &self,
+    ) -> Option<std::sync::Arc<C::Service>> {
+        self.host.lookup_local::<C>()
+    }
+
     /// Boots the standard immutable catalog from one required Profile file.
     pub async fn boot(composition: StandardComposition, profile_path: &Path) -> Result<Self> {
         let host = composition

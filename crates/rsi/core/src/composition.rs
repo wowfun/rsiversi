@@ -3,8 +3,11 @@ use crate::agent_preset::{
 };
 use crate::profiles::{CodingToolsLaunchIdentity, HostLaunchKey, HostProfileDocument};
 use crate::settings::{AgentSettingsFactory, SETTINGS_FACTORY};
+use crate::{
+    AddonFactoryDescription, AddonScope, StandardAddon, StandardAddonBuilder, StandardAddonSet,
+};
 use async_trait::async_trait;
-use rsi_agent_composition::{AgentCompositionFactory, AgentContributionCatalog};
+use rsi_agent_composition::AgentCompositionFactory;
 use rsi_agent_composition_protocol::AgentCompositionContract;
 use rsi_agent_presets::{
     AgentPresetCatalog, AgentPresetCatalogConfig, AgentPresetId, AgentPresetLaunchIdentity,
@@ -30,8 +33,7 @@ use rsi_jobs::{Jobs, JobsContract};
 use rsi_jobs_tools::JobsToolsFactory;
 use rsi_media_protocol::{MediaBackendContract, MediaContract, MediaReadContract};
 use rsi_meta::{
-    ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation, ResolvedFactory,
-    UpdateMode,
+    ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation, UpdateMode,
 };
 use rsi_meta_scope::ScopeRoot;
 use rsi_permission_presets::PermissionPresetsContract;
@@ -92,34 +94,11 @@ const JOBS_TOOLS_FACTORY: &str = "rsi.jobs.tools";
 const AGENT_TOOLS_FACTORY: &str = "rsi.agent.tools";
 const WORKSPACE_CONTEXT_FACTORY: &str = "rsi.agent.workspace-context.local";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
-const STANDARD_AGENT_CONTRIBUTION_IDS: &[&str] = &[
-    BASH_TOOL_FACTORY,
-    JOBS_TOOLS_FACTORY,
-    AGENT_TOOLS_FACTORY,
-    APPLY_PATCH_FACTORY,
-    OUTPUT_READ_FACTORY,
-    QUESTION_TOOLS_FACTORY,
-];
-const PORTABLE_AGENT_CONTRIBUTION_IDS: &[&str] = &[
-    JOBS_TOOLS_FACTORY,
-    AGENT_TOOLS_FACTORY,
-    QUESTION_TOOLS_FACTORY,
-];
 const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
 const AGENT_COMPOSITION_FACTORY: &str = "rsi.agent.composition";
 const AGENT_GENERATION_ROOT_FACTORY: &str = "rsi.agent.generation-root";
 const LANGUAGE_FACTORY: &str = "rsi.ai.language";
 const IMAGE_FACTORY: &str = "rsi.ai.image";
-
-pub(crate) fn standard_agent_contribution_ids(
-    linux_tools_enabled: bool,
-) -> &'static [&'static str] {
-    if linux_tools_enabled {
-        STANDARD_AGENT_CONTRIBUTION_IDS
-    } else {
-        PORTABLE_AGENT_CONTRIBUTION_IDS
-    }
-}
 
 const STANDARD_AGENT_PROFILE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -137,8 +116,9 @@ pub struct StandardComposition {
     captured_environment: BTreeMap<String, SecretValue>,
     credential_store: Arc<dyn SecretStore>,
     coding_tools: Option<StandardCodingTools>,
-    agent_presets: Option<AgentPresetCatalog>,
+    agent_presets: Option<(AgentPresetCatalog, String)>,
     service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
+    addons: StandardAddonSet,
 }
 
 /// Frozen process inputs required by the standard Linux coding-tool generation.
@@ -156,6 +136,8 @@ pub struct StandardHostPreview {
     pub launch_key: HostLaunchKey,
     /// Generic Host compiler/resolver evidence.
     pub profile: rsi_host::HostProfilePreview,
+    /// Frozen factory descriptions; configurations have not been prepared.
+    pub factories: Vec<AddonFactoryDescription>,
 }
 
 impl StandardCodingTools {
@@ -187,53 +169,36 @@ impl StandardCodingTools {
     }
 }
 
-fn standard_agent_contributions(
+fn standard_agent_addon(
     coding_tools: Option<&StandardCodingTools>,
-) -> rsi_host::Result<AgentContributionCatalog> {
-    let mut factories = vec![
-        ResolvedFactory::linked(
-            QUESTION_TOOLS_FACTORY,
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(rsi_agent_tools::QuestionToolsFactory),
-        ),
-        ResolvedFactory::linked(
-            JOBS_TOOLS_FACTORY,
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(JobsToolsFactory),
-        ),
-        ResolvedFactory::linked(
-            AGENT_TOOLS_FACTORY,
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            Arc::new(AgentToolsFactory),
-        ),
-    ];
+) -> rsi_host::Result<StandardAddon> {
+    let mut builder = StandardAddonBuilder::new("rsi.standard.agent");
+    let mut register = |id: &str, factory: Arc<dyn PluginFactory>| {
+        builder
+            .register_factory(
+                AddonScope::Agent,
+                id,
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                factory,
+            )
+            .map(|_| ())
+    };
+    register(
+        QUESTION_TOOLS_FACTORY,
+        Arc::new(rsi_agent_tools::QuestionToolsFactory),
+    )?;
+    register(JOBS_TOOLS_FACTORY, Arc::new(JobsToolsFactory))?;
+    register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
     if let Some(coding) = coding_tools {
-        factories.extend([
-            ResolvedFactory::linked(
-                OUTPUT_READ_FACTORY,
-                env!("CARGO_PKG_VERSION"),
-                UpdateMode::RestartRequired,
-                Arc::new(crate::output_read::OutputReadToolFactory),
-            ),
-            ResolvedFactory::linked(
-                BASH_TOOL_FACTORY,
-                env!("CARGO_PKG_VERSION"),
-                UpdateMode::RestartRequired,
-                Arc::new(coding.bash_tool.clone()),
-            ),
-            ResolvedFactory::linked(
-                APPLY_PATCH_FACTORY,
-                env!("CARGO_PKG_VERSION"),
-                UpdateMode::RestartRequired,
-                Arc::new(coding.apply_patch.clone()),
-            ),
-        ]);
+        register(
+            OUTPUT_READ_FACTORY,
+            Arc::new(crate::output_read::OutputReadToolFactory),
+        )?;
+        register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
+        register(APPLY_PATCH_FACTORY, Arc::new(coding.apply_patch.clone()))?;
     }
-    AgentContributionCatalog::new(factories)
-        .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))
+    builder.build()
 }
 
 fn materialize_standard_agent_preset(paths: &HostPaths) -> rsi_host::Result<PathBuf> {
@@ -857,7 +822,51 @@ impl StandardComposition {
             coding_tools,
             agent_presets: None,
             service_owner: None,
+            addons: StandardAddonSet::default(),
         }
+    }
+
+    /// Adds explicit immutable addon declarations to every standard startup and preview path.
+    #[must_use]
+    pub fn with_addons(mut self, addons: StandardAddonSet) -> Self {
+        self.addons = addons;
+        self
+    }
+
+    /// Returns the supplied immutable addon declarations for application/client composition.
+    pub const fn addons(&self) -> &StandardAddonSet {
+        &self.addons
+    }
+
+    pub(crate) fn agent_addons(&self) -> rsi_host::Result<StandardAddonSet> {
+        self.addons.validate_platform(&format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))?;
+        self.addons
+            .merged(standard_agent_addon(self.coding_tools.as_ref())?)
+    }
+
+    pub(crate) fn agent_compiler_identity(&self) -> crate::Result<String> {
+        let addons = self
+            .agent_addons()
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        crate::agent_preset::standard_agent_compiler_identity(
+            &self.paths,
+            self.coding_tools.is_some(),
+            &addons,
+        )
+    }
+
+    /// Derives the Agent preset compiler from the actual frozen contribution declarations.
+    pub fn agent_profile_compiler(
+        &self,
+    ) -> crate::Result<rsi_agent_presets::AgentPresetProfileCompiler> {
+        let addons = self
+            .agent_addons()
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        standard_agent_profile_compiler(&self.paths, self.coding_tools.is_some(), &addons)
     }
 
     /// Replaces the credential store implementation for an explicit embedder.
@@ -867,11 +876,19 @@ impl StandardComposition {
         self
     }
 
-    /// Replaces the derived system/user catalog with one settings-backed catalog.
-    #[must_use]
-    pub fn with_agent_presets(mut self, presets: AgentPresetCatalog) -> Self {
-        self.agent_presets = Some(presets);
-        self
+    /// Uses a settings-backed catalog with the same frozen addon declarations.
+    pub fn with_agent_presets(
+        mut self,
+        presets: &crate::AgentPresetManager,
+    ) -> crate::Result<Self> {
+        let identity = self.agent_compiler_identity()?;
+        if identity != presets.composition_identity() {
+            return Err(crate::RsiError::Boot(
+                "Agent-preset manager uses different addon declarations".into(),
+            ));
+        }
+        self.agent_presets = Some((presets.catalog().clone(), identity));
+        Ok(self)
     }
 
     /// Supplies ownership already selected by the native process control plane.
@@ -891,6 +908,13 @@ impl StandardComposition {
         Ok(self)
     }
 
+    pub(crate) fn credentials_factory(&self) -> CredentialsLocalFactory {
+        CredentialsLocalFactory::with_store(
+            self.credential_store.clone(),
+            self.captured_environment.clone(),
+        )
+    }
+
     /// Returns the frozen paths used by this candidate.
     pub const fn paths(&self) -> &HostPaths {
         &self.paths
@@ -904,7 +928,7 @@ impl StandardComposition {
         &self,
         profile: &HostProfileDocument,
     ) -> crate::Result<StandardHostPreview> {
-        let (host, presets) = self
+        let (host, presets, factories) = self
             .build_internal(false, None)
             .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
         let composition_digest = host
@@ -930,31 +954,42 @@ impl StandardComposition {
         Ok(StandardHostPreview {
             launch_key,
             profile,
+            factories,
         })
     }
 
     /// Builds the generic Host without reading a Host Profile or activating plugins.
     pub fn build(self) -> rsi_host::Result<Host> {
-        self.build_internal(true, None).map(|(host, _presets)| host)
+        self.build_internal(true, None)
+            .map(|(host, _presets, _factories)| host)
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn build_daemon(self, launch_key: &str) -> rsi_host::Result<Host> {
         self.build_internal(true, Some(launch_key))
-            .map(|(host, _)| host)
+            .map(|(host, _, _)| host)
     }
 
-    fn build_internal(
+    fn preset_catalog(
         &self,
         materialize_assets: bool,
-        local_api: Option<&str>,
-    ) -> rsi_host::Result<(Host, AgentPresetLaunchIdentity)> {
-        let linux_tools_enabled = self.coding_tools.is_some();
+        agent_addons: &StandardAddonSet,
+    ) -> rsi_host::Result<AgentPresetCatalog> {
         let paths = self.paths.clone();
-        let compiler = standard_agent_profile_compiler(&paths, linux_tools_enabled)
+        let linux_tools_enabled = self.coding_tools.is_some();
+        let compiler = standard_agent_profile_compiler(&paths, linux_tools_enabled, agent_addons)
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
-        let presets = if let Some(presets) = &self.agent_presets {
-            presets.clone()
+        if let Some((presets, identity)) = &self.agent_presets {
+            if identity
+                != &self
+                    .agent_compiler_identity()
+                    .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
+            {
+                return Err(rsi_host::HostError::Bootstrap(
+                    "Agent-preset manager uses different addon declarations".into(),
+                ));
+            }
+            Ok(presets.clone())
         } else {
             let system_root = if materialize_assets {
                 materialize_standard_agent_preset(&paths)?
@@ -969,17 +1004,32 @@ impl StandardComposition {
                     .with_user_root(user_agent_preset_root(&paths)),
                 compiler,
             )
-            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
-        };
+            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))
+        }
+    }
+
+    fn build_internal(
+        &self,
+        materialize_assets: bool,
+        local_api: Option<&str>,
+    ) -> rsi_host::Result<(
+        Host,
+        AgentPresetLaunchIdentity,
+        Vec<AddonFactoryDescription>,
+    )> {
+        let linux_tools_enabled = self.coding_tools.is_some();
+        let paths = self.paths.clone();
+        let agent_addons = self.agent_addons()?;
+        let presets = self.preset_catalog(materialize_assets, &agent_addons)?;
         let preset_identity = presets.launch_identity();
-        let contributions = standard_agent_contributions(self.coding_tools.as_ref())?;
+        let contributions = agent_addons.agent_catalog()?;
         let agent_composition = AgentCompositionFactory::new(
             presets,
             contributions,
             ScopeRoot::new(ScopeRoot::MAXIMUM_ANCESTRY_DEPTH)
                 .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?,
         );
-        let mut builder = HostBuilder::new(paths.clone());
+        let mut builder = StandardAddonBuilder::new("rsi.standard.service");
         register_contracts(&mut builder)?;
         register_factories(
             &mut builder,
@@ -1035,12 +1085,17 @@ impl StandardComposition {
                 )],
             ))?;
         }
-        builder.build().map(|host| (host, preset_identity))
+        let addons = agent_addons.merged(builder.build()?)?;
+        let factories = addons.descriptions().cloned().collect();
+        let mut host = HostBuilder::new(paths);
+        addons.register_into(&mut host, AddonScope::Service)?;
+        host.define("rsi_standard_addons", json!(addons.digest()?))?;
+        host.build().map(|host| (host, preset_identity, factories))
     }
 }
 
 fn register_factories(
-    builder: &mut HostBuilder,
+    builder: &mut StandardAddonBuilder,
     credential_store: Arc<dyn SecretStore>,
     captured_environment: BTreeMap<String, SecretValue>,
     coding_tools: Option<StandardCodingTools>,
@@ -1106,7 +1161,7 @@ fn register_factories(
 
 #[allow(clippy::too_many_lines)] // The standard linked catalog is one product-owned composition boundary.
 fn register_runtime_factories(
-    builder: &mut HostBuilder,
+    builder: &mut StandardAddonBuilder,
     coding_tools: Option<StandardCodingTools>,
     agent_composition: AgentCompositionFactory,
 ) -> rsi_host::Result<()> {
@@ -1222,7 +1277,7 @@ fn register_runtime_factories(
     Ok(())
 }
 
-fn register_agent_ai_factories(builder: &mut HostBuilder) -> rsi_host::Result<()> {
+fn register_agent_ai_factories(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
     register(
         builder,
         LANGUAGE_FACTORY,
@@ -1275,7 +1330,7 @@ fn register_agent_ai_factories(builder: &mut HostBuilder) -> rsi_host::Result<()
 }
 
 fn register(
-    builder: &mut HostBuilder,
+    builder: &mut StandardAddonBuilder,
     id: &'static str,
     mode: UpdateMode,
     factory: impl PluginFactory,
@@ -1284,7 +1339,7 @@ fn register(
     Ok(())
 }
 
-fn register_contracts(builder: &mut HostBuilder) -> rsi_host::Result<()> {
+fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
     builder.register_local_contract::<StorageHubContract>()?;
     builder.register_local_contract::<DomainFacilityContract>()?;
     builder.register_local_contract::<SettingsProviderContract>()?;
@@ -1392,14 +1447,12 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
                 Value::Null
             },
         ),
-        ProfileEntry::new("rsi-commands", COMMANDS_FACTORY, Value::Null),
         ProfileEntry::new("rsi-jobs", JOBS_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-session-jobs-finalizer",
             JOBS_FINALIZER_FACTORY,
             Value::Null,
         ),
-        ProfileEntry::new("rsi-projection", PROJECTION_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-workspace",
             WORKSPACE_FACTORY,
@@ -1664,7 +1717,10 @@ mod tests {
             ]
         );
 
-        let portable = standard_agent_contributions(None).unwrap();
+        let portable = StandardAddonSet::new([standard_agent_addon(None).unwrap()])
+            .unwrap()
+            .agent_catalog()
+            .unwrap();
         let jobs = rsi_meta::PluginId::from(JOBS_TOOLS_FACTORY);
         assert!(portable.resolve(&jobs).is_ok());
         for linux_only in [BASH_TOOL_FACTORY, APPLY_PATCH_FACTORY] {

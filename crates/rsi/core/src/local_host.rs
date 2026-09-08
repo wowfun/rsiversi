@@ -85,6 +85,13 @@ impl ServiceHostConnection {
             }
         }
     }
+    pub(crate) fn lookup_addon<C: rsi_meta::LocalContract>(&self) -> Option<Arc<C::Service>> {
+        if let Some(remote) = &self.remote {
+            return remote.lookup_local::<C>();
+        }
+        self.embedded.as_ref()?.running.lookup_addon::<C>()
+    }
+
     /// Returns the exact selected ownership mode.
     pub const fn mode(&self) -> ServiceHostConnectionMode {
         self.mode
@@ -199,6 +206,7 @@ pub async fn connect_or_embed_service_host(
                                 &metadata,
                                 parent,
                                 composition.paths().clone(),
+                                composition.addons(),
                             ),
                         )
                         .await;

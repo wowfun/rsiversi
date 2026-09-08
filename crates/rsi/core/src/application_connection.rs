@@ -5,19 +5,15 @@ mod operator;
 mod service;
 use crate::{
     AgentPresetManager, HostProfileDocument, HostProfileId, ProfileCatalog, RsiError,
-    StandardCodingTools, StandardComposition,
+    StandardComposition,
 };
 use async_trait::async_trait;
-use rsi_credentials_protocol::SecretValue;
-use rsi_host::{Host, HostBuilder, HostPaths};
+use rsi_host::{Host, HostBuilder};
 use rsi_meta::{
     ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation, UpdateMode,
 };
 use serde::Deserialize;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 const CONNECTION: &str = "rsi.application.connection";
 
@@ -29,9 +25,7 @@ struct Configuration {
 
 #[derive(Debug)]
 struct ConnectionFactory {
-    paths: HostPaths,
-    environment: BTreeMap<String, SecretValue>,
-    coding_tools: Option<StandardCodingTools>,
+    composition: StandardComposition,
     diagnostic: Mutex<Option<RsiError>>,
 }
 impl ConnectionFactory {
@@ -40,22 +34,17 @@ impl ConnectionFactory {
         plan: &mut ActivationPlan,
     ) -> rsi_meta::Result<(HostProfileDocument, StandardComposition)> {
         let host = plan.take_state::<HostProfileDocument>()?;
-        let system_root = crate::standard_agent_preset_root(&self.paths)
+        let system_root = crate::standard_agent_preset_root(self.composition.paths())
             .map_err(|error| self.diagnosed(error))?;
-        let presets = AgentPresetManager::open_standard_in(
-            plan.context(),
-            self.paths.clone(),
-            system_root,
-            self.coding_tools.is_some(),
-        )
-        .await
-        .map_err(|error| self.diagnosed(error))?;
-        let composition = StandardComposition::new(
-            self.paths.clone(),
-            self.environment.clone(),
-            self.coding_tools.clone(),
-        )
-        .with_agent_presets(presets.catalog().clone());
+        let presets =
+            AgentPresetManager::open_standard_in(plan.context(), &self.composition, system_root)
+                .await
+                .map_err(|error| self.diagnosed(error))?;
+        let composition = self
+            .composition
+            .clone()
+            .with_agent_presets(&presets)
+            .map_err(|error| self.diagnosed(error))?;
         plan.defer(
             "close application preset Profile",
             Box::new(move || {
@@ -93,7 +82,7 @@ impl PluginFactory for ConnectionFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: Configuration =
             serde_json::from_value(config.clone()).map_err(|error| self.diagnosed(error))?;
-        let host = ProfileCatalog::new(self.paths.clone())
+        let host = ProfileCatalog::new(self.composition.paths().clone())
             .host(&config.host_profile)
             .map_err(|error| self.diagnosed(error))?;
         let retained = host.contents.len() + 4096;
@@ -108,6 +97,10 @@ impl PluginFactory for ConnectionFactory {
         let connection = crate::connect_or_embed_service_host(plan.context(), composition, &host)
             .await
             .map_err(|error| self.diagnosed(error))?;
+        let exports = self
+            .composition
+            .addons()
+            .publish_domains(&mut plan, crate::addon::DomainLookup::Local(&connection));
         let session = connection.session_service();
         let workspace = connection.workspace_registry();
         let models = connection.language_models();
@@ -128,6 +121,7 @@ impl PluginFactory for ConnectionFactory {
                 })
             }),
         )?;
+        exports.map_err(|error| self.diagnosed(error))?;
         let context = plan.context();
         let supplies = vec![
             context.provide_local::<rsi_session_protocol::SessionContract>(session)?,
@@ -183,16 +177,12 @@ impl ApplicationDiagnostics {
 
 /// Freezes the ordinary native application catalog without activating any backend.
 pub fn standard_application_host(
-    paths: HostPaths,
+    composition: StandardComposition,
     arguments: Vec<std::ffi::OsString>,
-    environment: BTreeMap<String, SecretValue>,
-    coding_tools: Option<StandardCodingTools>,
 ) -> crate::Result<(Host, ApplicationDiagnostics)> {
     let diagnostics = ApplicationDiagnostics {
         connection: Arc::new(ConnectionFactory {
-            paths: paths.clone(),
-            environment,
-            coding_tools,
+            composition,
             diagnostic: Mutex::new(None),
         }),
         cli: Arc::new(rsi_terminal::CliFactory::new(arguments.clone())),
@@ -202,21 +192,30 @@ pub fn standard_application_host(
         web_serve: Arc::new(rsi_serve::ServeFactory::with_web_assets(arguments.clone())),
         serve: Arc::new(rsi_serve::ServeFactory::new(arguments)),
     };
-    let mut builder = HostBuilder::new(paths);
+    let mut builder = crate::StandardAddonBuilder::new("rsi.standard.application");
+    diagnostics
+        .connection
+        .composition
+        .addons()
+        .validate_platform(&format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+        .map_err(boot)?;
     register_contracts(&mut builder)?;
     builder
-        .register_linked(
+        .register_factory(
+            crate::AddonScope::Application,
             "rsi.credentials.local",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
-            Arc::new(rsi_credentials_local::CredentialsLocalFactory::with_store(
-                Arc::new(rsi_credentials_local::KeyringSecretStore),
-                diagnostics.connection.environment.clone(),
-            )),
+            Arc::new(diagnostics.connection.composition.credentials_factory()),
         )
         .map_err(boot)?;
     builder
-        .register_linked(
+        .register_factory(
+            crate::AddonScope::Application,
             "rsi.application.http",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
@@ -225,7 +224,8 @@ pub fn standard_application_host(
         .map_err(boot)?;
     #[cfg(target_os = "linux")]
     builder
-        .register_linked(
+        .register_factory(
+            crate::AddonScope::Application,
             "rsi.application.service",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
@@ -234,7 +234,8 @@ pub fn standard_application_host(
         .map_err(boot)?;
     #[cfg(target_os = "linux")]
     builder
-        .register_linked(
+        .register_factory(
+            crate::AddonScope::Application,
             "rsi.application.operator",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
@@ -253,7 +254,8 @@ pub fn standard_application_host(
     ];
     for (id, factory) in factories {
         builder
-            .register_linked(
+            .register_factory(
+                crate::AddonScope::Application,
                 id,
                 env!("CARGO_PKG_VERSION"),
                 UpdateMode::RestartRequired,
@@ -261,69 +263,118 @@ pub fn standard_application_host(
             )
             .map_err(boot)?;
     }
-    Ok((builder.build().map_err(boot)?, diagnostics))
+    let addons = diagnostics
+        .connection
+        .composition
+        .addons()
+        .merged(builder.build().map_err(boot)?)
+        .map_err(boot)?;
+    let mut host = HostBuilder::new(diagnostics.connection.composition.paths().clone());
+    addons
+        .register_into(&mut host, crate::AddonScope::Application)
+        .map_err(boot)?;
+    Ok((host.build().map_err(boot)?, diagnostics))
 }
+
 fn boot(error: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(error.to_string())
 }
 
-fn register_contracts(builder: &mut HostBuilder) -> crate::Result<()> {
+fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
     builder
-        .register_local_contract::<rsi_api_http::HttpAssetsContract>()
+        .register_local_contract_at::<rsi_api_http::HttpAssetsContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_credentials_protocol::CredentialsResolveContract>()
+        .register_local_contract_at::<rsi_credentials_protocol::CredentialsResolveContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_credentials_protocol::CredentialsAdminContract>()
+        .register_local_contract_at::<rsi_credentials_protocol::CredentialsAdminContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_settings_protocol::SettingsAccessContract>()
+        .register_local_contract_at::<rsi_settings_protocol::SettingsAccessContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_media_protocol::MediaReadContract>()
+        .register_local_contract_at::<rsi_media_protocol::MediaReadContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_api_protocol::ApiClientContract>()
+        .register_local_contract_at::<rsi_api_protocol::ApiClientContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_application::ApplicationRunContract>()
+        .register_local_contract_at::<rsi_application::ApplicationRunContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_client::ConnectionLifetimeContract>()
+        .register_local_contract_at::<rsi_client::ConnectionLifetimeContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_session_protocol::SessionContract>()
+        .register_local_contract_at::<rsi_session_protocol::SessionContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_workspace_protocol::WorkspaceRegistryContract>()
+        .register_local_contract_at::<rsi_workspace_protocol::WorkspaceRegistryContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_ai_protocol::LanguageModelsContract>()
+        .register_local_contract_at::<rsi_ai_protocol::LanguageModelsContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_process::ProcessOutputCacheContract>()
+        .register_local_contract_at::<rsi_process::ProcessOutputCacheContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_media_protocol::MediaContract>()
+        .register_local_contract_at::<rsi_media_protocol::MediaContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_api_protocol::DeviceAdministrationContract>()
+        .register_local_contract_at::<rsi_api_protocol::DeviceAdministrationContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_api_http::HttpListenerContract>()
+        .register_local_contract_at::<rsi_api_http::HttpListenerContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_api_protocol::ApiDispatchContract>()
+        .register_local_contract_at::<rsi_api_protocol::ApiDispatchContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_api_protocol::DeviceAuthenticationContract>()
+        .register_local_contract_at::<rsi_api_protocol::DeviceAuthenticationContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_api_protocol::ConnectionDescriptionContract>()
+        .register_local_contract_at::<rsi_api_protocol::ConnectionDescriptionContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     builder
-        .register_local_contract::<rsi_serve::ServingServiceContract>()
+        .register_local_contract_at::<rsi_serve::ServingServiceContract>(
+            crate::AddonScope::Application,
+        )
         .map_err(boot)?;
     Ok(())
 }

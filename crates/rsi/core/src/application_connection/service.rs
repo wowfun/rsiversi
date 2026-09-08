@@ -22,7 +22,7 @@ impl PluginFactory for ServiceFactory {
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (profile, composition) = self.0.compose(&mut plan).await?;
-        let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&self.0.paths)
+        let paths = rsi_service_host::ServiceHostPaths::from_host_paths(self.0.composition.paths())
             .map_err(|error| self.0.diagnosed(error))?;
         let owner = rsi_service_host::HostOwnerLease::try_acquire(paths)
             .map_err(|error| self.0.diagnosed(error))?;
@@ -60,6 +60,10 @@ impl PluginFactory for ServiceFactory {
                 })
             }),
         )?;
+        self.0
+            .composition
+            .addons()
+            .publish_domains(&mut plan, crate::addon::DomainLookup::Service(&running))?;
         let context = plan.context();
         let service = Arc::new(Service {
             running: Arc::downgrade(&running),
