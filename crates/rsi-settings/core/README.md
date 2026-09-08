@@ -20,3 +20,9 @@ snapshots carry it alongside their revision. Versioned writes compare identity
 within the namespace lookup without copying a resolved value, then retain that scope's generation fence
 through validation and durable commit. Re-registration and service restart
 cannot reuse an earlier client's revision-zero authority.
+
+The namespace owner supplies validated descriptive metadata at registration.
+Discovery omits retiring entries and unregistered provider sections. Listing
+retains only the requested page plus one lookahead name; describing one namespace
+captures its version, defaults, metadata and provider writability under the same
+registry lock. It neither acquires a registration lease nor changes a revision.

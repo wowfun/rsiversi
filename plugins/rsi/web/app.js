@@ -404,15 +404,27 @@ function showDialog(key, title, body) {
 async function closeDetail() { await command({ action: "close_detail" }); dialogKey = undefined; $("detail").close(); }
 $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
-$("settings-open").addEventListener("click", () => perform(async () => {
-  await command({ action: "close_detail" });
-  const form = element("form"); const input = element("input"); input.value = "rsi.agent"; input.required = true; input.setAttribute("aria-label", "Settings namespace");
-  const submit = element("button", "primary", "Read settings"); submit.type = "submit";
-  form.append(element("label", "", "Settings namespace"), input, submit);
-  form.addEventListener("submit", event => { event.preventDefault(); perform(() => command({ action: "settings_read", namespace: input.value })); });
-  showDialog("settings-prompt", "Settings", form);
-}));
+$("settings-open").addEventListener("click", () => perform(() => command({ action: "settings_list" })));
 function renderDetail(next) {
+  if (next.settings_catalog) {
+    const catalog = next.settings_catalog;
+    const key = JSON.stringify(catalog);
+    if (dialogKey === key) return;
+    const body = element("div", "settings-catalog");
+    if (catalog.error) body.append(element("p", "settings-error", catalog.error));
+    else if (!catalog.page) body.append(element("p", "", catalog.namespace ? `Reading ${catalog.namespace}…` : "Loading registered settings…"));
+    else {
+      const list = element("div", "settings-list");
+      for (const namespace of catalog.page.namespaces) list.append(button(namespace, () => command({ action: "settings_read", namespace }), "settings-namespace quiet"));
+      if (!catalog.page.namespaces.length) list.append(element("p", "", "No registered settings."));
+      const actions = element("div", "actions");
+      const nextPage = button("More settings", () => command({ action: "settings_next", ticket: catalog.ticket }));
+      nextPage.disabled = catalog.page.next == null;
+      actions.append(button("Refresh settings", () => command({ action: "settings_list" })), nextPage);
+      body.append(list, actions);
+    }
+    showDialog(key, "Settings", body); return;
+  }
   if (next.block_sources) {
     const detail = next.block_sources;
     const key = `block-sources:${detail.ticket}`;
@@ -455,7 +467,16 @@ function renderDetail(next) {
     if (dialogKey === editor.ticket) return;
     const form = element("form"); const text = element("textarea", "settings-text"); text.value = editor.text; text.spellcheck = false; text.setAttribute("aria-label", "Settings JSON");
     const save = element("button", "primary", "Save settings"); save.type = "submit";
-    form.append(element("p", "hint", "Changes apply to new conversations. Saving requires the version you opened."), text, save);
+    const description = editor.description;
+    const applies = { live: "Applies live", new_session: "Applies to new conversations", restart: "Restart required" }[description.metadata.applies];
+    form.append(element("p", "settings-applies", applies), element("p", "hint", description.metadata.description));
+    for (const [label, value] of [["Schema", description.metadata.schema], ["Defaults", description.defaults]]) {
+      const disclosure = element("details", "settings-description");
+      disclosure.append(element("summary", "", label), element("pre", "", JSON.stringify(value, null, 2))); form.append(disclosure);
+    }
+    if (description.metadata.sensitive_fields.length) form.append(element("p", "hint", `Sensitive fields: ${description.metadata.sensitive_fields.map(path => path.join(" / ") || "(root)").join(", ")}`));
+    form.append(element("p", "hint", "Saving requires the version you opened."), text, save);
+    if (!description.writable) { text.readOnly = true; save.disabled = true; form.append(element("p", "hint", "Settings provider is read-only.")); }
     if (new TextEncoder().encode(editor.text).length > 1024 * 1024) {
       text.readOnly = true; save.disabled = true; form.append(element("p", "hint", "This value exceeds the Web editor's 1 MiB input limit."));
     }

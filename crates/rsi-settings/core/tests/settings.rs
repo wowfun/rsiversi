@@ -15,6 +15,7 @@ use tokio::sync::Notify;
 
 #[derive(Debug, Default)]
 struct PausingProvider {
+    read_only: bool,
     document: Mutex<SettingsDocument>,
     committed: Notify,
     release: Notify,
@@ -23,7 +24,7 @@ struct PausingProvider {
 #[async_trait]
 impl SettingsProvider for PausingProvider {
     fn writable(&self) -> bool {
-        true
+        !self.read_only
     }
 
     async fn load(&self) -> SettingsResult<SettingsDocument> {
@@ -136,6 +137,12 @@ fn spec() -> SettingsSpec {
         namespace: "agent".into(),
         defaults: json!({"model":"default"}),
         base: json!({}),
+        metadata: rsi_settings_protocol::SettingsMetadata {
+            schema: serde_json::json!({"type":"object"}),
+            applies: rsi_settings_protocol::SettingsApply::Live,
+            description: "Fixture values apply live".into(),
+            sensitive_fields: vec![],
+        },
         validator: Arc::new(ValidateWith(|value: &Value| {
             value
                 .get("model")
@@ -180,6 +187,12 @@ async fn merge_revision_cas_and_lease_staleness_are_one_contract() {
             namespace: "agent".into(),
             defaults: json!({"model":"default", "nested":{"default":true}, "list":[1]}),
             base: json!({"nested":{"base":true}, "list":[2]}),
+            metadata: rsi_settings_protocol::SettingsMetadata {
+                schema: serde_json::json!({"type":"object"}),
+                applies: rsi_settings_protocol::SettingsApply::Live,
+                description: "Fixture values apply live".into(),
+                sensitive_fields: vec![],
+            },
             validator: Arc::new(ValidateWith(|value: &Value| {
                 value
                     .get("model")
@@ -436,6 +449,12 @@ fn client_spec() -> SettingsSpec {
         namespace: "client".into(),
         defaults: json!({"count":1}),
         base: json!({}),
+        metadata: rsi_settings_protocol::SettingsMetadata {
+            schema: serde_json::json!({"type":"object"}),
+            applies: rsi_settings_protocol::SettingsApply::Live,
+            description: "Fixture values apply live".into(),
+            sensitive_fields: vec![],
+        },
         validator: Arc::new(ValidateWith(|value: &Value| {
             if value["count"].is_u64() {
                 Ok(())
@@ -443,5 +462,145 @@ fn client_spec() -> SettingsSpec {
                 Err(SettingsError::InvalidInput("count must be unsigned".into()))
             }
         })),
+    }
+}
+
+#[tokio::test]
+async fn discovery_is_bounded_to_active_names_and_registration_metadata() {
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            linked(
+                "memory",
+                Arc::new(MemorySettingsProviderFactory::new(
+                    json!({"unregistered":{"not_a_namespace":true}}),
+                )),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    runtime
+        .root()
+        .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+        .await
+        .unwrap();
+    let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+    let access = runtime
+        .root()
+        .lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
+        .unwrap();
+    assert!(access.list(None, 64).await.unwrap().namespaces.is_empty());
+    let mut leases = Vec::new();
+    for index in (0..70).rev() {
+        let mut entry = spec();
+        entry.namespace = format!("test-{index:02}");
+        leases.push(registry.register(entry).unwrap());
+    }
+    let first = access.list(None, 64).await.unwrap();
+    assert_eq!(first.namespaces.len(), 64);
+    assert_eq!(first.namespaces[0], "test-00");
+    assert_eq!(first.next.as_deref(), Some("test-63"));
+    let last = access.list(first.next.as_deref(), 64).await.unwrap();
+    assert_eq!(
+        last.namespaces,
+        (64..70)
+            .map(|index| format!("test-{index:02}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(last.next.is_none());
+    let description = access.describe("test-00").await.unwrap();
+    assert_eq!(description.defaults, spec().defaults);
+    assert_eq!(description.metadata, spec().metadata);
+    assert!(description.writable);
+    assert_eq!(description.version.revision, 0);
+    drop(leases.pop().unwrap());
+    assert!(matches!(
+        access.describe("test-00").await,
+        Err(SettingsError::UnknownNamespace(_))
+    ));
+    assert_eq!(access.list(None, 1).await.unwrap().namespaces, ["test-01"]);
+    let mut entry = spec();
+    entry.namespace = "test-00".into();
+    let replacement = registry.register(entry).unwrap();
+    assert_ne!(
+        access.describe("test-00").await.unwrap().version.scope_id,
+        description.version.scope_id
+    );
+    let mut bad = spec();
+    bad.metadata.schema = json!("invalid schema");
+    assert!(registry.register(bad).is_err());
+    assert!(access.describe("agent").await.is_err());
+    assert!(access.describe("unregistered").await.is_err());
+    drop(replacement);
+    drop(leases);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn descriptions_report_read_only_and_hide_retiring_registrations() {
+    for read_only in [true, false] {
+        let runtime = Runtime::default();
+        let provider = Arc::new(PausingProvider {
+            read_only,
+            ..Default::default()
+        });
+        runtime
+            .root()
+            .apply(
+                linked(
+                    "provider",
+                    Arc::new(PausingProviderFactory(provider.clone())),
+                ),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+        runtime
+            .root()
+            .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+            .await
+            .unwrap();
+        let registry = runtime.root().lookup_local::<SettingsContract>().unwrap();
+        let access = runtime
+            .root()
+            .lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
+            .unwrap();
+        let registration = registry.register(spec()).unwrap();
+        let description = access.describe("agent").await.unwrap();
+        assert_eq!(description.writable, !read_only);
+        let scope = registration.scope.clone();
+        if read_only {
+            assert!(matches!(
+                scope.replace(0, json!({"model":"changed"})).await,
+                Err(SettingsError::ReadOnly)
+            ));
+            assert!(provider.document.lock().unwrap().is_empty());
+            drop(registration);
+        } else {
+            let write =
+                tokio::spawn(async move { scope.replace(0, json!({"model":"changed"})).await });
+            provider.committed.notified().await;
+            drop(registration);
+            assert!(access.list(None, 64).await.unwrap().namespaces.is_empty());
+            assert!(matches!(
+                access.describe("agent").await,
+                Err(SettingsError::UnknownNamespace(_))
+            ));
+            assert!(matches!(
+                registry.register(spec()),
+                Err(SettingsError::DuplicateNamespace(_))
+            ));
+            provider.release.notify_one();
+            write.await.unwrap().unwrap();
+            let replacement = registry.register(spec()).unwrap();
+            assert_ne!(
+                access.describe("agent").await.unwrap().version.scope_id,
+                description.version.scope_id
+            );
+            drop(replacement);
+        }
+        assert!(runtime.shutdown().await.is_clean());
     }
 }

@@ -1,10 +1,11 @@
-use crate::wire::{Clear, Failure, Operation, Read, Replace};
+use crate::wire::{Clear, Failure, List, Operation, Read, Replace};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiClientContract, ApiError, call_json};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_settings_protocol::{
-    Result, SettingsAccess, SettingsAccessContract, SettingsError, SettingsSnapshot,
-    SettingsVersion, validate_namespace, validate_section,
+    Result, SettingsAccess, SettingsAccessContract, SettingsDescription, SettingsError,
+    SettingsPage, SettingsSnapshot, SettingsVersion, validate_namespace, validate_section,
+    validate_settings_page,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -60,6 +61,41 @@ impl SettingsClient {
 }
 #[async_trait]
 impl SettingsAccess for SettingsClient {
+    async fn list(&self, after: Option<&str>, limit: usize) -> Result<SettingsPage> {
+        validate_settings_page(after, limit)?;
+        let page = call_json::<_, SettingsPage, Failure>(
+            self.api.as_ref(),
+            &Operation::List.spec(),
+            &List {
+                after: after.map(str::to_owned),
+                limit,
+            },
+        )
+        .await
+        .map_err(SettingsError::Api)?
+        .map_err(|failure| failure.into_error("discovery", None))?;
+        page.validate(after, limit).map_err(|_| {
+            SettingsError::Api(ApiError::Invalid("invalid Settings discovery page".into()))
+        })?;
+        Ok(page)
+    }
+    async fn describe(&self, namespace: &str) -> Result<SettingsDescription> {
+        validate_namespace(namespace)?;
+        let description = call_json::<_, SettingsDescription, Failure>(
+            self.api.as_ref(),
+            &Operation::Describe.spec(),
+            &Read {
+                namespace: namespace.into(),
+            },
+        )
+        .await
+        .map_err(SettingsError::Api)?
+        .map_err(|failure| failure.into_error(namespace, None))?;
+        description.validate(namespace).map_err(|_| {
+            SettingsError::Api(ApiError::Invalid("invalid Settings description".into()))
+        })?;
+        Ok(description)
+    }
     async fn read(&self, namespace: &str) -> Result<SettingsSnapshot> {
         validate_namespace(namespace)?;
         self.call(

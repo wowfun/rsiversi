@@ -58,6 +58,15 @@ impl PluginFactory for CatalogFactory {
                 namespace: AGENT_PRESET_SETTINGS_NAMESPACE.into(),
                 defaults: json!({"default":DEFAULT_AGENT_PRESET_ID,"roots":[]}),
                 base: json!({}),
+                metadata: rsi_settings_protocol::SettingsMetadata {
+                    schema: json!({"type":"object","additionalProperties":false,"required":["default","roots"],"properties":{
+                        "default":{"type":"string","description":"Default selection for future drafts."},
+                        "roots":{"type":"array","description":"Absolute discovery roots; changing roots requires restarting the catalog.","items":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"trust":{"enum":["system","user"]}}}}
+                    }}),
+                    applies: rsi_settings_protocol::SettingsApply::Restart,
+                    description: "Root changes require restarting the catalog. The default preset is read for future selections without restarting; existing Sessions retain their pinned composition.".into(),
+                    sensitive_fields: vec![vec!["roots".into()]],
+                },
                 validator: Arc::new(ValidateWith(validate_settings)),
             })
             .map_err(|error| self.diagnosed(settings_boot(error)))?;

@@ -114,6 +114,10 @@ pub(crate) enum Command {
     SettingsRead {
         namespace: String,
     },
+    SettingsList,
+    SettingsNext {
+        ticket: String,
+    },
     SettingsSave {
         ticket: String,
         text: String,
@@ -145,6 +149,7 @@ pub(crate) struct SettingsEditor {
     pub namespace: String,
     pub text: String,
     pub ticket: String,
+    pub description: rsi_settings_protocol::SettingsDescription,
     #[serde(skip)]
     pub version: rsi_settings_protocol::SettingsVersion,
 }
@@ -235,6 +240,7 @@ impl WebApplication {
         reservation.encode(&serde_json::json!({
             "panes": panes, "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "settings": details.editor,
+            "settings_catalog": details.settings_catalog,
             "detail": details.interaction,
             "source_detail": details.source,
             "block_sources": details.block_sources,
@@ -258,6 +264,8 @@ impl WebApplication {
                 self.refresh(Command::Refresh).await
             }
             Command::SettingsRead { namespace } => self.read_settings(&namespace).await,
+            Command::SettingsList => self.list_settings(None).await,
+            Command::SettingsNext { ticket } => self.list_settings(Some(&ticket)).await,
             Command::SettingsSave { ticket, text } => self.save_settings(&ticket, &text).await,
             Command::CloseDetail => {
                 self.details.lock().expect("Web details poisoned").begin()?;

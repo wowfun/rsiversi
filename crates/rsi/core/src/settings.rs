@@ -60,6 +60,7 @@ impl PluginFactory for AgentSettingsFactory {
                     }
                 }),
                 base: json!({}),
+                metadata: metadata(),
                 validator: Arc::new(ValidateWith(validate_settings)),
             })
             .map_err(|error| settings_meta(&error))?;
@@ -83,6 +84,32 @@ impl PluginFactory for AgentSettingsFactory {
                 })
             }),
         )
+    }
+}
+
+fn metadata() -> rsi_settings_protocol::SettingsMetadata {
+    rsi_settings_protocol::SettingsMetadata {
+        schema: json!({
+            "type":"object", "additionalProperties":false,
+            "required":["settings_id","system_prompt","default_model","sandbox","require_approval","turn_budget"],
+            "properties": {
+                "settings_id":{"type":"string","description":"Immutable settings identity captured in each Session."},
+                "system_prompt":{"type":"string"},
+                "default_model":{"type":"object","additionalProperties":false,"required":["deployment","model"],"properties":{"deployment":{"type":"string"},"model":{"type":"string"}}},
+                "sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},
+                "require_approval":{"type":"boolean"},
+                "turn_budget":{"type":"object","additionalProperties":false,"properties":{
+                    "maximum_elapsed_ms":{"type":"integer","minimum":0},
+                    "maximum_provider_attempts":{"type":"integer","minimum":0},
+                    "maximum_tool_calls":{"type":"integer","minimum":0},
+                    "maximum_generated_records":{"type":"integer","minimum":0},
+                    "maximum_generated_record_bytes":{"type":"integer","minimum":0}
+                },"description":"The Agent validator enforces its exact bounded Turn budget."}
+            }
+        }),
+        applies: rsi_settings_protocol::SettingsApply::NewSession,
+        description: "New conversations capture these values. Existing drafts and durable Sessions keep their original defaults; explicit Turn inputs retain their existing override rules.".into(),
+        sensitive_fields: vec![],
     }
 }
 

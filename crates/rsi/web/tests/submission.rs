@@ -6,6 +6,8 @@ use rsi_session_protocol::*;
 use std::sync::{Arc, Mutex};
 #[path = "submission/commands.rs"]
 mod commands;
+#[path = "submission/settings.rs"]
+mod settings;
 #[path = "submission/sources.rs"]
 mod sources;
 
@@ -16,6 +18,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    settings: Arc<settings::Fixture>,
     block_source: std::sync::atomic::AtomicBool,
     active_source: std::sync::atomic::AtomicUsize,
     commands: Mutex<Vec<SessionCommandInvocation>>,
@@ -332,30 +335,6 @@ impl rsi_ai_protocol::LanguageModels for Unused {
         unreachable!()
     }
 }
-#[async_trait]
-impl rsi_settings_protocol::SettingsAccess for Unused {
-    async fn read(
-        &self,
-        _: &str,
-    ) -> rsi_settings_protocol::Result<rsi_settings_protocol::SettingsSnapshot> {
-        unreachable!()
-    }
-    async fn replace(
-        &self,
-        _: &str,
-        _: &rsi_settings_protocol::SettingsVersion,
-        _: serde_json::Value,
-    ) -> rsi_settings_protocol::Result<rsi_settings_protocol::SettingsSnapshot> {
-        unreachable!()
-    }
-    async fn clear(
-        &self,
-        _: &str,
-        _: &rsi_settings_protocol::SettingsVersion,
-    ) -> rsi_settings_protocol::Result<rsi_settings_protocol::SettingsSnapshot> {
-        unreachable!()
-    }
-}
 #[derive(Debug)]
 struct Providers(Arc<Backend>);
 #[async_trait]
@@ -378,7 +357,7 @@ impl PluginFactory for Providers {
             .unwrap();
         let _se = plan
             .context()
-            .provide_local::<rsi_settings_protocol::SettingsAccessContract>(Arc::new(Unused))
+            .provide_local::<rsi_settings_protocol::SettingsAccessContract>(self.0.settings.clone())
             .unwrap();
         plan.defer(
             "withdraw fake domains",

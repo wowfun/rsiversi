@@ -43,6 +43,12 @@ async fn local_write_preserves_unloaded_namespaces_and_detects_external_change()
             namespace: "loaded".into(),
             defaults: json!({}),
             base: json!({}),
+            metadata: rsi_settings_protocol::SettingsMetadata {
+                schema: serde_json::json!({"type":"object"}),
+                applies: rsi_settings_protocol::SettingsApply::Live,
+                description: "Fixture values apply live".into(),
+                sensitive_fields: vec![],
+            },
             validator: Arc::new(ValidateWith(|_: &Value| Ok(()))),
         })
         .unwrap();
@@ -121,6 +127,12 @@ async fn preplaced_temporary_symlinks_cannot_overwrite_their_target() {
             namespace: "loaded".into(),
             defaults: json!({}),
             base: json!({}),
+            metadata: rsi_settings_protocol::SettingsMetadata {
+                schema: serde_json::json!({"type":"object"}),
+                applies: rsi_settings_protocol::SettingsApply::Live,
+                description: "Fixture values apply live".into(),
+                sensitive_fields: vec![],
+            },
             validator: Arc::new(ValidateWith(|_: &Value| Ok(()))),
         })
         .unwrap();
@@ -169,6 +181,12 @@ async fn preplaced_lock_symlink_is_rejected_without_chmodding_its_target() {
             namespace: "loaded".into(),
             defaults: json!({}),
             base: json!({}),
+            metadata: rsi_settings_protocol::SettingsMetadata {
+                schema: serde_json::json!({"type":"object"}),
+                applies: rsi_settings_protocol::SettingsApply::Live,
+                description: "Fixture values apply live".into(),
+                sensitive_fields: vec![],
+            },
             validator: Arc::new(ValidateWith(|_: &Value| Ok(()))),
         })
         .unwrap();

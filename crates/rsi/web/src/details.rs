@@ -59,6 +59,14 @@ pub(crate) struct SourceDetail {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct SettingsCatalog {
+    pub ticket: String,
+    pub namespace: Option<String>,
+    pub page: Option<rsi_settings_protocol::SettingsPage>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Details {
     revision: u64,
@@ -66,6 +74,7 @@ pub(crate) struct Details {
     pub source: Option<SourceDetail>,
     pub block_sources: Option<BlockSources>,
     pub editor: Option<SettingsEditor>,
+    pub settings_catalog: Option<SettingsCatalog>,
     pub interaction: Option<Value>,
 }
 impl Details {
@@ -79,6 +88,7 @@ impl Details {
         self.source = None;
         self.block_sources = None;
         self.editor = None;
+        self.settings_catalog = None;
         self.interaction = None;
         Ok(self.revision)
     }
@@ -113,7 +123,29 @@ impl Details {
     }
     pub fn settings(&mut self, revision: u64, editor: SettingsEditor) {
         if self.revision == revision {
+            self.settings_catalog = None;
             self.editor = Some(editor);
+        }
+    }
+    pub fn settings_page(
+        &mut self,
+        revision: u64,
+        result: Result<rsi_settings_protocol::SettingsPage>,
+    ) {
+        if self.revision == revision
+            && let Some(catalog) = &mut self.settings_catalog
+        {
+            match result {
+                Ok(page) => catalog.page = Some(page),
+                Err(error) => catalog.error = Some(error),
+            }
+        }
+    }
+    pub fn settings_error(&mut self, revision: u64, error: String) {
+        if self.revision == revision
+            && let Some(catalog) = &mut self.settings_catalog
+        {
+            catalog.error = Some(error);
         }
     }
     pub fn settle(&mut self, pane: u8, generation: &str, owner: &str, id: &str) {
@@ -167,6 +199,18 @@ mod tests {
                 namespace: "rsi.agent".into(),
                 text: "{}".into(),
                 ticket: "old".into(),
+                description: rsi_settings_protocol::SettingsDescription {
+                    namespace: "rsi.agent".into(),
+                    version: version.clone(),
+                    defaults: serde_json::json!({}),
+                    writable: true,
+                    metadata: rsi_settings_protocol::SettingsMetadata {
+                        schema: serde_json::json!({}),
+                        applies: rsi_settings_protocol::SettingsApply::NewSession,
+                        description: "Fixture".into(),
+                        sensitive_fields: vec![],
+                    },
+                },
                 version,
             },
         );

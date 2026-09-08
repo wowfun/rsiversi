@@ -4,8 +4,8 @@ name: Shared conversation semantics and application contributions
 
 ## Problem
 
-Web/TUI independently interpret Facts and expose closed actions/views. Web tool
-completion loses intent. Full frames repeat work for unchanged content.
+Web/TUI expose closed actions/views, and full frames repeat work for unchanged
+content. Earlier independent Fact projections lost Tool intent and source identity.
 
 ## Proposal
 
@@ -13,6 +13,20 @@ Share bounded native/wasm identities, source fields, Tool intent/result state,
 and Output/Media references in pure Rust. Each application retains layout,
 selection, and rendering. Plugins register owned surfaces/actions/renderers;
 Rust validates generation-bound operations and document code owns DOM.
+
+The shared conversation foundation is implemented: exact closed source windows,
+bounded source membership, complete Tool identity and phase, and Media provenance.
+Renderers retain their own bounded text/layout state and no observation leases.
+Detail cancellation is presentation-local and preserves admitted mutations.
+
+Settings discovery is implemented over the existing registered namespace owner.
+Its schema and application timing are descriptive; they do not replace safe-Rust
+validation or registration/revision CAS. Bounded lexical pages avoid a full raw
+document or registry export. Describing a namespace acquires no registration
+lease, and an editor verifies that metadata and value share a registration.
+Sensitive markers govern presentation of non-secret fields; RSI continues to
+keep credential material outside Settings. These foundations do not complete the
+surface/action/renderer contribution acceptance criteria below.
 
 Linked renderers are trusted application code under the existing CSP. Data uses
 text nodes, closed Markdown AST, and validated URLs. Settings schema describes

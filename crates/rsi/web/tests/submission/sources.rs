@@ -2,11 +2,11 @@ use super::*;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 
-fn view(app: &rsi_web::WebApplication) -> Value {
+pub(super) fn view(app: &rsi_web::WebApplication) -> Value {
     serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap()
 }
 
-async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplication>) {
+pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplication>) {
     let runtime = Runtime::default();
     let root = runtime.root();
     let backend = Arc::new(Backend::default());

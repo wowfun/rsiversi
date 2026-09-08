@@ -7,10 +7,11 @@
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_settings_protocol::{
-    Result, Settings, SettingsAccess, SettingsAccessContract, SettingsContract, SettingsDocument,
-    SettingsError, SettingsLease, SettingsProvider, SettingsProviderContract, SettingsRegistration,
-    SettingsScope, SettingsScopeId, SettingsSnapshot, SettingsSpec, SettingsVersion,
-    validate_namespace, validate_section,
+    Result, Settings, SettingsAccess, SettingsAccessContract, SettingsContract,
+    SettingsDescription, SettingsDocument, SettingsError, SettingsLease, SettingsMetadata,
+    SettingsPage, SettingsProvider, SettingsProviderContract, SettingsRegistration, SettingsScope,
+    SettingsScopeId, SettingsSnapshot, SettingsSpec, SettingsVersion, validate_namespace,
+    validate_section, validate_settings_page,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ struct NamespaceState {
     resolved: Value,
     defaults: Value,
     base: Value,
+    metadata: SettingsMetadata,
     validator: Arc<dyn rsi_settings_protocol::SettingsValidator>,
     in_flight: usize,
     retiring: bool,
@@ -87,6 +89,51 @@ impl Drop for InFlightCommit {
 
 #[async_trait]
 impl SettingsAccess for Service {
+    async fn list(&self, after: Option<&str>, limit: usize) -> Result<SettingsPage> {
+        validate_settings_page(after, limit)?;
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut names = std::collections::BTreeSet::new();
+        for (name, entry) in &state.namespaces {
+            if entry.retiring || after.is_some_and(|after| name.as_str() <= after) {
+                continue;
+            }
+            names.insert(name.as_str());
+            if names.len() > limit + 1 {
+                names.pop_last();
+            }
+        }
+        let more = names.len() > limit;
+        let namespaces: Vec<String> = names.into_iter().take(limit).map(str::to_owned).collect();
+        let next = more.then(|| namespaces.last().expect("nonempty lookahead page").clone());
+        Ok(SettingsPage { namespaces, next })
+    }
+    async fn describe(&self, namespace: &str) -> Result<SettingsDescription> {
+        validate_namespace(namespace)?;
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state
+            .namespaces
+            .get(namespace)
+            .filter(|entry| !entry.retiring)
+            .ok_or_else(|| SettingsError::UnknownNamespace(namespace.into()))?;
+        Ok(SettingsDescription {
+            namespace: namespace.into(),
+            version: SettingsVersion {
+                scope_id: entry.scope_id.clone(),
+                revision: entry.revision,
+            },
+            defaults: entry.defaults.clone(),
+            metadata: entry.metadata.clone(),
+            writable: self.provider.writable(),
+        })
+    }
     async fn read(&self, namespace: &str) -> Result<SettingsSnapshot> {
         self.scope(namespace)?.get()
     }
@@ -143,6 +190,7 @@ impl Settings for Service {
         validate_namespace(&spec.namespace)?;
         validate_section(&spec.defaults)?;
         validate_section(&spec.base)?;
+        spec.metadata.validate()?;
         let mut state = self
             .state
             .inner
@@ -178,6 +226,7 @@ impl Settings for Service {
                 resolved,
                 defaults: spec.defaults,
                 base: spec.base,
+                metadata: spec.metadata,
                 validator: spec.validator,
                 in_flight: 0,
                 retiring: false,

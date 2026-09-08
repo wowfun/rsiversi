@@ -13,6 +13,12 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod description;
+pub use description::{
+    MAXIMUM_SETTINGS_METADATA_BYTES, MAXIMUM_SETTINGS_PAGE, SettingsApply, SettingsDescription,
+    SettingsMetadata, SettingsPage, validate_settings_page,
+};
+
 /// Maximum namespace identifier bytes.
 pub const MAXIMUM_SETTINGS_NAMESPACE_BYTES: usize = 256;
 /// Maximum encoded bytes in one raw namespace section.
@@ -122,6 +128,8 @@ pub struct SettingsSpec {
     pub defaults: Value,
     /// Composition-owned base value.
     pub base: Value,
+    /// Bounded schema and presentation declaration from this namespace's owner.
+    pub metadata: SettingsMetadata,
     /// Pure validator for the fully merged value.
     pub validator: Arc<dyn SettingsValidator>,
 }
@@ -195,6 +203,10 @@ impl SettingsSnapshot {
 /// Asynchronous client access to registered namespaces without registration authority.
 #[async_trait]
 pub trait SettingsAccess: fmt::Debug + Send + Sync + 'static {
+    /// Lists active names after an exclusive lexical cursor, within the protocol page bound.
+    async fn list(&self, after: Option<&str>, limit: usize) -> Result<SettingsPage>;
+    /// Describes one active registration without exposing raw provider sections.
+    async fn describe(&self, namespace: &str) -> Result<SettingsDescription>;
     /// Reads one currently registered namespace projection.
     async fn read(&self, namespace: &str) -> Result<SettingsSnapshot>;
     /// Replaces that namespace under registration and revision CAS.

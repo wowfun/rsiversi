@@ -55,6 +55,18 @@ per pane; returning to live view fences a history result still in flight and res
 backward paging to the earliest Fact represented by the current live projection.
 Workspace paths describe the selected server, not the browser filesystem.
 
+Settings opens a bounded page of registered namespaces and shows the selected
+owner's schema, default layer, application timing and sensitive-field markers.
+Metadata and the editable snapshot must share a registration identity. The editor
+retains the actual snapshot's version for CAS and reports provider writability.
+Closing or replacing a Settings read cancels its local future; late success and
+failure cannot replace another detail. Saving remains an admitted mutation under
+the existing Settings owner even if the editor closes.
+Pretty JSON output stops at 8 MiB before growing beyond the editor's rendering
+bound. If indentation exceeds that bound, the editor uses complete compact JSON
+from the Settings-validated value (at most 4 MiB). Values exceeding the command
+input limit remain readable with saving disabled; no displayed prefix is writable.
+
 Tool argument and result details use closed exact Fact sources, with decimal
 string sequences preserved opaquely in JavaScript. Rust reads one exact Fact
 through the shared controller and retains a 64 KiB UTF-8 field window. Paging

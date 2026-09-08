@@ -162,7 +162,10 @@ try {
       assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
       assert.equal(await left.locator(".transcript > :first-child").getAttribute("class"), "omitted");
       await page.getByRole("button", { name: "Settings", exact: true }).click();
-      await page.getByRole("button", { name: "Read settings", exact: true }).click();
+      await page.getByRole("button", { name: "rsi.agent", exact: true }).click();
+      await page.locator(".settings-applies").filter({ hasText: "Applies to new conversations" }).waitFor();
+      assert.equal(await page.locator(".settings-description summary").allTextContents().then(labels => labels.join(",")), "Schema,Defaults");
+      await page.screenshot({ path: join(report, `${name}-settings-description.png`) });
       const editor = page.getByRole("textbox", { name: "Settings JSON" });
       const settings = JSON.parse(await editor.inputValue()); settings.require_approval = true;
       await editor.fill(JSON.stringify(settings, null, 2));

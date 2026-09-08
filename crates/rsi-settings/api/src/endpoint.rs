@@ -1,4 +1,4 @@
-use crate::wire::{Clear, Operation, Read, Replace, result};
+use crate::wire::{Clear, List, Operation, Read, Replace, result};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiRegistrar, ApiRegistrarContract, ApiRegistration, json_handler};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -17,6 +17,22 @@ impl SettingsApi {
         settings: Arc<dyn SettingsAccess>,
     ) -> rsi_api_protocol::Result<Self> {
         let mut registrations = Vec::new();
+        let service = settings.clone();
+        registrations.push(registrar.register(
+            Operation::List.spec(),
+            json_handler(move |_, input: List| {
+                let service = service.clone();
+                async move { result(service.list(input.after.as_deref(), input.limit).await) }
+            }),
+        )?);
+        let service = settings.clone();
+        registrations.push(registrar.register(
+            Operation::Describe.spec(),
+            json_handler(move |_, input: Read| {
+                let service = service.clone();
+                async move { result(service.describe(&input.namespace).await) }
+            }),
+        )?);
         let service = settings.clone();
         registrations.push(registrar.register(
             Operation::Read.spec(),

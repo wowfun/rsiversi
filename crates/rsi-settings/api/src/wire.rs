@@ -1,20 +1,30 @@
 use rsi_api_protocol::{
     ApiError, OperationClass, OperationEffect, OperationId, OperationSpec, RequestEncoding,
 };
-use rsi_settings_protocol::{SettingsError, SettingsSnapshot, SettingsVersion};
+use rsi_settings_protocol::{SettingsError, SettingsVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Operation {
+    List,
+    Describe,
     Read,
     Replace,
     Clear,
 }
 impl Operation {
-    pub const ALL: [Self; 3] = [Self::Read, Self::Replace, Self::Clear];
+    pub const ALL: [Self; 5] = [
+        Self::List,
+        Self::Describe,
+        Self::Read,
+        Self::Replace,
+        Self::Clear,
+    ];
     pub fn spec(self) -> OperationSpec {
         let (name, effect) = match self {
+            Self::List => ("list", OperationEffect::Read),
+            Self::Describe => ("describe", OperationEffect::Read),
             Self::Read => ("read", OperationEffect::Read),
             Self::Replace => ("replace", OperationEffect::Mutation),
             Self::Clear => ("clear", OperationEffect::Mutation),
@@ -33,6 +43,12 @@ impl Operation {
             maximum_response_bytes: 8 * 1024 * 1024,
         }
     }
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct List {
+    pub after: Option<String>,
+    pub limit: usize,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -64,9 +80,9 @@ pub(crate) enum Failure {
     ReadOnly,
     Corrupt,
 }
-pub(crate) fn result(
-    result: rsi_settings_protocol::Result<SettingsSnapshot>,
-) -> rsi_api_protocol::Result<std::result::Result<SettingsSnapshot, Failure>> {
+pub(crate) fn result<T>(
+    result: rsi_settings_protocol::Result<T>,
+) -> rsi_api_protocol::Result<std::result::Result<T, Failure>> {
     Ok(match result {
         Ok(snapshot) => Ok(snapshot),
         Err(error) => Err(match error {

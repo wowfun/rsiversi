@@ -27,6 +27,10 @@ enum Corruption {
     Revision,
     Scope,
     Section,
+    DescriptionNamespace,
+    DescriptionMetadata,
+    DiscoveryOrder,
+    DiscoveryCursor,
 }
 #[async_trait]
 impl ApiClient for Connection {
@@ -53,18 +57,26 @@ impl ApiClient for Connection {
             let ApiOutput::Reply(mut message) = output else {
                 panic!("finite Settings reply")
             };
-            let mut snapshot: SettingsSnapshot =
-                serde_json::from_slice(message.json.as_bytes()).unwrap();
+            let mut snapshot: Value = serde_json::from_slice(message.json.as_bytes()).unwrap();
             match corrupt {
-                Corruption::Revision => snapshot.revision += 2,
+                Corruption::Revision => {
+                    snapshot["revision"] = json!(snapshot["revision"].as_u64().unwrap() + 2);
+                }
                 Corruption::Scope => {
-                    let mut id = snapshot.scope_id.as_str().to_owned();
+                    let mut id = snapshot["scope_id"].as_str().unwrap().to_owned();
                     id.replace_range(..1, if id.starts_with('0') { "1" } else { "0" });
-                    snapshot.scope_id = SettingsScopeId::parse(id).unwrap();
+                    snapshot["scope_id"] = json!(id);
                 }
                 Corruption::Section => {
-                    snapshot.value = json!("x".repeat(MAXIMUM_SETTINGS_SECTION_BYTES + 1));
+                    snapshot["value"] = json!("x".repeat(MAXIMUM_SETTINGS_SECTION_BYTES + 1));
                 }
+                Corruption::DescriptionNamespace => snapshot["namespace"] = json!("other"),
+                Corruption::DescriptionMetadata => {
+                    snapshot["metadata"]["schema"] =
+                        json!({"description":"x".repeat(MAXIMUM_SETTINGS_METADATA_BYTES)});
+                }
+                Corruption::DiscoveryOrder => snapshot["namespaces"] = json!(["ui", "ui"]),
+                Corruption::DiscoveryCursor => snapshot["next"] = json!("before"),
             }
             message.json = ByteBudget::default()
                 .encode(&snapshot, operation.maximum_response_bytes)
@@ -101,6 +113,12 @@ fn spec() -> SettingsSpec {
         namespace: "ui".into(),
         defaults: json!({"enabled":true}),
         base: json!({}),
+        metadata: rsi_settings_protocol::SettingsMetadata {
+            schema: serde_json::json!({"type":"object"}),
+            applies: rsi_settings_protocol::SettingsApply::Live,
+            description: "Fixture values apply live".into(),
+            sensitive_fields: vec![],
+        },
         validator: Arc::new(ValidateWith(|value: &Value| {
             if value.get("enabled").is_some_and(Value::is_boolean) {
                 Ok(())
@@ -168,6 +186,19 @@ async fn client_composition(dispatch: Arc<dyn ApiDispatch>) -> (Runtime, rsi_met
     (client, plugin)
 }
 
+async fn assert_discovery(access: &dyn SettingsAccess) -> SettingsDescription {
+    assert_eq!(access.list(None, 64).await.unwrap().namespaces, ["ui"]);
+    assert!(matches!(
+        access.describe("hidden").await,
+        Err(SettingsError::UnknownNamespace(_))
+    ));
+    let description = access.describe("ui").await.unwrap();
+    assert_eq!(description.metadata, spec().metadata);
+    assert_eq!(description.defaults, spec().defaults);
+    assert!(description.writable);
+    description
+}
+
 #[tokio::test]
 async fn native_file_and_namespace_api_preserve_cas_last_good_state_and_scope_identity() {
     let temporary = tempfile::tempdir().unwrap();
@@ -192,7 +223,9 @@ async fn native_file_and_namespace_api_preserve_cas_last_good_state_and_scope_id
     assert!(
         matches!(access.read("hidden").await, Err(SettingsError::UnknownNamespace(namespace)) if namespace == "hidden")
     );
+    let description = assert_discovery(access.as_ref()).await;
     let initial = access.read("ui").await.unwrap();
+    assert_eq!(description.version, initial.version());
     assert_eq!(initial.revision, 0);
     let updated = access
         .replace(
@@ -302,4 +335,45 @@ async fn malformed_success_after_real_file_commit_is_unknown_and_the_write_remai
         drop(registration.lease);
         assert!(server.shutdown().await.is_clean());
     }
+}
+
+#[tokio::test]
+async fn malformed_discovery_replies_are_rejected_before_client_exposure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let server = server(&temporary.path().join("settings.json")).await;
+    let registry = server.root().lookup_local::<SettingsContract>().unwrap();
+    let registration = registry.register(spec()).unwrap();
+    let dispatch = server.root().lookup_local::<ApiDispatchContract>().unwrap();
+    for corrupt in [
+        Corruption::DescriptionNamespace,
+        Corruption::DescriptionMetadata,
+        Corruption::DiscoveryOrder,
+        Corruption::DiscoveryCursor,
+    ] {
+        let client = rsi_settings_api::SettingsClient::new(Arc::new(Connection {
+            operations: dispatch.operations(),
+            dispatch: dispatch.clone(),
+            corrupt: Some(corrupt),
+            description: ConnectionDescription {
+                wire_version: 1,
+                endpoint_id: EndpointId::from_bytes([1; 16]),
+                host_epoch: HostEpoch::from_bytes([2; 16]),
+            },
+        }))
+        .unwrap();
+        let result = if matches!(
+            corrupt,
+            Corruption::DiscoveryOrder | Corruption::DiscoveryCursor
+        ) {
+            client.list(None, 64).await.map(|_| ())
+        } else {
+            client.describe("ui").await.map(|_| ())
+        };
+        assert!(matches!(
+            result,
+            Err(SettingsError::Api(ApiError::Invalid(_)))
+        ));
+    }
+    drop(registration);
+    assert!(server.shutdown().await.is_clean());
 }

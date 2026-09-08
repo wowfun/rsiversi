@@ -120,4 +120,6 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 
 .block-sources .source-reference { display: block; margin-block: 0.4rem; overflow-wrap: anywhere; text-align: start; }
 
-.source-list { max-height: min(50dvh, 30rem); overflow: auto; overscroll-behavior: contain; margin-block: 1rem; }
+.source-list, .settings-list { max-height: min(50dvh, 30rem); overflow: auto; overscroll-behavior: contain; margin-block: 1rem; }
+
+.settings-namespace { display: block; margin-block: 0.4rem; }
