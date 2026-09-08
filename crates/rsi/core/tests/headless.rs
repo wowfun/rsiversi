@@ -1405,7 +1405,7 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
             .iter()
             .any(|line| { line["type"] == "fact" && line["fact"]["type"] == "cancel_requested" })
     );
-    assert_eq!(lines.last().unwrap()["type"], "outcome");
+    assert_eq!(lines.last().unwrap()["type"], "outcome", "{lines:#?}");
     assert_eq!(lines.last().unwrap()["outcome"]["status"], "cancelled");
     server.abort();
 }
@@ -1637,9 +1637,15 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             .unwrap();
         });
         let fixture = fixture(&endpoint);
+        // macOS TMPDIR can exceed sockaddr_un even for a short fixture name.
+        // Keep the socket in an isolated short /tmp directory on both Unix hosts.
+        let socket_root = tempfile::Builder::new()
+            .prefix("rsi-q-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let paths = ServiceHostPaths::from_host_paths_with_runtime(
             &fixture.paths,
-            Some(&fixture.temporary.path().join("runtime")),
+            Some(socket_root.path()),
         )
         .unwrap();
         let epoch = HostEpoch::generate().unwrap();
