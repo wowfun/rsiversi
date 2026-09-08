@@ -280,21 +280,22 @@ async fn instance_gate_distinguishes_reentry_from_unrelated_lineage_contention()
 
 #[tokio::test]
 async fn native_watchdog_terminalizes_even_after_core_drops_the_adapter_future() {
-    let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(100));
+    let markers = tempfile::tempdir().unwrap();
+    let call_entered = markers.path().join("call-entered");
+    let call_release = markers.path().join("call-release");
+    let (cancel_watchdog, watchdog) = release_gate_watchdog(call_release.clone());
+    let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(1));
     let runtime = Runtime::new(RuntimeLimits {
         deadlines: DeadlineLimits {
-            service_call: Duration::from_millis(20),
+            service_call: Duration::from_millis(100),
             ..DeadlineLimits::default()
         },
         ..RuntimeLimits::default()
     })
     .unwrap();
-    let (_native, service) = apply_delayed_native(
-        &runtime,
-        &catalog,
-        json!({ "prefix": "native:", "delay_ms": 200 }),
-    )
-    .await;
+    let (_native, service) = apply_delayed_native(&runtime, &catalog, json!({
+        "prefix": "native:", "call_entered_path": call_entered, "call_release_path": call_release,
+    })).await;
     assert_eq!(
         service
             .invoke(Message::new(b"slow".as_slice()))
@@ -302,17 +303,24 @@ async fn native_watchdog_terminalizes_even_after_core_drops_the_adapter_future()
             .unwrap_err(),
         MetaError::Timeout("service call")
     );
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if runtime.snapshot().terminal.is_some() {
-                break;
-            }
+    wait_for_file(&call_entered).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while runtime.snapshot().terminal.is_none() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("adapter watchdog did not terminalize the runtime");
     assert!(matches!(service.open(), Err(MetaError::RuntimeTerminal(_))));
+    assert_eq!(
+        catalog.snapshot().active_callbacks,
+        1,
+        "the native call gate was released before timeout"
+    );
+    std::fs::write(&call_release, b"release").unwrap();
+    let _ = cancel_watchdog.send(());
+    watchdog.join().unwrap();
+    wait_for_callback_quiescence(&catalog);
 }
 
 #[cfg(target_os = "linux")]
@@ -447,7 +455,7 @@ async fn publication_failure_never_runs_native_destruction_on_the_executor() {
     let destroy_release = markers.path().join("destroy-release");
     let destroy_thread = markers.path().join("destroy-thread");
     let (cancel_watchdog, watchdog) = release_gate_watchdog(destroy_release.clone());
-    let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(100));
+    let (_cache, catalog) = catalog();
     let runtime = Runtime::default();
     let upstream = runtime
         .root()
@@ -498,7 +506,7 @@ async fn native_instance_cleanup_joins_destruction_beyond_the_callback_deadline(
     let destroy_release = markers.path().join("destroy-release");
     let destroy_thread = markers.path().join("destroy-thread");
     let (cancel_watchdog, watchdog) = release_gate_watchdog(destroy_release.clone());
-    let (_cache, catalog) = catalog_with_timeout(Duration::from_millis(100));
+    let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(1));
     let runtime = Runtime::default();
     let (native, _service) = apply_delayed_native(
         &runtime,
@@ -511,13 +519,19 @@ async fn native_instance_cleanup_joins_destruction_beyond_the_callback_deadline(
         }),
     )
     .await;
-    let disposal = tokio::spawn(async move { native.dispose().await });
+    let mut disposal = tokio::spawn(async move { native.dispose().await });
     wait_for_file(&destroy_entered).await;
     wait_for_file(&destroy_thread).await;
     assert_destroy_worker(&destroy_thread);
     assert!(
         !disposal.is_finished(),
         "cleanup completed before the foreign destructor returned"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1_100), &mut disposal)
+            .await
+            .is_err(),
+        "cleanup stopped joining at the callback deadline instead of retaining foreign ownership"
     );
     std::fs::write(&destroy_release, b"release").unwrap();
     let report = tokio::time::timeout(Duration::from_secs(1), disposal)

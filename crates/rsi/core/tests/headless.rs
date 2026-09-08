@@ -285,6 +285,7 @@ fn tool_message<'a>(request: &'a serde_json::Value, call_id: &str) -> &'a serde_
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn background_job_id(request: &serde_json::Value) -> &str {
     tool_message(request, "call-background-bash")["content"]
         .as_str()
@@ -295,6 +296,7 @@ fn background_job_id(request: &serde_json::Value) -> &str {
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn durable_tool_result<'a>(lines: &'a [serde_json::Value], call_id: &str) -> &'a serde_json::Value {
     lines
         .iter()
@@ -306,6 +308,7 @@ fn durable_tool_result<'a>(lines: &'a [serde_json::Value], call_id: &str) -> &'a
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn assert_real_coding_results(lines: &[serde_json::Value], job_id: &str) {
     let foreground = durable_tool_result(lines, "call-foreground-bash");
     assert_eq!(foreground["fact"]["result"]["is_error"], false);
@@ -343,6 +346,7 @@ fn assert_real_coding_results(lines: &[serde_json::Value], job_id: &str) {
     assert_eq!(patched["fact"]["result"]["value"]["status"], "applied");
 }
 
+#[cfg(target_os = "linux")]
 async fn complete_coding_tools_then_chat(
     State(state): State<ToolServerState>,
     body: String,
@@ -391,6 +395,7 @@ async fn complete_coding_tools_then_chat(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn background_then_chat(State(state): State<ToolServerState>, body: String) -> Response {
     state
         .requests
@@ -438,6 +443,7 @@ async fn background_then_chat(State(state): State<ToolServerState>, body: String
     ])
 }
 
+#[cfg(target_os = "linux")]
 async fn rejected_patch_then_chat(State(state): State<ToolServerState>, body: String) -> Response {
     state
         .requests
@@ -489,6 +495,7 @@ async fn rejected_patch_then_chat(State(state): State<ToolServerState>, body: St
     ])
 }
 
+#[cfg(target_os = "linux")]
 async fn tool_server() -> (
     String,
     Arc<AtomicUsize>,
@@ -519,6 +526,7 @@ async fn tool_server() -> (
     (format!("http://{address}"), calls, requests, task)
 }
 
+#[cfg(target_os = "linux")]
 async fn background_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -540,6 +548,7 @@ async fn background_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHand
     (format!("http://{address}"), calls, task)
 }
 
+#[cfg(target_os = "linux")]
 async fn rejected_patch_server() -> (
     String,
     Arc<Mutex<Vec<serde_json::Value>>>,
@@ -1770,6 +1779,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn full_output_then_chat(
     State(state): State<ToolServerState>,
     axum::Json(request): axum::Json<serde_json::Value>,
@@ -1905,6 +1915,7 @@ async fn model_reads_full_command_output_across_raw_utf8_page_boundaries() {
     http.abort();
 }
 
+#[cfg(target_os = "linux")]
 async fn child_question_chat(
     State(state): State<ToolServerState>,
     axum::Json(request): axum::Json<serde_json::Value>,
