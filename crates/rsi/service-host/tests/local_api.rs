@@ -38,7 +38,11 @@ async fn apply(
         .unwrap()
 }
 async fn fixture() -> (tempfile::TempDir, Runtime, ServiceHostPaths) {
-    let directory = tempfile::tempdir().unwrap();
+    // Keep Unix socket paths inside sockaddr_un on macOS as well as Linux.
+    let directory = tempfile::Builder::new()
+        .prefix("rsi-api-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let paths = HostPaths::new(
         directory.path().join("config"),
         directory.path().join("state"),

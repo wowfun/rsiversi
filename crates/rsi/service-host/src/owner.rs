@@ -28,8 +28,6 @@ const OWNER_METADATA_FILE: &str = "owner.json";
 const OWNER_LOG_FILE: &str = "owner.log";
 const FALLBACK_RUNTIME_DIRECTORY: &str = "runtime";
 const SOCKET_FILE: &str = "host.sock";
-#[cfg(unix)]
-const MAXIMUM_UNIX_SOCKET_PATH_BYTES: usize = 107;
 
 /// Active owner execution mode.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -554,14 +552,11 @@ fn validate_socket_path(path: &Path) -> Result<(), ServiceHostError> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt as _;
-        if path.as_os_str().as_bytes().len() > MAXIMUM_UNIX_SOCKET_PATH_BYTES {
-            return Err(ServiceHostError::Invalid(format!(
-                "Unix socket path exceeds {MAXIMUM_UNIX_SOCKET_PATH_BYTES} bytes: {}",
-                path.display()
-            )));
-        }
-        Ok(())
+        std::os::unix::net::SocketAddr::from_pathname(path)
+            .map(|_| ())
+            .map_err(|error| {
+                ServiceHostError::Invalid(format!("invalid Unix socket path: {error}"))
+            })
     }
     #[cfg(not(unix))]
     {

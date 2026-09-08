@@ -108,3 +108,7 @@ Session interaction snapshots, subtree approval routing and immutable message
 reads belong to the [Session API](../session-api/README.md). Workspace, Models,
 Settings, Output and Media remain independent services. Media publication and
 later message acceptance retain their separate failure semantics.
+
+Persisted and selected Unix socket paths must be absolute and accepted by the
+host standard library Unix address constructor, including its native length
+limit and NUL rejection. Linux address width is not assumed on other Unix hosts.

@@ -10,7 +10,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, MetaError, PluginFactory, PreparedActivation,
 };
 use serde::{Deserialize, Serialize};
-use std::{os::unix::ffi::OsStrExt, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Explicit native endpoint and exact deployment-selection fences.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -28,13 +28,14 @@ pub struct UdsClientConfig {
 impl UdsClientConfig {
     /// Rejects unusable or unbounded local socket addresses before connecting.
     pub fn validate(&self) -> Result<()> {
-        let path = self.socket.as_os_str().as_bytes();
-        if !self.socket.is_absolute() || path.len() > 107 || path.contains(&0) {
+        if !self.socket.is_absolute() {
             return Err(ApiError::Invalid(
-                "Unix socket requires an absolute path of at most 107 bytes without NUL".into(),
+                "Unix socket path must be absolute".into(),
             ));
         }
-        Ok(())
+        std::os::unix::net::SocketAddr::from_pathname(&self.socket)
+            .map(|_| ())
+            .map_err(|error| ApiError::Invalid(format!("invalid Unix socket path: {error}")))
     }
 }
 

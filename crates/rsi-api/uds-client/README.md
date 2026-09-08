@@ -2,7 +2,8 @@
 
 This ordinary native connection plugin supplies ApiClient over a same-UID Unix
 socket. Configuration selects an absolute socket path, EndpointId, HostEpoch and
-opaque LocalCompatibilityKey. The product owns their selection and build/launch
+opaque LocalCompatibilityKey. Socket paths must also pass the host standard
+library Unix address constructor, including its native length and NUL checks. The product owns their selection and build/launch
 policy. This package imports no Service Host process owner or domain implementation.
 
 Each exchange verifies the actual peer UID before HTTP transmission and sends
