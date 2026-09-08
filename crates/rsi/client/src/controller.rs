@@ -17,6 +17,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[path = "commands.rs"]
 pub(super) mod commands;
+#[path = "source.rs"]
+pub(super) mod source;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

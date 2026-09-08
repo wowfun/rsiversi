@@ -64,6 +64,15 @@ receipt per saved Session. A dropped application waiter preserves that invocatio
 Its separate single-work admission prevents a new command from replacing unknown
 input; result refresh preserves it even if the current controller is unavailable.
 
+Exact source windows use the same four controller work slots. They bind the
+closed conversation SourceRef to this controller's captured Session handle,
+request one preceding Fact and verify its exact sequence before selecting a
+field. Missing neighbors never substitute for the requested Fact. Bounds are
+checked before I/O. The controller owns an admitted read even after its waiter
+is dropped; detail cancellation and controller retirement drop its I/O future
+and release its work slot. The returned window retains no Fact or observation
+lease. Applications additionally fence delivery with their detail generation.
+
 `drive_message` follows one submitted message through its durable claim and the
 claimed Turn's terminal Fact. It emits typed receipt, claim, Fact and outcome
 events to an explicit sink; the caller owns the future and presentation lifetime.

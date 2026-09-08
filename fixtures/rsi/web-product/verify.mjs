@@ -164,6 +164,29 @@ try {
       assert.match(failedTool, /fixture stdout/);
       assert.match(failedTool, /fixture stderr/);
       await page.screenshot({ path: join(report, `${name}-tool-failure.png`) });
+      await left.getByRole("button", { name: "Inspect arguments", exact: true }).last().click();
+      await page.locator(".source-text").waitFor();
+      const firstSource = await page.locator(".source-text").innerText();
+      assert.match(firstSource, /"command":.*exit 7/);
+      assert.match(firstSource, /<script>window.untrustedExecuted = true<\/script>/);
+      assert.ok(Buffer.byteLength(firstSource) <= 64 * 1024);
+      assert.equal(await page.evaluate(() => window.untrustedExecuted), undefined);
+      assert.equal(await page.getByRole("button", { name: "Next source page", exact: true }).isEnabled(), true);
+      await page.screenshot({ path: join(report, `${name}-source-arguments.png`) });
+      await page.getByRole("button", { name: "Next source page", exact: true }).click();
+      await page.locator(".source-text").filter({ hasText: "SOURCE-END" }).waitFor();
+      const secondSource = await page.locator(".source-text").innerText();
+      assert.equal(JSON.parse(firstSource + secondSource).command.endsWith("SOURCE-END"), true);
+      assert.equal(await page.getByRole("button", { name: "Next source page", exact: true }).isEnabled(), false);
+      await page.getByRole("button", { name: "Previous source page", exact: true }).click();
+      await page.locator(".source-text").filter({ hasText: '"command"' }).waitFor();
+      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await left.getByRole("button", { name: "Inspect result", exact: true }).last().click();
+      await page.locator(".source-text").filter({ hasText: '"exit_code": 7' }).waitFor();
+      assert.match(await page.locator(".source-text").innerText(), /fixture stdout/);
+      assert.match(await page.locator(".source-text").innerText(), /fixture stderr/);
+      await page.screenshot({ path: join(report, `${name}-source-result.png`) });
+      await page.getByRole("button", { name: "Close details", exact: true }).click();
       await page.setViewportSize({ width: 390, height: 844 });
       await page.screenshot({ path: join(report, `${name}-narrow.png`), fullPage: true });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -177,7 +200,7 @@ try {
       assert.equal((await context.cookies()).length, 0);
       assert.deepEqual(errors, []);
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
-      results.at(-1).cases.push("Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
+      results.at(-1).cases.push("exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

@@ -1,3 +1,6 @@
+#[path = "source_details.rs"]
+mod source_details;
+
 use crate::{
     application::{Command, Result, WebApplication, error, surface_program},
     projection::Transcript,
@@ -267,6 +270,15 @@ impl WebApplication {
     }
     pub(crate) async fn pane_command(&self, command: Command) -> Result<()> {
         match command {
+            Command::InspectSource {
+                pane,
+                generation,
+                source,
+            } => {
+                self.inspect_source(pane, &generation, source, 0, None)
+                    .await
+            }
+            Command::SourcePage { ticket, forward } => self.source_page(&ticket, forward).await,
             Command::Commands { pane, generation } => {
                 let attached = self.pane(pane)?.attachment(&generation)?;
                 let commands = attached.controller.commands().await.map_err(error)?;
@@ -509,11 +521,16 @@ impl WebApplication {
             durable: std::sync::atomic::AtomicBool::new(durable),
             history_work: tokio::sync::Semaphore::new(1),
         });
-        let old = pane
-            .current
-            .lock()
-            .expect("Web pane poisoned")
-            .replace(attachment);
+        let old = {
+            let mut current = pane.current.lock().expect("Web pane poisoned");
+            if let Some(old) = current.as_ref() {
+                self.details
+                    .lock()
+                    .expect("Web details poisoned")
+                    .detach(index, &old.generation.to_string())?;
+            }
+            current.replace(attachment)
+        };
         self.changed();
         if let Some(old) = old {
             old.close().await?;

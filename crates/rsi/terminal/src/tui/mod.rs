@@ -114,6 +114,7 @@ enum Update {
 #[derive(Clone, Copy)]
 enum WorkKind {
     Read,
+    Detail,
     Inspect,
     History,
     Submit,
@@ -125,6 +126,15 @@ struct Work {
     history_revision: u64,
     kind: WorkKind,
     result: Result<Update>,
+}
+impl Work {
+    fn superseded(&self, client: &Client) -> bool {
+        self.generation != client.generation
+            || matches!(self.kind, WorkKind::History)
+                && self.history_revision != client.history.revision
+            || matches!(self.kind, WorkKind::Detail)
+                && self.view_revision != client.state.view_revision
+    }
 }
 type Task = std::pin::Pin<Box<dyn std::future::Future<Output = Work> + Send>>;
 
@@ -253,7 +263,7 @@ impl Client {
         let limit = match kind {
             WorkKind::Cancel => 12,
             WorkKind::Submit => 10,
-            WorkKind::Read | WorkKind::Inspect | WorkKind::History => 8,
+            WorkKind::Read | WorkKind::Detail | WorkKind::Inspect | WorkKind::History => 8,
         };
         if self.tasks.len() >= limit {
             self.state
@@ -622,7 +632,7 @@ impl Client {
         }
         let handle = self.handle.clone();
         let application = self.application.clone();
-        self.state.view_revision = self.state.view_revision.wrapping_add(1);
+        self.state.invalidate_detail();
         self.extension_view = None;
         match action {
             Action::Commands => self.command_menu(),
@@ -724,11 +734,14 @@ impl Client {
                     if !items.is_empty() { self.state.menu = Some(Menu { title: "Source reads".into(), selected: 0, items }); }
                 }
             },
-            Action::Window(source, offset) => self.spawn(async move {
-                let page = read(|| handle.history_before(source.seq.checked_add(1), 1)).await?;
-                let fact = page.facts.first().filter(|fact| fact.seq() == source.seq).ok_or_else(|| error("Exact Fact is unavailable"))?;
-                transcript::Transcript::window(fact, source, offset).map(Update::Window).ok_or_else(|| error("Exact Fact payload field is unavailable"))
-            }),
+            Action::Window(source, offset) => {
+                let controller = self.controller.clone();
+                let stop = self.state.detail_stop.clone();
+                self.spawn_as(WorkKind::Detail, async move {
+                    let window = controller.source_window(source, offset, transcript::WINDOW, stop).await.map_err(error)?;
+                    Ok(Update::Window(transcript::Piece::from_window(source, &window)))
+                });
+            },
             Action::Output(id, offset) => {
                 let output_cache = self.output_cache.clone();
                 self.spawn(async move {
@@ -919,7 +932,7 @@ async fn run_inner(
                             if control && key.code == KeyCode::Char('c') { client.cancel(); continue; }
                             if control && key.code == KeyCode::Char('y') { client.copy(); continue; }
                             if key.code == KeyCode::Escape { client.state.escape(); continue; }
-                            if control && key.code == KeyCode::Char('p') { client.state.view_revision = client.state.view_revision.wrapping_add(1); client.state.menu = Some(Menu::actions()); continue; }
+                            if control && key.code == KeyCode::Char('p') { client.state.invalidate_detail(); client.state.menu = Some(Menu::actions()); continue; }
                             if control && key.code == KeyCode::Char('d') && client.state.editor.text.is_empty() && client.state.answer.is_none() && client.submission.request.is_none() { break; }
                             if let Some(menu) = &mut client.state.menu {
                                 match key.code {
@@ -969,13 +982,13 @@ async fn run_inner(
                     }
                 },
                 Some(work) = client.tasks.next(), if !client.tasks.is_empty() => {
-                    if work.generation != client.generation || matches!(work.kind, WorkKind::History) && work.history_revision != client.history.revision { continue; }
+                    if work.superseded(&client) { continue; }
                     dirty = true;
                     match work.kind {
                         WorkKind::Inspect => client.inspecting = false,
                         WorkKind::History => client.history.loading = false,
                         WorkKind::Cancel => client.cancelling = false,
-                        WorkKind::Read | WorkKind::Submit => {},
+                        WorkKind::Read | WorkKind::Detail | WorkKind::Submit => {},
                     }
                     if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {

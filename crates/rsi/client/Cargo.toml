@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-conversation = { path = "../conversation" }
 rsi-meta-execution = { path = "../../rsi-meta/execution" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }

@@ -510,6 +510,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
+ "rsi-conversation",
  "rsi-meta",
  "rsi-meta-execution",
  "rsi-session-protocol",
@@ -533,6 +534,7 @@ dependencies = [
  "rsi-application",
  "rsi-approval-protocol",
  "rsi-client",
+ "rsi-conversation",
  "rsi-host",
  "rsi-meta",
  "rsi-meta-execution",
@@ -546,6 +548,19 @@ dependencies = [
  "tokio-util",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "rsi-conversation"
+version = "0.0.1"
+dependencies = [
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-media-protocol",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

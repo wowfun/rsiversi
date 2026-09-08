@@ -16,6 +16,7 @@ rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
 rsi-application = { path = "../../../crates/rsi/application" }
 rsi-host = { path = "../../../crates/rsi-host/core" }
 rsi-client = { path = "../../../crates/rsi/client" }
+rsi-conversation = { path = "../../../crates/rsi/conversation" }
 rsi-meta = { path = "../../../crates/rsi-meta/core" }
 rsi-meta-execution = { path = "../../../crates/rsi-meta/execution" }
 rsi-meta-scope = { path = "../../../crates/rsi-meta/scope" }

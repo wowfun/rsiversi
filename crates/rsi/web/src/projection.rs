@@ -4,7 +4,7 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_turn_protocol::SessionObservation;
 use rsi_ai_protocol::{ContentDelta, LanguageEvent};
-use rsi_conversation::{FieldWindow, ToolOutcome};
+use rsi_conversation::{FactField, FieldWindow, SourceRef, ToolOutcome};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -16,8 +16,8 @@ const MAX_TEXT: usize = 1024 * 1024;
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ToolPreview {
     name: Option<String>,
-    intent_seq: Option<u64>,
-    result_seq: Option<u64>,
+    arguments: Option<SourceRef>,
+    result: Option<SourceRef>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -197,8 +197,11 @@ impl Transcript {
                     block.clipped |= arguments.more;
                     block.tool = Some(ToolPreview {
                         name: Some(name.clone()),
-                        intent_seq: Some(self.seq),
-                        result_seq: None,
+                        arguments: Some(SourceRef {
+                            seq: self.seq,
+                            field: FactField::ToolArguments,
+                        }),
+                        result: None,
                     });
                 }
             }
@@ -216,7 +219,7 @@ impl Transcript {
                     .and_then(|block| block.tool.clone())
                     .unwrap_or_default();
                 let title = format!("{} · {}", tool.name.as_deref().unwrap_or("Tool"), outcome);
-                if tool.intent_seq.is_some() {
+                if tool.arguments.is_some() {
                     self.add(key.clone(), "tool", &title, "\n\n", true);
                 }
                 let mut first = true;
@@ -234,7 +237,10 @@ impl Transcript {
                         block.clipped |= value.more;
                     }
                 }
-                tool.result_seq = Some(self.seq);
+                tool.result = Some(SourceRef {
+                    seq: self.seq,
+                    field: FactField::ToolValue,
+                });
                 if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
                     block.tool = Some(tool);
                 }
@@ -350,15 +356,15 @@ mod tests {
             assert_eq!(block.clipped, command.len() > MAX_BLOCK_BYTES / 2);
             assert_eq!(transcript.history_before(), Some(10));
             let view = serde_json::to_value(block).unwrap();
-            assert_eq!(view["tool"]["intent_seq"], 10);
-            assert_eq!(view["tool"]["result_seq"], 12);
+            assert_eq!(view["tool"]["arguments"]["seq"], "10");
+            assert_eq!(view["tool"]["result"]["seq"], "12");
 
             let mut suffix = Transcript::default();
             suffix.fact(&result);
             let suffix = serde_json::to_value(&suffix.blocks[0]).unwrap();
             assert!(suffix["tool"]["name"].is_null());
-            assert!(suffix["tool"]["intent_seq"].is_null());
-            assert_eq!(suffix["tool"]["result_seq"], 12);
+            assert!(suffix["tool"]["arguments"].is_null());
+            assert_eq!(suffix["tool"]["result"]["seq"], "12");
         }
     }
 

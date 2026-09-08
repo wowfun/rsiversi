@@ -6,6 +6,8 @@ use rsi_session_protocol::*;
 use std::sync::{Arc, Mutex};
 #[path = "submission/commands.rs"]
 mod commands;
+#[path = "submission/sources.rs"]
+mod sources;
 
 fn missing<T>() -> rsi_session_protocol::Result<T> {
     Err(rsi_session_protocol::SessionError::Backend(
@@ -14,6 +16,8 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    block_source: std::sync::atomic::AtomicBool,
+    active_source: std::sync::atomic::AtomicUsize,
     commands: Mutex<Vec<SessionCommandInvocation>>,
     command_receipt: Mutex<Option<SessionCommandReceipt>>,
     requests: Mutex<Vec<SubmitInput>>,
@@ -172,6 +176,18 @@ impl SessionHandle for Backend {
         limit: usize,
     ) -> rsi_session_protocol::Result<SessionHistoryPage> {
         self.history_requests.lock().unwrap().push(before);
+        if limit == 1 && self.block_source.load(std::sync::atomic::Ordering::SeqCst) {
+            struct Active<'a>(&'a std::sync::atomic::AtomicUsize);
+            impl Drop for Active<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            self.active_source
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _active = Active(&self.active_source);
+            std::future::pending::<()>().await;
+        }
         let facts = self.facts.lock().unwrap();
         let durable_seq = facts.last().map_or(0, SessionFact::seq);
         let before_seq = before.unwrap_or(durable_seq + 1);

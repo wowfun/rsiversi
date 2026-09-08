@@ -4,6 +4,7 @@ mod messages;
 pub use commands::exact_command_reconciliation;
 mod projections;
 mod reads;
+mod source_reads;
 use futures_util::StreamExt;
 pub use messages::message_claim_cancellation_and_terminal_delivery;
 pub use projections::independent_projection_observation;
@@ -25,6 +26,7 @@ use rsi_meta::{
 use rsi_session_protocol::{
     InteractionSnapshot, SessionContract, SessionError, SessionHandle, SessionService, SubmitInput,
 };
+pub use source_reads::owned_source_window_reads;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -53,6 +55,7 @@ impl Drop for Active {
 #[derive(Debug)]
 pub struct Handle {
     pub commands: commands::Scenario,
+    pub source_reads: source_reads::Scenario,
     pub projections: projections::Scenario,
     pub id: SessionId,
     pub submissions: Mutex<Vec<SubmitInput>>,
@@ -67,6 +70,7 @@ impl Handle {
     pub fn new(id: &str, truncate: bool) -> Arc<Self> {
         Arc::new(Self {
             commands: commands::Scenario::default(),
+            source_reads: source_reads::Scenario::default(),
             projections: projections::Scenario::default(),
             id: SessionId::new(id).unwrap(),
             submissions: Mutex::new(Vec::new()),
@@ -169,10 +173,10 @@ impl SessionHandle for Handle {
     }
     async fn history_before(
         &self,
-        _: Option<u64>,
-        _: usize,
+        before: Option<u64>,
+        limit: usize,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionHistoryPage> {
-        missing()
+        self.source_reads.read(before, limit).await
     }
     async fn inspect(
         &self,

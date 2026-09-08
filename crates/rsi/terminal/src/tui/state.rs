@@ -93,6 +93,7 @@ pub(super) struct State {
     pub(super) detail_next: Option<Action>,
     pub(super) detail_previous: Option<Action>,
     pub(super) detail_actions: Option<Menu>,
+    pub(super) detail_stop: tokio_util::sync::CancellationToken,
     pub(super) selection: Option<(Anchor, Anchor)>,
     pub(super) top: Option<Anchor>,
     pub(super) focused: usize,
@@ -107,6 +108,11 @@ pub(super) struct State {
 }
 
 impl State {
+    pub(super) fn invalidate_detail(&mut self) {
+        self.view_revision = self.view_revision.wrapping_add(1);
+        self.detail_stop.cancel();
+        self.detail_stop = tokio_util::sync::CancellationToken::new();
+    }
     pub(super) fn open_detail(&mut self, text: String) {
         self.detail = Some(text);
         self.detail_offset = 0;
@@ -129,6 +135,7 @@ impl State {
             detail_next: None,
             detail_previous: None,
             detail_actions: None,
+            detail_stop: tokio_util::sync::CancellationToken::new(),
             selection: None,
             top: None,
             focused: 0,
@@ -162,7 +169,7 @@ impl State {
     }
 
     pub(super) fn escape(&mut self) {
-        self.view_revision = self.view_revision.wrapping_add(1);
+        self.invalidate_detail();
         if self.menu.take().is_some() {
             return;
         }
@@ -177,5 +184,11 @@ impl State {
             return;
         }
         self.selection = None;
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        self.detail_stop.cancel();
     }
 }

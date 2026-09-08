@@ -43,3 +43,8 @@ async fn message_driver_preserves_claim_identity_cancellation_and_terminal_deliv
 async fn fresh_projection_baselines_reconnect_and_fail_independently_of_core_history() {
     support::independent_projection_observation(execution()).await;
 }
+
+#[tokio::test]
+async fn exact_source_reads_cancel_and_retire_under_shared_bounded_admission() {
+    support::owned_source_window_reads(execution()).await;
+}

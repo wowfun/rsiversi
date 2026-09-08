@@ -3459,6 +3459,7 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
  "rsi-approval-protocol",
+ "rsi-conversation",
  "rsi-meta",
  "rsi-meta-execution",
  "rsi-meta-scope",

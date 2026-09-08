@@ -1,9 +1,26 @@
 use crate::application::{Result, SettingsEditor};
+use rsi_conversation::{FieldWindow, SourceRef};
+use serde::Serialize;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+pub(crate) const SOURCE_PAGE_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SourceDetail {
+    pub pane: u8,
+    pub generation: String,
+    pub source: SourceRef,
+    pub ticket: String,
+    pub window: Option<FieldWindow>,
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct Details {
     revision: u64,
+    pub stop: CancellationToken,
+    pub source: Option<SourceDetail>,
     pub editor: Option<SettingsEditor>,
     pub interaction: Option<Value>,
 }
@@ -13,9 +30,37 @@ impl Details {
             .revision
             .checked_add(1)
             .ok_or("Detail generation exhausted")?;
+        self.stop.cancel();
+        self.stop = CancellationToken::new();
+        self.source = None;
         self.editor = None;
         self.interaction = None;
         Ok(self.revision)
+    }
+    pub fn source_result(&mut self, revision: u64, result: Result<FieldWindow>) {
+        if self.revision != revision || self.stop.is_cancelled() {
+            return;
+        }
+        if let Some(source) = &mut self.source {
+            match result {
+                Ok(window) => source.window = Some(window),
+                Err(error) => source.error = Some(error),
+            }
+        }
+    }
+    pub fn detach(&mut self, pane: u8, generation: &str) -> Result<()> {
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.pane == pane && source.generation == generation)
+            || self
+                .interaction
+                .as_ref()
+                .is_some_and(|detail| detail["pane"] == pane && detail["generation"] == generation)
+        {
+            self.begin()?;
+        }
+        Ok(())
     }
     pub fn settings(&mut self, revision: u64, editor: SettingsEditor) {
         if self.revision == revision {
@@ -32,6 +77,12 @@ impl Details {
         }) {
             self.interaction = None;
         }
+    }
+}
+
+impl Drop for Details {
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
 

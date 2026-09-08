@@ -126,6 +126,52 @@ async fn extension_inspection_tracks_replacements_without_reopening_a_closed_det
     assert!(runtime.shutdown().await.is_clean());
 }
 
+#[tokio::test]
+async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() {
+    let fixture = Arc::new(UnknownThenAcceptedHandle {
+        history_gate: Some(Arc::new(tokio::sync::Semaphore::new(0))),
+        ..UnknownThenAcceptedHandle::default()
+    });
+    let (mut client, handle, runtime, surface) = client_with(fixture).await;
+    client.state.open_detail("old detail".into());
+    client.action(Action::Window(
+        rsi_conversation::SourceRef {
+            seq: 9,
+            field: rsi_conversation::FactField::TurnOutcome,
+        },
+        0,
+    ));
+    assert!(futures_util::poll!(client.tasks.next()).is_pending());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while handle
+            .history_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    client.state.escape();
+    let work = tokio::time::timeout(Duration::from_secs(1), client.tasks.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        handle
+            .history_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(work.result.is_err());
+    assert!(work.superseded(&client));
+    assert!(client.state.detail.is_none());
+    assert!(handle.cancellations.lock().unwrap().is_empty());
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[derive(Debug)]
 struct Application(Arc<UnknownThenAcceptedHandle>);
 

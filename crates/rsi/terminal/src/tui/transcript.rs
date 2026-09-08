@@ -40,7 +40,7 @@ impl Piece {
         )
     }
 
-    fn from_window(source: Source, window: &FieldWindow) -> Self {
+    pub(super) fn from_window(source: Source, window: &FieldWindow) -> Self {
         let mut piece = Self::new(source, &window.text, 0, WINDOW);
         for run in &mut piece.mapping {
             run.source += window.start;
@@ -233,6 +233,7 @@ impl Transcript {
         self.trim(true);
     }
 
+    #[cfg(test)]
     pub(super) fn window(fact: &SessionFact, source: Source, start: usize) -> Option<Piece> {
         let window = rsi_conversation::select_field(fact, source)?
             .window(start, WINDOW)

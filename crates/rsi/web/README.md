@@ -50,6 +50,15 @@ per pane; returning to live view fences a history result still in flight and res
 backward paging to the earliest Fact represented by the current live projection.
 Workspace paths describe the selected server, not the browser filesystem.
 
+Tool argument and result details use closed exact Fact sources, with decimal
+string sequences preserved opaquely in JavaScript. Rust reads one exact Fact
+through the shared controller and retains a 64 KiB UTF-8 field window. Paging
+requires the current detail ticket; stale buttons cannot replace a newer view.
+Closing or replacing details and replacing their pane cancel the old read.
+Both success and failure are fenced by pane and detail generation; unavailable
+sources are reported within their own detail. No full Fact or observation lease
+is retained by a detail, and detail cancellation does not cancel the Turn.
+
 Each transcript retains at most 128 blocks, 128 KiB per block and 1 MiB of text;
 omission is visible. A history page has the same projection bounds. The view
 uses shared [conversation semantics](../conversation/README.md) for Tool outcome

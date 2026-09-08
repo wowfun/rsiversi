@@ -74,6 +74,15 @@ pub(crate) enum Command {
         pane: u8,
         generation: String,
     },
+    InspectSource {
+        pane: u8,
+        generation: String,
+        source: rsi_conversation::SourceRef,
+    },
+    SourcePage {
+        ticket: String,
+        forward: bool,
+    },
     InspectInteraction {
         pane: u8,
         generation: String,
@@ -218,6 +227,7 @@ impl WebApplication {
             "panes": panes, "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "settings": details.editor,
             "detail": details.interaction,
+            "source_detail": details.source,
             "notice": *self.notice.lock().expect("Web notice poisoned"),
         }))
     }
@@ -306,6 +316,11 @@ impl PluginFactory for WebApplicationFactory {
                     {
                         let _admission = app.admission.lock().expect("Web admission poisoned");
                         app.stop.cancel();
+                        app.details
+                            .lock()
+                            .expect("Web details poisoned")
+                            .stop
+                            .cancel();
                         app.slots.close();
                         app.tasks.close();
                     }

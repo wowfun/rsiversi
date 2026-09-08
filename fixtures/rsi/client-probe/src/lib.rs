@@ -43,6 +43,7 @@ pub async fn run_probe() -> Result<String, JsValue> {
     scenarios::isolated_controller_scopes(execution.clone()).await;
     scenarios::owned_submission_drain(execution.clone()).await;
     scenarios::exact_command_reconciliation(execution.clone()).await;
+    scenarios::owned_source_window_reads(execution.clone()).await;
     scenarios::independent_projection_observation(execution.clone()).await;
     scenarios::explicit_reconciliation_cancellation(execution.clone()).await;
     scenarios::acknowledged_cursor(execution.clone()).await;
@@ -60,6 +61,6 @@ pub async fn run_probe() -> Result<String, JsValue> {
     Ok(serde_json::json!({
         "status":"passed", "command_reconciliation":"passed", "pending_timers":resources.pending_timers,
         "active_alarms":resources.active_alarms,
-        "cases":["independent fresh projection baselines and failure", "command identity and query-only reconciliation", "durable header decoding", "message claim cancellation and terminal delivery", "isolated controller scopes with shared domain", "owned submission drain and bounded admission", "explicit reconciliation cancellation and retained identity", "acknowledged cursor without watermark skip", "bounded read capacity recovery and cancellation", "Session-free Shell profiles and dropped opens", "partial surface activation retirement", "child cleanup failure propagation"]
+        "cases":["owned exact-source reads and cancellation", "independent fresh projection baselines and failure", "command identity and query-only reconciliation", "durable header decoding", "message claim cancellation and terminal delivery", "isolated controller scopes with shared domain", "owned submission drain and bounded admission", "explicit reconciliation cancellation and retained identity", "acknowledged cursor without watermark skip", "bounded read capacity recovery and cancellation", "Session-free Shell profiles and dropped opens", "partial surface activation retirement", "child cleanup failure propagation"]
     }).to_string())
 }

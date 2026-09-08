@@ -308,11 +308,24 @@ class Pane {
       if (!entry) {
         const node = element("article", `message ${block.role}`);
         const title = element("p", "message-title"); const text = element("p", "message-text"); const clipped = element("p", "omitted", "Text shortened in this view.");
-        node.append(title, text, clipped); entry = { node, title, text, clipped }; this.blocks.set(block.key, entry);
+        const sources = element("div", "actions source-actions");
+        node.append(title, text, clipped, sources); entry = { node, title, text, clipped, sources }; this.blocks.set(block.key, entry);
       }
       if (entry.title.textContent !== block.title) entry.title.textContent = block.title;
       if (entry.text.textContent !== block.text) entry.text.textContent = block.text;
       entry.clipped.hidden = !block.clipped;
+      const sourceKey = JSON.stringify(block.tool);
+      if (sourceKey !== entry.sourceKey) {
+        entry.sourceKey = sourceKey;
+        entry.sources.replaceChildren();
+        if (block.tool) {
+          for (const [field, label] of [["arguments", "Inspect arguments"], ["result", "Inspect result"]]) {
+            const source = block.tool[field];
+            if (source) entry.sources.append(button(label, () => this.action("inspect_source", { source }), "quiet"));
+          }
+          if (!block.tool.arguments) entry.sources.append(element("span", "hint", "Intent not loaded"));
+        }
+      }
       const expected = previous ? previous.nextSibling : this.transcript.firstChild;
       if (expected !== entry.node) this.transcript.insertBefore(entry.node, expected);
       previous = entry.node;
@@ -390,14 +403,34 @@ function showDialog(key, title, body) {
 async function closeDetail() { await command({ action: "close_detail" }); dialogKey = undefined; $("detail").close(); }
 $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
-$("settings-open").addEventListener("click", () => {
+$("settings-open").addEventListener("click", () => perform(async () => {
+  await command({ action: "close_detail" });
   const form = element("form"); const input = element("input"); input.value = "rsi.agent"; input.required = true; input.setAttribute("aria-label", "Settings namespace");
   const submit = element("button", "primary", "Read settings"); submit.type = "submit";
   form.append(element("label", "", "Settings namespace"), input, submit);
   form.addEventListener("submit", event => { event.preventDefault(); perform(() => command({ action: "settings_read", namespace: input.value })); });
   showDialog("settings-prompt", "Settings", form);
-});
+}));
 function renderDetail(next) {
+  if (next.source_detail) {
+    const detail = next.source_detail;
+    const key = JSON.stringify(detail);
+    if (dialogKey === key) return;
+    const body = element("div", "source-detail");
+    body.append(element("p", "hint", `Fact ${detail.source.seq} · ${detail.source.field.kind}`));
+    if (detail.error) body.append(element("p", "source-error", `Source unavailable: ${detail.error}`));
+    else if (!detail.window) body.append(element("p", "", "Loading source…"));
+    else {
+      const window = detail.window;
+      body.append(element("p", "source-range", `Bytes ${window.start}–${window.end}${window.more ? " · more available" : " · end"}`), element("pre", "source-text", window.text));
+      const actions = element("div", "actions");
+      const previous = button("Previous source page", () => command({ action: "source_page", ticket: detail.ticket, forward: false }));
+      const nextPage = button("Next source page", () => command({ action: "source_page", ticket: detail.ticket, forward: true }));
+      previous.disabled = window.start === 0; nextPage.disabled = !window.more;
+      actions.append(previous, nextPage); body.append(actions);
+    }
+    showDialog(key, "Exact source", body); return;
+  }
   if (next.settings) {
     const editor = next.settings;
     if (dialogKey === editor.ticket) return;
