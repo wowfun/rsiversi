@@ -37,7 +37,12 @@ Workspace paths describe the selected server, not the browser filesystem.
 
 Each transcript retains at most 128 blocks, 128 KiB per block and 1 MiB of text;
 omission is visible. A history page has the same projection bounds. The view
-also marks a page whose durable prefix was not loaded, including the initial
+keeps a Tool's name and argument preview when its result arrives, with distinct
+intent and result Fact sequences. Arguments occupy at most half the block so a
+result still has preview capacity; clipping never removes its exact source.
+History beginning after intent displays an explicitly missing intent rather than
+inventing a Tool name or arguments. It also marks a page whose durable prefix
+was not loaded, including the initial
 attachment tail; a page can begin in the middle of streamed model output.
 Rendering acknowledges an observation after its bounded Rust projection is retained.
 Coalesced view notifications cannot advance or replace domain cursors. The DOM

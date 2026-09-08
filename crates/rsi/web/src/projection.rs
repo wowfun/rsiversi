@@ -12,6 +12,13 @@ const MAX_BLOCKS: usize = 128;
 const MAX_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct ToolPreview {
+    name: Option<String>,
+    intent_seq: Option<u64>,
+    result_seq: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Block {
     pub key: String,
@@ -19,6 +26,8 @@ pub(crate) struct Block {
     pub title: String,
     pub text: String,
     pub clipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolPreview>,
     #[serde(skip)]
     first_seq: u64,
 }
@@ -49,6 +58,7 @@ impl Transcript {
                 title: short(title, 512).into(),
                 text: String::new(),
                 clipped: false,
+                tool: None,
                 first_seq: self.seq,
             });
             self.blocks.len() - 1
@@ -172,13 +182,23 @@ impl Transcript {
                 arguments,
                 ..
             } => {
+                let key = format!("tool:{effect_id}");
+                let arguments = arguments.to_string();
                 self.add(
-                    format!("tool:{effect_id}"),
+                    key.clone(),
                     "tool",
                     &format!("{name} · running"),
-                    &arguments.to_string(),
+                    short(&arguments, MAX_BLOCK_BYTES / 2),
                     false,
                 );
+                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                    block.clipped |= arguments.len() > MAX_BLOCK_BYTES / 2;
+                    block.tool = Some(ToolPreview {
+                        name: Some(name.clone()),
+                        intent_seq: Some(self.seq),
+                        result_seq: None,
+                    });
+                }
             }
             SessionFactBody::ToolResult {
                 effect_id, result, ..
@@ -193,26 +213,32 @@ impl Transcript {
                         .value
                         .get("signal")
                         .is_some_and(|value| !value.is_null());
-                let title = if failed {
-                    "Tool · failed"
-                } else {
-                    "Tool · completed"
-                };
+                let key = format!("tool:{effect_id}");
+                let previous = self.blocks.iter().find(|block| block.key == key);
+                let mut tool = previous
+                    .and_then(|block| block.tool.clone())
+                    .unwrap_or_default();
+                let title = format!(
+                    "{} · {}",
+                    tool.name.as_deref().unwrap_or("Tool"),
+                    if failed { "failed" } else { "completed" }
+                );
+                if tool.intent_seq.is_some() {
+                    self.add(key.clone(), "tool", &title, "\n\n", true);
+                }
                 let mut first = true;
                 for content in &result.content {
                     if let ToolContent::Text { text } = content {
-                        self.add(format!("tool:{effect_id}"), "tool", title, text, !first);
+                        self.add(key.clone(), "tool", &title, text, true);
                         first = false;
                     }
                 }
                 if first {
-                    self.add(
-                        format!("tool:{effect_id}"),
-                        "tool",
-                        title,
-                        &result.value.to_string(),
-                        false,
-                    );
+                    self.add(key.clone(), "tool", &title, &result.value.to_string(), true);
+                }
+                tool.result_seq = Some(self.seq);
+                if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+                    block.tool = Some(tool);
                 }
             }
             SessionFactBody::TurnTerminal { turn_id, outcome } => {
@@ -265,6 +291,79 @@ pub(crate) fn short(text: &str, maximum: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_tool_keeps_name_arguments_and_both_sources() {
+        use rsi_agent_session_protocol::EffectId;
+        use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
+        for (exit_code, expected_status, command) in [
+            (0, "completed", "cargo test".to_owned()),
+            (7, "failed", "cargo test".to_owned()),
+            (
+                0,
+                "completed",
+                format!("cargo test {}", "界".repeat(MAX_BLOCK_BYTES / 3)),
+            ),
+        ] {
+            let identity =
+                ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64)).unwrap();
+            let intent = SessionFact::new(
+                10,
+                1,
+                SessionFactBody::ToolIntent {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    identity: identity.clone(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": command}),
+                    approval: None,
+                    parallel_safe: false,
+                },
+            )
+            .unwrap();
+            let result = SessionFact::new(
+                12,
+                1,
+                SessionFactBody::ToolResult {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    identity,
+                    result: ToolResult::new(
+                        serde_json::json!({"exit_code": exit_code}),
+                        vec![ToolContent::Text {
+                            text: "test output".into(),
+                        }],
+                        false,
+                    )
+                    .unwrap(),
+                },
+            )
+            .unwrap();
+            let mut transcript = Transcript::default();
+            transcript.fact(&intent);
+            transcript.fact(&result);
+            transcript.fact(&result);
+            let block = &transcript.blocks[0];
+            assert_eq!(transcript.blocks.len(), 1);
+            assert_eq!(block.title, format!("bash · {expected_status}"));
+            assert!(block.text.contains("cargo test"));
+            assert!(block.text.contains("test output"));
+            assert!(block.text.len() <= MAX_BLOCK_BYTES);
+            assert_eq!(block.clipped, command.len() > MAX_BLOCK_BYTES / 2);
+            assert_eq!(transcript.history_before(), Some(10));
+            let view = serde_json::to_value(block).unwrap();
+            assert_eq!(view["tool"]["intent_seq"], 10);
+            assert_eq!(view["tool"]["result_seq"], 12);
+
+            let mut suffix = Transcript::default();
+            suffix.fact(&result);
+            let suffix = serde_json::to_value(&suffix.blocks[0]).unwrap();
+            assert!(suffix["tool"]["name"].is_null());
+            assert!(suffix["tool"]["intent_seq"].is_null());
+            assert_eq!(suffix["tool"]["result_seq"], 12);
+        }
+    }
+
     #[test]
     fn projection_bounds_utf8_replacement_and_aggregate_history_without_losing_terminal_status() {
         let mut transcript = Transcript::default();

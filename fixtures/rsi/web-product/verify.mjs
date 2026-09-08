@@ -136,8 +136,11 @@ try {
       await page.screenshot({ path: join(report, `${name}-approval.png`) });
       await page.getByRole("button", { name: "Allow once", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
-      assert.match(await left.locator(".transcript").innerText(), /Tool · failed/);
-      assert.match(await left.locator(".transcript").innerText(), /fixture stdout/);
+      const failedTool = await left.locator(".transcript").innerText();
+      assert.match(failedTool, /bash · failed/);
+      assert.match(failedTool, /"command":.*exit 7/);
+      assert.match(failedTool, /fixture stdout/);
+      assert.match(failedTool, /fixture stderr/);
       await page.screenshot({ path: join(report, `${name}-tool-failure.png`) });
       await page.setViewportSize({ width: 390, height: 844 });
       await page.screenshot({ path: join(report, `${name}-narrow.png`), fullPage: true });
