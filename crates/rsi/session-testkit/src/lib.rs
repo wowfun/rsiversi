@@ -71,6 +71,41 @@ pub async fn assert_session_contract(
     let header = handle.header().await.unwrap();
     assert_eq!(header.session_id(), &session_id);
     assert_eq!(header.canonical_cwd(), canonical_cwd);
+    let draft = handle.draft_snapshot().await.unwrap();
+    assert_eq!(draft.header, header);
+    assert_eq!(draft.revision, 0);
+    assert_eq!(
+        handle.commands().await.unwrap().revision(),
+        rsi_agent_session_protocol::CommandRevision::Draft { revision: 0 }
+    );
+    let unknown_command =
+        rsi_agent_session_protocol::DomainRequestId::new("unexecuted-command").unwrap();
+    assert!(
+        handle
+            .command_status(&unknown_command)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let selected = handle
+        .select_preset(rsi_session_protocol::SelectDraftPreset {
+            preset_id: header.agent_preset_id().clone(),
+            expected_revision: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(selected.header, header);
+    assert_eq!(selected.revision, 1);
+    assert_eq!(
+        application
+            .create(create.clone())
+            .await
+            .unwrap()
+            .draft_snapshot()
+            .await
+            .unwrap(),
+        selected
+    );
     assert!(
         handle
             .history_before(None, 8)

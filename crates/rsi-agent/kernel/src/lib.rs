@@ -233,6 +233,7 @@ struct KernelInner {
     clock: Arc<dyn Clock>,
     state: Mutex<KernelState>,
     submission_admission: SubmissionAdmission,
+    commands: commands::CommandRequests,
     ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
     session_changes: SessionWatchHub,
@@ -782,6 +783,7 @@ fn apply_committed_flush(
 }
 
 mod admission;
+mod commands;
 mod contributions;
 mod domains;
 mod elapsed;
@@ -992,10 +994,25 @@ impl PluginFactory for KernelFactory {
                 return Err(error);
             }
         };
+        let commands_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionCommandsContract>(Arc::new(
+                kernel.clone(),
+            )) {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
         plan.defer(
             "shutdown Agent Kernel",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(commands_supply);
                     drop(finalization_supply);
                     drop(execution_supply);
                     drop(turns_supply);

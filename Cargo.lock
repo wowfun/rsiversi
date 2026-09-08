@@ -3900,6 +3900,7 @@ dependencies = [
  "futures-util",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
+ "rsi-agent-kernel",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",

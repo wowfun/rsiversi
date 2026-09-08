@@ -1,5 +1,18 @@
 # rsi-agent-turn-protocol
 
+`SessionCommands` is an independent Local service published by the same Kernel.
+Listing and execution consume Kernel-issued resume authority, retaining the
+resident or validated cold generation. Query reads the canonical request receipt
+without executing a callback. Execution joins an identical in-flight request,
+checks a committed receipt before callback dispatch, captures the exact control
+revision and complete typed states, then runs the callback outside framework
+locks. Preparation and callback execution share a 30-second deadline, with at
+most 64 concurrent distinct requests per Kernel. A changed invocation using the same request ID is
+a conflict; callbacks are never automatically retried after revision conflicts.
+After validation, the Kernel owns the state-only commit through reconciliation
+even if the caller disconnects. Commands do not create Turns, execution Facts,
+Workspace registrations or external effects.
+
 `SubmitMessage.delivery` is immutable ingress intent: fixed next Turn, fixed
 next Step, or Human steering. The Kernel resolves steering atomically while
 holding Session submission admission. A receipt means durable acceptance; it

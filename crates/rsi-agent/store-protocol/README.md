@@ -7,6 +7,9 @@ contains all distinct-domain replacements for a bounded request, its expected
 revisions and Kernel-assigned source. A receipt identifies that control and the
 request digest. Domain head/as-of and request indexes retain control positions,
 never a second authoritative state payload. Store does not invoke domain codecs.
+For command controls, the retained invocation's expected control revision must
+be the exact predecessor of that canonical control, in addition to each domain
+replacement's revision check.
 
 A mixed Turn mutation binds its exact contiguous same-append Fact span and a
 digest of those Fact bodies. The request digest includes that body digest,

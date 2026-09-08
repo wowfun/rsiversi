@@ -115,6 +115,26 @@ pub struct CreateSession {
     pub workspace_trust: WorkspaceTrust,
 }
 
+/// One atomic view of a still-unpublished draft.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionDraftView {
+    /// Current Header, including the selected preset.
+    pub header: SessionHeader,
+    /// Current lease-local mutation revision.
+    pub revision: u64,
+}
+
+/// Compare-and-select request for a new unpublished preset generation.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectDraftPreset {
+    /// Exact preset selected by the caller.
+    pub preset_id: AgentPresetId,
+    /// Exact draft revision observed by the caller.
+    pub expected_revision: u64,
+}
+
 /// One transport-independent user-input block.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -290,6 +310,22 @@ pub struct RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Reads the current Header and revision from one live draft snapshot.
+    async fn draft_snapshot(&self) -> Result<SessionDraftView>;
+    /// Selects a fully prepared preset only at the expected unpublished revision.
+    async fn select_preset(&self, request: SelectDraftPreset) -> Result<SessionDraftView>;
+    /// Lists the pinned command catalog and exact draft or durable predecessor.
+    async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView>;
+    /// Executes one frozen logical invocation; no callback is implicitly replayed.
+    async fn execute_command(
+        &self,
+        invocation: rsi_agent_session_protocol::SessionCommandInvocation,
+    ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt>;
+    /// Queries the original compact receipt in the current draft lease or durable Session.
+    async fn command_status(
+        &self,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>;
     /// Reads only the immutable acceptance record matching this exact identity and cursor.
     async fn read_message(
         &self,
@@ -383,6 +419,26 @@ impl rsi_meta_contract::LocalContract for SessionContract {
 /// Closed Session application failure taxonomy shared by all adapters.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    /// An existing command identity names different logical input.
+    #[error("command request {request_id} conflicts with its original invocation")]
+    CommandConflict {
+        /// Exact Session-scoped idempotency identity.
+        request_id: rsi_agent_session_protocol::DomainRequestId,
+    },
+    /// A command no longer names the current draft or durable predecessor.
+    #[error("command revision conflict: expected {expected:?}, actual {actual:?}")]
+    CommandRevisionConflict {
+        /// Frozen caller predecessor.
+        expected: rsi_agent_session_protocol::CommandRevision,
+        /// Current owning revision.
+        actual: rsi_agent_session_protocol::CommandRevision,
+    },
+    /// Delivery or Store reconciliation cannot establish the command's result.
+    #[error("command request {request_id} has an unknown outcome; query its original identity")]
+    CommandOutcomeUnknown {
+        /// Exact original request identity; never replaced automatically.
+        request_id: rsi_agent_session_protocol::DomainRequestId,
+    },
     /// Common API failure, including uncertain mutation outcomes.
     #[error(transparent)]
     Api(rsi_api_protocol::ApiError),

@@ -23,7 +23,12 @@ Drafts retain actual typed domain initial state. Applying an initial proposal
 changes that payload only; a successful preset switch resets it to the selected
 generation's defaults, and a failed switch preserves it. Fresh admission moves
 the Header, pin and complete baseline together. Its digest distinguishes frozen
-initial states during first-submission retries. Empty initial state has no
+initial states during first-submission retries. A lease-owning Session adapter
+may freeze an admission while retaining the draft for failed-submission retries;
+it serializes freezing, initial-state changes and first publication under one
+draft mutation admission. Freezing preserves the complete baseline and exact
+generation. An initial-state batch is validated as a whole and either replaces
+all requested domains or leaves the draft intact. Empty initial state has no
 baseline control and uses the documented zero digest.
 
 This package contains no preset filesystem discovery, generation construction,
@@ -85,3 +90,31 @@ Tool policies return only Abstain, RequireApproval or a bounded Deny reason.
 Deny takes precedence, and no policy can relax resolved Turn approval or
 Sandbox requirements. Policies inspect the exact prepared Tool call and the
 same pinned domain snapshot; they do not produce state mutations.
+
+## Command contributions
+
+Session command callbacks are frozen by the same unpublished registrar and
+generation as execution contributions. Each has a bounded description, an
+explicit draft-safe flag and a unique command name. Callbacks receive the
+immutable Header, typed revision and complete bounded domain snapshot, and
+return only typed domain replacements. They have no external-effect or Store
+capability. The owning Session or Kernel validates and atomically commits the
+complete output after the callback finishes outside framework locks. Duplicate
+request lookup precedes callback invocation and revision checks. A conflict
+never causes an automatic callback retry.
+
+Draft command preparation captures the lease-local revision, actual initial
+states and exact callback generation. Execution returns a move-only proposal
+batch; applying it requires the same draft identity and unchanged revision.
+The Session lease owner serializes that final application with first submit and
+preset selection, while the callback runs without holding that admission.
+Identical request lookup precedes preparation. A draft retains at most 256
+compact command receipts for its lifetime and rejects further distinct command
+mutations at capacity; it never evicts an idempotency receipt and later silently
+re-executes the same request. Preset selection resets initial defaults, advances
+the draft revision and preserves earlier receipts as results of their original
+operations. They do not claim to describe the draft's latest state.
+Preset preparation also returns an owned future and a move-only staged result,
+so plugin generation construction runs outside the Session mutation lock. Final
+selection checks the same draft identity and predecessor before replacing the
+Header, pin and defaults together.

@@ -1,5 +1,28 @@
 # rsi-agent-session-protocol
 
+## Session commands
+
+Command invocations bind a ContributionId, DomainRequestId, typed draft or
+durable control revision, and at most 16 KiB of structurally validated JSON
+arguments. A durable command control retains that complete invocation alongside
+its domain replacements; the canonical request digest therefore binds command,
+arguments and expected revision. Its request identity must equal the control's
+request identity, and a draft revision cannot appear in a durable command.
+Command controls contain no execution Facts and cannot claim a Turn's free
+mutation lane. Their consumers obtain Session authority through the owning
+Kernel service; serialized identities alone confer no authority. Header format
+11 and SQLite schema 16 make this command invocation cutover explicit; earlier
+authoritative formats are rejected without rewriting their files.
+
+Client command receipts are compact validated projections of canonical command
+controls or lease-local draft mutations. DraftChanged binds the successor draft
+revision and complete baseline digest; Committed binds the exact control cursor
+and canonical domain request digest. Both retain command/request identities and
+the original invocation digest. They do not copy complete domain states into
+transport receipts or create another durable receipt store.
+
+## Execution records
+
 `PluginContext` attributes actual model-visible text to one validated
 ContributionId. It is text-only, uses the entered-message byte/block bounds,
 and carries the exact open Step identity. Kernel accepts it only at a boundary

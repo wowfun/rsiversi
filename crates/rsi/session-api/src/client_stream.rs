@@ -24,7 +24,7 @@ async fn open<I: Serialize + Sync>(
         .input_budget(spec.class)
         .encode(
             &HandleRequest {
-                target: handle.target.clone(),
+                target: handle.target(),
                 input,
             },
             spec.maximum_request_bytes,
@@ -55,7 +55,7 @@ fn decode<T: DeserializeOwned>(
     }
     let reply: HandleReply<T> = serde_json::from_slice(message.json.as_bytes())
         .map_err(|_| client::malformed(operation))?;
-    if reply.target != handle.target {
+    if reply.target != handle.target() {
         return Err(client::malformed(operation));
     }
     Ok(reply.body)
@@ -75,8 +75,8 @@ pub(super) async fn observe(
     handle: &Handle,
     cursor: ObservationCursor,
 ) -> rsi_session_protocol::Result<SessionObservationStream> {
-    let mut source = open(handle, Operation::Observe, cursor).await?;
-    let handle = handle.clone();
+    let handle = handle.frozen();
+    let mut source = open(&handle, Operation::Observe, cursor).await?;
     let mut observed = cursor;
     let mut durable = cursor;
     Ok(Box::pin(async_stream::try_stream! {
@@ -125,14 +125,14 @@ struct Interactions {
 pub(super) async fn interactions(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<InteractionStream> {
-    let mut source = open(handle, Operation::Interactions, ()).await?;
-    let handle = handle.clone();
-    let mut verified = BTreeSet::from([handle.target.session_id.to_string()]);
+    let handle = handle.frozen();
+    let mut source = open(&handle, Operation::Interactions, ()).await?;
+    let mut verified = BTreeSet::from([handle.session_id.to_string()]);
     Ok(Box::pin(async_stream::try_stream! {
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(Operation::Interactions, error))?;
             let body: Interactions = decode(&handle, Operation::Interactions, &message)?;
-            client::validate_questions(&body.questions, &handle.target.session_id)?;
+            client::validate_questions(&body.questions, &handle.session_id)?;
             let retained = handle.state.interactions.retain(body.approvals, body.questions)?;
             drop(message);
             handle.verify_owners(retained.approvals(), &mut verified).await?;

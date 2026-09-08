@@ -452,20 +452,34 @@ impl DomainBaseline {
     /// Rejects a different generation, nonzero predecessor or aggregate capacity failure.
     /// Failure preserves the entire previous baseline.
     pub fn apply(&mut self, proposal: &ValidatedDomainProposal) -> Result<()> {
-        self.catalog.validate_proposal(proposal)?;
-        if proposal.expected_revision().get() != 0 {
-            return Err(DomainError::BaselineRevision);
+        self.apply_batch(std::slice::from_ref(proposal))
+    }
+
+    /// Replaces a bounded distinct-domain initial batch atomically.
+    ///
+    /// # Errors
+    /// Rejects duplicate domains, wrong generations, revisions or aggregate bounds.
+    /// Failure leaves all previous values and their digest intact.
+    pub fn apply_batch(&mut self, proposals: &[ValidatedDomainProposal]) -> Result<()> {
+        if proposals.len() > MAXIMUM_SESSION_DOMAINS {
+            return Err(DomainError::Capacity);
         }
+        let mut seen = std::collections::BTreeSet::new();
         let mut snapshots = self.snapshots();
-        let index = snapshots
-            .binary_search_by(|snapshot| {
-                snapshot
-                    .identity()
-                    .id()
-                    .cmp(proposal.snapshot().identity().id())
-            })
-            .map_err(|_| DomainError::WrongGeneration)?;
-        snapshots[index] = proposal.snapshot().clone();
+        for proposal in proposals {
+            self.catalog.validate_proposal(proposal)?;
+            if proposal.expected_revision().get() != 0 {
+                return Err(DomainError::BaselineRevision);
+            }
+            let id = proposal.snapshot().identity().id();
+            if !seen.insert(id) {
+                return Err(DomainError::Duplicate(id.into()));
+            }
+            let index = snapshots
+                .binary_search_by(|snapshot| snapshot.identity().id().cmp(id))
+                .map_err(|_| DomainError::WrongGeneration)?;
+            snapshots[index] = proposal.snapshot().clone();
+        }
         let next = baseline_commit(snapshots)?;
         self.commit = next;
         Ok(())
@@ -518,6 +532,11 @@ impl DomainBaseline {
                 .map(|update| update.snapshot().clone())
                 .collect()
         })
+    }
+
+    /// Returns actual bounded initial states, whose domain predecessors are all zero.
+    pub fn initial_states(&self) -> Vec<DomainSnapshot> {
+        self.snapshots()
     }
 }
 

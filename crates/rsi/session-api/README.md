@@ -6,16 +6,34 @@ trusted ingress; it owns no draft table, execution pin, provider or durable log.
 Creation passes the authenticated origin to the existing draft owner. The client
 publishes only the application-facing Session capability.
 
-Each attached handle carries the validated immutable Header fingerprint. Handle
+Each attached handle carries an atomic Header and fingerprint binding. Handle
 operations and stream items carry that fingerprint and exact Session identity;
 operations reject a different Header under a reused Session identity. This
 fingerprint identifies canonical Header content, not a recoverable draft pin;
 the live draft lease remains the domain's idempotency boundary.
 Transport EndpointId/HostEpoch checks independently fence the deployment generation.
+Preset selection validates the returned Header as exactly the previous Header with
+the selected preset, validates the successor draft revision, and replaces that
+handle's binding atomically. Already admitted calls and streams retain their
+captured binding. A stale selection response cannot overwrite a newer binding;
+another handle refreshes through attach after a remote switch. Creation replies
+echo the original creation input alongside the current draft snapshot, so a retry
+after selection can return the actual draft without changing its creation identity.
 All DTOs are closed; receipts, history, recent pages, inspections, observation
 cursors and live interactions are validated against their request before exposure.
 Message reads also echo the exact acceptance cursor. Invalid-input diagnostics
 retain at most 4 KiB of UTF-8 text; clients reject an oversized diagnostic.
+
+Command discovery, execution and receipt lookup use authenticated Data operations.
+The adapter validates the request identity, command identity and complete invocation
+digest on execution replies; uncertain or mismatched mutation replies preserve the
+original request identity as `CommandOutcomeUnknown`. Lookup validates its exact
+request identity and never repeats execution. Command revision conflicts echo the
+caller's expected revision. Compact receipts do not contain domain state values.
+Each command operation reserves the full Data scratch ceiling before attachment:
+resolving a compact receipt or command catalog can still load Headers, canonical
+controls and complete domain snapshots. Its wire response remains independently
+bounded (512 KiB for discovery, 8 KiB for receipts).
 
 Create, input, direct Image and interaction answers are owned mutations. Unknown
 message outcomes retain the caller's MessageId for status/retry reconciliation.

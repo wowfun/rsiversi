@@ -956,7 +956,16 @@ async fn cold_recovery_restores_turn_control_usage_and_excludes_command_controls
             }
         } else {
             DomainMutationSource::Command {
-                command: "fixture.toggle".into(),
+                invocation: rsi_agent_session_protocol::SessionCommandInvocation {
+                    command: rsi_agent_session_protocol::ContributionId::new("fixture.toggle")
+                        .unwrap(),
+                    request_id: DomainRequestId::new("raw-second").unwrap(),
+                    expected_revision: rsi_agent_session_protocol::CommandRevision::Durable {
+                        control_seq: 2,
+                    },
+                    arguments: rsi_agent_session_protocol::CommandArguments::new(false.into())
+                        .unwrap(),
+                },
             }
         };
         let commit = DomainStateCommit::new(
@@ -1226,7 +1235,15 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
     let commit = rsi_agent_session_protocol::DomainStateCommit::new(
         Some(rsi_agent_session_protocol::DomainRequestId::new("idle-toggle").unwrap()),
         rsi_agent_session_protocol::DomainMutationSource::Command {
-            command: "fixture.toggle".into(),
+            invocation: rsi_agent_session_protocol::SessionCommandInvocation {
+                command: rsi_agent_session_protocol::ContributionId::new("fixture.toggle").unwrap(),
+                request_id: rsi_agent_session_protocol::DomainRequestId::new("idle-toggle")
+                    .unwrap(),
+                expected_revision: rsi_agent_session_protocol::CommandRevision::Durable {
+                    control_seq: page.durable_control_seq,
+                },
+                arguments: rsi_agent_session_protocol::CommandArguments::new(false.into()).unwrap(),
+            },
         },
         vec![update],
     )

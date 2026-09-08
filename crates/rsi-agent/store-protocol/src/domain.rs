@@ -93,6 +93,16 @@ pub fn domain_heads_after(
 ) -> Result<Vec<StoreDomainHead>> {
     validate_domain_heads(heads)?;
     let baseline = matches!(commit.source(), DomainMutationSource::Baseline);
+    if let DomainMutationSource::Command { invocation } = commit.source()
+        && invocation.expected_revision
+            != (rsi_agent_session_protocol::CommandRevision::Durable {
+                control_seq: control_seq.saturating_sub(1),
+            })
+    {
+        return Err(StoreError::Invalid(
+            "command control revision differs from its canonical predecessor".into(),
+        ));
+    }
     if control_seq == 0 || (baseline && (control_seq != 1 || !heads.is_empty())) {
         return Err(StoreError::Invalid(
             "domain baseline must be the first control of a fresh empty set".into(),

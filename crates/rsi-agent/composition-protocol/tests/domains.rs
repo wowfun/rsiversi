@@ -243,3 +243,49 @@ fn a_draft_baseline_freezes_actual_initial_values_and_preserves_them_on_rejectio
         .validate_complete_states(&[frozen.updates()[0].snapshot().clone()])
         .unwrap();
 }
+
+#[test]
+fn draft_batches_never_publish_a_valid_prefix_before_a_later_rejection() {
+    use rsi_agent_composition_protocol::DomainBaseline;
+    let first = DomainDefinition::new(DomainIdentity::new("first", 1).unwrap(), &false, |_| Ok(()))
+        .unwrap();
+    let second =
+        DomainDefinition::new(
+            DomainIdentity::new("second", 1).unwrap(),
+            &false,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let catalog = DomainCatalog::new([first.registration(), second.registration()]).unwrap();
+    let a = catalog.bind(&first).unwrap();
+    let b = catalog.bind(&second).unwrap();
+    let mut baseline = DomainBaseline::new(catalog).unwrap();
+    let original = baseline.digest().to_owned();
+    let valid = a.propose(DomainRevision::new(0), &true).unwrap();
+    assert!(
+        baseline
+            .apply_batch(&[
+                valid.clone(),
+                b.propose(DomainRevision::new(1), &true).unwrap()
+            ])
+            .is_err()
+    );
+    assert_eq!(baseline.digest(), original);
+    assert!(
+        baseline
+            .apply_batch(&[valid.clone(), valid.clone()])
+            .is_err()
+    );
+    assert_eq!(baseline.digest(), original);
+    baseline
+        .apply_batch(&[valid, b.propose(DomainRevision::new(0), &true).unwrap()])
+        .unwrap();
+    assert!(
+        baseline
+            .commit()
+            .unwrap()
+            .updates()
+            .iter()
+            .all(|update| update.snapshot().state().value() == &serde_json::json!(true))
+    );
+}

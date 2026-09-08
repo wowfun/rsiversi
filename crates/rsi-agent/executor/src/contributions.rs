@@ -98,8 +98,8 @@ impl Driver {
                                 .contribute(&run.context, settled, run.token.clone())
                                 .await
                         }
-                        ContributionKind::ToolPolicy(_) => {
-                            unreachable!("policy uses read-only decision dispatch")
+                        ContributionKind::ToolPolicy(_) | ContributionKind::Command(_) => {
+                            unreachable!("non-execution callbacks use their own dispatch")
                         }
                     }
                 })

@@ -23,8 +23,11 @@ control-admission fences and partial startup repair. Domain as-of selection uses
 that established control horizon. The
 [execution contribution decision](../../implemented/architecture/2026-09-08-execution-contributions.md)
 owns PluginContext, ToolRejected, stable ordering, bounded execution stages and
-workspace/time migration. This proposal continues with commands, projections,
-draft controls and planning policy, consuming those established interfaces.
+workspace/time migration. The
+[Session command decision](../../implemented/architecture/2026-09-09-session-command-admission.md)
+owns command dispatch, draft values, preset selection and transport binding.
+This proposal continues with projections and planning policy, consuming those
+established interfaces.
 
 ## Alternatives considered
 

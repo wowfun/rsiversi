@@ -14,10 +14,16 @@ constructs Session adapters nor registers a second broker per client.
 
 `LocalSessionService` is constructed from already-owned capabilities. Draft
 creation resolves a registered WorkspaceId, freezes workspace trust and settings,
-rejects a durable identity collision and retains a preset generation. Attach and
+rejects a durable identity collision and retains the actual Agent draft payload,
+including typed initial states and its preset generation. Attach and
 history read only the durable Store. Submission defers execution dependencies
 until the selected operation requires them; fresh publication serializes the
-one transition from draft to durable attachment. Already admitted publication
+one transition from draft to durable attachment. Each fresh publication freezes
+that retained payload, including its baseline digest, under the same admission.
+The current Header belongs to the Fresh or Attached state. A handle retains only
+its Session identity separately, so preset changes cannot leave a second stale
+Header behind for binding or publication reconciliation.
+Already admitted publication
 waiters recheck the draft state after acquiring that transition lock; a draft
 expired by a conflicting publication returns NotFound.
 Fresh handle Header/history reads also reconcile against the Store. A matching

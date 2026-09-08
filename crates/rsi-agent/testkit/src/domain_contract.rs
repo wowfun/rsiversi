@@ -113,6 +113,33 @@ pub async fn assert_domain_store_contract(
     assert_eq!((first.durable_fact_seq, first.durable_control_seq), (1, 1));
     assert_eq!(first.states.len(), 2);
     assert_eq!(first.states[0].head.revision, DomainRevision::new(1));
+    let stale_command = control(
+        2,
+        Some("stale-command"),
+        DomainMutationSource::Command {
+            invocation: rsi_agent_session_protocol::SessionCommandInvocation {
+                command: rsi_agent_session_protocol::ContributionId::new("fixture.command")
+                    .unwrap(),
+                request_id: rsi_agent_session_protocol::DomainRequestId::new("stale-command")
+                    .unwrap(),
+                expected_revision: rsi_agent_session_protocol::CommandRevision::Durable {
+                    control_seq: 0,
+                },
+                arguments: rsi_agent_session_protocol::CommandArguments::new(true.into()).unwrap(),
+            },
+        },
+        vec![update("a", 1, true)],
+    );
+    assert!(
+        store
+            .commit_agent(atomic(&header, 1, 1, false, vec![], vec![stale_command]))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.read_domain_states(session, None).await.unwrap(),
+        first
+    );
     assert_eq!(
         first.states[0].snapshot.state().value(),
         &serde_json::Value::Bool(false)

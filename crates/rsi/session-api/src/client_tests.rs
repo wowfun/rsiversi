@@ -1,4 +1,10 @@
 use super::*;
+
+#[path = "client_tests/commands.rs"]
+mod commands;
+
+#[path = "client_tests/draft.rs"]
+mod draft;
 use futures_util::{StreamExt as _, stream};
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, AgentMessageContent, AgentMessageSource,
@@ -28,6 +34,22 @@ struct Remote {
     output: ByteBudget,
     replies: Mutex<VecDeque<rsi_api_protocol::Result<ApiOutput>>>,
     calls: AtomicUsize,
+    requests: Mutex<Vec<(OperationSpec, Value)>>,
+    gates: Mutex<VecDeque<Arc<Gate>>>,
+}
+
+#[derive(Debug)]
+struct Gate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+impl Gate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        })
+    }
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -42,6 +64,8 @@ impl Remote {
             output: ByteBudget::default(),
             replies: Mutex::default(),
             calls: AtomicUsize::new(0),
+            requests: Mutex::default(),
+            gates: Mutex::default(),
         })
     }
     fn message(&self, value: &impl Serialize) -> ApiMessage {
@@ -87,15 +111,26 @@ impl ApiClient for Remote {
     async fn call(
         &self,
         operation: &OperationSpec,
-        _: RetainedBytes,
+        input: RetainedBytes,
     ) -> rsi_api_protocol::Result<ApiOutput> {
         assert!(self.operations.contains(operation));
         self.calls.fetch_add(1, Ordering::AcqRel);
-        self.replies
+        self.requests.lock().unwrap().push((
+            operation.clone(),
+            serde_json::from_slice(input.as_bytes()).unwrap(),
+        ));
+        let reply = self
+            .replies
             .lock()
             .unwrap()
             .pop_front()
-            .expect("one scripted response per explicit request")
+            .expect("one scripted response per explicit request");
+        let gate = self.gates.lock().unwrap().pop_front();
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
+        reply
     }
 }
 fn header() -> SessionHeader {

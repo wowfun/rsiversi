@@ -5,9 +5,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use async_trait::async_trait;
-use rsi_agent_composition_protocol::{
-    AgentComposition, AgentCompositionPin, AgentSessionDraft, PreparedFreshSession,
-};
+use rsi_agent_composition_protocol::{AgentComposition, AgentSessionDraft};
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, MAXIMUM_FACTS_PER_READ, MessageId,
     MessageOptions, SessionHeader, SessionId,
@@ -29,6 +27,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
+mod commands;
 mod drafts;
 mod interactions;
 mod plugin;
@@ -45,6 +44,8 @@ use rsi_session_protocol::{
 #[derive(Clone)]
 pub struct LocalSessionService {
     turns: Arc<dyn TurnService>,
+    commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
+    draft_commands: Arc<commands::DraftCommands>,
     store: Arc<dyn SessionStore>,
     composition: Arc<dyn AgentComposition>,
     workspace: Arc<dyn WorkspaceRegistry>,
@@ -71,6 +72,7 @@ impl LocalSessionService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         execution: rsi_meta::Execution,
+        commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
         turns: Arc<dyn TurnService>,
         store: Arc<dyn SessionStore>,
         composition: Arc<dyn AgentComposition>,
@@ -83,6 +85,8 @@ impl LocalSessionService {
     ) -> Self {
         Self {
             turns,
+            commands,
+            draft_commands: commands::DraftCommands::new(),
             store,
             composition,
             workspace,
@@ -107,18 +111,26 @@ impl LocalSessionService {
         self
     }
 
-    fn handle_from_header(
+    fn handle_from_state(
         &self,
-        header: SessionHeader,
         state: HandleState,
         lease: Option<drafts::DraftLease>,
     ) -> Arc<LocalSessionHandle> {
         Arc::new(LocalSessionHandle {
-            header,
-            published: std::sync::atomic::AtomicBool::new(matches!(state, HandleState::Attached)),
+            session_id: state
+                .header()
+                .expect("new handle has a Header")
+                .session_id()
+                .clone(),
+            published: Arc::new(std::sync::atomic::AtomicBool::new(matches!(
+                state,
+                HandleState::Attached(_)
+            ))),
             lease,
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
             turns: Arc::clone(&self.turns),
+            commands: self.commands.clone(),
+            draft_commands: self.draft_commands.clone(),
             store: Arc::clone(&self.store),
             workspace: Arc::clone(&self.workspace),
             language: Arc::clone(&self.language),
@@ -134,7 +146,7 @@ impl LocalSessionService {
 impl LocalSessionService {
     /// Stops draft admission and waits for service-owned preparation and sweeping.
     pub async fn stop(&self) {
-        self.drafts.stop().await;
+        tokio::join!(self.draft_commands.stop(), self.drafts.stop());
     }
 
     async fn prepare_draft(
@@ -182,11 +194,10 @@ impl LocalSessionService {
         )
         .and_then(|header| header.with_workspace_trust(request.workspace_trust))
         .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        let draft = AgentSessionDraft::new(header.clone(), Arc::clone(&self.composition))
+        let draft = AgentSessionDraft::new(header, Arc::clone(&self.composition))
             .await
             .map_err(|error| SessionError::Backend(error.to_string()))?;
-        let composition = draft.composition().clone();
-        Ok(self.handle_from_header(header, HandleState::Fresh(composition), Some(lease)))
+        Ok(self.handle_from_state(HandleState::Fresh(Box::new(draft)), Some(lease)))
     }
 }
 
@@ -213,7 +224,7 @@ impl SessionService for LocalSessionService {
             .header(session_id)
             .await
             .map_err(map_store_error)?;
-        Ok(self.handle_from_header(header, HandleState::Attached, None))
+        Ok(self.handle_from_state(HandleState::Attached(Box::new(header)), None))
     }
 
     async fn list_recent(
@@ -266,17 +277,30 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
 }
 
 enum HandleState {
-    Fresh(AgentCompositionPin),
-    Attached,
+    Fresh(Box<AgentSessionDraft>),
+    Attached(Box<SessionHeader>),
     Expired,
 }
 
+impl HandleState {
+    fn header(&self) -> Result<&SessionHeader> {
+        match self {
+            Self::Fresh(draft) => Ok(draft.header()),
+            Self::Attached(header) => Ok(header),
+            Self::Expired => Err(SessionError::NotFound("draft lease".into())),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct LocalSessionHandle {
-    header: SessionHeader,
-    state: Mutex<HandleState>,
+    session_id: SessionId,
+    state: Arc<Mutex<HandleState>>,
     lease: Option<drafts::DraftLease>,
-    published: std::sync::atomic::AtomicBool,
+    published: Arc<std::sync::atomic::AtomicBool>,
     turns: Arc<dyn TurnService>,
+    commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
+    draft_commands: Arc<commands::DraftCommands>,
     store: Arc<dyn SessionStore>,
     workspace: Arc<dyn WorkspaceRegistry>,
     language: Arc<dyn LanguageCall>,
@@ -291,12 +315,20 @@ impl fmt::Debug for LocalSessionHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LocalSessionHandle")
-            .field("session_id", self.header.session_id())
+            .field("session_id", self.session_id())
             .finish_non_exhaustive()
     }
 }
 
 impl LocalSessionHandle {
+    fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    async fn header_snapshot(&self) -> Result<SessionHeader> {
+        self.state.lock().await.header().cloned()
+    }
+
     fn begin_activity(&self) -> Result<Option<drafts::Activity>> {
         if self.published.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(None);
@@ -327,17 +359,21 @@ impl LocalSessionHandle {
         let matching = if accepted {
             true
         } else {
-            let Ok(header) = self.store.header(self.header.session_id()).await else {
+            let Ok(header) = self.store.header(self.session_id()).await else {
                 return;
             };
-            header == self.header
+            state.header().is_ok_and(|candidate| candidate == &header)
         };
         self.finish_fresh(state, matching);
     }
 
     fn finish_fresh(&self, state: &mut HandleState, matching: bool) {
         if matching {
-            *state = HandleState::Attached;
+            let header = state
+                .header()
+                .expect("fresh publication has a Header")
+                .clone();
+            *state = HandleState::Attached(Box::new(header));
             self.published
                 .store(true, std::sync::atomic::Ordering::Release);
         } else {
@@ -352,16 +388,16 @@ impl LocalSessionHandle {
     async fn reconcile_fresh_read(&self) -> Result<bool> {
         let mut state = self.state.lock().await;
         match &*state {
-            HandleState::Attached => return Ok(true),
+            HandleState::Attached(_) => return Ok(true),
             HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
             HandleState::Fresh(_) => {}
         }
-        let durable = match self.store.header(self.header.session_id()).await {
+        let durable = match self.store.header(self.session_id()).await {
             Ok(header) => header,
             Err(StoreError::NotFound(_)) => return Ok(false),
             Err(error) => return Err(map_store_error(error)),
         };
-        let matching = durable == self.header;
+        let matching = state.header().is_ok_and(|header| header == &durable);
         self.finish_fresh(&mut state, matching);
         if matching {
             Ok(true)
@@ -372,9 +408,9 @@ impl LocalSessionHandle {
         }
     }
 
-    async fn prepare_workspace(&self) -> Result<()> {
-        let cwd = canonical_workspace_directory(Path::new(self.header.canonical_cwd())).await?;
-        if cwd.to_str() != Some(self.header.canonical_cwd()) {
+    async fn prepare_workspace(&self, header: &SessionHeader) -> Result<()> {
+        let cwd = canonical_workspace_directory(Path::new(header.canonical_cwd())).await?;
+        if cwd.to_str() != Some(header.canonical_cwd()) {
             return Err(SessionError::Invalid(
                 "durable Session workspace no longer resolves to its canonical path".into(),
             ));
@@ -386,8 +422,12 @@ impl LocalSessionHandle {
         Ok(())
     }
 
-    async fn prepare_message(&self, request: SubmitInput) -> Result<AgentMessage> {
-        self.prepare_workspace().await?;
+    async fn prepare_message(
+        &self,
+        request: SubmitInput,
+        header: &SessionHeader,
+    ) -> Result<AgentMessage> {
+        self.prepare_workspace(header).await?;
         let mut content = Vec::with_capacity(request.content.len());
         for block in request.content {
             content.push(match block {
@@ -419,6 +459,32 @@ impl LocalSessionHandle {
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn draft_snapshot(&self) -> Result<rsi_session_protocol::SessionDraftView> {
+        self.read_draft_snapshot().await
+    }
+    async fn select_preset(
+        &self,
+        request: rsi_session_protocol::SelectDraftPreset,
+    ) -> Result<rsi_session_protocol::SessionDraftView> {
+        self.draft_commands
+            .select_preset(self.clone(), request)
+            .await
+    }
+    async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView> {
+        self.list_commands().await
+    }
+    async fn execute_command(
+        &self,
+        invocation: rsi_agent_session_protocol::SessionCommandInvocation,
+    ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        self.dispatch_command(invocation).await
+    }
+    async fn command_status(
+        &self,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>> {
+        self.lookup_command(request_id).await
+    }
     async fn read_message(
         &self,
         message_id: &MessageId,
@@ -430,7 +496,7 @@ impl SessionHandle for LocalSessionHandle {
         })?;
         let page = self
             .store
-            .read_controls(self.header.session_id(), after, 1)
+            .read_controls(self.session_id(), after, 1)
             .await
             .map_err(map_store_error)?;
         let record = page
@@ -450,7 +516,7 @@ impl SessionHandle for LocalSessionHandle {
     async fn header(&self) -> Result<SessionHeader> {
         let _activity = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
-        Ok(self.header.clone())
+        self.header_snapshot().await
     }
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
@@ -462,24 +528,25 @@ impl SessionHandle for LocalSessionHandle {
                 "human Session input requires NextTurn or Steer intent".into(),
             ));
         }
+        let header = self.header_snapshot().await?;
         self.language
             .describe(
                 request
                     .model
                     .as_ref()
-                    .unwrap_or_else(|| self.header.settings().default_model()),
+                    .unwrap_or_else(|| header.settings().default_model()),
             )
             .map_err(|error| map_ai_error(&error))?;
         let mut state = self.state.lock().await;
-        if matches!(*state, HandleState::Attached) {
+        if matches!(*state, HandleState::Attached(_)) {
             drop(state);
             let session = self
                 .turns
-                .prepare_resume(self.header.session_id())
+                .prepare_resume(self.session_id())
                 .await
                 .map(SubmitSession::Resume)
                 .map_err(map_turn_error)?;
-            let message = self.prepare_message(request).await?;
+            let message = self.prepare_message(request, &header).await?;
             return self
                 .turns
                 .submit_message(SubmitAgentMessage {
@@ -490,13 +557,11 @@ impl SessionHandle for LocalSessionHandle {
                 .await
                 .map_err(map_turn_error);
         }
-        let HandleState::Fresh(composition) = &*state else {
+        let HandleState::Fresh(draft) = &*state else {
             return Err(SessionError::NotFound("draft lease".into()));
         };
-        let session = PreparedFreshSession::new(self.header.clone(), composition.clone())
-            .map(SubmitSession::Fresh)
-            .map_err(|error| SessionError::Backend(error.to_string()))?;
-        let message = self.prepare_message(request).await?;
+        let session = SubmitSession::Fresh(draft.freeze());
+        let message = self.prepare_message(request, &header).await?;
         let result = self
             .turns
             .submit_message(SubmitAgentMessage {
@@ -513,7 +578,7 @@ impl SessionHandle for LocalSessionHandle {
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt> {
         let _activity = self.begin_activity()?;
         self.turns
-            .message_status(self.header.session_id(), message_id)
+            .message_status(self.session_id(), message_id)
             .await
             .map_err(map_turn_error)
     }
@@ -524,11 +589,11 @@ impl SessionHandle for LocalSessionHandle {
             .describe(&request.model)
             .map_err(|error| map_ai_error(&error))?;
         let mut state = self.state.lock().await;
-        if matches!(*state, HandleState::Attached) {
+        if matches!(*state, HandleState::Attached(_)) {
             drop(state);
             let session = self
                 .turns
-                .prepare_resume(self.header.session_id())
+                .prepare_resume(self.session_id())
                 .await
                 .map(SubmitSession::Resume)
                 .map_err(map_turn_error)?;
@@ -544,12 +609,10 @@ impl SessionHandle for LocalSessionHandle {
                 .map(TurnReceipt::from)
                 .map_err(map_turn_error);
         }
-        let HandleState::Fresh(composition) = &*state else {
+        let HandleState::Fresh(draft) = &*state else {
             return Err(SessionError::NotFound("draft lease".into()));
         };
-        let session = PreparedFreshSession::new(self.header.clone(), composition.clone())
-            .map(SubmitSession::Fresh)
-            .map_err(|error| SessionError::Backend(error.to_string()))?;
+        let session = SubmitSession::Fresh(draft.freeze());
         let result = self
             .turns
             .submit_image(SubmitImage {
@@ -567,7 +630,7 @@ impl SessionHandle for LocalSessionHandle {
     async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult> {
         let _activity = self.begin_activity()?;
         self.turns
-            .cancel_target(self.header.session_id(), target, reason)
+            .cancel_target(self.session_id(), target, reason)
             .await
             .map_err(map_turn_error)
     }
@@ -593,11 +656,7 @@ impl SessionHandle for LocalSessionHandle {
         }
         let page = self
             .store
-            .read_facts_before(
-                self.header.session_id(),
-                exclusive_before_seq.unwrap_or(0),
-                limit,
-            )
+            .read_facts_before(self.session_id(), exclusive_before_seq.unwrap_or(0), limit)
             .await
             .map_err(map_store_error)?;
         Ok(SessionHistoryPage {
@@ -611,7 +670,7 @@ impl SessionHandle for LocalSessionHandle {
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream> {
         let _activity = self.begin_activity()?;
         self.turns
-            .observe_session(self.header.session_id(), cursor)
+            .observe_session(self.session_id(), cursor)
             .await
             .map_err(map_turn_error)
     }
@@ -619,7 +678,7 @@ impl SessionHandle for LocalSessionHandle {
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
         let _activity = self.begin_activity()?;
         self.store
-            .inspect_session(self.header.session_id())
+            .inspect_session(self.session_id())
             .await
             .map_err(|error| SessionError::Backend(error.to_string()))
     }
@@ -630,7 +689,7 @@ impl SessionHandle for LocalSessionHandle {
             return Ok(Vec::new());
         };
         questions
-            .pending(self.header.session_id().as_str())
+            .pending(self.session_id().as_str())
             .await
             .map_err(map_question_error)
     }
@@ -645,7 +704,7 @@ impl SessionHandle for LocalSessionHandle {
             SessionError::Invalid("human questions are unavailable in this Host".into())
         })?;
         questions
-            .answer(self.header.session_id().as_str(), id, answer)
+            .answer(self.session_id().as_str(), id, answer)
             .await
             .map_err(map_question_error)
     }
@@ -654,7 +713,7 @@ impl SessionHandle for LocalSessionHandle {
         let _activity = self.begin_activity()?;
         let sessions = self
             .turns
-            .tree_sessions(self.header.session_id())
+            .tree_sessions(self.session_id())
             .await
             .map_err(map_turn_error)?;
         self.approvals.pending_for_sessions(&sessions).await
@@ -669,7 +728,7 @@ impl SessionHandle for LocalSessionHandle {
         let _activity = self.begin_activity()?;
         let sessions = self
             .turns
-            .tree_sessions(self.header.session_id())
+            .tree_sessions(self.session_id())
             .await
             .map_err(map_turn_error)?;
         if !sessions.contains(owner) {
@@ -682,11 +741,12 @@ impl SessionHandle for LocalSessionHandle {
 
     async fn observe_interactions(&self) -> Result<rsi_session_protocol::InteractionStream> {
         let _activity = self.begin_activity()?;
+        let header = self.header_snapshot().await?;
         interactions::observe(
-            self.header.session_id().clone(),
-            self.header
+            self.session_id().clone(),
+            header
                 .fork_origin()
-                .map_or(self.header.session_id(), |origin| &origin.root_session_id)
+                .map_or(self.session_id(), |origin| &origin.root_session_id)
                 .clone(),
             self.turns.clone(),
             self.approvals.clone(),

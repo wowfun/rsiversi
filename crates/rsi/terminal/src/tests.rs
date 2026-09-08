@@ -106,6 +106,37 @@ pub(crate) struct UnknownThenAcceptedHandle {
 
 #[async_trait::async_trait]
 impl SessionHandle for UnknownThenAcceptedHandle {
+    async fn draft_snapshot(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
+        panic!("unexpected draft snapshot")
+    }
+    async fn select_preset(
+        &self,
+        _: rsi_session_protocol::SelectDraftPreset,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
+        panic!("unexpected preset selection")
+    }
+
+    async fn commands(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
+        panic!("unexpected command discovery")
+    }
+    async fn execute_command(
+        &self,
+        _: rsi_agent_session_protocol::SessionCommandInvocation,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        panic!("unexpected command execution")
+    }
+    async fn command_status(
+        &self,
+        _: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>
+    {
+        panic!("unexpected command lookup")
+    }
+
     async fn read_message(
         &self,
         _message_id: &MessageId,

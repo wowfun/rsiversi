@@ -20,7 +20,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+mod command;
 mod domain;
+pub use command::{SessionCommands, SessionCommandsContract};
 mod observation;
 pub use domain::{DomainMutation, DomainMutationReceipt};
 pub use observation::{
@@ -1324,13 +1326,21 @@ pub enum TurnError {
         /// Current durable revision.
         actual: rsi_agent_session_protocol::DomainRevision,
     },
+    /// A command no longer names the exact draft or durable predecessor.
+    #[error("command revision conflict: expected {expected:?}, actual {actual:?}")]
+    CommandRevisionConflict {
+        /// Predecessor frozen in the invocation.
+        expected: rsi_agent_session_protocol::CommandRevision,
+        /// Current owner revision.
+        actual: rsi_agent_session_protocol::CommandRevision,
+    },
     /// An already committed request has different provenance, state or Fact bodies.
     #[error("domain request {request_id} conflicts with its committed content")]
     DomainRequestConflict {
         /// Exact conflicting request.
         request_id: String,
     },
-    /// Store failure prevented reconciliation; the session remains closed to execution.
+    /// Store failure prevented reconciliation; execution-owned requests close their Session.
     #[error("domain request {request_id} outcome is unknown; query the canonical request")]
     DomainOutcomeUnknown {
         /// Exact request to query.

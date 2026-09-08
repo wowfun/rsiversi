@@ -12,7 +12,13 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod command;
 mod contribution;
+pub use command::{
+    DraftCommandError, DraftCommandMutation, DraftCommandPreparation, DraftCommandResult,
+    MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedDraftCommand, SessionCommand, SessionCommandContext,
+    SessionCommandRegistration,
+};
 mod domain;
 pub use contribution::{
     ContextContributor, ContributionBatch, ContributionCatalog, ContributionContext,
@@ -227,8 +233,24 @@ impl PreparedFreshSession {
 /// Process-local empty-session draft that has not created Store state.
 #[derive(Debug)]
 pub struct AgentSessionDraft {
+    identity: Arc<()>,
+    revision: u64,
+    command_receipts: std::collections::BTreeMap<
+        rsi_agent_session_protocol::DomainRequestId,
+        rsi_agent_session_protocol::SessionCommandReceipt,
+    >,
     header: SessionHeader,
     composition_service: Arc<dyn AgentComposition>,
+    composition: AgentCompositionPin,
+    baseline: DomainBaseline,
+}
+
+/// Move-only replacement generation prepared for one exact draft predecessor.
+#[derive(Debug)]
+pub struct PreparedDraftPreset {
+    identity: Arc<()>,
+    expected_revision: u64,
+    header: SessionHeader,
     composition: AgentCompositionPin,
     baseline: DomainBaseline,
 }
@@ -256,7 +278,15 @@ impl AgentSessionDraft {
             composition_service,
             composition,
             baseline,
+            identity: Arc::new(()),
+            revision: 0,
+            command_receipts: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// Returns the actual candidate Header, including the currently selected preset.
+    pub const fn header(&self) -> &SessionHeader {
+        &self.header
     }
 
     /// Returns the currently selected logical preset identity.
@@ -279,8 +309,42 @@ impl AgentSessionDraft {
     /// # Errors
     /// Rejects wrong generations, nonzero revisions and aggregate bound violations.
     pub fn apply_domain_initial(&mut self, proposal: &ValidatedDomainProposal) -> Result<()> {
-        self.baseline.apply(proposal)?;
+        self.apply_domain_initial_batch(std::slice::from_ref(proposal))
+    }
+
+    /// Applies a complete initial-state batch without publishing a successful prefix.
+    ///
+    /// # Errors
+    /// Rejects invalid generation, revision, duplicate domain or aggregate bounds.
+    pub fn apply_domain_initial_batch(
+        &mut self,
+        proposals: &[ValidatedDomainProposal],
+    ) -> Result<()> {
+        if proposals.is_empty() {
+            return Ok(());
+        }
+        let revision = self.next_revision()?;
+        self.baseline.apply_batch(proposals)?;
+        self.revision = revision;
         Ok(())
+    }
+
+    fn next_revision(&self) -> Result<u64> {
+        self.revision
+            .checked_add(1)
+            .ok_or_else(|| AgentCompositionError::InvalidInput("draft revision exhausted".into()))
+    }
+
+    /// Freezes the actual draft payload for one first-publication attempt.
+    /// The lease owner serializes this operation with mutations and publication.
+    pub fn freeze(&self) -> PreparedFreshSession {
+        PreparedFreshSession {
+            inner: Box::new(PreparedFreshSessionInner {
+                header: self.header.clone(),
+                composition: self.composition.clone(),
+                baseline: self.baseline.clone(),
+            }),
+        }
     }
 
     /// Fully stages and then atomically selects one replacement preset.
@@ -290,21 +354,70 @@ impl AgentSessionDraft {
     /// Propagates composition resolution failure or rejects a service result
     /// carrying a different preset identity. Failure leaves the draft intact.
     pub async fn select_preset(&mut self, preset_id: AgentPresetId) -> Result<()> {
-        let composition = self.composition_service.pin(&preset_id).await?;
-        if composition.preset_id() != &preset_id {
-            return Err(AgentCompositionError::InvalidInput(
-                "Agent composition returned a different preset identity".into(),
-            ));
+        let prepared = self.prepare_preset_selection(preset_id).await?;
+        self.apply_preset_selection(prepared)
+            .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))
+    }
+
+    /// Captures an owned generation-preparation future without holding mutation admission.
+    ///
+    /// # Errors
+    /// The future rejects exhausted revisions, unavailable or mismatched generations.
+    pub fn prepare_preset_selection(
+        &self,
+        preset_id: AgentPresetId,
+    ) -> impl std::future::Future<Output = Result<PreparedDraftPreset>> + Send + 'static {
+        let next = self.next_revision();
+        let expected_revision = self.revision;
+        let identity = self.identity.clone();
+        let service = self.composition_service.clone();
+        let header = self.header.clone();
+        async move {
+            next?;
+            let composition = service.pin(&preset_id).await?;
+            if composition.preset_id() != &preset_id {
+                return Err(AgentCompositionError::InvalidInput(
+                    "Agent composition returned a different preset identity".into(),
+                ));
+            }
+            let header = header
+                .with_agent_preset_id(preset_id)
+                .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
+            let baseline = DomainBaseline::new(composition.domains().clone())?;
+            Ok(PreparedDraftPreset {
+                identity,
+                expected_revision,
+                header,
+                composition,
+                baseline,
+            })
         }
-        let header = self
-            .header
-            .clone()
-            .with_agent_preset_id(preset_id)
-            .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
-        let baseline = DomainBaseline::new(composition.domains().clone())?;
-        self.header = header;
-        self.composition = composition;
-        self.baseline = baseline;
+    }
+
+    /// Atomically selects a prepared Header, pin and defaults for the same draft predecessor.
+    ///
+    /// # Errors
+    /// Rejects another draft or any intervening mutation, preserving the current payload.
+    pub fn apply_preset_selection(
+        &mut self,
+        prepared: PreparedDraftPreset,
+    ) -> DraftCommandResult<()> {
+        use rsi_agent_session_protocol::CommandRevision;
+        if !Arc::ptr_eq(&self.identity, &prepared.identity) {
+            return Err(DraftCommandError::WrongDraft);
+        }
+        if self.revision != prepared.expected_revision {
+            return Err(DraftCommandError::Revision {
+                expected: CommandRevision::Draft {
+                    revision: prepared.expected_revision,
+                },
+                actual: self.revision(),
+            });
+        }
+        self.header = prepared.header;
+        self.composition = prepared.composition;
+        self.baseline = prepared.baseline;
+        self.revision = prepared.expected_revision + 1;
         Ok(())
     }
 

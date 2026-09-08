@@ -132,6 +132,7 @@ impl AgentKernel {
                     queued: BTreeSet::new(),
                 }),
                 submission_admission: SubmissionAdmission::new(),
+                commands: commands::CommandRequests::default(),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
                 session_changes: SessionWatchHub::default(),

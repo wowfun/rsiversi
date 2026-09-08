@@ -18,6 +18,8 @@ pub enum ContributionStage {
     AfterTools,
     /// Before Tool approval or execution.
     ToolPolicy,
+    /// Explicit Session command dispatch, outside the execution loop.
+    Command,
 }
 
 /// One narrow callback registered in an Agent-only composition.
@@ -29,6 +31,8 @@ pub enum ContributionKind {
     PostTool(Arc<dyn PostToolContributor>),
     /// Monotone prepared-Tool policy.
     ToolPolicy(Arc<dyn ToolPolicy>),
+    /// Effect-free Session command with bounded discovery metadata.
+    Command(crate::SessionCommandRegistration),
 }
 
 /// Stable identity, explicit priority and one callback.
@@ -62,6 +66,7 @@ impl ContributionRegistration {
             ContributionKind::Context(_) => ContributionStage::BeforeStep,
             ContributionKind::PostTool(_) => ContributionStage::AfterTools,
             ContributionKind::ToolPolicy(_) => ContributionStage::ToolPolicy,
+            ContributionKind::Command(_) => ContributionStage::Command,
         }
     }
 }
@@ -86,9 +91,18 @@ impl ContributionCatalog {
         }
         entries.retain(|(_, position)| position.is_admitting());
         let mut ids = BTreeSet::new();
+        let mut command_names = BTreeSet::new();
         for (entry, _) in &entries {
             if !ids.insert(entry.id()) {
                 return Err(ContributionError::Duplicate(entry.id().clone()));
+            }
+            if let ContributionKind::Command(command) = entry.kind()
+                && (command.descriptor().id() != entry.id()
+                    || !command_names.insert(command.descriptor().name()))
+            {
+                return Err(ContributionError::Invalid(
+                    "command identity mismatch or duplicate name".into(),
+                ));
             }
         }
         let positions: Vec<_> = entries

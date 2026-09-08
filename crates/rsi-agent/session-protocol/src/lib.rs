@@ -18,6 +18,12 @@ use thiserror::Error;
 
 mod contribution;
 pub use contribution::ToolRejection;
+mod command;
+pub use command::{
+    CommandArguments, CommandOutcome, CommandRevision, MAXIMUM_COMMAND_ARGUMENT_BYTES,
+    MAXIMUM_SESSION_COMMANDS, SessionCommandDescriptor, SessionCommandInvocation,
+    SessionCommandReceipt, SessionCommandsView,
+};
 mod domain;
 pub use domain::{
     DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
@@ -26,7 +32,7 @@ pub use domain::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 10;
+pub const SESSION_FORMAT_VERSION: u32 = 11;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.

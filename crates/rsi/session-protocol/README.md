@@ -7,6 +7,27 @@ routing checks and approval-control
 plumbing behind durable message submission, history, observation,
 cancellation, direct image generation, and approval operations.
 
+Session handles expose command discovery, invocation and receipt lookup through
+the Agent-owned bounded command DTOs. Fresh handles use the actual draft payload;
+durable handles obtain Kernel-issued command authority only for that operation.
+Draft commands and first publication share mutation admission. Concurrent exact
+draft requests join one service-owned callback, with a 30-second deadline and
+64 distinct in-flight mutations, shared with preset preparation, per Session
+service. Retirement cancels draft
+callbacks, and a published or expired draft cannot accept their late results.
+Durable commands retain the Kernel's canonical receipt semantics. Unknown
+outcomes preserve the typed request identity for explicit query; no adapter
+automatically repeats a callback.
+
+Draft snapshots atomically expose the current Header and mutation revision. Preset
+selection prepares a complete replacement outside mutation admission, then applies
+it only to the same still-unpublished draft at the expected revision. Preparation
+has a 30-second deadline and stops with the service. Success resets domain defaults
+and advances the revision; failure preserves the existing Header, pin and values.
+Publication and expiry reject late selection results. A transport failure leaves
+the caller to reattach and inspect the current draft; selection is not replayed
+automatically. Creation input remains the original lease identity after a switch.
+
 Creation, input, receipt and page values have closed Serde representations.
 They describe domain API values, not a new durable Session or Store format.
 

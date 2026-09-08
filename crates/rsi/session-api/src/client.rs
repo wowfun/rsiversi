@@ -23,6 +23,9 @@ use std::{collections::BTreeSet, sync::Arc};
 #[path = "client_tests.rs"]
 mod tests;
 
+mod commands;
+mod draft;
+
 #[derive(Debug)]
 pub(super) struct State {
     pub api: Arc<dyn ApiClient>,
@@ -54,6 +57,7 @@ impl SessionClient {
     fn handle(
         &self,
         header: SessionHeader,
+        draft_revision: Option<u64>,
     ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
         let target = Target {
             session_id: header.session_id().clone(),
@@ -63,8 +67,12 @@ impl SessionClient {
         };
         Ok(Arc::new(Handle {
             state: self.state.clone(),
-            header,
-            target,
+            session_id: header.session_id().clone(),
+            binding: Arc::new(std::sync::RwLock::new(Binding {
+                header,
+                target,
+                draft_revision,
+            })),
         }))
     }
 }
@@ -85,6 +93,17 @@ pub(super) fn failure(
         Failure::Conflict { .. } => operation == Operation::Image,
         Failure::MessageConflict { .. } | Failure::MessageOutcomeUnknown { .. } => {
             operation == Operation::Submit
+        }
+        Failure::CommandConflict { .. } => matches!(
+            operation,
+            Operation::ExecuteCommand | Operation::CommandStatus
+        ),
+        Failure::CommandOutcomeUnknown { .. } => operation == Operation::ExecuteCommand,
+        Failure::CommandRevisionConflict { expected, actual } => {
+            matches!(
+                operation,
+                Operation::ExecuteCommand | Operation::SelectPreset
+            ) && expected != actual
         }
         _ => true,
     };
@@ -115,13 +134,17 @@ impl SessionService for SessionClient {
         &self,
         request: CreateSession,
     ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
-        let result: rsi_session_protocol::Result<SessionHeader> =
+        let result: rsi_session_protocol::Result<wire::Created> =
             self.state.call(Operation::Create, &request).await;
         if matches!(&result, Err(SessionError::DraftConflict { session }) if session != request.session_id.as_str())
         {
             return Err(malformed(Operation::Create));
         }
-        let header = result?;
+        let created = result?;
+        if created.creation != request {
+            return Err(malformed(Operation::Create));
+        }
+        let header = created.draft.header;
         let workspace = rsi_workspace_protocol::WorkspaceRecord {
             id: request.workspace_id,
             path: header.canonical_cwd().into(),
@@ -129,14 +152,15 @@ impl SessionService for SessionClient {
         if header.session_id() != &request.session_id
             || workspace.validate().is_err()
             || header.workspace_trust() != request.workspace_trust
-            || request
-                .agent_preset_id
-                .as_ref()
-                .is_some_and(|preset| header.agent_preset_id() != preset)
+            || (created.draft.revision == 0
+                && request
+                    .agent_preset_id
+                    .as_ref()
+                    .is_some_and(|preset| header.agent_preset_id() != preset))
         {
             return Err(malformed(Operation::Create));
         }
-        self.handle(header)
+        self.handle(header, Some(created.draft.revision))
     }
     async fn attach(
         &self,
@@ -154,7 +178,7 @@ impl SessionService for SessionClient {
         if header.session_id() != session_id {
             return Err(malformed(Operation::Attach));
         }
-        self.handle(header)
+        self.handle(header, None)
     }
     async fn list_recent(
         &self,
@@ -205,26 +229,49 @@ impl SessionService for SessionClient {
 #[derive(Clone, Debug)]
 pub(super) struct Handle {
     pub state: Arc<State>,
-    pub header: SessionHeader,
-    pub target: Target,
+    pub session_id: SessionId,
+    binding: Arc<std::sync::RwLock<Binding>>,
+}
+#[derive(Clone, Debug)]
+struct Binding {
+    header: SessionHeader,
+    target: Target,
+    draft_revision: Option<u64>,
 }
 impl Handle {
+    fn binding(&self) -> Binding {
+        self.binding
+            .read()
+            .expect("Session binding poisoned")
+            .clone()
+    }
+    pub(super) fn target(&self) -> Target {
+        self.binding().target
+    }
+    pub(super) fn frozen(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            session_id: self.session_id.clone(),
+            binding: Arc::new(std::sync::RwLock::new(self.binding())),
+        }
+    }
     pub async fn call<I: Serialize + Sync, O: DeserializeOwned>(
         &self,
         operation: Operation,
         input: &I,
     ) -> rsi_session_protocol::Result<O> {
+        let target = self.target();
         let reply: HandleReply<O> = self
             .state
             .call(
                 operation,
                 &HandleRequest {
-                    target: self.target.clone(),
+                    target: target.clone(),
                     input,
                 },
             )
             .await?;
-        if reply.target != self.target {
+        if reply.target != target {
             return Err(malformed(operation));
         }
         Ok(reply.body)
@@ -258,8 +305,38 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn draft_snapshot(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
+        self.checked_draft_snapshot().await
+    }
+    async fn select_preset(
+        &self,
+        request: rsi_session_protocol::SelectDraftPreset,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
+        self.select_checked_preset(request).await
+    }
+
+    async fn commands(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
+        self.call(Operation::Commands, &()).await
+    }
+    async fn execute_command(
+        &self,
+        invocation: rsi_agent_session_protocol::SessionCommandInvocation,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        self.execute_checked_command(invocation).await
+    }
+    async fn command_status(
+        &self,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>
+    {
+        self.checked_command_status(request_id).await
+    }
     async fn header(&self) -> rsi_session_protocol::Result<SessionHeader> {
-        Ok(self.header.clone())
+        Ok(self.binding().header)
     }
     async fn read_message(
         &self,
@@ -295,7 +372,7 @@ impl SessionHandle for Handle {
             Ok(receipt) => self.receipt(receipt, &request.message_id, Operation::Submit),
             Err(SessionError::Api(ApiError::OutcomeUnknown)) => {
                 Err(SessionError::MessageOutcomeUnknown {
-                    session: self.target.session_id.to_string(),
+                    session: self.session_id.to_string(),
                     message: request.message_id.to_string(),
                 })
             }
@@ -308,11 +385,9 @@ impl SessionHandle for Handle {
                 else {
                     unreachable!()
                 };
-                if session != self.target.session_id.as_str()
-                    || message != request.message_id.as_str()
-                {
+                if session != self.session_id.as_str() || message != request.message_id.as_str() {
                     return Err(SessionError::MessageOutcomeUnknown {
-                        session: self.target.session_id.to_string(),
+                        session: self.session_id.to_string(),
                         message: request.message_id.to_string(),
                     });
                 }
@@ -337,12 +412,12 @@ impl SessionHandle for Handle {
     ) -> rsi_session_protocol::Result<TurnReceipt> {
         let result: rsi_session_protocol::Result<TurnReceipt> =
             self.call(Operation::Image, &request).await;
-        if matches!(&result, Err(SessionError::Conflict { session, turn }) if session != self.target.session_id.as_str() || turn != request.turn_id.as_str())
+        if matches!(&result, Err(SessionError::Conflict { session, turn }) if session != self.session_id.as_str() || turn != request.turn_id.as_str())
         {
             return Err(malformed(Operation::Image));
         }
         let receipt = result?;
-        if receipt.session_id != self.target.session_id
+        if receipt.session_id != self.session_id
             || receipt.turn_id != request.turn_id
             || receipt.accepted_seq == 0
         {
@@ -412,11 +487,12 @@ impl SessionHandle for Handle {
         crate::client_stream::interactions(self).await
     }
     async fn inspect(&self) -> rsi_session_protocol::Result<StoreSessionInspection> {
-        let inspection: StoreSessionInspection = self.call(Operation::Inspect, &()).await?;
+        let frozen = self.frozen();
+        let inspection: StoreSessionInspection = frozen.call(Operation::Inspect, &()).await?;
         inspection
             .validate()
             .map_err(|_| malformed(Operation::Inspect))?;
-        if inspection.header != self.header {
+        if inspection.header != frozen.binding().header {
             return Err(malformed(Operation::Inspect));
         }
         Ok(inspection)
@@ -426,7 +502,7 @@ impl SessionHandle for Handle {
     ) -> rsi_session_protocol::Result<Vec<rsi_user_questions_protocol::QuestionRequest>> {
         let requests: Vec<rsi_user_questions_protocol::QuestionRequest> =
             self.call(Operation::Questions, &()).await?;
-        validate_questions(&requests, &self.target.session_id)?;
+        validate_questions(&requests, &self.session_id)?;
         Ok(requests)
     }
     async fn answer_question(
@@ -453,7 +529,7 @@ impl SessionHandle for Handle {
         validate_approvals(&requests)?;
         self.verify_owners(
             &requests,
-            &mut BTreeSet::from([self.target.session_id.to_string()]),
+            &mut BTreeSet::from([self.session_id.to_string()]),
         )
         .await?;
         Ok(requests)
@@ -482,13 +558,13 @@ impl Handle {
         message: &MessageId,
         operation: Operation,
     ) -> rsi_session_protocol::Result<MessageReceipt> {
-        if receipt.session_id != self.target.session_id
+        if receipt.session_id != self.session_id
             || receipt.message_id != *message
             || receipt.validate().is_err()
         {
             return Err(if operation == Operation::Submit {
                 SessionError::MessageOutcomeUnknown {
-                    session: self.target.session_id.to_string(),
+                    session: self.session_id.to_string(),
                     message: message.to_string(),
                 }
             } else {

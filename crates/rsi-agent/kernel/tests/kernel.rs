@@ -1411,6 +1411,8 @@ fn mailbox_message(message_id: &str) -> AgentMessage {
 mod agent_lifecycle;
 #[path = "kernel/capacity_and_observation.rs"]
 mod capacity_and_observation;
+#[path = "kernel/commands.rs"]
+mod commands;
 #[path = "kernel/contributions.rs"]
 mod contributions;
 #[path = "kernel/domains.rs"]

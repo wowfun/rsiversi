@@ -1,5 +1,7 @@
 use crate::wire::{self, Failure, HandleReply, HandleRequest, Operation, Target, domain};
-use rsi_agent_session_protocol::{MessageId, SessionHeader};
+use rsi_agent_session_protocol::{
+    DomainRequestId, MessageId, SessionCommandInvocation, SessionHeader,
+};
 use rsi_api_protocol::{ApiHandler, ApiRegistrar, ApiRegistration, OperationClass, json_handler};
 use rsi_session_protocol::{
     CreateSession, SessionHandle, SessionIngress, SessionService, SubmitDirectImage, SubmitInput,
@@ -18,6 +20,13 @@ impl Scratch {
         operation: Operation,
     ) -> rsi_api_protocol::Result<tokio::sync::OwnedSemaphorePermit> {
         let spec = operation.spec();
+        let maximum = match operation {
+            Operation::Commands
+            | Operation::ExecuteCommand
+            | Operation::CommandStatus
+            | Operation::SelectPreset => wire::LARGE_REPLY,
+            _ => spec.maximum_response_bytes,
+        };
         let budget = if spec.class == OperationClass::Control {
             &self.control
         } else {
@@ -25,9 +34,7 @@ impl Scratch {
         };
         budget
             .clone()
-            .acquire_many_owned(
-                u32::try_from(spec.maximum_response_bytes).expect("bounded API maximum"),
-            )
+            .acquire_many_owned(u32::try_from(maximum).expect("bounded API maximum"))
             .await
             .map_err(|_| rsi_api_protocol::ApiError::ShuttingDown)
     }
@@ -155,11 +162,15 @@ fn root_operations(
             async move {
                 let reservation = scratch.reserve(Operation::Create).await?;
                 let result = async {
-                    ingress
-                        .create_from(request, context.origin)
+                    let draft = ingress
+                        .create_from(request.clone(), context.origin)
                         .await?
-                        .header()
-                        .await
+                        .draft_snapshot()
+                        .await?;
+                    Ok(wire::Created {
+                        creation: request,
+                        draft,
+                    })
                 }
                 .await;
                 admitted(result, reservation)
@@ -225,6 +236,29 @@ fn handle_operations(
         };
     }
     vec![
+        add!(DraftSnapshot, |owner, (): ()| async move {
+            owner.draft_snapshot().await
+        }),
+        add!(
+            SelectPreset,
+            |owner, request: rsi_session_protocol::SelectDraftPreset| async move {
+                owner.select_preset(request).await
+            }
+        ),
+        add!(
+            Commands,
+            |owner, (): ()| async move { owner.commands().await }
+        ),
+        add!(
+            ExecuteCommand,
+            |owner, invocation: SessionCommandInvocation| async move {
+                owner.execute_command(invocation).await
+            }
+        ),
+        add!(
+            CommandStatus,
+            |owner, request_id: DomainRequestId| async move { owner.command_status(&request_id).await }
+        ),
         add!(Submit, |owner, request: SubmitInput| async move {
             rsi_session_protocol::validate_session_input(&request.content)?;
             owner.submit(request).await
@@ -400,5 +434,23 @@ mod tests {
             scratch.data.available_permits(),
             rsi_api_protocol::MAXIMUM_API_BYTES
         );
+        for operation in [
+            Operation::Commands,
+            Operation::ExecuteCommand,
+            Operation::CommandStatus,
+        ] {
+            let command = scratch.reserve(operation).await.unwrap();
+            assert_eq!(scratch.data.available_permits(), 0);
+            let control = scratch.reserve(Operation::MessageStatus).await.unwrap();
+            drop(control);
+            let mut waiting = Box::pin(scratch.reserve(operation));
+            assert!(waiting.as_mut().now_or_never().is_none());
+            drop(command);
+            drop(waiting.await.unwrap());
+            assert_eq!(
+                scratch.data.available_permits(),
+                rsi_api_protocol::MAXIMUM_API_BYTES
+            );
+        }
     }
 }

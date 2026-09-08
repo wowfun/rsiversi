@@ -203,8 +203,8 @@ pub enum DomainMutationSource {
     Baseline,
     /// Authenticated application command routed by its owning Session service.
     Command {
-        /// Exact registered command identity selected by Kernel dispatch.
-        command: String,
+        /// Exact logical request selected by Kernel dispatch, including CAS and arguments.
+        invocation: crate::SessionCommandInvocation,
     },
     /// Execution contribution charged to its actual admitted Turn.
     Turn {
@@ -217,7 +217,17 @@ impl DomainMutationSource {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Baseline | Self::Turn { .. } => Ok(()),
-            Self::Command { command } => validate_identifier("domain command", command),
+            Self::Command { invocation } => {
+                if matches!(
+                    invocation.expected_revision,
+                    crate::CommandRevision::Draft { .. }
+                ) {
+                    return Err(SessionError::Invalid(
+                        "durable command has a draft revision".into(),
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -412,6 +422,13 @@ impl DomainStateCommit {
         if baseline != request_id.is_none() {
             return Err(SessionError::Invalid(
                 "only a domain baseline omits a request identity".into(),
+            ));
+        }
+        if let DomainMutationSource::Command { invocation } = &source
+            && Some(&invocation.request_id) != request_id.as_ref()
+        {
+            return Err(SessionError::Invalid(
+                "command and domain request identities differ".into(),
             ));
         }
         if updates.is_empty() || updates.len() > MAXIMUM_SESSION_DOMAINS {

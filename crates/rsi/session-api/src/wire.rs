@@ -1,4 +1,4 @@
-use rsi_agent_session_protocol::{MessageId, SessionId, TurnId};
+use rsi_agent_session_protocol::{CommandRevision, DomainRequestId, MessageId, SessionId, TurnId};
 use rsi_agent_turn_protocol::{CancelTarget, ObservationCursor};
 use rsi_api_protocol::{
     ApiError, OperationClass, OperationEffect, OperationId, OperationSpec, RequestEncoding,
@@ -19,6 +19,11 @@ pub(crate) enum Operation {
     Attach,
     Recent,
     Submit,
+    Commands,
+    ExecuteCommand,
+    CommandStatus,
+    DraftSnapshot,
+    SelectPreset,
     Image,
     MessageStatus,
     ReadMessage,
@@ -33,11 +38,16 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 21] = [
         Self::Create,
         Self::Attach,
         Self::Recent,
         Self::Submit,
+        Self::Commands,
+        Self::ExecuteCommand,
+        Self::CommandStatus,
+        Self::DraftSnapshot,
+        Self::SelectPreset,
         Self::Image,
         Self::MessageStatus,
         Self::ReadMessage,
@@ -55,10 +65,15 @@ impl Operation {
         use OperationClass::{Control, Data, Subscription};
         use OperationEffect::{Mutation, Read};
         let (name, class, effect, input, output) = match self {
-            Self::Create => ("create", Data, Mutation, 8192, HEADER_REPLY),
+            Self::Create => ("create", Data, Mutation, 8192, HEADER_REPLY + 16 * 1024),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
             Self::Submit => ("submit", Data, Mutation, 8 * 1024 * 1024, 16 * 1024),
+            Self::Commands => ("commands", Data, Read, 8192, 512 * 1024),
+            Self::ExecuteCommand => ("execute-command", Data, Mutation, 32 * 1024, 8192),
+            Self::CommandStatus => ("command-status", Data, Read, 8192, 8192),
+            Self::DraftSnapshot => ("draft-snapshot", Data, Read, 8192, HEADER_REPLY + 8192),
+            Self::SelectPreset => ("select-preset", Data, Mutation, 8192, HEADER_REPLY + 8192),
             Self::Image => ("image", Data, Mutation, LARGE_REPLY, 16 * 1024),
             Self::MessageStatus => ("message-status", Control, Read, 8192, 16 * 1024),
             Self::ReadMessage => ("read-message", Data, Read, 8192, OBSERVATION_REPLY),
@@ -73,7 +88,8 @@ impl Operation {
             Self::AnswerApproval => ("answer-approval", Control, Mutation, 128 * 1024, 8192),
         };
         OperationSpec {
-            id: OperationId::new("session", name, 1).expect("constant operation"),
+            id: OperationId::new("session", name, if self == Self::Create { 2 } else { 1 })
+                .expect("constant operation"),
             class,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
@@ -121,6 +137,13 @@ pub(crate) struct HandleReply<T> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Attach {
     pub session_id: SessionId,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Created {
+    pub creation: rsi_session_protocol::CreateSession,
+    pub draft: rsi_session_protocol::SessionDraftView,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -196,6 +219,16 @@ pub(crate) enum Failure {
         session: SessionId,
         message: MessageId,
     },
+    CommandConflict {
+        request_id: DomainRequestId,
+    },
+    CommandRevisionConflict {
+        expected: CommandRevision,
+        actual: CommandRevision,
+    },
+    CommandOutcomeUnknown {
+        request_id: DomainRequestId,
+    },
     Capacity {},
     ShuttingDown {},
 }
@@ -236,6 +269,13 @@ pub(crate) fn domain<T>(
                 }
             }
             SessionError::Capacity => Failure::Capacity {},
+            SessionError::CommandConflict { request_id } => Failure::CommandConflict { request_id },
+            SessionError::CommandRevisionConflict { expected, actual } => {
+                Failure::CommandRevisionConflict { expected, actual }
+            }
+            SessionError::CommandOutcomeUnknown { request_id } => {
+                Failure::CommandOutcomeUnknown { request_id }
+            }
             SessionError::ShuttingDown => Failure::ShuttingDown {},
         }))
     })
@@ -263,6 +303,13 @@ impl Failure {
                 }
             }
             Self::Capacity {} => SessionError::Capacity,
+            Self::CommandConflict { request_id } => SessionError::CommandConflict { request_id },
+            Self::CommandRevisionConflict { expected, actual } => {
+                SessionError::CommandRevisionConflict { expected, actual }
+            }
+            Self::CommandOutcomeUnknown { request_id } => {
+                SessionError::CommandOutcomeUnknown { request_id }
+            }
             Self::ShuttingDown {} => SessionError::ShuttingDown,
         }
     }
