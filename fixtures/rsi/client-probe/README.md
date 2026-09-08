@@ -14,6 +14,11 @@ Profile compilation without a Session consumer, inherited domain capabilities,
 independent surface Local identities, dropped open/Surface cleanup, cancellation
 during activation and propagation of child cleanup failures through Meta.
 
+The independent UI addon scenarios run in both native Meta and these Workers.
+They contribute surfaces, actions and block renderers, and verify declaration
+reorder, exact target mappings, stale references, dropped waiters, bounded action
+admission, withdrawal drain and failed activation rollback.
+
 The Session service and renderer are deterministic Rust fixtures. This establishes
 portable controller and plugin ownership, not product Web rendering, HTTP domain
 integration or a live provider result. CI and application-foundation work consume

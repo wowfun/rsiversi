@@ -52,6 +52,9 @@ an independently composed service generation within that same Runtime.
 The Web application runs Rust Meta, Profiles and shared client controllers in a
 Dedicated Worker; its document bridge renders two independent conversation panes.
 Static Web assets are supplied by their own plugin to the HTTP listener.
+The [UI contribution plugin](../crates/rsi/ui/README.md) owns bounded, generation-bound
+surfaces, actions and block renderers shared by native and Worker adapters.
+It uses actual application/surface Local mappings and owns no Session or layout.
 The binary owns launcher and management parsing, explicit daemon process control,
 process signals, and construction of the Tokio runtime. The Agent Kernel remains the sole durable session state-machine
 owner; the product Host adds live multiplexing and process ownership without

@@ -28,6 +28,14 @@ Sensitive markers govern presentation of non-secret fields; RSI continues to
 keep credential material outside Settings. These foundations do not complete the
 surface/action/renderer contribution acceptance criteria below.
 
+The UI registration owner uses ordinary Meta factories and registration effects.
+It captures declaration-order snapshots and binds actions to a fresh application
+nonce, exact contribution registration and actual target Context. Views contain
+closed text/form/button primitives; domain-specific target factories declare the
+Local dependencies whose replacement must retire their target. Native and Worker
+public-seam tests exercise an independent addon. Production Web/TUI adapters and
+first-party contribution migration remain required before completing this decision.
+
 Linked renderers are trusted application code under the existing CSP. Data uses
 text nodes, closed Markdown AST, and validated URLs. Settings schema describes
 fields while the existing validator and revision CAS remain authoritative.

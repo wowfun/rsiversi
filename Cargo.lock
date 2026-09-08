@@ -4274,6 +4274,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-ui"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "js-sys",
+ "rsi-conversation",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "rsi-user-questions-protocol"
 version = "0.0.1"
 dependencies = [

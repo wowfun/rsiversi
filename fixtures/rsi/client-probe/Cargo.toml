@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rsi-ui = { path = "../../../crates/rsi/ui" }
 rsi-sandbox = { path = "../../../crates/rsi-sandbox/core" }
 rsi-tools-protocol = { path = "../../../crates/rsi-tools/protocol" }
 rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }

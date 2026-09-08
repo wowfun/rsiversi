@@ -542,6 +542,7 @@ dependencies = [
  "rsi-sandbox",
  "rsi-session-protocol",
  "rsi-tools-protocol",
+ "rsi-ui",
  "rsi-user-questions-protocol",
  "serde_json",
  "tokio",
@@ -741,6 +742,26 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-ui"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "js-sys",
+ "rsi-conversation",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
