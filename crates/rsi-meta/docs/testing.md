@@ -249,6 +249,9 @@ contention returning `BUSY`, unregister/call races, and timeout retention until
 foreign return. Completion also requires public callback, instance, module,
 staging, cache, capability, effect, destruction, and Runtime resource snapshots
 to reach zero only after actual teardown.
+Callback-count assertions begin only after setup callbacks have quiesced. A
+published capability or completed application waiter does not prove that the
+foreign worker has released its callback reservation.
 
 Table unit evidence distinguishes a duplicate release in the still-current
 consumed epoch (`PROTOCOL_ERROR`) from an old token after slot reuse (`STALE`),
