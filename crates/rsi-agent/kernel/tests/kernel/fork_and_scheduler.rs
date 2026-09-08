@@ -534,28 +534,9 @@ async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activati
 }
 
 #[tokio::test]
-async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_background_context() {
+async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_after_cold_recovery() {
     let store = Arc::new(MemoryStore::new());
-    let context = Arc::new(QueuedWorkspaceContext {
-        snapshots: Mutex::new(VecDeque::from([WorkspaceContextSnapshot {
-            complete: true,
-            instructions_sha256: "a".repeat(64),
-            instructions: Some("workspace instructions".into()),
-            skill_catalog_sha256: "b".repeat(64),
-            skill_catalog: Some("<available_skills>test</available_skills>".into()),
-            invocations: Vec::new(),
-        }])),
-        calls: AtomicUsize::new(0),
-    });
-    let initial = AgentKernel::recover_with_context_clock_and_limits(
-        store.clone(),
-        composition(),
-        context,
-        Arc::new(FixedClock),
-        KernelLimits::default(),
-    )
-    .await
-    .unwrap();
+    let initial = kernel(store.clone()).await;
     let worker = initial.start_workers();
     let session_id = SessionId::new("session-claim-retry-boundary").unwrap();
     let message_id = MessageId::new("message-claim-retry-boundary").unwrap();
@@ -592,7 +573,7 @@ async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_backgr
             activation_id: activation_id.clone(),
             turn_id: turn_id.clone(),
             step_id: step_id.clone(),
-            entered_fact_seq: 5,
+            entered_fact_seq: 3,
         }
     );
     initial.shutdown(worker).await.unwrap();

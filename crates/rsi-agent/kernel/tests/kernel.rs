@@ -29,9 +29,6 @@ use rsi_agent_turn_protocol::{
     TurnFinalizationContext, TurnFinalizationError, TurnFinalizationReport, TurnFinalizer,
     TurnService, TurnUpdate,
 };
-use rsi_agent_workspace_context::{
-    WorkspaceContext, WorkspaceContextError, WorkspaceContextFactory, WorkspaceContextSnapshot,
-};
 use rsi_ai_protocol::{
     AiCapability, ContentDelta, ContentStart, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, ModelRef,
     PreparedCallSnapshot, RetryPolicy,
@@ -46,7 +43,6 @@ use rsi_tools_protocol::{
     ToolRuntime,
 };
 use serde_json::Value;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
@@ -84,6 +80,7 @@ enum WaitResumeFault {
 #[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
+    preparation_gate: Mutex<Option<Arc<mutations::GatedPreparation>>>,
     block_header_reads: AtomicBool,
     blocked_header_session: Mutex<Option<SessionId>>,
     header_read_attempts: AtomicUsize,
@@ -148,6 +145,7 @@ impl FactReadRaceStore {
     fn new(inner: Arc<MemoryStore>) -> Self {
         Self {
             inner,
+            preparation_gate: Mutex::new(None),
             block_header_reads: AtomicBool::new(false),
             blocked_header_session: Mutex::new(None),
             header_read_attempts: AtomicUsize::new(0),
@@ -748,6 +746,10 @@ impl SessionStore for FactReadRaceStore {
         after: Option<&rsi_agent_store_protocol::StoreReadyMessageCursor>,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreReadyMessagePage> {
+        let gate = self.preparation_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.wait(root_session_id).await;
+        }
         let mut page = self
             .inner
             .list_ready_messages(root_session_id, after, limit)
@@ -775,14 +777,6 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailboxSummary> {
         self.inner.read_agent_mailbox_summary(session_id).await
-    }
-
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreWorkspaceContextState>
-    {
-        self.inner.read_workspace_context_state(session_id).await
     }
 
     async fn list_ready_roots(
@@ -1058,6 +1052,7 @@ fn test_pin_with_digest(preset_id: &AgentPresetId, digit: char) -> AgentComposit
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(()),
     )
     .unwrap()
@@ -1113,6 +1108,7 @@ impl AgentComposition for DropTrackingComposition {
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             rsi_agent_composition_protocol::DomainCatalog::default(),
+            rsi_agent_composition_protocol::ContributionCatalog::default(),
             Arc::new(DropOwner(Arc::clone(&self.drops))),
         )
     }
@@ -1334,28 +1330,6 @@ async fn kernel(store: Arc<MemoryStore>) -> AgentKernel {
         .unwrap()
 }
 
-#[derive(Debug)]
-struct QueuedWorkspaceContext {
-    snapshots: Mutex<VecDeque<WorkspaceContextSnapshot>>,
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl WorkspaceContext for QueuedWorkspaceContext {
-    async fn snapshot(
-        &self,
-        _header: &SessionHeader,
-        _messages: &[&AgentMessage],
-    ) -> std::result::Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.snapshots
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| WorkspaceContextError::Failed("snapshot queue exhausted".into()))
-    }
-}
-
 async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: usize) {
     let session_id = SessionId::new(session_id).unwrap();
     let mut facts = Vec::with_capacity(turns * 2);
@@ -1437,6 +1411,8 @@ fn mailbox_message(message_id: &str) -> AgentMessage {
 mod agent_lifecycle;
 #[path = "kernel/capacity_and_observation.rs"]
 mod capacity_and_observation;
+#[path = "kernel/contributions.rs"]
+mod contributions;
 #[path = "kernel/domains.rs"]
 mod domains;
 #[path = "kernel/fork_and_scheduler.rs"]

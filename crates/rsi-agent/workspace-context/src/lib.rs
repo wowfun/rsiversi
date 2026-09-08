@@ -24,7 +24,11 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 mod budget;
+mod requests;
+pub use requests::WorkspaceSkillRequests;
+mod contributor;
 use budget::{SnapshotBudget, SnapshotOwner};
+pub use contributor::WorkspaceContributorFactory;
 
 /// Maximum bytes read from one instruction or skill source.
 pub const MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES: usize = 256 * 1024;
@@ -85,11 +89,11 @@ pub enum WorkspaceContextError {
 /// Process-local trust-aware workspace context source.
 #[async_trait]
 pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
-    /// Reads one complete bounded snapshot for the exact Session Header and messages.
+    /// Reads one complete bounded snapshot for the exact Header and selected skill names.
     async fn snapshot(
         &self,
         header: &SessionHeader,
-        messages: &[&AgentMessage],
+        requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError>;
 }
 
@@ -367,16 +371,8 @@ impl WorkspaceContext for LocalWorkspaceContext {
     async fn snapshot(
         &self,
         header: &SessionHeader,
-        messages: &[&AgentMessage],
+        requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        if messages.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
-            || messages.iter().any(|message| {
-                message.content.len()
-                    > rsi_agent_session_protocol::MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS
-            })
-        {
-            return Err(WorkspaceContextError::Capacity);
-        }
         let lease = self.owner.acquire().await?;
         let config = Arc::clone(&self.config);
         let budget = SnapshotBudget::new(
@@ -386,7 +382,7 @@ impl WorkspaceContext for LocalWorkspaceContext {
         )?;
         let cwd = PathBuf::from(header.canonical_cwd());
         let workspace_trust = header.workspace_trust();
-        let invocations = invoked_names(messages);
+        let invocations = requests.names().to_vec();
         lease
             .run(move || snapshot_with_budget(&config, &cwd, workspace_trust, &invocations, budget))
             .await
@@ -943,34 +939,6 @@ fn utf8_prefix(text: &str, maximum_bytes: usize) -> &str {
     &text[..end]
 }
 
-fn invoked_names(messages: &[&AgentMessage]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut names = Vec::new();
-    for message in messages {
-        if !matches!(message.source, AgentMessageSource::Human) {
-            continue;
-        }
-        for content in &message.content {
-            let AgentMessageContent::Text { text } = content else {
-                continue;
-            };
-            let Some(first) = text.lines().find(|line| !line.trim().is_empty()) else {
-                continue;
-            };
-            let Some(token) = first.split_whitespace().next() else {
-                continue;
-            };
-            let Some(name) = token.strip_prefix('/') else {
-                continue;
-            };
-            if valid_skill_name(name) && seen.insert(name.to_owned()) {
-                names.push(name.to_owned());
-            }
-        }
-    }
-    names
-}
-
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -1234,7 +1202,9 @@ mod capacity_tests {
                 options: MessageOptions::default(),
             })
             .collect::<Vec<_>>();
-        let names = invoked_names(&messages.iter().collect::<Vec<_>>());
+        let requests =
+            WorkspaceSkillRequests::from_messages(&messages.iter().collect::<Vec<_>>()).unwrap();
+        let names = requests.names();
         assert_eq!(names.len(), 4096);
         let snapshot = snapshot_blocking(
             &WorkspaceContextConfig {
@@ -1243,7 +1213,7 @@ mod capacity_tests {
             },
             root.path(),
             WorkspaceTrust::Untrusted,
-            &names,
+            names,
         )
         .unwrap();
         assert!(snapshot.complete);

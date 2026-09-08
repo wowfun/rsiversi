@@ -2,19 +2,18 @@ use super::{
     AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit,
     Arc, AtomicAgentCommit, AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet,
     CasObjectRef, Digest, EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
-    InputMessageSource, MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES,
-    MAXIMUM_STORE_FACT_PAGE_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState,
-    MemoryStore, MemoryTurnBoundary, MessageId, MessageTarget, Ordering, Result, SessionFact,
-    SessionFactBody, SessionHeader, SessionId, SessionStore, Sha256, StoreActivationPhase,
-    StoreActiveActivation, StoreAgentChild, StoreAgentChildPage, StoreAgentDescendantStatus,
-    StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState,
-    StoreAgentSessionStatus, StoreAgentSubtreeSnapshot, StoreBackwardFactPage, StoreControlPage,
-    StoreError, StoreFactPage, StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn,
-    StoreOpenTurnPage, StoreReadyMessage, StoreReadyMessageCursor, StoreReadyMessagePage,
-    StoreReadyRootPage, StoreRecentSession, StoreRecentSessionCursor, StoreRecentSessionPage,
-    StoreSessionPage, StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage,
-    StoreWorkspaceContextState, StoredContextCheckpoint, TurnId, WriteContextCheckpoint,
-    advance_control_prefix_digest, advance_fact_prefix_digest, async_trait,
+    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
+    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState, MemoryStore, MemoryTurnBoundary,
+    MessageId, MessageTarget, Ordering, Result, SessionFact, SessionHeader, SessionId,
+    SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation, StoreAgentChild,
+    StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary,
+    StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
+    StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
+    StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
+    StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
+    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
+    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, TurnId,
+    WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest, async_trait,
     validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 
@@ -44,12 +43,9 @@ impl SessionStore for MemoryStore {
             }
             let (turn_updates, fact_prefix_digest) =
                 index_appended_turns(&session.turns, &batch.facts, session.fact_prefix_digest)?;
-            let workspace_context =
-                workspace_context_after(session.workspace_context.clone(), &batch.facts);
             session.facts.extend(batch.facts);
             session.turns.extend(turn_updates);
             session.fact_prefix_digest = fact_prefix_digest;
-            session.workspace_context = workspace_context;
             Ok(AppendCommit {
                 durable_seq: session
                     .facts
@@ -75,8 +71,6 @@ impl SessionStore for MemoryStore {
                 .seq();
             let (turns, fact_prefix_digest) =
                 index_appended_turns(&BTreeMap::new(), &batch.facts, EMPTY_FACT_PREFIX_DIGEST)?;
-            let workspace_context =
-                workspace_context_after(StoreWorkspaceContextState::default(), &batch.facts);
             state
                 .recent_sessions
                 .insert((header.created_at_ms(), batch.session_id.clone()));
@@ -100,7 +94,6 @@ impl SessionStore for MemoryStore {
                     checkpoint: None,
                     controls: Vec::new(),
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
-                    workspace_context,
                     domain_versions: BTreeMap::new(),
                     domain_requests: BTreeMap::new(),
                     domain_usage: BTreeMap::new(),
@@ -980,34 +973,6 @@ impl SessionStore for MemoryStore {
         Ok(summary)
     }
 
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<StoreWorkspaceContextState> {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let workspace_context = state
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?
-            .workspace_context
-            .clone();
-        let workspace_context = StoreWorkspaceContextState {
-            durable_fact_seq: state
-                .sessions
-                .get(session_id)
-                .expect("validated workspace-context session exists")
-                .facts
-                .last()
-                .map_or(0, |fact| fact.seq()),
-            ..workspace_context
-        };
-        workspace_context.validate()?;
-        Ok(workspace_context)
-    }
-
     async fn list_agent_children(
         &self,
         parent_session_id: &SessionId,
@@ -1341,8 +1306,6 @@ fn apply_atomic_memory_append(
         }
         let (turn_updates, fact_digest) =
             index_appended_turns(&session.turns, &append.facts, session.fact_prefix_digest)?;
-        let workspace_context =
-            workspace_context_after(session.workspace_context.clone(), &append.facts);
         let control_digest =
             append
                 .controls
@@ -1356,7 +1319,6 @@ fn apply_atomic_memory_append(
         session.fact_prefix_digest = fact_digest;
         session.controls.extend(append.controls.clone());
         session.control_prefix_digest = control_digest;
-        session.workspace_context = workspace_context;
         apply_message_updates(
             state,
             &session_id,
@@ -1372,8 +1334,6 @@ fn apply_atomic_memory_append(
         validate_memory_agent_node(state, &header)?;
         let (turns, fact_digest) =
             index_appended_turns(&BTreeMap::new(), &append.facts, EMPTY_FACT_PREFIX_DIGEST)?;
-        let workspace_context =
-            workspace_context_after(StoreWorkspaceContextState::default(), &append.facts);
         let control_digest =
             append
                 .controls
@@ -1405,7 +1365,6 @@ fn apply_atomic_memory_append(
                 checkpoint: None,
                 controls: append.controls.clone(),
                 control_prefix_digest: control_digest,
-                workspace_context,
                 domain_versions: BTreeMap::new(),
                 domain_requests: BTreeMap::new(),
                 domain_usage: BTreeMap::new(),
@@ -1449,29 +1408,6 @@ fn apply_atomic_memory_append(
         durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
     })
-}
-
-fn workspace_context_after(
-    mut state: StoreWorkspaceContextState,
-    facts: &[Arc<SessionFact>],
-) -> StoreWorkspaceContextState {
-    for fact in facts {
-        if let SessionFactBody::InputMessageEntered { source, .. } = fact.body() {
-            match source {
-                InputMessageSource::AgentInstructions { sha256, .. } => {
-                    state.instructions_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::SkillCatalog { sha256 } => {
-                    state.skill_catalog_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::Human { .. }
-                | InputMessageSource::Agent { .. }
-                | InputMessageSource::Completion { .. }
-                | InputMessageSource::UserSkillInvocation { .. } => {}
-            }
-        }
-    }
-    state
 }
 
 fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Result<()> {

@@ -1405,38 +1405,6 @@ impl SessionStore for SqliteStore {
         .await
     }
 
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<StoreWorkspaceContextState> {
-        self.ensure_session_validated(session_id).await?;
-        let session_id = session_id.clone();
-        self.with_reader(move |connection| {
-            let (instructions_sha256, skill_catalog_sha256, durable_fact_seq) = connection
-                .query_row(
-                    "SELECT workspace_instructions_sha256,
-                            workspace_skill_catalog_sha256, durable_seq
-                     FROM sessions WHERE session_id = ?1",
-                    [session_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?)),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-            let state = StoreWorkspaceContextState {
-                instructions_sha256,
-                skill_catalog_sha256,
-                durable_fact_seq: decode_u64(
-                    "workspace-context durable Fact sequence",
-                    durable_fact_seq,
-                )?,
-            };
-            state.validate()?;
-            Ok(state)
-        })
-        .await
-    }
-
     async fn list_agent_children(
         &self,
         parent_session_id: &SessionId,

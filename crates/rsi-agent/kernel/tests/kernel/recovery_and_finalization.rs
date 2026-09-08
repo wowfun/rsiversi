@@ -496,25 +496,7 @@ async fn ordinary_factory_waits_for_store_and_withdraws_all_turn_contracts() {
         )
         .await
         .unwrap();
-    assert!(
-        runtime
-            .root()
-            .lookup_local::<rsi_agent_turn_protocol::TurnServiceContract>()
-            .is_none()
-    );
-    let workspace_context_fiber = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "rsi.agent.workspace-context",
-                "workspace-context",
-                UpdateMode::Replayable,
-                Arc::new(WorkspaceContextFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+
     assert!(
         runtime
             .root()
@@ -554,7 +536,6 @@ async fn ordinary_factory_waits_for_store_and_withdraws_all_turn_contracts() {
     );
     assert!(store_fiber.dispose().await.is_clean());
     assert!(composition_fiber.dispose().await.is_clean());
-    assert!(workspace_context_fiber.dispose().await.is_clean());
 }
 
 #[tokio::test]

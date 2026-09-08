@@ -12,7 +12,16 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod contribution;
 mod domain;
+pub use contribution::{
+    ContextContributor, ContributionBatch, ContributionCatalog, ContributionContext,
+    ContributionError, ContributionFactPage, ContributionFactReader, ContributionHorizon,
+    ContributionInput, ContributionKind, ContributionOutput, ContributionRegistrar,
+    ContributionRegistrarContract, ContributionRegistration, ContributionResult, ContributionStage,
+    MAXIMUM_AGENT_CONTRIBUTIONS, MAXIMUM_CONTRIBUTION_INPUT_BYTES, MAXIMUM_CONTRIBUTION_INPUTS,
+    PostToolContributor, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
+};
 pub use domain::{
     DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
     DomainError, DomainHandle, DomainRegistrar, DomainRegistrarContract, DomainRegistration,
@@ -32,6 +41,7 @@ pub struct AgentCompositionPin {
     tools: Arc<dyn ToolRuntime>,
     context_builder: Arc<dyn ModelContextBuilder>,
     domains: DomainCatalog,
+    contributions: ContributionCatalog,
     _owner: Arc<dyn AgentGenerationOwner>,
 }
 
@@ -48,6 +58,7 @@ impl AgentCompositionPin {
         tools: Arc<dyn ToolRuntime>,
         context_builder: Arc<dyn ModelContextBuilder>,
         domains: DomainCatalog,
+        contributions: ContributionCatalog,
         owner: Arc<dyn AgentGenerationOwner>,
     ) -> Result<Self> {
         let source_digest = source_digest.into();
@@ -66,6 +77,7 @@ impl AgentCompositionPin {
             tools,
             context_builder,
             domains,
+            contributions,
             _owner: owner,
         })
     }
@@ -93,6 +105,11 @@ impl AgentCompositionPin {
     /// Returns the exact immutable domain definitions frozen with this generation.
     pub const fn domains(&self) -> &DomainCatalog {
         &self.domains
+    }
+
+    /// Returns callbacks captured and ordered with this exact generation.
+    pub const fn contributions(&self) -> &ContributionCatalog {
+        &self.contributions
     }
 }
 

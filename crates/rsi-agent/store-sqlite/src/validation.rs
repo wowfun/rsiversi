@@ -888,28 +888,13 @@ pub(super) fn validate_canonical_fact_prefix(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<()> {
-    let (expected_digest, instructions_sha256, skill_catalog_sha256) = connection
+    let expected_digest = connection
         .query_row(
-            "SELECT fact_prefix_sha256, workspace_instructions_sha256,
-                    workspace_skill_catalog_sha256
-             FROM sessions WHERE session_id = ?1",
+            "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [session_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
+            |row| row.get::<_, String>(0),
         )
         .map_err(sql_error)?;
-    let expected_workspace_context = StoreWorkspaceContextState {
-        instructions_sha256,
-        skill_catalog_sha256,
-        durable_fact_seq: 0,
-    };
-    expected_workspace_context.validate()?;
-    let mut actual_workspace_context = StoreWorkspaceContextState::default();
     let mut digest = EMPTY_FACT_PREFIX_DIGEST;
     let mut next_sequence = 1_u64;
     let mut statement = connection
@@ -952,20 +937,6 @@ pub(super) fn validate_canonical_fact_prefix(
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
         })?;
-        if let SessionFactBody::InputMessageEntered { source, .. } = fact.body() {
-            match source {
-                InputMessageSource::AgentInstructions { sha256, .. } => {
-                    actual_workspace_context.instructions_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::SkillCatalog { sha256 } => {
-                    actual_workspace_context.skill_catalog_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::Human { .. }
-                | InputMessageSource::Agent { .. }
-                | InputMessageSource::Completion { .. }
-                | InputMessageSource::UserSkillInvocation { .. } => {}
-            }
-        }
         if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
             let terminal_digest = connection
                 .query_row(
@@ -997,15 +968,6 @@ pub(super) fn validate_canonical_fact_prefix(
     if hex::encode(digest) != expected_digest {
         return Err(StoreError::Corrupt(
             "Fact-prefix digest differs from the canonical Fact stream".into(),
-        ));
-    }
-    if actual_workspace_context.instructions_sha256
-        != expected_workspace_context.instructions_sha256
-        || actual_workspace_context.skill_catalog_sha256
-            != expected_workspace_context.skill_catalog_sha256
-    {
-        return Err(StoreError::Corrupt(
-            "workspace-context digest index differs from the canonical Fact stream".into(),
         ));
     }
     Ok(())

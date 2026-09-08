@@ -48,14 +48,7 @@ pub(super) fn ending_facts(
         });
     }
     bodies.push(terminal);
-    let staged = execution::stage_execution_facts(
-        kernel,
-        claim,
-        original,
-        base_seq,
-        WorkspaceContextState::default(),
-        bodies,
-    )?;
+    let staged = execution::stage_execution_facts(kernel, claim, original, base_seq, bodies)?;
     enforce_turn_budget(
         claim.header().settings().turn_budget(),
         original,

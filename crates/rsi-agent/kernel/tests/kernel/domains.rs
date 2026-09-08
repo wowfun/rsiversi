@@ -36,6 +36,7 @@ fn domain_composition() -> (Arc<DomainComposition>, DomainHandle<bool>) {
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         catalog,
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(()),
     )
     .unwrap();
@@ -48,6 +49,67 @@ struct DomainRun {
     lease: rsi_agent_turn_protocol::ExecutorLease,
     claim: rsi_agent_turn_protocol::TurnClaim,
     handle: DomainHandle<bool>,
+}
+
+#[tokio::test]
+async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() {
+    let store = Arc::new(MemoryStore::new());
+    let run = DomainRun::start(store, TurnBudget::default()).await;
+    let scope = CancellationToken::new();
+    let context = run
+        .kernel
+        .contribution_context(&run.claim, scope.clone())
+        .await
+        .unwrap();
+    assert_eq!(context.horizon.control_seq, 1);
+    assert_eq!(context.domains.len(), 1);
+    assert_eq!(context.domains[0].revision, DomainRevision::new(1));
+    assert_eq!(
+        context.domains[0].snapshot.state().value(),
+        &serde_json::json!(false)
+    );
+    let before = context.facts.read(0, 16).await.unwrap();
+    assert_eq!(before.through_seq, context.horizon.fact_seq);
+    assert!(matches!(
+        before.facts.last().unwrap().body(),
+        SessionFactBody::StepStarted { .. }
+    ));
+    let mutation = rsi_agent_turn_protocol::DomainMutation {
+        request_id: rsi_agent_session_protocol::DomainRequestId::new("after-snapshot").unwrap(),
+        proposals: vec![run.handle.propose(DomainRevision::new(1), &true).unwrap()],
+        facts: vec![SessionFactBody::InputMessageEntered {
+            turn_id: run.claim.turn_id().clone(),
+            step_id: context.step_id.clone(),
+            source: rsi_agent_session_protocol::InputMessageSource::PluginContext {
+                contribution_id: rsi_agent_session_protocol::ContributionId::new("fixture.context")
+                    .unwrap(),
+            },
+            content: vec![AgentMessageContent::Text {
+                text: "later input".into(),
+            }],
+        }],
+    };
+    run.kernel
+        .commit_domains(&run.claim, mutation)
+        .await
+        .unwrap();
+    assert_eq!(context.facts.read(0, 16).await.unwrap().facts, before.facts);
+    assert!(
+        context
+            .facts
+            .read(context.horizon.fact_seq + 1, 1)
+            .await
+            .is_err()
+    );
+    assert!(context.facts.read(0, 0).await.is_err());
+    scope.cancel();
+    assert!(context.facts.read(0, 1).await.is_err());
+    run.kernel
+        .finish_turn(&run.claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(run.lease);
+    run.kernel.shutdown(run.workers).await.unwrap();
 }
 
 impl DomainRun {
@@ -545,6 +607,16 @@ async fn elapsed_domain_work_is_rejected_while_atomic_ending_closes_the_open_ste
         .await
         .unwrap();
     clock.0.store(52, Ordering::Release);
+    assert!(matches!(
+        run.kernel
+            .contribution_context(&run.claim, CancellationToken::new())
+            .await,
+        Err(TurnError::BudgetExceeded {
+            dimension: BudgetDimension::Elapsed,
+            consumed: 10,
+            limit: 10
+        })
+    ));
     assert!(matches!(
         run.kernel
             .commit_domains(&run.claim, run.mutation("late", 2, false, vec![]))

@@ -16,15 +16,17 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+mod contribution;
+pub use contribution::ToolRejection;
 mod domain;
 pub use domain::{
     DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
-    DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue,
+    DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue, DomainStateView,
     MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_DOMAIN_STATE_BYTES, MAXIMUM_SESSION_DOMAINS,
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 9;
+pub const SESSION_FORMAT_VERSION: u32 = 10;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -128,6 +130,7 @@ string_identity!(MessageId, "message");
 string_identity!(ActivationId, "activation");
 string_identity!(StepId, "step");
 string_identity!(DomainRequestId, "domain request");
+string_identity!(ContributionId, "contribution");
 
 /// Stable path from an Agent-tree root to one descendant.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -526,6 +529,11 @@ pub enum InputMessageSource {
     SkillCatalog { sha256: String },
     /// Direct user invocation of one selected skill.
     UserSkillInvocation { name: String, source: String },
+    /// Actual text entered by a pinned context contribution before external execution.
+    PluginContext {
+        /// Stable contribution provenance, not an authorization credential.
+        contribution_id: ContributionId,
+    },
 }
 
 impl InputMessageSource {
@@ -540,7 +548,10 @@ impl InputMessageSource {
                 validate_safe_text("input source", source, MAXIMUM_WORKSPACE_PATH_BYTES, false)
             }
             Self::SkillCatalog { sha256 } => validate_sha256("skill catalog digest", sha256),
-            Self::Human { .. } | Self::Agent { .. } | Self::Completion { .. } => Ok(()),
+            Self::Human { .. }
+            | Self::Agent { .. }
+            | Self::Completion { .. }
+            | Self::PluginContext { .. } => Ok(()),
         }
     }
 }
@@ -1710,6 +1721,21 @@ pub enum SessionFactBody {
         /// Tool-owner scheduling proof copied from the sealed definition.
         parallel_safe: bool,
     },
+    /// One prepared Tool call was denied before intent or external execution.
+    ToolRejected {
+        /// Exact target turn.
+        turn_id: TurnId,
+        /// Exact prepared effect identity, never started by this record.
+        effect_id: EffectId,
+        /// Prepared identity preserves the model call and pinned Tool generation.
+        identity: ToolResultIdentity,
+        /// Exact prepared Tool name.
+        name: String,
+        /// Canonical bounded arguments presented to the deciding policy or approval.
+        arguments: serde_json::Value,
+        /// Actual denial with bounded provenance.
+        rejection: ToolRejection,
+    },
     /// The prepared Tool call was authorized to start after intent durability.
     ToolStarted {
         /// Exact target turn.
@@ -1765,18 +1791,7 @@ impl SessionFactBody {
             Self::StepStarted { .. } => Ok(()),
             Self::InputMessageEntered {
                 source, content, ..
-            } => {
-                source.validate()?;
-                let text_limit = if matches!(
-                    source,
-                    InputMessageSource::Agent { .. } | InputMessageSource::Completion { .. }
-                ) {
-                    MAXIMUM_AGENT_MESSAGE_BYTES
-                } else {
-                    MAXIMUM_TURN_TEXT_BYTES
-                };
-                validate_message_content(content, text_limit)
-            }
+            } => validate_entered_message(source, content),
             Self::StepEnded { outcome, .. } => outcome.validate(),
             Self::WorkspaceTouched { paths, .. } => validate_workspace_touch(paths),
             Self::ImageRequested { model, request, .. } => {
@@ -1837,6 +1852,16 @@ impl SessionFactBody {
                 approval,
                 ..
             } => validate_tool_intent(identity, name, arguments, approval.as_ref()),
+            Self::ToolRejected {
+                identity,
+                name,
+                arguments,
+                rejection,
+                ..
+            } => {
+                validate_tool_intent(identity, name, arguments, None)?;
+                rejection.validate()
+            }
             Self::ToolResult { result, .. } => result
                 .validate()
                 .map_err(|error| SessionError::Invalid(error.to_string())),
@@ -1863,6 +1888,7 @@ impl SessionFactBody {
             | Self::ImageOutput { turn_id, .. }
             | Self::ModelEvent { turn_id, .. }
             | Self::ToolIntent { turn_id, .. }
+            | Self::ToolRejected { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolResult { turn_id, .. }
             | Self::TurnTerminal { turn_id, .. } => turn_id,
@@ -1952,6 +1978,31 @@ fn validate_snapshot_capability(
         return Err(SessionError::Invalid(mismatch.into()));
     }
     Ok(())
+}
+
+fn validate_entered_message(
+    source: &InputMessageSource,
+    content: &[AgentMessageContent],
+) -> Result<()> {
+    source.validate()?;
+    if matches!(source, InputMessageSource::PluginContext { .. })
+        && content
+            .iter()
+            .any(|item| !matches!(item, AgentMessageContent::Text { .. }))
+    {
+        return Err(SessionError::Invalid(
+            "PluginContext must contain only text".into(),
+        ));
+    }
+    let text_limit = if matches!(
+        source,
+        InputMessageSource::Agent { .. } | InputMessageSource::Completion { .. }
+    ) {
+        MAXIMUM_AGENT_MESSAGE_BYTES
+    } else {
+        MAXIMUM_TURN_TEXT_BYTES
+    };
+    validate_message_content(content, text_limit)
 }
 
 fn validate_tool_intent(

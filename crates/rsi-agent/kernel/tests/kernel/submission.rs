@@ -467,6 +467,7 @@ async fn shutdown_releases_resident_generation_pins_while_service_handles_escape
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();

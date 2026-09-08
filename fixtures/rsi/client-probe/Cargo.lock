@@ -361,10 +361,12 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio-util",
 ]
 
 [[package]]

@@ -74,7 +74,7 @@ resumes prove that one session has at most one in-flight control-state load.
 Agent-control regressions exercise the complete running/parked/resumed/waiting
 Store vocabulary, recovery from shutdown during a durable park, Fresh mailbox
 admission racing a write-behind Header, exact idempotent claim receipts with
-workspace background Facts, serialized cancellation against direct commits,
+cold recovery, serialized cancellation against direct commits,
 post-activation claim handoff, and idle-session capacity reclamation.
 The shared Store contract also proves typed activation/quiescence guard failures
 and backend-equivalent rejection of duplicate task, message, and activation

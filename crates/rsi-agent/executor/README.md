@@ -1,5 +1,21 @@
 # rsi-agent-executor
 
+Execution contributions use the claim's frozen composition. Before a new
+provider retry series, one stage captures durable Fact/control watermarks and
+domain states, invokes callbacks in catalog order, validates the complete
+output, and commits it before provider preparation. A proven undispatched
+provider retry reuses those entered inputs. A post-tool stage receives one
+source-ordered settled batch after every successful result publication is
+durable. Tool policy stages inspect the exact prepared identity before approval:
+Abstain preserves constraints, RequireApproval adds one, and Deny wins before
+any Tool intent/start and persists a charged ToolRejected.
+
+Each stage has one 30-second deadline, including snapshot capture and all its
+callbacks. Cancellation, timeout, panic or invalid output fails the stage with
+producer/stage diagnostics and leaves its proposed business mutations unapplied.
+Captured readers expire when the stage ends. Callbacks run without framework
+locks, and the framework never reruns them to reconcile an uncertain commit.
+
 Ordinary executor plugin over exact Turn execution/finalization, Language,
 Image, Media, Approval, Sandbox, and Jobs Local contracts. Tool authority is
 not a standing executor dependency: each exact claim supplies its resident

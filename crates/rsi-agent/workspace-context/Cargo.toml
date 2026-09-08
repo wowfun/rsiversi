@@ -11,6 +11,7 @@ async-trait.workspace = true
 cap-std.workspace = true
 hex.workspace = true
 rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 serde.workspace = true
@@ -26,6 +27,16 @@ libc.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+rsi-agent-composition = { path = "../composition" }
+rsi-agent-context = { path = "../context" }
+rsi-agent-kernel = { path = "../kernel" }
+rsi-agent-presets = { path = "../presets" }
+rsi-agent-store-protocol = { path = "../store-protocol" }
+rsi-agent-store-sqlite = { path = "../store-sqlite" }
+rsi-agent-turn-protocol = { path = "../turn-protocol" }
+rsi-meta-profile = { path = "../../rsi-meta/profile" }
+rsi-meta-scope = { path = "../../rsi-meta/scope" }
+rsi-tools = { path = "../../rsi-tools/core" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tempfile.workspace = true

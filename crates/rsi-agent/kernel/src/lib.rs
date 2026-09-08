@@ -45,9 +45,6 @@ use rsi_agent_turn_protocol::{
     DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
 };
 use rsi_agent_turn_protocol::{SettlementHealth, SettlementSessionError};
-use rsi_agent_workspace_context::{
-    WorkspaceContext, WorkspaceContextContract, WorkspaceContextSnapshot,
-};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -231,7 +228,6 @@ struct KernelInner {
     tasks: TaskTracker,
     store: Arc<dyn SessionStore>,
     composition: Arc<dyn AgentComposition>,
-    workspace_context: Arc<dyn WorkspaceContext>,
     resume_issuer: ResumeAdmissionIssuer,
     claim_issuer: TurnClaimIssuer,
     clock: Arc<dyn Clock>,
@@ -517,37 +513,6 @@ struct SessionRuntime {
     retry_not_before: Option<Instant>,
     permanent_flush_error: Option<String>,
     admission_reservations: usize,
-    workspace_context: WorkspaceContextState,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct WorkspaceContextState {
-    instructions_sha256: Option<String>,
-    skill_catalog_sha256: Option<String>,
-}
-
-#[derive(Debug)]
-struct EmptyWorkspaceContext;
-
-#[async_trait]
-impl WorkspaceContext for EmptyWorkspaceContext {
-    async fn snapshot(
-        &self,
-        _header: &SessionHeader,
-        _messages: &[&AgentMessage],
-    ) -> std::result::Result<
-        WorkspaceContextSnapshot,
-        rsi_agent_workspace_context::WorkspaceContextError,
-    > {
-        Ok(WorkspaceContextSnapshot {
-            complete: false,
-            instructions_sha256: String::new(),
-            instructions: None,
-            skill_catalog_sha256: String::new(),
-            skill_catalog: None,
-            invocations: Vec::new(),
-        })
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -730,7 +695,6 @@ impl SessionRuntime {
             retry_not_before: None,
             permanent_flush_error: None,
             admission_reservations: 0,
-            workspace_context: WorkspaceContextState::default(),
         }
     }
 
@@ -818,6 +782,7 @@ fn apply_committed_flush(
 }
 
 mod admission;
+mod contributions;
 mod domains;
 mod elapsed;
 mod ending;
@@ -834,14 +799,13 @@ mod turn_state;
 
 use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path,
-    apply_workspace_context_state, bounded_step_message_prefix, completion_message,
-    completion_message_id, context_checkpoints_enabled, control_tail, descendant_session_ids,
-    durable_observation_next, entered_message_source, fill_observation_page,
-    list_agent_descendants, list_direct_agent_children, message_receipt, observation_next,
-    observe_agent_wait_change, read_controls_bounded, read_facts_bounded,
-    read_fork_page_from_header, read_header_bounded, read_observed_facts,
-    read_turn_boundary_bounded, read_turn_facts_bounded, read_validated_header_bounded,
-    scan_durable_messages, workspace_context_bodies,
+    bounded_step_message_prefix, completion_message, completion_message_id,
+    context_checkpoints_enabled, control_tail, descendant_session_ids, durable_observation_next,
+    entered_message_source, fill_observation_page, list_agent_descendants,
+    list_direct_agent_children, message_receipt, observation_next, observe_agent_wait_change,
+    read_controls_bounded, read_facts_bounded, read_fork_page_from_header, read_header_bounded,
+    read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
+    read_validated_header_bounded, scan_durable_messages,
 };
 use recovery::{
     is_terminal_fact, load_control_state, read_stored_outcome, repair_unfinished_session,
@@ -852,7 +816,7 @@ use turn_state::{
     clone_turn_control, deregister_executor, enforce_turn_budget, enqueue, kernel_turn_error,
     lock_state, next_fact, publish_live_watermarks, push_pending, reserve_atomic_capacity,
     submission_conflict, turn_composition_error, turn_kernel_error, turn_not_found,
-    turn_store_error, turn_workspace_error,
+    turn_store_error,
 };
 
 struct ObservationState {
@@ -980,17 +944,14 @@ impl PluginFactory for KernelFactory {
             std::mem::size_of::<ValidatedKernelLimits>(),
         )
         .requiring_local::<SessionStoreContract>()
-        .requiring_local::<AgentCompositionContract>()
-        .requiring_local::<WorkspaceContextContract>())
+        .requiring_local::<AgentCompositionContract>())
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let limits = plan.take_state::<ValidatedKernelLimits>()?;
-        let workspace_context = plan.local::<WorkspaceContextContract>()?;
         let kernel = AgentKernel::recover_with_validated_limits(
             plan.local::<SessionStoreContract>()?,
             plan.local::<AgentCompositionContract>()?,
-            workspace_context,
             Arc::new(SystemClock),
             limits,
         )

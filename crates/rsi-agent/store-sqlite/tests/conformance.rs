@@ -4,12 +4,12 @@ use rsi_agent_session_protocol::{
     EMPTY_FACT_PREFIX_DIGEST, ForkOrigin, ForkTurnSelection, FrozenAgentSettings,
     MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_PENDING_AGENT_MESSAGES, MAXIMUM_SESSION_FACT_BYTES,
     MAXIMUM_SESSION_HEADER_BYTES, MessageDiscardReason, MessageId, MessageOptions, MessageTarget,
-    SessionFact, SessionFactBody, SessionHeader, SessionId, StepId, TurnId,
+    SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_store_protocol::{
     AGENT_STORE_SCHEMA_VERSION, AppendBatch, AtomicAgentCommit, AtomicSessionAppend,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, SessionStore, StoreError, StoreWorkspaceContextState,
-    StoredContextCheckpoint, WriteContextCheckpoint,
+    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, SessionStore, StoreError, StoredContextCheckpoint,
+    WriteContextCheckpoint,
 };
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_testkit::assert_mechanical_store_contract;
@@ -346,109 +346,6 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
             .effective_turns,
         2
     );
-}
-
-#[tokio::test]
-async fn workspace_context_digests_are_recovered_from_the_sqlite_fact_projection() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let session_id = SessionId::new("session-workspace-context-state").unwrap();
-    let turn_id = TurnId::new("turn-workspace-context-state").unwrap();
-    let step_id = StepId::new("step-workspace-context-state").unwrap();
-    let instructions_sha256 = "a".repeat(64);
-    let skill_catalog_sha256 = "b".repeat(64);
-    rsi_agent_testkit::append_history_fixture(
-        &store,
-        AppendBatch {
-            session_id: session_id.clone(),
-            expected_seq: 0,
-            header: Some(header(session_id.as_str())),
-            facts: (vec![
-                SessionFact::new(
-                    1,
-                    1,
-                    SessionFactBody::TurnAccepted {
-                        turn_id: turn_id.clone(),
-                        text: "publish workspace context".into(),
-                        model: None,
-                        sandbox: SandboxMode::WorkspaceWrite,
-                        require_approval: false,
-                    },
-                )
-                .unwrap(),
-                SessionFact::new(
-                    2,
-                    1,
-                    SessionFactBody::StepStarted {
-                        turn_id: turn_id.clone(),
-                        step_id: step_id.clone(),
-                    },
-                )
-                .unwrap(),
-                SessionFact::new(
-                    3,
-                    1,
-                    SessionFactBody::InputMessageEntered {
-                        turn_id: turn_id.clone(),
-                        step_id: step_id.clone(),
-                        source: rsi_agent_session_protocol::InputMessageSource::AgentInstructions {
-                            source: "project/AGENTS.md".into(),
-                            sha256: instructions_sha256.clone(),
-                            replacement: true,
-                            tombstone: false,
-                        },
-                        content: vec![AgentMessageContent::Text {
-                            text: "workspace instructions".into(),
-                        }],
-                    },
-                )
-                .unwrap(),
-                SessionFact::new(
-                    4,
-                    1,
-                    SessionFactBody::InputMessageEntered {
-                        turn_id: turn_id.clone(),
-                        step_id,
-                        source: rsi_agent_session_protocol::InputMessageSource::SkillCatalog {
-                            sha256: skill_catalog_sha256.clone(),
-                        },
-                        content: vec![AgentMessageContent::Text {
-                            text: "workspace skills".into(),
-                        }],
-                    },
-                )
-                .unwrap(),
-                SessionFact::new(
-                    5,
-                    1,
-                    SessionFactBody::TurnTerminal {
-                        turn_id,
-                        outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
-                    },
-                )
-                .unwrap(),
-            ])
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        store
-            .read_workspace_context_state(&session_id)
-            .await
-            .unwrap(),
-        StoreWorkspaceContextState {
-            instructions_sha256: Some(instructions_sha256),
-            skill_catalog_sha256: Some(skill_catalog_sha256),
-            durable_fact_seq: 5,
-        }
-    );
-    drop(store);
-    SqliteStore::verify(root.path()).unwrap();
 }
 
 fn accepted_message_control(

@@ -362,6 +362,14 @@ pub struct RegistrationRank {
     sequence: u64,
 }
 
+impl RegistrationRank {
+    /// Compares composition positions without the owner-local registration sequence.
+    /// Products can append their own stable contribution identity tie-break.
+    pub fn compare_position(&self, other: &Self) -> std::cmp::Ordering {
+        self.path.cmp(&other.path)
+    }
+}
+
 /// One immutable capture of contribution order for a registry dispatch.
 /// Registrars invalidate their membership cache separately when inserting/removing.
 #[derive(Clone)]

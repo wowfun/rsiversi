@@ -4,9 +4,9 @@ name: Generation-pinned Agent contributions and durable domain state
 
 ## Problem
 
-Workspace context has dedicated Kernel branches. The durable domain substrate
-needs ordinary contribution, command and projection consumers before standard
-business features can use the same extension paths as independent addons.
+The durable domain substrate and ordinary execution contributions need command,
+projection and draft consumers before interactive business features can use
+the same extension paths as independent addons.
 
 ## Proposal
 
@@ -20,14 +20,11 @@ ending. This proposal begins with consumers of that substrate.
 The [terminal boundary decision](../../implemented/architecture/2026-09-08-terminal-control-boundaries.md)
 owns same-transaction Fact/control correlation, exact historical fork prefixes,
 control-admission fences and partial startup repair. Domain as-of selection uses
-that established control horizon. PluginContext must preserve actual model
-input with producer admission and replay. ToolRejected must record denial
-without a fake start while still charging tool-call admission.
-
-Only after both durable vocabulary paths have producer and failure tests,
-migrate workspace/time contributors, followed
-by commands, projections, draft controls, and planning policy. Ordered consumers
-use stable composition positions.
+that established control horizon. The
+[execution contribution decision](../../implemented/architecture/2026-09-08-execution-contributions.md)
+owns PluginContext, ToolRejected, stable ordering, bounded execution stages and
+workspace/time migration. This proposal continues with commands, projections,
+draft controls and planning policy, consuming those established interfaces.
 
 ## Alternatives considered
 

@@ -290,6 +290,12 @@ generation-preparation failure therefore cannot create a Workspace row.
 Dropping an unsubmitted resume token has no Store or resident-capacity side
 effect.
 
+The standard Agent preset also selects workspace and time context as ordinary
+contributions. Workspace refresh and its last-good domain state commit together;
+time context commits one UTC clock reading before each new provider retry series.
+Both belong to the immutable Agent generation. Custom presets select their own
+contributions through the Agent-only addon catalog.
+
 On Linux, linking the standard coding Tools makes a successfully probed
 restricted sandbox backend a Host activation requirement. The Host does not
 begin serving and defer an unavailable enforcement backend until the first

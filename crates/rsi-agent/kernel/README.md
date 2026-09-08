@@ -142,7 +142,7 @@ with at most four preparation jobs and one job per root. New durable input
 requests another root scan even while the previous final page still has a
 blocked preparation; retained preparations continue to count against the bound.
 A generation-bound reservation releases the exact root on completion. A candidate reserves one of
-its tree's three lanes before composition/workspace preparation and transfers
+its tree's three lanes before composition preparation and transfers
 that lane through the resident Turn into the executor claim. Failure in one root's bounded Store scan is
 isolated from later roots and from the executor lease; an otherwise idle claim
 loop retries skipped roots every five seconds as well as on commit notification.

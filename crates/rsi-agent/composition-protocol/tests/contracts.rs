@@ -81,6 +81,7 @@ impl AgentComposition for FakeComposition {
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             rsi_agent_composition_protocol::DomainCatalog::default(),
+            rsi_agent_composition_protocol::ContributionCatalog::default(),
             Arc::new(GenerationOwner),
         )
     }
@@ -148,6 +149,7 @@ fn pin_rejects_non_sha256_source_identity() {
             Arc::new(EmptyTools),
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             rsi_agent_composition_protocol::DomainCatalog::default(),
+            rsi_agent_composition_protocol::ContributionCatalog::default(),
             Arc::new(GenerationOwner),
         ),
         Err(AgentCompositionError::InvalidInput(_))

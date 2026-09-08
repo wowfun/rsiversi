@@ -31,6 +31,8 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[path = "composition/contributions.rs"]
+mod contributions;
 #[path = "composition/domains.rs"]
 mod domains;
 
@@ -407,6 +409,7 @@ fn test_compiler(temp: &TempDir) -> AgentPresetProfileCompiler {
             "test.unknown",
             "test.context",
             "test.domain",
+            "test.callbacks",
         ],
     )
 }

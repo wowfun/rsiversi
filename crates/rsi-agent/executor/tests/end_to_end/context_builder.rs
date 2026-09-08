@@ -104,6 +104,7 @@ async fn execution_and_delayed_checkpoint_keep_the_admitted_builder_after_catalo
         admitted.tools(),
         replacement.clone(),
         rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(()),
     )
     .unwrap();

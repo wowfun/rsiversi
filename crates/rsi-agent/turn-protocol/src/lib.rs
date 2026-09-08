@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
-    ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, ForkTurnSelection,
-    MessageDiscardReason, MessageId, SessionFact, SessionFactBody, SessionHeader, SessionId,
-    StepId, TurnId, TurnOutcome, validate_identifier, validate_safe_diagnostic,
+    ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, DomainStateView,
+    ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
+    SessionHeader, SessionId, StepId, TurnId, TurnOutcome, validate_identifier,
+    validate_safe_diagnostic,
 };
 use rsi_meta_contract::LocalContract;
 use std::fmt;
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 mod domain;
 mod observation;
-pub use domain::{DomainMutation, DomainMutationReceipt, DomainStateView};
+pub use domain::{DomainMutation, DomainMutationReceipt};
 pub use observation::{
     DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
 };
@@ -984,8 +985,20 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<ForkFactPage>>;
     /// Atomically enters every pending next-Step message at one safe model boundary.
     async fn enter_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
-    /// Refreshes complete trust-bound workspace context before provider I/O.
-    async fn refresh_workspace_context(&self, claim: &TurnClaim) -> Result<usize>;
+    /// Captures a durable Fact/control horizon and complete domain state at a safe boundary.
+    /// Opens a charged Step for a direct Turn when necessary. The reader expires with the
+    /// exact claim or supplied stage cancellation; no callback executes under admission.
+    /// Rejects cancelled or ending Turns, including an already recorded budget exhaustion.
+    async fn contribution_context(
+        &self,
+        claim: &TurnClaim,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_composition_protocol::ContributionContext> {
+        let _ = (claim, cancellation);
+        Err(TurnError::Invalid(
+            "execution contributions are unsupported".into(),
+        ))
+    }
     /// Publishes an ordinary charged Step closure. Turn finalization uses `finish_turn`.
     async fn close_current_step(&self, claim: &TurnClaim, outcome: &TurnOutcome) -> Result<()>;
     /// Durably closes the current Step and Turn in one bounded ending transaction.

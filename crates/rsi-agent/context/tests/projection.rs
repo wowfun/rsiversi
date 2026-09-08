@@ -14,6 +14,8 @@ use serde_json::json;
 
 #[path = "projection/builders.rs"]
 mod builders;
+#[path = "projection/contributions.rs"]
+mod contributions;
 
 fn header(system: &str) -> SessionHeader {
     SessionHeader::new(

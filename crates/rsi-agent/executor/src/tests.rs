@@ -287,13 +287,6 @@ impl TurnExecution for CheckpointFixture {
         unreachable!("checkpoint writer does not enter messages")
     }
 
-    async fn refresh_workspace_context(
-        &self,
-        _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<usize> {
-        unreachable!("checkpoint writer does not refresh workspace context")
-    }
-
     async fn close_current_step(
         &self,
         _claim: &TurnClaim,
@@ -444,13 +437,6 @@ impl TurnExecution for FullBeforePublish {
         _claim: &TurnClaim,
     ) -> rsi_agent_turn_protocol::Result<usize> {
         unreachable!("terminal publication test does not enter messages")
-    }
-
-    async fn refresh_workspace_context(
-        &self,
-        _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<usize> {
-        unreachable!("terminal publication test does not refresh workspace context")
     }
 
     async fn close_current_step(
@@ -1023,6 +1009,7 @@ pub(super) fn context_pin() -> AgentCompositionPin {
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(()),
     )
     .unwrap()

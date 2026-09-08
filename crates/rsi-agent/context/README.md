@@ -5,6 +5,10 @@ deterministic compaction. It consumes validated session Facts and emits bounded
 provider-neutral Language messages. It never reads a Workspace implicitly and
 never stores a second transcript.
 
+Entered plugin context is durable text with developer role. A pre-start Tool
+rejection becomes an error response for its exact model call, without inventing
+Tool execution or consulting a current plugin during replay.
+
 `ModelContextBuilder` is a synchronous, process-local Local capability. It opens
 one mutable `ModelContextCursor` from a validated immutable Header, retention
 limits, and an optional bounded provider checkpoint payload. Cursors consume

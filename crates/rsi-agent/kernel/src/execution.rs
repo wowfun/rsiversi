@@ -2,6 +2,13 @@ use super::*;
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
+    async fn contribution_context(
+        &self,
+        claim: &TurnClaim,
+        cancellation: CancellationToken,
+    ) -> TurnResult<rsi_agent_composition_protocol::ContributionContext> {
+        self.capture_contribution_context(claim, cancellation).await
+    }
     async fn park_human_wait(
         &self,
         claim: &TurnClaim,
@@ -221,7 +228,7 @@ impl TurnExecution for AgentKernel {
                 .map_err(turn_kernel_error)?
         };
         self.flush(claim, live_seq).await?;
-        let (expected_fact_seq, activation_id, current_step, original, header, current_context) = {
+        let (expected_fact_seq, activation_id, current_step, original) = {
             let state = lock_state(&self.inner);
             let turn = self.validate_claim(&state, claim)?;
             let session = state
@@ -241,8 +248,6 @@ impl TurnExecution for AgentKernel {
                     )
                 })?,
                 clone_turn_control(turn),
-                session.header.clone(),
-                session.workspace_context.clone(),
             )
         };
         let next_step = rsi_agent_session_protocol::StepId::new(format!(
@@ -261,26 +266,6 @@ impl TurnExecution for AgentKernel {
                 step_id: next_step.clone(),
             },
         ];
-        let context_snapshot = self
-            .inner
-            .workspace_context
-            .snapshot(
-                &header,
-                &pending
-                    .iter()
-                    .map(|entry| &entry.message)
-                    .collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(turn_workspace_error)?;
-        let (background, invocations, next_context) = workspace_context_bodies(
-            claim.turn_id(),
-            &next_step,
-            &current_context,
-            context_snapshot,
-        );
-        let background_len = background.len();
-        bodies.extend(background);
         bodies.extend(
             pending
                 .iter()
@@ -291,7 +276,6 @@ impl TurnExecution for AgentKernel {
                     content: entry.message.content.clone(),
                 }),
         );
-        bodies.extend(invocations);
         let timestamp_ms = self.inner.clock.now_ms().max(1);
         let facts = bodies
             .into_iter()
@@ -333,7 +317,6 @@ impl TurnExecution for AgentKernel {
             .map(|(offset, entry)| {
                 let fact_index = offset
                     .checked_add(2)
-                    .and_then(|index| index.checked_add(background_len))
                     .ok_or_else(|| TurnError::Invariant("Fact offset exhausted".into()))?;
                 let control_offset = u64::try_from(offset)
                     .map_err(|_| TurnError::Invariant("control offset exceeds u64".into()))?;
@@ -396,7 +379,6 @@ impl TurnExecution for AgentKernel {
                 .get_mut(claim.turn_id())
                 .expect("validated claim turn exists");
             *turn = staged;
-            session.workspace_context = next_context;
             session.durable_seq = facts
                 .last()
                 .expect("Step message commit contains Facts")
@@ -408,67 +390,6 @@ impl TurnExecution for AgentKernel {
             publish_live_watermarks(session);
         }
         Ok(pending.len())
-    }
-
-    async fn refresh_workspace_context(&self, claim: &TurnClaim) -> TurnResult<usize> {
-        let (header, step_id, current_context) = {
-            let state = lock_state(&self.inner);
-            let turn = self.validate_claim(&state, claim)?;
-            let session = state
-                .sessions
-                .get(claim.session_id())
-                .expect("validated claim session exists");
-            (
-                session.header.clone(),
-                turn.current_step.clone(),
-                session.workspace_context.clone(),
-            )
-        };
-        let snapshot = self
-            .inner
-            .workspace_context
-            .snapshot(&header, &[])
-            .await
-            .map_err(turn_workspace_error)?;
-        if !snapshot.complete {
-            return Ok(0);
-        }
-        let step_id = step_id.ok_or_else(|| {
-            TurnError::Invariant("workspace context refresh requires one open Agent Step".into())
-        })?;
-        let (mut bodies, invocations, _) =
-            workspace_context_bodies(claim.turn_id(), &step_id, &current_context, snapshot);
-        if !invocations.is_empty() {
-            return Err(TurnError::Invariant(
-                "workspace refresh invented a direct-user skill invocation".into(),
-            ));
-        }
-        if bodies.is_empty() {
-            return Ok(0);
-        }
-        let body_count = bodies.len();
-        loop {
-            match self.publish(claim, bodies).await? {
-                PublishAttempt::Published(facts) => {
-                    let through_seq = facts
-                        .last()
-                        .expect("nonempty workspace context publication")
-                        .seq();
-                    self.flush(claim, through_seq).await?;
-                    return Ok(body_count);
-                }
-                PublishAttempt::FlushRequired { unpublished } => {
-                    let live_seq = lock_state(&self.inner)
-                        .sessions
-                        .get(claim.session_id())
-                        .ok_or(TurnError::StaleClaim)?
-                        .live_seq()
-                        .map_err(turn_kernel_error)?;
-                    self.flush(claim, live_seq).await?;
-                    bodies = unpublished;
-                }
-            }
-        }
     }
 
     async fn close_current_step(&self, claim: &TurnClaim, outcome: &TurnOutcome) -> TurnResult<()> {
@@ -888,7 +809,6 @@ pub(super) enum PublishAdmission {
 
 pub(super) struct StagedExecutionFacts {
     pub(super) turn: TurnControl,
-    pub(super) workspace: WorkspaceContextState,
     pub(super) facts: Vec<SessionFact>,
     pub(super) bytes: usize,
 }
@@ -898,7 +818,6 @@ pub(super) fn stage_execution_facts(
     claim: &TurnClaim,
     original: &TurnControl,
     base_seq: u64,
-    mut workspace: WorkspaceContextState,
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<StagedExecutionFacts> {
     let mut turn = clone_turn_control(original);
@@ -913,7 +832,6 @@ pub(super) fn stage_execution_facts(
         }
         let body = canonicalize_terminal(body, turn.cancel_requested);
         apply_executor_body(&mut turn, &body)?;
-        apply_workspace_context_state(&mut workspace, &body);
         next_seq = next_seq
             .checked_add(1)
             .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
@@ -924,12 +842,7 @@ pub(super) fn stage_execution_facts(
             .ok_or_else(|| TurnError::Invalid("Fact bytes overflowed".into()))?;
         facts.push(fact);
     }
-    Ok(StagedExecutionFacts {
-        turn,
-        workspace,
-        facts,
-        bytes,
-    })
+    Ok(StagedExecutionFacts { turn, facts, bytes })
 }
 
 #[allow(clippy::too_many_lines)] // Staging keeps budget, intent fences, and speculative suffix mutation all-or-nothing.
@@ -938,7 +851,7 @@ pub(super) fn try_publish_once(
     claim: &TurnClaim,
     bodies: Vec<SessionFactBody>,
 ) -> TurnResult<PublishAdmission> {
-    let (original, header, base_seq, workspace) = {
+    let (original, header, base_seq) = {
         let state = lock_state(&kernel.inner);
         let original = kernel.validate_claim(&state, claim)?;
         if !state.accepting {
@@ -955,15 +868,13 @@ pub(super) fn try_publish_once(
             clone_turn_control(original),
             Arc::clone(&session.header),
             session.live_seq().map_err(turn_kernel_error)?,
-            session.workspace_context.clone(),
         )
     };
     let StagedExecutionFacts {
         turn: mut staged,
-        workspace: staged_workspace_context,
         facts,
         bytes: added_bytes,
-    } = stage_execution_facts(kernel, claim, &original, base_seq, workspace, bodies)?;
+    } = stage_execution_facts(kernel, claim, &original, base_seq, bodies)?;
     staged.budget_usage = enforce_turn_budget(
         header.settings().turn_budget(),
         &original,
@@ -1026,7 +937,6 @@ pub(super) fn try_publish_once(
         .turns
         .get_mut(claim.turn_id())
         .expect("validated claim turn exists") = staged;
-    session.workspace_context = staged_workspace_context;
     for fact in &facts {
         session.pending_bytes = session
             .pending_bytes

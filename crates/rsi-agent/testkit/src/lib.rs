@@ -25,9 +25,8 @@ use rsi_agent_store_protocol::{
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
-    StoreTurnFactPage, StoreWaitingActivationPage, StoreWorkspaceContextState,
-    StoredContextCheckpoint, WriteContextCheckpoint, validate_message_claim_fact,
-    validate_read_limit, validate_session_read_limit,
+    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde_json::Value;
@@ -67,7 +66,6 @@ struct MemorySession {
     checkpoint: Option<StoredContextCheckpoint>,
     controls: Vec<AgentControlRecord>,
     control_prefix_digest: [u8; 32],
-    workspace_context: StoreWorkspaceContextState,
     domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
     domain_requests: BTreeMap<rsi_agent_session_protocol::DomainRequestId, u64>,
     domain_usage: BTreeMap<TurnId, (u64, u64)>,

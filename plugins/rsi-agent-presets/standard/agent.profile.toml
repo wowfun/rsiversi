@@ -7,6 +7,16 @@ plugin = "rsi.agent.context.default"
 
 [[steps]]
 kind = "plugin"
+id = "workspace-context"
+plugin = "rsi.agent.workspace-context.contributor"
+
+[[steps]]
+kind = "plugin"
+id = "time-context"
+plugin = "rsi.agent.time-context"
+
+[[steps]]
+kind = "plugin"
 id = "output-read"
 plugin = "rsi.output.read"
 enabled_rhai = "defines.standard_linux_coding_tools"

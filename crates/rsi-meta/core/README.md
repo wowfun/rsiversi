@@ -3,6 +3,13 @@
 The public composition seam is `Runtime -> Context -> FiberHandle`. The crate
 contains no unsafe code.
 
+`RegistrationOrderSnapshot` captures all registration positions at one order
+revision. Its ranks compare composition position and then owner-local
+registration sequence. `RegistrationRank::compare_position` compares only the
+composition position, allowing a product with stable contribution identities
+to supply its own final tie-break. Neither comparison key grants authority or
+serves as an identity.
+
 ## Runtime
 
 `Runtime::new` validates one policy grouped into topology, payload, execution,

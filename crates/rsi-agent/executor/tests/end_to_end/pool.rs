@@ -149,7 +149,7 @@ async fn lane_failure_waits_for_siblings_before_executor_cleanup() {
         &runtime,
         "test.security.failing-claim",
         "security",
-        Arc::new(SecurityFixtureFactory),
+        Arc::new(SecurityFixtureFactory(ApprovalDecision::AllowOnce)),
     )
     .await;
     let store = Arc::new(MemoryStore::new());

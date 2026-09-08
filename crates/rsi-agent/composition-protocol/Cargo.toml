@@ -13,15 +13,15 @@ rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
-rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tokio.workspace = true
-tokio-util.workspace = true
 
 [lints]
 workspace = true

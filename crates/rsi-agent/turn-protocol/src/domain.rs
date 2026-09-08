@@ -3,8 +3,8 @@
 use crate::{Result, TurnError};
 use rsi_agent_composition_protocol::ValidatedDomainProposal;
 use rsi_agent_session_protocol::{
-    AgentControlRecord, AgentControlRecordBody, DomainRequestId, DomainRevision, DomainSnapshot,
-    DomainStateCommit, SessionFactBody, SessionId,
+    AgentControlRecord, AgentControlRecordBody, DomainRequestId, DomainStateCommit,
+    SessionFactBody, SessionId,
 };
 
 /// One source-free execution request; only Kernel may assign its Turn provenance.
@@ -16,15 +16,6 @@ pub struct DomainMutation {
     pub proposals: Vec<ValidatedDomainProposal>,
     /// Optional ordered generated Facts committed atomically with the replacements.
     pub facts: Vec<SessionFactBody>,
-}
-
-/// Opaque current state with its exact CAS predecessor for the next mutation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomainStateView {
-    /// Current durable revision.
-    pub revision: DomainRevision,
-    /// Complete state; only its exact codec may perform semantic decode.
-    pub snapshot: DomainSnapshot,
 }
 
 /// Canonical committed request; no speculative receipt or separately persisted payload.

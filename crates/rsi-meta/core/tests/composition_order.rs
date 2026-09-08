@@ -503,6 +503,30 @@ async fn contribution_order_capture_is_consistent_across_reorder_and_rejects_oth
     assert!(runtime.shutdown().await.is_clean());
 }
 
+#[tokio::test]
+async fn business_order_can_replace_the_owner_local_registration_tie_break() {
+    let runtime = Runtime::default();
+    let (_, context) = owner(&runtime.root()).await;
+    let registrar = Arc::new(Registrar::default());
+    let credential = context.registration_context().unwrap();
+    let _first = registrar.register(&credential).unwrap();
+    let _second = registrar.register(&credential).unwrap();
+    let positions = registrar
+        .entries
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let order = rsi_meta::RegistrationOrderSnapshot::capture(&positions).unwrap();
+    assert!(order.ranks()[0] < order.ranks()[1]);
+    assert_eq!(
+        order.ranks()[0].compare_position(&order.ranks()[1]),
+        std::cmp::Ordering::Equal
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn active_publication_racing_retirement_cannot_reappear_after_cleanup() {
     let runtime = Runtime::default();

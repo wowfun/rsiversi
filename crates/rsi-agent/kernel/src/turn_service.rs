@@ -607,14 +607,14 @@ impl TurnService for AgentKernel {
     async fn domain_states(
         &self,
         session_id: &SessionId,
-    ) -> TurnResult<Vec<rsi_agent_turn_protocol::DomainStateView>> {
+    ) -> TurnResult<Vec<rsi_agent_session_protocol::DomainStateView>> {
         let page = observation::read_domain_states_bounded(&self.inner, session_id, None)
             .await
             .map_err(turn_store_error)?;
         Ok(page
             .states
             .into_iter()
-            .map(|state| rsi_agent_turn_protocol::DomainStateView {
+            .map(|state| rsi_agent_session_protocol::DomainStateView {
                 revision: state.head.revision,
                 snapshot: state.snapshot,
             })
@@ -1035,25 +1035,6 @@ impl AgentKernel {
         let require_approval = header.settings().require_approval()
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
         let timestamp_ms = self.inner.clock.now_ms().max(1);
-        let current_context = lock_state(&self.inner)
-            .sessions
-            .get(&session_id)
-            .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-            .workspace_context
-            .clone();
-        let context_snapshot = self
-            .inner
-            .workspace_context
-            .snapshot(&header, &[&entry.message])
-            .await
-            .map_err(turn_workspace_error)?;
-        let (background, invocations, next_context) = workspace_context_bodies(
-            &request.turn_id,
-            &request.step_id,
-            &current_context,
-            context_snapshot,
-        );
-        let background_len = background.len();
         let mut fact_bodies = vec![
             SessionFactBody::MessageTurnAccepted {
                 turn_id: request.turn_id.clone(),
@@ -1068,14 +1049,12 @@ impl AgentKernel {
                 step_id: request.step_id.clone(),
             },
         ];
-        fact_bodies.extend(background);
         fact_bodies.push(SessionFactBody::InputMessageEntered {
             turn_id: request.turn_id.clone(),
             step_id: request.step_id.clone(),
             source: entered_message_source(&entry.message),
             content: entry.message.content.clone(),
         });
-        fact_bodies.extend(invocations);
         let facts = fact_bodies
             .into_iter()
             .enumerate()
@@ -1090,12 +1069,7 @@ impl AgentKernel {
             })
             .collect::<TurnResult<Vec<_>>>()?;
         let entered_fact_seq = expected_fact_seq
-            .checked_add(
-                u64::try_from(background_len)
-                    .map_err(|_| TurnError::Invariant("context Fact count exceeds u64".into()))?
-                    .checked_add(3)
-                    .ok_or_else(|| TurnError::Invariant("message Fact offset exhausted".into()))?,
-            )
+            .checked_add(3)
             .ok_or_else(|| TurnError::Invariant("message Fact sequence exhausted".into()))?;
         let final_fact_seq = facts
             .last()
@@ -1241,7 +1215,6 @@ impl AgentKernel {
                     .get_mut(&request.turn_id)
                     .expect("committed Turn is installed")
                     .prepared_lane = lane;
-                session.workspace_context = next_context;
                 session.durable_seq = final_fact_seq;
                 session.flush_status.send_replace(FlushStatus {
                     durable_seq: final_fact_seq,

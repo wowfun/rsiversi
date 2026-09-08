@@ -26,7 +26,7 @@ pub use domain::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 14;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 15;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -932,39 +932,6 @@ pub struct StoreAgentMailboxSummary {
     pub durable_fact_seq: u64,
 }
 
-/// Latest workspace-context digests derived from canonical durable Facts.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct StoreWorkspaceContextState {
-    /// Latest complete instruction-baseline digest, when one was published.
-    pub instructions_sha256: Option<String>,
-    /// Latest complete skill-catalog digest, when one was published.
-    pub skill_catalog_sha256: Option<String>,
-    /// Exact durable Fact tail captured in the same Store snapshot.
-    pub durable_fact_seq: u64,
-}
-
-impl StoreWorkspaceContextState {
-    /// Revalidates optional lowercase SHA-256 values returned by a Store.
-    pub fn validate(&self) -> Result<()> {
-        for (name, digest) in [
-            ("workspace instruction", &self.instructions_sha256),
-            ("workspace skill catalog", &self.skill_catalog_sha256),
-        ] {
-            if digest.as_ref().is_some_and(|digest| {
-                digest.len() != 64
-                    || !digest
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-            }) {
-                return Err(StoreError::Corrupt(format!(
-                    "{name} digest is not lowercase SHA-256"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 impl StoreAgentMailboxSummary {
     /// Revalidates the protocol-owned pending-message bound.
     pub fn validate(&self) -> Result<()> {
@@ -1856,16 +1823,6 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         let _ = session_id;
         Err(StoreError::Invalid(
             "this Agent Store does not support mailbox summaries".into(),
-        ))
-    }
-    /// Reads the latest workspace-context digests derived from canonical Facts.
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<StoreWorkspaceContextState> {
-        let _ = session_id;
-        Err(StoreError::Invalid(
-            "this Agent Store does not support workspace-context state".into(),
         ))
     }
     /// Lists distinct Agent-tree roots which currently contain waking input.

@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod contribution;
 mod domain;
 mod root;
 pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
@@ -10,7 +11,8 @@ pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
-    DomainCatalog, DomainRegistrar, DomainRegistrarContract,
+    ContributionCatalog, ContributionRegistrar, ContributionRegistrarContract, DomainCatalog,
+    DomainRegistrar, DomainRegistrarContract,
 };
 use rsi_agent_context::{ModelContextBuilder, ModelContextBuilderContract};
 use rsi_agent_presets::{AgentPresetCatalog, AgentPresetId, PresetError};
@@ -330,6 +332,7 @@ struct Generation {
     tools: Arc<dyn ToolRuntime>,
     context_builder: Arc<dyn ModelContextBuilder>,
     domains: DomainCatalog,
+    contributions: ContributionCatalog,
     owner: Arc<GenerationOwner>,
 }
 
@@ -351,6 +354,7 @@ impl Generation {
             Arc::clone(&self.tools),
             Arc::clone(&self.context_builder),
             self.domains.clone(),
+            self.contributions.clone(),
             self.owner.clone(),
         )
     }
@@ -383,6 +387,8 @@ struct UnpublishedGeneration {
     context_builder: Option<Arc<dyn ModelContextBuilder>>,
     domain_stage: domain::DomainStage,
     domains: Option<DomainCatalog>,
+    contribution_stage: contribution::ContributionStage,
+    contributions: Option<ContributionCatalog>,
     singleflight: Option<OwnedMutexGuard<()>>,
     build_slot: Option<OwnedSemaphorePermit>,
     state: Weak<CompositionState>,
@@ -410,6 +416,8 @@ impl UnpublishedGeneration {
         executor: tokio::runtime::Handle,
     ) -> Self {
         let domain_stage = domain::DomainStage::new(scope.context().meta().runtime_identity());
+        let contribution_stage =
+            contribution::ContributionStage::new(scope.context().meta().runtime_identity());
         Self {
             stage: Some(stage),
             scope: Some(scope),
@@ -417,6 +425,8 @@ impl UnpublishedGeneration {
             context_builder: None,
             domain_stage,
             domains: None,
+            contribution_stage,
+            contributions: None,
             singleflight: Some(singleflight),
             build_slot: Some(build_slot),
             state: owner_state,
@@ -450,6 +460,11 @@ impl UnpublishedGeneration {
                 .seal()
                 .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
         );
+        self.contributions = Some(
+            self.contribution_stage
+                .seal()
+                .map_err(|_| unavailable(preset_id, "Agent execution catalog sealing failed"))?,
+        );
         let stage = self
             .stage
             .take()
@@ -469,6 +484,7 @@ impl UnpublishedGeneration {
         Arc<dyn ToolRuntime>,
         Arc<dyn ModelContextBuilder>,
         DomainCatalog,
+        ContributionCatalog,
         ScopeHandle,
     ) {
         let tools = self
@@ -489,7 +505,11 @@ impl UnpublishedGeneration {
             .expect("published Agent generation has domain definitions");
         drop(self.singleflight.take());
         drop(self.build_slot.take());
-        (tools, context_builder, domains, scope)
+        let contributions = self
+            .contributions
+            .take()
+            .expect("published Agent generation has contributions");
+        (tools, context_builder, domains, contributions, scope)
     }
 
     async fn rollback(mut self) -> bool {
@@ -738,6 +758,7 @@ impl CompositionState {
             .isolate_local_fresh::<ToolRegistrarContract>()
             .and_then(|(context, _)| context.isolate_local_fresh::<ModelContextBuilderContract>())
             .and_then(|(context, _)| context.isolate_local_fresh::<DomainRegistrarContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<ContributionRegistrarContract>())
         {
             Ok((context, _isolation)) => context,
             Err(_error) => {
@@ -758,6 +779,7 @@ impl CompositionState {
                     Arc::new(AgentRegistrarFactory {
                         registrar: unpublished.registrar(),
                         domains: unpublished.domain_stage.registrar(),
+                        contributions: unpublished.contribution_stage.registrar(),
                     }),
                 ),
                 ConfigValue::Null,
@@ -857,7 +879,8 @@ impl CompositionState {
             if let Some(error) = rejection {
                 Err((error, unpublished))
             } else {
-                let (tools, context_builder, domains, scope) = unpublished.into_published_parts();
+                let (tools, context_builder, domains, contributions, scope) =
+                    unpublished.into_published_parts();
                 inner.next_scope += 1;
                 let record = Arc::new(ScopeRecord {
                     id: inner.next_scope,
@@ -875,6 +898,7 @@ impl CompositionState {
                     tools,
                     context_builder,
                     domains,
+                    contributions,
                     owner,
                 });
                 let previous = row
@@ -980,6 +1004,7 @@ where
 struct AgentRegistrarFactory {
     registrar: Arc<dyn ToolRegistrar>,
     domains: Arc<dyn DomainRegistrar>,
+    contributions: Arc<dyn ContributionRegistrar>,
 }
 
 #[async_trait]
@@ -1000,12 +1025,16 @@ impl PluginFactory for AgentRegistrarFactory {
         let domain_supply = plan
             .context()
             .provide_local::<DomainRegistrarContract>(Arc::clone(&self.domains))?;
+        let contribution_supply = plan
+            .context()
+            .provide_local::<ContributionRegistrarContract>(Arc::clone(&self.contributions))?;
         plan.defer(
             "withdraw Agent registrars",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
                     drop(domain_supply);
+                    drop(contribution_supply);
                     Ok(())
                 })
             }),

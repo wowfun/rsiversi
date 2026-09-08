@@ -599,7 +599,7 @@ async fn shutdown_timeout_does_not_abort_an_admitted_target_commit() {
 }
 
 #[derive(Debug)]
-struct GatedPreparation {
+pub(super) struct GatedPreparation {
     all: bool,
     entered: AtomicUsize,
     active: AtomicUsize,
@@ -607,28 +607,15 @@ struct GatedPreparation {
     release: tokio::sync::Semaphore,
 }
 
-#[async_trait]
-impl WorkspaceContext for GatedPreparation {
-    async fn snapshot(
-        &self,
-        header: &SessionHeader,
-        _messages: &[&AgentMessage],
-    ) -> std::result::Result<WorkspaceContextSnapshot, WorkspaceContextError> {
+impl GatedPreparation {
+    pub(super) async fn wait(&self, session_id: &SessionId) {
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
         self.peak.fetch_max(active, Ordering::AcqRel);
         self.entered.fetch_add(1, Ordering::AcqRel);
-        if self.all || header.session_id().as_str() == "ready-000" {
+        if self.all || session_id.as_str() == "ready-000" {
             self.release.acquire().await.unwrap().forget();
         }
         self.active.fetch_sub(1, Ordering::AcqRel);
-        Ok(WorkspaceContextSnapshot {
-            complete: true,
-            instructions_sha256: "a".repeat(64),
-            instructions: None,
-            skill_catalog_sha256: "b".repeat(64),
-            skill_catalog: None,
-            invocations: Vec::new(),
-        })
     }
 }
 
@@ -643,10 +630,10 @@ async fn slow_ready_root_does_not_hold_other_roots_and_preparation_is_bounded() 
             peak: AtomicUsize::new(0),
             release: tokio::sync::Semaphore::new(0),
         });
-        let kernel = AgentKernel::recover_with_context_clock_and_limits(
-            memory.clone(),
+        let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
+        let kernel = AgentKernel::recover_with_clock_and_limits(
+            observed.clone(),
             composition(),
-            context.clone(),
             Arc::new(FixedClock),
             KernelLimits::default(),
         )
@@ -663,6 +650,7 @@ async fn slow_ready_root_does_not_hold_other_roots_and_preparation_is_bounded() 
                 .await
                 .unwrap();
         }
+        *observed.preparation_gate.lock().unwrap() = Some(context.clone());
         let _lease = kernel.register("ready-executor".into()).unwrap();
         let cancellation = CancellationToken::new();
         let claim = tokio::spawn({
@@ -697,6 +685,7 @@ async fn slow_ready_root_does_not_hold_other_roots_and_preparation_is_bounded() 
             );
             assert!(context.peak.load(Ordering::Acquire) <= 4);
         }
+        observed.preparation_gate.lock().unwrap().take();
         context.release.add_permits(8);
         kernel.shutdown(workers).await.unwrap();
     }
@@ -711,10 +700,10 @@ async fn new_ready_root_is_discovered_while_the_previous_page_is_still_preparing
         peak: AtomicUsize::new(0),
         release: tokio::sync::Semaphore::new(0),
     });
-    let kernel = AgentKernel::recover_with_context_clock_and_limits(
-        Arc::new(MemoryStore::new()),
+    let observed = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        observed.clone(),
         composition(),
-        context.clone(),
         Arc::new(FixedClock),
         KernelLimits::default(),
     )
@@ -729,6 +718,7 @@ async fn new_ready_root_is_discovered_while_the_previous_page_is_still_preparing
         })
         .await
         .unwrap();
+    *observed.preparation_gate.lock().unwrap() = Some(context.clone());
     let _lease = kernel.register("new-ready".into()).unwrap();
     let claim = tokio::spawn({
         let kernel = kernel.clone();
@@ -752,6 +742,7 @@ async fn new_ready_root_is_discovered_while_the_previous_page_is_still_preparing
         .unwrap()
         .unwrap();
     assert_eq!(result.session_id().as_str(), "ready-new");
+    observed.preparation_gate.lock().unwrap().take();
     context.release.add_permits(1);
     kernel.shutdown(workers).await.unwrap();
 }

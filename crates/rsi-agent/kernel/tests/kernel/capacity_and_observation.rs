@@ -1640,6 +1640,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();
@@ -1714,6 +1715,7 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
         Arc::new(EmptyTools),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();

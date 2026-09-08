@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageSource,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, InputMessageSource,
+    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
     MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
     MessageDiscardReason, MessageId, MessageTarget, SessionFact, SessionFactBody, SessionHeader,
     SessionId, StepId, TurnId, advance_control_prefix_digest, advance_fact_prefix_digest,
@@ -24,9 +24,8 @@ use rsi_agent_store_protocol::{
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreTurnBoundary, StoreTurnFactPage,
-    StoreWaitingActivationPage, StoreWorkspaceContextState, StoredContextCheckpoint,
-    WriteContextCheckpoint, validate_message_claim_fact, validate_read_limit,
-    validate_session_read_limit,
+    StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rusqlite::{
@@ -100,9 +99,7 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
             durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
             fact_prefix_sha256 TEXT NOT NULL,
             control_seq INTEGER NOT NULL CHECK (control_seq >= 0),
-            control_prefix_sha256 TEXT NOT NULL,
-            workspace_instructions_sha256 TEXT,
-            workspace_skill_catalog_sha256 TEXT
+            control_prefix_sha256 TEXT NOT NULL
          ) STRICT",
     ),
     (

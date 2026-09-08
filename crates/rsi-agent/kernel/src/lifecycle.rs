@@ -77,28 +77,9 @@ impl AgentKernel {
         clock: Arc<dyn Clock>,
         limits: KernelLimits,
     ) -> Result<Self> {
-        Self::recover_with_context_clock_and_limits(
-            store,
-            composition,
-            Arc::new(EmptyWorkspaceContext),
-            clock,
-            limits,
-        )
-        .await
-    }
-
-    /// Recovers with an explicit process-local workspace context source, clock, and limits.
-    pub async fn recover_with_context_clock_and_limits(
-        store: Arc<dyn SessionStore>,
-        composition: Arc<dyn AgentComposition>,
-        workspace_context: Arc<dyn WorkspaceContext>,
-        clock: Arc<dyn Clock>,
-        limits: KernelLimits,
-    ) -> Result<Self> {
         Self::recover_with_validated_limits(
             store,
             composition,
-            workspace_context,
             clock,
             ValidatedKernelLimits::new(limits)?,
         )
@@ -108,7 +89,6 @@ impl AgentKernel {
     pub(super) async fn recover_with_validated_limits(
         store: Arc<dyn SessionStore>,
         composition: Arc<dyn AgentComposition>,
-        workspace_context: Arc<dyn WorkspaceContext>,
         clock: Arc<dyn Clock>,
         limits: ValidatedKernelLimits,
     ) -> Result<Self> {
@@ -135,7 +115,6 @@ impl AgentKernel {
                 tasks: TaskTracker::new(),
                 store,
                 composition,
-                workspace_context,
                 resume_issuer: ResumeAdmissionIssuer::new(),
                 claim_issuer: TurnClaimIssuer::new(),
                 clock,
@@ -995,12 +974,11 @@ impl AgentKernel {
             } else {
                 match loaded {
                     Err(error) => Err(error),
-                    Ok((durable_seq, turns, turn_order, workspace_context)) => {
+                    Ok((durable_seq, turns, turn_order)) => {
                         let mut session =
                             SessionRuntime::new(header, composition, durable_seq, false);
                         session.turns = turns;
                         session.turn_order = turn_order;
-                        session.workspace_context = workspace_context;
                         let queued = session.turn_order.clone();
                         state.sessions.insert(session_id.clone(), session);
                         for turn_id in queued {

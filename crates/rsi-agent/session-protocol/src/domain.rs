@@ -4,6 +4,15 @@ use crate::{Result, SessionError, compact_json_len, validate_identifier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Opaque current state with its exact CAS predecessor for the next mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomainStateView {
+    /// Current durable revision.
+    pub revision: DomainRevision,
+    /// Complete state; only its exact codec may perform semantic decode.
+    pub snapshot: DomainSnapshot,
+}
+
 /// Maximum encoded bytes in one complete domain value.
 pub const MAXIMUM_DOMAIN_STATE_BYTES: usize = 256 * 1024;
 /// Maximum distinct domains admitted by one Session composition.

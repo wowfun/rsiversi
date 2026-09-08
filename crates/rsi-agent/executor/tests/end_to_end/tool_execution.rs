@@ -1,6 +1,67 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() {
+    let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tool_lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+        })
+        .unwrap();
+    let fixture = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_script())])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("test.language", fixture.clone())
+        .await;
+    let executor = stack.activate_executor("executor-deny").await;
+    let (submitted, outcome) = stack
+        .submit_and_wait_with_sandbox("call echo", Some(SandboxMode::DangerFullAccess))
+        .await;
+    assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. } if code == "approval.denied"));
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert_eq!(fixture.starts.load(Ordering::Acquire), 1);
+    let page = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 64)
+        .await
+        .unwrap();
+    let rejected = page
+        .facts
+        .iter()
+        .filter(|fact| matches!(fact.body(), SessionFactBody::ToolRejected { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(rejected.len(), 1);
+    assert!(
+        matches!(rejected[0].body(), SessionFactBody::ToolRejected { identity, name, arguments, rejection: rsi_agent_session_protocol::ToolRejection::ApprovalDenied { outcome }, .. }
+        if identity.call_id() == "tool-call-1" && name == "echo" && arguments == &json!({"value":42}) && outcome.decision == ApprovalDecision::Deny)
+    );
+    assert!(!page.facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::ToolIntent { .. }
+            | SessionFactBody::ToolStarted { .. }
+            | SessionFactBody::ToolResult { .. }
+    )));
+    assert!(matches!(
+        page.facts.last().unwrap().body(),
+        SessionFactBody::TurnTerminal { .. }
+    ));
+    drop(tool_lease);
+    stack.dispose(language, executor).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn executor_persists_intent_and_start_before_model_and_tool_io() {
     let stack = BaseStack::activate().await;
     let tool_calls = Arc::new(AtomicUsize::new(0));
@@ -778,6 +839,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::ImageStarted { .. } => "image_started",
         SessionFactBody::ImageOutput { .. } => "image_output",
         SessionFactBody::ToolIntent { .. } => "tool_intent",
+        SessionFactBody::ToolRejected { .. } => "tool_rejected",
         SessionFactBody::ToolStarted { .. } => "tool_started",
         SessionFactBody::ToolResult { .. } => "tool_result",
         SessionFactBody::TurnTerminal { .. } => "terminal",

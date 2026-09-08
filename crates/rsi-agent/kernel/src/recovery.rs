@@ -12,7 +12,7 @@ pub(super) async fn repair_unfinished_session(
     }
     store.validate_session(session_id).await?;
     let header = store.header(session_id).await?;
-    let (durable_seq, turns, turn_order, _workspace_context) =
+    let (durable_seq, turns, turn_order) =
         load_control_state(store, None, session_id, header.settings().turn_budget()).await?;
     if turns.len() != turn_order.len()
         || turn_order
@@ -266,24 +266,13 @@ pub(super) fn validate_durable_intent_fence(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)] // One snapshot joins open-Turn Facts with derived workspace state and domain usage.
+#[allow(clippy::too_many_lines)] // One snapshot joins open-Turn Facts and domain usage.
 pub(super) async fn load_control_state(
     store: &Arc<dyn SessionStore>,
     admission: Option<&KernelInner>,
     session_id: &SessionId,
     budget: &TurnBudget,
-) -> Result<(
-    u64,
-    BTreeMap<TurnId, TurnControl>,
-    Vec<TurnId>,
-    WorkspaceContextState,
-)> {
-    let stored_workspace_context = store.read_workspace_context_state(session_id).await?;
-    stored_workspace_context.validate()?;
-    let workspace_context = WorkspaceContextState {
-        instructions_sha256: stored_workspace_context.instructions_sha256.clone(),
-        skill_catalog_sha256: stored_workspace_context.skill_catalog_sha256.clone(),
-    };
+) -> Result<(u64, BTreeMap<TurnId, TurnControl>, Vec<TurnId>)> {
     let mut open_cursor = 0_u64;
     let mut durable_seq = None;
     let mut turns = BTreeMap::new();
@@ -292,11 +281,6 @@ pub(super) async fn load_control_state(
         let page = store
             .list_open_turns(session_id, open_cursor, MAXIMUM_FACTS_PER_READ)
             .await?;
-        if page.durable_seq != stored_workspace_context.durable_fact_seq {
-            return Err(KernelError::Invariant(
-                "Store durable watermark changed during workspace-context state load".into(),
-            ));
-        }
         if durable_seq
             .replace(page.durable_seq)
             .is_some_and(|previous| previous != page.durable_seq)
@@ -365,12 +349,7 @@ pub(super) async fn load_control_state(
             open_cursor = open_turn.accepted_seq;
         }
         if !page.has_more {
-            return Ok((
-                durable_seq.unwrap_or(page.durable_seq),
-                turns,
-                order,
-                workspace_context,
-            ));
+            return Ok((durable_seq.unwrap_or(page.durable_seq), turns, order));
         }
         if page.turns.is_empty() {
             return Err(KernelError::Invariant(

@@ -1,5 +1,19 @@
 # rsi-agent-session-protocol
 
+`PluginContext` attributes actual model-visible text to one validated
+ContributionId. It is text-only, uses the entered-message byte/block bounds,
+and carries the exact open Step identity. Kernel accepts it only at a boundary
+without an active external effect. Context builders replay it as developer
+content; they do not resample or rerun its producer.
+
+`ToolRejected` records an exact prepared Tool call denied before intent/start.
+It preserves name, arguments and identity plus either a denied live approval
+outcome or a bounded contribution-attributed policy reason. It counts as one
+Tool call and one generated record. A rejection is not a retained Tool result,
+never creates a started effect, and cannot replace an already admitted intent.
+Context replay emits the corresponding error Tool response. Approval denial
+retains the executor's existing failed-Turn behavior.
+
 Complete domain values use a bounded JSON envelope (256 KiB, the shared JSON
 depth/node limits), an exact identity/version and a checked revision. JSON null
 is an ordinary explicit state, distinct from absent revision zero. A frozen

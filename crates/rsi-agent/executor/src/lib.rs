@@ -282,6 +282,7 @@ const fn elapsed_deadline_wins(
     deadline_fired && matches!(drive, Err(DriveFailure::Stopped))
 }
 
+mod contributions;
 mod driver;
 mod execution_support;
 
@@ -443,6 +444,9 @@ fn scan_turn(
                 state.effects.remove(index);
                 state.completed_model_without_successor = true;
             }
+            SessionFactBody::ToolRejected { turn_id, .. } if turn_id == claim.turn_id() => {
+                state.completed_model_without_successor = true;
+            }
             SessionFactBody::ToolIntent {
                 turn_id,
                 effect_id,
@@ -510,6 +514,7 @@ fn scan_turn(
             | SessionFactBody::ImageOutput { .. }
             | SessionFactBody::ModelEvent { .. }
             | SessionFactBody::ToolIntent { .. }
+            | SessionFactBody::ToolRejected { .. }
             | SessionFactBody::ToolStarted { .. }
             | SessionFactBody::ToolResult { .. }
             | SessionFactBody::TurnTerminal { .. } => {}

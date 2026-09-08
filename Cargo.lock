@@ -2586,6 +2586,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",
+ "rsi-agent-time-context",
  "rsi-agent-tools",
  "rsi-agent-turn-protocol",
  "rsi-agent-workspace-context",
@@ -2740,7 +2741,6 @@ dependencies = [
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
- "rsi-agent-workspace-context",
  "rsi-ai-protocol",
  "rsi-ai-testkit",
  "rsi-approval-protocol",
@@ -2771,7 +2771,6 @@ dependencies = [
  "rsi-agent-store-sqlite",
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
- "rsi-agent-workspace-context",
  "rsi-ai-protocol",
  "rsi-meta",
  "rsi-sandbox",
@@ -2867,6 +2866,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-agent-time-context"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-meta",
+ "time",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-agent-tools"
 version = "0.0.1"
 dependencies = [
@@ -2910,11 +2922,22 @@ dependencies = [
  "cap-std",
  "hex",
  "libc",
+ "rsi-agent-composition",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-context",
+ "rsi-agent-kernel",
+ "rsi-agent-presets",
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-store-sqlite",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-meta-profile",
+ "rsi-meta-scope",
  "rsi-sandbox",
+ "rsi-tools",
  "rustix",
  "serde",
  "serde_json",
@@ -4984,6 +5007,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -4991,6 +5015,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tiny-keccak"

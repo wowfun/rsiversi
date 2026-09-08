@@ -45,7 +45,6 @@ struct Candidate {
     original_fact_seq: u64,
     original_control_seq: u64,
     turn: TurnControl,
-    workspace: WorkspaceContextState,
     facts: Vec<Arc<SessionFact>>,
     control: AgentControlRecord,
 }
@@ -170,7 +169,7 @@ impl AgentKernel {
             AgentControlRecordBody::DomainStateCommitted { commit },
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let (original, mut workspace) = {
+        let original = {
             let state = lock_state(&self.inner);
             let turn = self.validate_claim(&state, claim)?;
             if turn.terminal.is_some() || turn.budget_exhausted.is_some() {
@@ -182,12 +181,11 @@ impl AgentKernel {
             for fact in &facts {
                 validate_durable_intent_fence(session, fact.body())?;
             }
-            (clone_turn_control(turn), session.workspace_context.clone())
+            clone_turn_control(turn)
         };
         let mut staged = clone_turn_control(&original);
         for fact in &facts {
             apply_executor_body(&mut staged, fact.body())?;
-            apply_workspace_context_state(&mut workspace, fact.body());
         }
         staged.budget_usage = turn_state::enforce_domain_budget(
             claim.header().settings().turn_budget(),
@@ -208,7 +206,6 @@ impl AgentKernel {
             original_fact_seq: live,
             original_control_seq: page.durable_control_seq,
             turn: staged,
-            workspace,
             facts: facts.into_iter().map(Arc::new).collect(),
             control,
         };
@@ -297,7 +294,6 @@ impl AgentKernel {
             .get_mut(candidate.caller.turn_id())
             .ok_or(TurnError::StaleClaim)?;
         *turn = candidate.turn;
-        session.workspace_context = candidate.workspace;
         session.durable_seq = candidate
             .facts
             .last()

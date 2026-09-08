@@ -331,20 +331,12 @@ source order before the first failure is propagated. An `exclusive_final` Tool
 also requires the last source-order position in its model response;
 `wait_agent` declares this scheduling class.
 
-Workspace instructions and skills enter a Step only through the process-local
-Workspace Context service; the Kernel remains the sole writer of their durable
-`InputMessageEntered` Facts. A Session Header freezes `untrusted` or `trusted`
-workspace trust at creation and a fork preserves it. User-owned instruction and
-skill roots are always eligible, but an untrusted workspace contributes neither
-project `AGENTS.md` files nor project skills. A trusted workspace discovers the
-nearest `.git` ancestor, reads `AGENTS.md` from that root down to the Session cwd,
-and scans only the root-level `.agents/skills` directory. Reads, files, entries,
-individual sources, rendered messages, and total batches are bounded. Complete
-instruction and skill-catalog digests suppress unchanged refreshes; a later
-empty snapshot durably tombstones or replaces an earlier nonempty view. Skill
-names resolve in trust order: a project skill never shadows an identically named
-user skill. Only direct Human messages may invoke a skill, and invocation loads
-the exact already-selected skill body as the final context input for that Step.
-The Kernel refreshes the complete snapshot before every provider request, so a
-successful Tool round cannot hide an instruction or catalog change even when a
-general shell command cannot enumerate its filesystem touches precisely.
+Workspace instructions and skills are ordinary Agent execution contributions over
+[a bounded filesystem source](../workspace-context/README.md). The plugin owns
+invocation interpretation, complete digests, last-good state and Session-bound
+history cursors in its typed domain. The Kernel owns only generic role/source
+validation, budgets and atomic Fact/control submission. A Session Header freezes
+workspace trust at creation and a fork preserves it. The contributor runs before
+each new provider retry series, while provider retries reuse the already entered
+inputs. A successful Tool round therefore cannot hide workspace changes before
+the next model request; no Tool-specific filesystem-touch enumeration is needed.

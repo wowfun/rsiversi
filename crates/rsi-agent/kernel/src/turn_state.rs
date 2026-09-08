@@ -90,31 +90,13 @@ pub(super) fn apply_executor_body(
         | SessionFactBody::ImageStarted { .. }
         | SessionFactBody::ImageOutput { .. } => apply_image_body(turn, body)?,
         SessionFactBody::ToolIntent { .. }
+        | SessionFactBody::ToolRejected { .. }
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
-        SessionFactBody::StepStarted { step_id, .. } => {
-            if turn.current_step.replace(step_id.clone()).is_some() {
-                return Err(TurnError::Invalid(
-                    "Step start follows another open Step".into(),
-                ));
-            }
-        }
-        SessionFactBody::InputMessageEntered { step_id, .. }
-        | SessionFactBody::WorkspaceTouched { step_id, .. } => {
-            if turn.current_step.as_ref() != Some(step_id) {
-                return Err(TurnError::Invalid(
-                    "Step-scoped Fact does not match the open Step".into(),
-                ));
-            }
-        }
-        SessionFactBody::StepEnded { step_id, .. } => {
-            if turn.current_step.as_ref() != Some(step_id) {
-                return Err(TurnError::Invalid(
-                    "Step end does not match the open Step".into(),
-                ));
-            }
-            turn.current_step = None;
-        }
+        SessionFactBody::StepStarted { .. }
+        | SessionFactBody::InputMessageEntered { .. }
+        | SessionFactBody::WorkspaceTouched { .. }
+        | SessionFactBody::StepEnded { .. } => apply_step_body(turn, body)?,
         SessionFactBody::BudgetExhausted {
             dimension,
             consumed,
@@ -167,6 +149,39 @@ pub(super) fn apply_executor_body(
                 "executor cannot publish acceptance or cancellation Facts".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
+    match body {
+        SessionFactBody::StepStarted { step_id, .. } => {
+            if turn.current_step.replace(step_id.clone()).is_some() {
+                return Err(TurnError::Invalid(
+                    "Step start follows another open Step".into(),
+                ));
+            }
+        }
+        SessionFactBody::InputMessageEntered { step_id, .. }
+        | SessionFactBody::WorkspaceTouched { step_id, .. } => {
+            if turn.current_step.as_ref() != Some(step_id) {
+                return Err(TurnError::Invalid(
+                    "Step-scoped Fact does not match the open Step".into(),
+                ));
+            }
+            if matches!(body, SessionFactBody::InputMessageEntered { .. }) {
+                ensure_no_active_effect(turn)?;
+            }
+        }
+        SessionFactBody::StepEnded { step_id, .. } => {
+            if turn.current_step.as_ref() != Some(step_id) {
+                return Err(TurnError::Invalid(
+                    "Step end does not match the open Step".into(),
+                ));
+            }
+            turn.current_step = None;
+        }
+        _ => unreachable!("caller selected a Step Fact"),
     }
     Ok(())
 }
@@ -259,6 +274,7 @@ pub(super) fn apply_image_body(turn: &mut TurnControl, body: &SessionFactBody) -
 
 pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     match body {
+        SessionFactBody::ToolRejected { .. } => ensure_no_active_effect(turn)?,
         SessionFactBody::ToolIntent {
             effect_id,
             identity,
@@ -522,7 +538,7 @@ pub(super) fn record_budget_usage(
                 .checked_add(1)
                 .ok_or_else(|| "provider attempt count overflowed".to_owned())?;
         }
-        SessionFactBody::ToolIntent { .. } => {
+        SessionFactBody::ToolIntent { .. } | SessionFactBody::ToolRejected { .. } => {
             usage.tool_calls = usage
                 .tool_calls
                 .checked_add(1)
@@ -800,14 +816,4 @@ pub(super) fn turn_kernel_error(error: KernelError) -> TurnError {
 #[allow(clippy::needless_pass_by_value)] // This is a direct `map_err` adapter over an owned error.
 pub(super) fn kernel_turn_error(error: TurnError) -> KernelError {
     KernelError::Invariant(bounded_diagnostic(&error.to_string()))
-}
-
-pub(super) fn turn_workspace_error(
-    error: rsi_agent_workspace_context::WorkspaceContextError,
-) -> TurnError {
-    match error {
-        rsi_agent_workspace_context::WorkspaceContextError::Capacity => TurnError::Capacity,
-        rsi_agent_workspace_context::WorkspaceContextError::Closed => TurnError::ShuttingDown,
-        other => TurnError::Invalid(bounded_diagnostic(&other.to_string())),
-    }
 }

@@ -1,15 +1,14 @@
 use super::{
     ActivationId, AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AgentMessage,
     AgentMessageSource, AppendBatch, AtomicAgentCommit, AtomicSessionAppend, Connection,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, InputMessageSource,
-    MAXIMUM_INDEXED_MESSAGE_STATE_BYTES, MAXIMUM_SESSION_FACT_BYTES,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId, MessageTarget,
-    OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
-    StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
-    StoreFactTurnRole, StoreReadyMessage, Transaction, TurnId, advance_control_prefix_digest,
-    advance_fact_prefix_digest, decode_projected_json, decode_sha256, decode_u64, encode_json,
-    fact_index_kind, params, read_session_header_row, sql_error, sqlite_u64,
-    validate_message_claim_fact,
+    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
+    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId,
+    MessageTarget, OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader,
+    SessionId, StepId, StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot,
+    StoreError, StoreFactTurnRole, StoreReadyMessage, Transaction, TurnId,
+    advance_control_prefix_digest, advance_fact_prefix_digest, decode_projected_json,
+    decode_sha256, decode_u64, encode_json, fact_index_kind, params, read_session_header_row,
+    sql_error, sqlite_u64, validate_message_claim_fact,
 };
 
 pub(super) fn validate_sqlite_activation_guards(
@@ -1081,40 +1080,7 @@ pub(super) fn insert_fact(
             ],
         )
         .map_err(sql_error)?;
-    update_turn_index(transaction, session_id, fact)?;
-    update_workspace_context_index(transaction, session_id, fact)
-}
-
-pub(super) fn update_workspace_context_index(
-    transaction: &Transaction<'_>,
-    session_id: &SessionId,
-    fact: &SessionFact,
-) -> Result<()> {
-    let SessionFactBody::InputMessageEntered { source, .. } = fact.body() else {
-        return Ok(());
-    };
-    let (column, digest) = match source {
-        InputMessageSource::AgentInstructions { sha256, .. } => {
-            ("workspace_instructions_sha256", sha256)
-        }
-        InputMessageSource::SkillCatalog { sha256 } => ("workspace_skill_catalog_sha256", sha256),
-        InputMessageSource::Human { .. }
-        | InputMessageSource::Agent { .. }
-        | InputMessageSource::Completion { .. }
-        | InputMessageSource::UserSkillInvocation { .. } => return Ok(()),
-    };
-    let changed = transaction
-        .execute(
-            &format!("UPDATE sessions SET {column} = ?1 WHERE session_id = ?2"),
-            params![digest, session_id.as_str()],
-        )
-        .map_err(sql_error)?;
-    if changed != 1 {
-        return Err(StoreError::Corrupt(
-            "workspace-context index lost its owning Session".into(),
-        ));
-    }
-    Ok(())
+    update_turn_index(transaction, session_id, fact)
 }
 
 pub(super) fn update_turn_index(
