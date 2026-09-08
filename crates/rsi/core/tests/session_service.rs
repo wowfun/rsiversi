@@ -28,6 +28,8 @@ const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 #[path = "session_service/plan_policy.rs"]
 mod plan_policy;
+#[path = "session_service/repeat_reminder.rs"]
+mod repeat_reminder;
 #[path = "session_service/session_api.rs"]
 mod session_api;
 #[path = "session_service/standard_api.rs"]

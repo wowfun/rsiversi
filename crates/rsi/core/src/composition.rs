@@ -97,6 +97,7 @@ const WORKSPACE_CONTEXT_FACTORY: &str = "rsi.agent.workspace-context.local";
 const WORKSPACE_CONTRIBUTOR_FACTORY: &str = "rsi.agent.workspace-context.contributor";
 const TIME_CONTEXT_FACTORY: &str = "rsi.agent.time-context";
 const PLAN_POLICY_FACTORY: &str = "rsi.agent.plan-policy";
+const REPEAT_REMINDER_FACTORY: &str = "rsi.agent.repeat-tool-reminder";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
 const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
 const AGENT_COMPOSITION_FACTORY: &str = "rsi.agent.composition";
@@ -209,6 +210,10 @@ fn standard_agent_addon(
     register(
         PLAN_POLICY_FACTORY,
         Arc::new(rsi_agent_plan_policy::PlanPolicyFactory),
+    )?;
+    register(
+        REPEAT_REMINDER_FACTORY,
+        Arc::new(rsi_agent_repeat_tool_reminder::RepeatToolReminderFactory),
     )?;
     if let Some(coding) = coding_tools {
         register(
@@ -1731,6 +1736,7 @@ mod tests {
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
                 PLAN_POLICY_FACTORY,
+                REPEAT_REMINDER_FACTORY,
                 OUTPUT_READ_FACTORY,
                 BASH_TOOL_FACTORY,
                 JOBS_TOOLS_FACTORY,
@@ -1752,6 +1758,7 @@ mod tests {
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
                 PLAN_POLICY_FACTORY,
+                REPEAT_REMINDER_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
                 QUESTION_TOOLS_FACTORY

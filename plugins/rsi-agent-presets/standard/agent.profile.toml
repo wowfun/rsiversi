@@ -22,6 +22,11 @@ plugin = "rsi.agent.plan-policy"
 
 [[steps]]
 kind = "plugin"
+id = "repeat-tool-reminder"
+plugin = "rsi.agent.repeat-tool-reminder"
+
+[[steps]]
+kind = "plugin"
 id = "output-read"
 plugin = "rsi.output.read"
 enabled_rhai = "defines.standard_linux_coding_tools"

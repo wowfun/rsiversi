@@ -301,6 +301,11 @@ through that same catalog. Planning starts disabled and can change through the
 shared Session command service before or after publication. Its Tool allowlist
 adds a constraint to existing approval and sandbox policy.
 
+The standard [repeat reminder](../rsi-agent/repeat-tool-reminder/README.md)
+adds source-attributed advice after repeated identical settled Tool calls.
+Its bounded domain cursor and advice commit together; inspecting history never
+replays the heuristic.
+
 On Linux, linking the standard coding Tools makes a successfully probed
 restricted sandbox backend a Host activation requirement. The Host does not
 begin serving and defer an unavailable enforcement backend until the first
