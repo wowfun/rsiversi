@@ -526,7 +526,9 @@ mod tests {
             command.env("RSI_TUI_GUARD_TEST_CHILD", mode);
             command.env("RSI_TUI_GUARD_TEST_DONE", &completed);
             command.env("TERM", "xterm-256color");
+            eprintln!("PTY {mode}: spawning child");
             let mut child = pair.slave.spawn_command(command).unwrap();
+            eprintln!("PTY {mode}: child spawned");
             drop(pair.slave);
             if mode == "slow" {
                 let start = std::time::Instant::now();
@@ -545,6 +547,7 @@ mod tests {
             }
             // Only resume draining after the blocked writer has restored termios;
             // libtest itself prints its result synchronously after this point.
+            eprintln!("PTY {mode}: starting output capture");
             let reader = capture::PtyCapture::start(pair.master.as_ref());
             let start = std::time::Instant::now();
             let status = loop {
@@ -558,11 +561,14 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             };
+            eprintln!("PTY {mode}: child exited; checking restored termios");
             assert_eq!(status.success(), mode != "panic");
             assert!(
                 format!("{:?}", pair.master.get_termios().unwrap().local_flags).contains("ICANON")
             );
+            eprintln!("PTY {mode}: finishing output capture");
             let bytes = reader.finish();
+            eprintln!("PTY {mode}: capture finished ({} bytes)", bytes.len());
             if mode == "panic" {
                 assert!(bytes.windows(RESTORE.len()).any(|bytes| bytes == RESTORE));
             }

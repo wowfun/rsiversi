@@ -318,7 +318,7 @@ jobs:
         timeout-minutes: 20
       - name: Exercise standard rsi on macOS
         if: runner.os == 'macOS'
-        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-terminal -p rsi-serve -p 'rsi-web*' --all-targets
+        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-terminal -p rsi-serve -p 'rsi-web*' --all-targets -- --nocapture
         timeout-minutes: 20
 
   repository-tools:
