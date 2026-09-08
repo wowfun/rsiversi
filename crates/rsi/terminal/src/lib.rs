@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 mod arguments;
 mod devices;
+mod headless_commands;
 mod plugin;
 mod session_cli;
 mod surfaces;
@@ -48,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 type Result<T, E = RsiError> = std::result::Result<T, E>;
 
 /// Native application arguments; the launcher handles Profile selection separately.
-pub const HELP: &str = "Usage:\n\
+pub const HELP: &str = "Session command options (headless):\n  --commands | --command INVOCATION_JSON | --command-status REQUEST_ID\n  --command may precede TASK; list and status do not submit a message.\nUsage:\n\
   rsi --profile headless TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
       [--deployment ID --model ID] [--sandbox read-only|workspace-write|danger-full-access]\n\
@@ -703,6 +704,7 @@ pub(crate) async fn run_headless_application(
     work: ApplicationWork,
 ) -> u8 {
     let mut running = Box::pin(async {
+        let has_task = command.stdin || command.positional.is_some();
         let task = match command.task(&work).await {
             Ok(task) => task,
             Err(error) => return report_error(&error),
@@ -711,14 +713,21 @@ pub(crate) async fn run_headless_application(
             Ok(options) => options,
             Err(error) => return report_error(&error),
         };
-        let content =
-            match headless_inputs(options.task, options.images, media.as_ref(), &work).await {
-                Ok(content) => content,
-                Err(error) => return report_error(&error),
-            };
         let handle =
             match resolve_application_handle(&application, &workspace, options.session).await {
                 Ok(handle) => handle,
+                Err(error) => return report_error(&error),
+            };
+        if let Some(extension) = &command.extension {
+            let exit =
+                headless_commands::run(extension, handle.as_ref(), options.output, &work).await;
+            if exit != 0 || !has_task {
+                return exit;
+            }
+        }
+        let content =
+            match headless_inputs(options.task, options.images, media.as_ref(), &work).await {
+                Ok(content) => content,
                 Err(error) => return report_error(&error),
             };
         let message_id = match options.message_id.map_or_else(generated_cli_message_id, Ok) {
@@ -1202,7 +1211,14 @@ fn write_status_event(stderr: &mut impl Write, event: &CliEvent) -> Result<()> {
 fn is_query_result(kind: &str) -> bool {
     matches!(
         kind,
-        "sessions" | "history" | "inspection" | "output" | "approvals" | "questions"
+        "sessions"
+            | "history"
+            | "inspection"
+            | "output"
+            | "approvals"
+            | "questions"
+            | "commands"
+            | "command_result"
     )
 }
 

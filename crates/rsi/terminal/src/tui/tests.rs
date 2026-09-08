@@ -1,6 +1,43 @@
 use super::*;
 use crate::tests::{UnknownThenAcceptedHandle, UnusedWorkspace};
 
+#[tokio::test]
+async fn registered_slash_command_retains_unknown_identity_without_submitting_a_message() {
+    let (mut client, handle, runtime, surface) = client().await;
+    client.state.editor.insert("/plan on").unwrap();
+    client.submit(MessageDelivery::NextTurn, false);
+    let work = client.tasks.next().await.unwrap();
+    let Update::Command(result) = work.result.unwrap() else {
+        panic!("Session command path")
+    };
+    assert!(result.is_err());
+    client.command_finished(result);
+    assert_eq!(client.state.editor.text, "/plan on");
+    assert!(client.submission.request.is_none());
+    assert!(client.owned.is_empty());
+    let original = client.command.view().pending.unwrap();
+    assert_eq!(original.arguments.value(), "on");
+    client.submit(MessageDelivery::NextTurn, false);
+    assert!(client.tasks.is_empty());
+    assert!(handle.submitted_requests.lock().unwrap().is_empty());
+    assert_eq!(handle.commands.lock().unwrap().len(), 1);
+    *handle.command_receipt.lock().unwrap() = Some(
+        rsi_agent_session_protocol::SessionCommandReceipt::draft_changed(&original, "a".repeat(64))
+            .unwrap(),
+    );
+    client.action(Action::CommandResult);
+    let work = client.tasks.next().await.unwrap();
+    assert!(matches!(work.result, Ok(Update::Notice(_))));
+    assert!(client.command.view().pending.is_none());
+    assert_eq!(
+        client.command.view().receipt.unwrap().request_id(),
+        &original.request_id
+    );
+    assert_eq!(handle.commands.lock().unwrap().len(), 1);
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[derive(Debug)]
 struct Application(Arc<UnknownThenAcceptedHandle>);
 

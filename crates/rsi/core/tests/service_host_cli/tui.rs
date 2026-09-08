@@ -13,6 +13,56 @@ struct TerminalClient {
     capture_count: usize,
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let router = Router::new()
+        .route("/v1/chat/completions", post(super::commands::capture))
+        .with_state(requests.clone());
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let fixture = CliFixture::new(&endpoint);
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "pty-plan-command"]);
+    terminal.until("Ready").await;
+    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\r");
+    terminal.until("Session commands").await;
+    terminal.until("/plan").await;
+    terminal.send(b"\x1b");
+    let closed = Instant::now() + Duration::from_secs(5);
+    while terminal
+        .screen
+        .lock()
+        .unwrap()
+        .screen()
+        .contents()
+        .contains("Session commands")
+    {
+        assert!(Instant::now() < closed, "command menu did not close");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    terminal.send(b"/plan on\r");
+    terminal.until("DraftChanged").await;
+    assert!(requests.lock().unwrap().is_empty());
+    terminal.send(b"inspect plan\r");
+    terminal.until("hello from daemon").await;
+    terminal.until("\"status\": \"completed\"").await;
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(
+        requests.lock().unwrap()[0]
+            .to_string()
+            .contains("Plan mode is enabled")
+    );
+    terminal.send(b"/plan off\r");
+    terminal.until("Committed").await;
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    provider.abort();
+}
+
 impl TerminalClient {
     fn start(fixture: &CliFixture, arguments: &[&str]) -> Self {
         let directory = fixture
@@ -288,7 +338,7 @@ async fn fullscreen_answers_live_questions_through_the_real_tool_and_provider_lo
         .unwrap();
     state.release.notify_one();
     terminal.until("1 questions").await;
-    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
     terminal.until("Live questions").await;
     terminal.send(b"\r");
     terminal.until("Live question").await;
@@ -318,7 +368,7 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
         .unwrap();
     state.release.notify_one();
     terminal.until("1 approvals").await;
-    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
     terminal.until("Live approvals").await;
     terminal.send(b"\r");
     terminal.until("Review the prepared request").await;
@@ -360,7 +410,7 @@ async fn daemon_detach_resume_reads_foreign_pending_body_and_ctrl_c_preserves_dr
         .unwrap();
     first.send(b"foreign queued body\r");
     tokio::time::sleep(Duration::from_millis(250)).await;
-    first.send(b"\x10\x1b[B\x1b[B\x1b[B\r");
+    first.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
     first.until("Pending inputs").await;
     first.send(b"\r");
     first.until("foreign queued body").await;
@@ -368,7 +418,7 @@ async fn daemon_detach_resume_reads_foreign_pending_body_and_ctrl_c_preserves_dr
     first.finish().await;
     let mut resumed = TerminalClient::start(&fixture, &["--resume", "tui-resume"]);
     resumed.until("exit detaches").await;
-    resumed.send(b"\x10\x1b[B\x1b[B\x1b[B\r");
+    resumed.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
     resumed.until("Pending inputs").await;
     resumed.send(b"\r");
     resumed.until("foreign queued body").await;

@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+#[path = "commands.rs"]
+pub(super) mod commands;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {

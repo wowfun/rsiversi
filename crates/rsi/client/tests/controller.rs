@@ -1,6 +1,11 @@
 mod support;
 
 #[tokio::test]
+async fn commands_freeze_identity_query_without_replay_and_retire_owned_waits() {
+    support::exact_command_reconciliation(execution()).await;
+}
+
+#[tokio::test]
 async fn explicit_reconciliation_stop_preserves_unknown_identity_and_drains_the_controller() {
     support::explicit_reconciliation_cancellation(execution()).await;
 }

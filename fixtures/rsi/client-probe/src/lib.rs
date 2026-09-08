@@ -42,6 +42,7 @@ pub async fn run_probe() -> Result<String, JsValue> {
         rsi_meta::Execution::browser().map_err(|error| JsValue::from_str(&error.to_string()))?;
     scenarios::isolated_controller_scopes(execution.clone()).await;
     scenarios::owned_submission_drain(execution.clone()).await;
+    scenarios::exact_command_reconciliation(execution.clone()).await;
     scenarios::explicit_reconciliation_cancellation(execution.clone()).await;
     scenarios::acknowledged_cursor(execution.clone()).await;
     scenarios::message_claim_cancellation_and_terminal_delivery(execution.clone()).await;
@@ -56,8 +57,8 @@ pub async fn run_probe() -> Result<String, JsValue> {
     assert_eq!(resources.pending_timers, 0);
     assert_eq!(resources.active_alarms, 0);
     Ok(serde_json::json!({
-        "status":"passed", "pending_timers":resources.pending_timers,
+        "status":"passed", "command_reconciliation":"passed", "pending_timers":resources.pending_timers,
         "active_alarms":resources.active_alarms,
-        "cases":["durable header decoding", "message claim cancellation and terminal delivery", "isolated controller scopes with shared domain", "owned submission drain and bounded admission", "explicit reconciliation cancellation and retained identity", "acknowledged cursor without watermark skip", "bounded read capacity recovery and cancellation", "Session-free Shell profiles and dropped opens", "partial surface activation retirement", "child cleanup failure propagation"]
+        "cases":["command identity and query-only reconciliation", "durable header decoding", "message claim cancellation and terminal delivery", "isolated controller scopes with shared domain", "owned submission drain and bounded admission", "explicit reconciliation cancellation and retained identity", "acknowledged cursor without watermark skip", "bounded read capacity recovery and cancellation", "Session-free Shell profiles and dropped opens", "partial surface activation retirement", "child cleanup failure propagation"]
     }).to_string())
 }

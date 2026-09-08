@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+mod commands;
 mod messages;
+pub use commands::exact_command_reconciliation;
 mod reads;
 use futures_util::StreamExt;
 pub use messages::message_claim_cancellation_and_terminal_delivery;
@@ -48,6 +50,7 @@ impl Drop for Active {
 
 #[derive(Debug)]
 pub struct Handle {
+    pub commands: commands::Scenario,
     pub id: SessionId,
     pub submissions: Mutex<Vec<SubmitInput>>,
     pub release: Semaphore,
@@ -60,6 +63,7 @@ pub struct Handle {
 impl Handle {
     pub fn new(id: &str, truncate: bool) -> Arc<Self> {
         Arc::new(Self {
+            commands: commands::Scenario::default(),
             id: SessionId::new(id).unwrap(),
             submissions: Mutex::new(Vec::new()),
             release: Semaphore::new(0),
@@ -89,20 +93,20 @@ impl SessionHandle for Handle {
     async fn commands(
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
-        panic!("unexpected command discovery")
+        Ok(commands::Scenario::discover())
     }
     async fn execute_command(
         &self,
-        _: rsi_agent_session_protocol::SessionCommandInvocation,
+        invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
-        panic!("unexpected command execution")
+        self.commands.execute(invocation).await
     }
     async fn command_status(
         &self,
-        _: &rsi_agent_session_protocol::DomainRequestId,
+        id: &rsi_agent_session_protocol::DomainRequestId,
     ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>
     {
-        panic!("unexpected command lookup")
+        self.commands.status(id)
     }
 
     async fn read_message(

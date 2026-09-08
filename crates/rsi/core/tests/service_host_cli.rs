@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#[path = "service_host_cli/commands.rs"]
+mod commands;
 #[path = "service_host_cli/serve.rs"]
 mod serve;
 #[path = "service_host_cli/tui.rs"]

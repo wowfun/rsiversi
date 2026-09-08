@@ -38,6 +38,30 @@ controller retry of a retained unresolved request begins with a status query;
 query failure sends nothing, NotFound permits the same reconciliation sequence,
 and an accepted receipt starts observation even when no replay was necessary.
 
+Session extension commands use the same controller's four non-queued work slots.
+Discovery returns the pinned catalog and exact predecessor; preparing an invocation
+selects a descriptor identity and freezes bounded JSON arguments, the caller's
+request ID and that predecessor. Interactive slash syntax uses a JSON string for
+the text following the name. Only registered names intercept message submission;
+unknown slash names remain Human text for the existing workspace-skill resolver.
+`//` remains ordinary message text. Structured callers may
+provide any validated JSON arguments.
+
+An execution sends the frozen invocation once. An unknown outcome queries that
+same request ID once and validates the receipt's complete invocation digest.
+An absent receipt can mean an admitted callback is still running, so neither
+automatic reconciliation nor explicit result refresh sends another mutation.
+Applications retain unresolved invocations across pane changes; they display
+the original identity and keep result refresh available. A revision conflict is
+a completed rejection, and a new explicit action captures a new predecessor.
+Controller retirement cancels local command waits with their original unknown
+identity; admitted server work retains its own owner.
+
+`CommandSubmission` stores one unresolved bounded invocation and the last compact
+receipt per saved Session. A dropped application waiter preserves that invocation.
+Its separate single-work admission prevents a new command from replacing unknown
+input; result refresh preserves it even if the current controller is unavailable.
+
 `drive_message` follows one submitted message through its durable claim and the
 claimed Turn's terminal Fact. It emits typed receipt, claim, Fact and outcome
 events to an explicit sink; the caller owns the future and presentation lifetime.

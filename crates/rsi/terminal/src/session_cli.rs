@@ -502,6 +502,7 @@ async fn run(
     let mut recent = None;
     let mut recent_exhausted = false;
     let mut draft: Option<AnswerDraft> = None;
+    let extension = rsi_client::CommandSubmission::default();
     let result = async {
         loop {
             let line = tokio::select! {
@@ -540,6 +541,7 @@ async fn run(
                             else { recent = sessions(&application, recent.as_ref(), renderer).await?; recent_exhausted = recent.is_none(); }
                         }
                         "attach" => {
+                            if extension.view().pending.is_some() { return Err(session_error("Resolve the pending command with :command-result before changing sessions")); }
                             let id = SessionId::new(arguments).map_err(session_error)?;
                             let next = application.attach(&id).await.map_err(session_error)?;
                             let snapshot = next.inspect().await.map_err(session_error)?;
@@ -559,6 +561,15 @@ async fn run(
                             let snapshot = handle.inspect().await.map_err(session_error)?;
                             let value = match name { "agents" => json!(snapshot.tree), "queue" => json!(snapshot.pending), _ => json!(snapshot) };
                             notice(renderer, "inspection", value).await?;
+                        }
+                        "commands" => {
+                            let controller = &observer.as_ref().ok_or_else(|| session_error("Session controller is unavailable"))?.controller;
+                            notice(renderer, "commands", json!(controller.commands().await.map_err(session_error)?)).await?;
+                        }
+                        "command-result" => {
+                            let controller = &observer.as_ref().ok_or_else(|| session_error("Session controller is unavailable"))?.controller;
+                            if extension.view().pending.is_some() { extension.refresh(controller).await.map_err(session_error)?; }
+                            notice(renderer, "command_result", json!(extension.view())).await?;
                         }
                         "cancel" => { cancel_explicit(&handle, arguments).await?; notice(renderer, "cancel_requested", json!({"target":arguments})).await?; }
                         "approvals" => notice(renderer, "approvals", json!(handle.pending_approvals().await.map_err(session_error)?)).await?,
@@ -585,7 +596,7 @@ async fn run(
                             notice(renderer, "output", json!({"id":page.id,"offset":page.offset,"next_offset":page.next_offset,"total_bytes":page.total_bytes,"text":String::from_utf8_lossy(&page.bytes),"bytes_hex":hex::encode(&page.bytes)})).await?;
                         }
                         "steer" => { if arguments.is_empty() { return Err(session_error("usage: :steer TEXT")); } delivery = MessageDelivery::Steer; text = arguments.to_owned(); }
-                        "help" => notice(renderer, "help", json!({"commands":":sessions :attach SESSION :history [BEFORE] :status :agents :queue :steer TEXT :cancel [ID] :approvals :allow SESSION ID :deny SESSION ID :questions :answer ID :output ID [OFFSET] :exit ::TEXT"})).await?,
+                        "help" => notice(renderer, "help", json!({"commands":":sessions :attach SESSION :history [BEFORE] :status :agents :queue :commands :command-result /NAME ARGUMENTS :steer TEXT :cancel [ID] :approvals :allow SESSION ID :deny SESSION ID :questions :answer ID :output ID [OFFSET] :exit ::TEXT"})).await?,
                         _ => return Err(session_error(format!("unknown Session command: :{name}"))),
                     }
                     if name != "steer" { return Ok(false); }
@@ -602,6 +613,12 @@ async fn run(
                 if !owned.is_empty() { prune_owned(&handle, &mut owned).await?; }
                 let id = generated_cli_message_id()?;
                 let controller = &observer.as_ref().ok_or_else(|| session_error("Session controller is unavailable"))?.controller;
+                if let Some(pending) = extension.view().pending { return Err(session_error(format!("Command {} is unresolved; use :command-result", pending.request_id))); }
+                let command_id = rsi_agent_session_protocol::DomainRequestId::new(format!("command-{id}")).map_err(session_error)?;
+                if let Some(receipt) = extension.try_slash(controller, &text, command_id).await.map_err(session_error)? {
+                    notice(renderer, "command_result", json!(receipt)).await?;
+                    return Ok(false);
+                }
                 notice(renderer, "submitting", json!({"session_id":controller.session_id(),"message_id":id})).await?;
                 let receipt = controller.submit_cancellable(SubmitInput { delivery, message_id: id.clone(), content: vec![MessageInput::Text { text }], model: None, sandbox: None }, work.submissions.clone()).await.map_err(session_error)?;
                 durable = true;

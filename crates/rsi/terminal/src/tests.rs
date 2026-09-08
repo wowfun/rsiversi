@@ -80,6 +80,10 @@ async fn cancelled_terminal_keeps_its_finish_line_under_renderer_backpressure() 
 
 #[derive(Debug, Default)]
 pub(crate) struct UnknownThenAcceptedHandle {
+    pub(crate) commands:
+        std::sync::Mutex<Vec<rsi_agent_session_protocol::SessionCommandInvocation>>,
+    pub(crate) command_receipt:
+        std::sync::Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
     pub(crate) submitted_requests: std::sync::Mutex<Vec<SubmitInput>>,
     pub(crate) inspection:
         std::sync::Mutex<Option<rsi_agent_store_protocol::StoreSessionInspection>>,
@@ -121,20 +125,36 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn commands(
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
-        panic!("unexpected command discovery")
+        use rsi_agent_session_protocol::*;
+        Ok(SessionCommandsView::new(
+            CommandRevision::Draft { revision: 0 },
+            vec![
+                SessionCommandDescriptor::new(
+                    ContributionId::new("fixture.plan").unwrap(),
+                    "plan",
+                    "Plan on or off",
+                    true,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap())
     }
     async fn execute_command(
         &self,
-        _: rsi_agent_session_protocol::SessionCommandInvocation,
+        invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
-        panic!("unexpected command execution")
+        self.commands.lock().unwrap().push(invocation.clone());
+        Err(SessionError::CommandOutcomeUnknown {
+            request_id: invocation.request_id,
+        })
     }
     async fn command_status(
         &self,
         _: &rsi_agent_session_protocol::DomainRequestId,
     ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>
     {
-        panic!("unexpected command lookup")
+        Ok(self.command_receipt.lock().unwrap().clone())
     }
 
     async fn read_message(

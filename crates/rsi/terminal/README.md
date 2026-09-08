@@ -1,5 +1,23 @@
 # rsi-terminal
 
+Interactive applications expose the pinned Session command catalog: the TUI
+action menu and line-mode `:commands`. Registered `/name arguments` inputs run
+through the shared controller; unknown slash names remain Human messages for
+workspace skills. TUI saved Sessions retain one bounded command invocation and
+its last receipt. The command-result action and line-mode `:command-result`
+query unresolved identities without replaying a mutation. New messages wait for
+that command to resolve. A failed command preserves editable input.
+
+Headless `--commands` prints discovery and its predecessor. `--command JSON`
+accepts one complete closed SessionCommandInvocation, including the discovered
+contribution identity, request ID, predecessor and JSON arguments. It executes
+once and may precede an optional TASK or `--stdin` input in the same handle.
+Without a task it reports only the command outcome; draft edits then end with
+the process-local lease. `--command-status REQUEST_ID` queries a receipt without
+invoking a callback. List and status are mutually exclusive with message options.
+JSON is bounded before decoding; signals and application retirement stop local
+waits and output while preserving admitted server ownership.
+
 Explicit Retry queries the retained MessageId before sending any mutation. A
 failed query preserves the unresolved request; only NotFound permits resubmission
 of its frozen content and options.

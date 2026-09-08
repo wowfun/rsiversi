@@ -92,6 +92,11 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .composer-bar button { font-size:.72rem; padding:6px 8px; }
 .composer-hint { font-size:.63rem; color:var(--muted); padding:0 12px 9px; }
 .pane-notice { font-size:.73rem; color:#82602b; padding:0 18px; max-height:60px; overflow:auto; }
+.session-commands { padding:0 18px; max-height:180px; overflow:auto; font-size:.72rem; flex-shrink:0; }
+.session-commands button { font-size:.72rem; margin:4px 8px 4px 0; }
+.command-description { color:var(--muted); overflow-wrap:anywhere; }
+.command-input { white-space:pre-wrap; overflow-wrap:anywhere; max-height:90px; overflow:auto; }
+.command-receipt { color:var(--muted); overflow-wrap:anywhere; }
 .detail-dialog { color:var(--ink); width:min(760px,calc(100vw - 32px)); max-height:85dvh; padding:24px; background:var(--paper); border:1px solid var(--line); border-radius:10px; box-shadow:0 25px 100px #163c4b25; }
 .detail-dialog::backdrop { background:#253e4666; }
 .dialog-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }

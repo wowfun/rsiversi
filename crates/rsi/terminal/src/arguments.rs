@@ -4,6 +4,7 @@ const HELP: &str = "Use rsi --profile headless --help for application options.";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Command {
+    pub(crate) extension: Option<crate::headless_commands::Extension>,
     pub(crate) positional: Option<String>,
     pub(crate) stdin: bool,
     pub(crate) cwd: Option<PathBuf>,
@@ -22,6 +23,7 @@ pub(crate) struct Command {
 impl Command {
     fn empty() -> Self {
         Self {
+            extension: None,
             positional: None,
             stdin: false,
             cwd: None,
@@ -53,6 +55,15 @@ impl Command {
             }
             if !literal && argument.starts_with('-') {
                 match argument.as_str() {
+                    "--commands" | "--command" | "--command-status" => {
+                        let extension =
+                            crate::headless_commands::Extension::parse(&argument, &mut arguments)?;
+                        set_option(
+                            &mut command.extension,
+                            extension,
+                            "Session command operation",
+                        )?;
+                    }
                     "--stdin" => set_flag(&mut command.stdin, "--stdin")?,
                     "--cwd" => set_option(
                         &mut command.cwd,
@@ -127,8 +138,23 @@ impl Command {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.stdin == self.positional.is_some() {
+        let has_task = self.stdin || self.positional.is_some();
+        if self.stdin && self.positional.is_some() || !has_task && self.extension.is_none() {
             return Err(usage("provide exactly one task positional or --stdin"));
+        }
+        if let Some(extension) = &self.extension {
+            extension.validate(has_task)?;
+            if !has_task
+                && (!self.images.is_empty()
+                    || self.message_id.is_some()
+                    || self.deployment.is_some()
+                    || self.model.is_some()
+                    || self.sandbox.is_some())
+            {
+                return Err(usage(
+                    "message, image, model and sandbox options require a task",
+                ));
+            }
         }
         if self.resume.is_some() && self.session_id.is_some() {
             return Err(usage("--resume and --session-id are mutually exclusive"));
@@ -153,6 +179,9 @@ impl Command {
     pub(crate) async fn task(&self, work: &ApplicationWork) -> Result<String> {
         if let Some(task) = &self.positional {
             return Ok(task.clone());
+        }
+        if !self.stdin {
+            return Ok(String::new());
         }
         let stop = work.stop.clone();
         let token = work.tasks.token();

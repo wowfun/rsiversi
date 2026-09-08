@@ -41,8 +41,14 @@ wire validation. Creation version 2 returns the original creation input and the
 current draft snapshot, preserving lease retry semantics after preset selection.
 Each call and stream captures one Header binding. Selection validates the exact
 successor before atomically updating the client binding; delayed replies cannot
-regress it. Other handles refresh through attach. Read projections and future UI
+regress it. Other handles refresh through attach. Read projections and application
 commands consume these public seams without gaining Store write authority.
+The shared Client owns one-send execution and query-only reconciliation. An
+absent receipt may name an active callback, so applications keep the full
+invocation until a matching receipt or a definite execution rejection. A failed
+refresh, retired controller or changed pane never authorizes a new invocation.
+Registered slash names take precedence over direct skill names; other slash
+inputs remain Human messages for the workspace resolver.
 
 ## Alternatives considered
 
@@ -70,6 +76,10 @@ deadline, capacity, lost acknowledgements and cold queries. Native Session tests
 exercise reconnect, actual baseline publication, expiry, retirement, concurrent
 commands, preset preparation races and disconnected callers. API tests exercise
 identity substitution, invocation hashes, revision errors, creation retries and
-out-of-order Header bindings. These establish the command and draft substrate;
-the remaining [contribution proposal](../../proposed/architecture/2026-09-08-agent-domain-state.md)
-still owns extension projections and the first interactive policy plugins.
+out-of-order Header bindings. Client and application tests cover retained
+invocations, original-digest validation, bounded admission, generation replacement
+and command-only execution without a model request. The separate
+[projection decision](2026-09-09-session-extension-projections.md) owns derived
+read state; ordinary [plan policy](../feature/2026-09-09-plan-policy.md) and
+[repeat advice](../feature/2026-09-09-repeat-tool-reminder.md) consume the frozen
+composition contracts.

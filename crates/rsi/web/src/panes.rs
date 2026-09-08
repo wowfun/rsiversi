@@ -23,6 +23,7 @@ pub(crate) struct Pane {
 
 #[derive(Debug)]
 struct SavedDraft {
+    command: rsi_client::CommandSubmission,
     text: Mutex<String>,
     unresolved: Mutex<Option<SubmitInput>>,
     owned: Mutex<BTreeSet<MessageId>>,
@@ -31,6 +32,7 @@ struct SavedDraft {
 impl SavedDraft {
     fn new() -> Self {
         Self {
+            command: rsi_client::CommandSubmission::default(),
             text: Mutex::new(String::new()),
             unresolved: Mutex::new(None),
             owned: Mutex::new(BTreeSet::new()),
@@ -41,6 +43,7 @@ impl SavedDraft {
 
 #[derive(Debug)]
 struct Attachment {
+    commands: Mutex<Option<rsi_agent_session_protocol::SessionCommandsView>>,
     generation: u64,
     id: SessionId,
     path: String,
@@ -54,6 +57,41 @@ struct Attachment {
     history_work: tokio::sync::Semaphore,
 }
 impl Attachment {
+    async fn slash(&self, text: &str) -> Result<bool> {
+        if let Some(pending) = self.draft.command.view().pending {
+            return Err(format!(
+                "Command {} is unresolved; refresh its result first",
+                pending.request_id
+            ));
+        }
+        let retry_message = self
+            .draft
+            .unresolved
+            .lock()
+            .expect("Web submission poisoned")
+            .is_some();
+        if !retry_message && rsi_client::slash_command(text).is_some() {
+            let id = rsi_agent_session_protocol::DomainRequestId::new(crate::identity::allocate(
+                "command",
+            )?)
+            .map_err(error)?;
+            if self
+                .draft
+                .command
+                .try_slash(&self.controller, text, id)
+                .await
+                .map_err(error)?
+                .is_some()
+            {
+                let mut draft = self.draft.text.lock().expect("Web draft poisoned");
+                if draft.as_str() == text {
+                    draft.clear();
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     async fn close(&self) -> Result<()> {
         let surface = self.surface.lock().expect("Web surface poisoned").take();
         if let Some(surface) = surface {
@@ -79,6 +117,7 @@ impl Pane {
                     .is_some_and(|attachment| Arc::ptr_eq(&attachment.draft, draft))
                     || !draft.text.lock().expect("Web draft poisoned").is_empty()
                     || draft.submissions.available_permits() == 0
+                    || draft.command.view().pending.is_some()
                     || draft
                         .unresolved
                         .lock()
@@ -209,6 +248,8 @@ impl Pane {
             .expect("Web renderer poisoned");
         serde_json::json!({
             "generation": current.generation.to_string(), "session":current.id, "path":current.path,
+            "commands":*current.commands.lock().expect("Web commands poisoned"),
+            "command_submission":current.draft.command.view(),
             "unresolved_text":current.draft.unresolved.lock().expect("Web submission poisoned").as_ref().and_then(|request| request.content.first()).and_then(|input| match input { SessionInput::Text { text } => Some(text.clone()), SessionInput::Image { .. } => None }),
             "draft":*current.draft.text.lock().expect("Web draft poisoned"), "model":*current.model.lock().expect("Web model poisoned"),
             "transcript":state.history.as_ref().unwrap_or(&state.transcript), "historical":state.history.is_some(),
@@ -225,6 +266,22 @@ impl WebApplication {
     }
     pub(crate) async fn pane_command(&self, command: Command) -> Result<()> {
         match command {
+            Command::Commands { pane, generation } => {
+                let attached = self.pane(pane)?.attachment(&generation)?;
+                let commands = attached.controller.commands().await.map_err(error)?;
+                *attached.commands.lock().expect("Web commands poisoned") = Some(commands);
+                Ok(())
+            }
+            Command::RefreshCommandResult { pane, generation } => {
+                let attached = self.pane(pane)?.attachment(&generation)?;
+                attached
+                    .draft
+                    .command
+                    .refresh(&attached.controller)
+                    .await
+                    .map_err(error)?;
+                Ok(())
+            }
             Command::Open { pane, session } => self.open(pane, session, None).await,
             Command::Create {
                 pane,
@@ -438,6 +495,7 @@ impl WebApplication {
             .ok_or("Surface renderer is unavailable")?;
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            commands: Mutex::new(None),
             generation,
             id,
             path: header.canonical_cwd().into(),
@@ -471,6 +529,9 @@ impl WebApplication {
             .map_err(|_| "A submission is still awaiting its receipt")?;
         self.pane(index)?
             .set_draft(&attachment.draft, text.clone())?;
+        if attachment.slash(&text).await? {
+            return Ok(());
+        }
         let content = vec![SessionInput::Text { text: text.clone() }];
         rsi_session_protocol::validate_session_input(&content).map_err(error)?;
         if attachment

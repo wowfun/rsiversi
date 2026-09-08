@@ -62,6 +62,14 @@ pub(crate) enum Command {
         pane: u8,
         generation: String,
     },
+    Commands {
+        pane: u8,
+        generation: String,
+    },
+    RefreshCommandResult {
+        pane: u8,
+        generation: String,
+    },
     Live {
         pane: u8,
         generation: String,

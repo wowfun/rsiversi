@@ -1,5 +1,14 @@
 # rsi-web
 
+Each conversation exposes its discovered Session commands and saved command
+receipt. Registered slash names execute through the shared controller; unknown
+names remain Human input for workspace skills. One unresolved invocation per
+saved Session retains its full arguments, original request ID and predecessor
+across pane replacement. Refresh only queries that identity. Sending a new
+message waits until the pending command is resolved; edited input remains saved.
+Command state uses the existing 64 saved-Session bound (at most 16 KiB of arguments
+per Session) independently of message-text retention.
+
 The Web coding application runs the same Rust Meta, ordered Profile compiler,
 domain clients and Session controllers in a Dedicated Worker. The document
 thread renders views and forwards input. JavaScript does not own session

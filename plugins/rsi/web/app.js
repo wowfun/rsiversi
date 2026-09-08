@@ -131,7 +131,9 @@ class Pane {
     const tools = element("div", "pane-tools");
     this.history = button("Earlier history", () => this.action("history"), "quiet");
     this.live = button("Back to live", () => this.action("live"), "quiet");
-    tools.append(this.history, this.live);
+    this.commands = button("Session commands", () => this.action("commands"), "quiet");
+    tools.append(this.history, this.live, this.commands);
+    this.commandView = element("div", "session-commands");
     this.transcript = element("div", "transcript");
     this.transcript.setAttribute("aria-label", "Conversation transcript");
     this.transcript.tabIndex = 0;
@@ -159,7 +161,7 @@ class Pane {
     this.send = button("Send ↗", () => this.submit(false), "primary");
     actions.append(this.cancel, this.steer, this.send); bar.append(this.model, actions);
     this.composer.append(this.input, bar, element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line"));
-    this.node.append(header, tools, this.transcript, this.waiting, this.notice, this.composer);
+    this.node.append(header, tools, this.commandView, this.transcript, this.waiting, this.notice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
   }
@@ -196,6 +198,32 @@ class Pane {
     } finally { this.submitting = false; this.send.disabled = !this.generation; this.steer.disabled = !this.generation || this.retryText != null; }
   }
   reset() { this.generation = undefined; this.unsent = false; this.draftError = undefined; this.input.value = ""; this.render(null, []); }
+  renderCommands(data) {
+    this.commands.disabled = !data || this.switching;
+    const key = JSON.stringify([data?.generation, data?.commands, data?.command_submission]);
+    if (key === this.commandKey) return;
+    this.commandKey = key;
+    this.commandView.replaceChildren();
+    for (const item of data?.commands?.commands ?? []) {
+      const select = button(`/${item.name}`, () => {
+        this.input.value = `/${item.name} `;
+        this.unsent = true; this.draftError = undefined; this.pump(); this.input.focus();
+      }, "quiet");
+      select.title = item.description;
+      select.disabled = data.commands.revision.kind === "draft" && !item.draft_safe;
+      this.commandView.append(select, element("span", "command-description", item.description));
+    }
+    const state = data?.command_submission;
+    if (state?.pending) {
+      this.commandView.append(element("p", "", `Command result unresolved · ${state.pending.request_id}`),
+        element("pre", "command-input", JSON.stringify(state.pending, null, 2)),
+        button("Refresh command result", () => this.action("refresh_command_result"), "quiet"));
+    } else if (state?.receipt) {
+      const result = state.receipt.outcome;
+      this.commandView.append(element("p", "command-receipt", `${state.receipt.command} · ${result.kind === "draft_changed" ? `Draft changed · revision ${result.revision}` : `Committed · control ${result.control_seq}`} · ${state.receipt.request_id}`));
+    }
+    this.commandView.hidden = this.commandView.childElementCount === 0;
+  }
   render(data, models) {
     const changed = this.generation !== data?.generation;
     if (changed) {
@@ -218,6 +246,7 @@ class Pane {
     this.send.textContent = this.retryText != null ? "Retry previous" : "Send ↗";
     this.steer.disabled ||= this.retryText != null;
     this.cancel.disabled = !data;
+    this.renderCommands(data);
     if (!data) {
       if (!this.transcript.querySelector(".empty-pane")) {
         const empty = element("div", "empty-pane");

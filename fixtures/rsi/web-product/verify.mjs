@@ -69,6 +69,14 @@ try {
       await page.locator("#workspaces .nav-item").first().click();
       const left = page.getByRole("region", { name: "Left conversation", exact: true });
       const right = page.getByRole("region", { name: "Right conversation", exact: true });
+      await left.getByRole("button", { name: "Session commands", exact: true }).click();
+      await left.getByRole("button", { name: "/plan", exact: true }).click();
+      assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "/plan ");
+      await left.getByRole("textbox", { name: "Left message" }).fill("/plan on");
+      await left.getByRole("button", { name: "Send ↗" }).click();
+      await left.locator(".command-receipt").filter({ hasText: "Draft changed · revision 1" }).waitFor();
+      assert.equal(service.provider.requests.length, 0);
+      await page.screenshot({ path: join(report, `${name}-plan-draft.png`) });
       await left.getByRole("textbox", { name: "Left message" }).fill("A saved left draft");
       await page.locator("#pane-tab-1").click();
       await page.locator("#workspaces .nav-item").first().click();
@@ -88,6 +96,10 @@ try {
       await page.locator("#detail").waitFor({ state: "hidden" });
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-two-panes.png`) });
+      await left.getByRole("textbox", { name: "Left message" }).fill("/plan off");
+      await left.getByRole("button", { name: "Send ↗" }).click();
+      await left.locator(".command-receipt").filter({ hasText: "Committed · control" }).waitFor();
+      await page.screenshot({ path: join(report, `${name}-plan-durable.png`) });
       await left.getByRole("textbox", { name: "Left message" }).fill("Keep this draft while switching");
       const leftIdentity = await left.locator(".pane-session").innerText();
       await page.locator("#refresh").click();
@@ -155,6 +167,7 @@ try {
       assert.equal((await context.cookies()).length, 0);
       assert.deepEqual(errors, []);
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
+      results.at(-1).cases.push("Session commands and draft-to-durable plan changes");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

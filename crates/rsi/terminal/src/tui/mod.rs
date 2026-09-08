@@ -1,5 +1,6 @@
 //! Fullscreen presentation over Session. The Kernel remains the execution authority.
 mod clipboard;
+mod commands;
 mod editor;
 mod input;
 mod render;
@@ -106,6 +107,7 @@ enum Update {
     Notice(String),
     Copy(clipboard::Delivery),
     Submitted(rsi_session_protocol::Result<rsi_agent_turn_protocol::MessageReceipt>),
+    Command(rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt>),
     Window(transcript::Piece),
 }
 
@@ -144,6 +146,7 @@ struct History {
 }
 
 struct SavedSession {
+    command: Arc<rsi_client::CommandSubmission>,
     editor: editor::Editor,
     model: Option<ModelRef>,
     owned: BTreeSet<MessageId>,
@@ -168,6 +171,7 @@ struct Client {
     tasks: FuturesUnordered<Task>,
     owned: BTreeSet<MessageId>,
     submission: Submission,
+    command: Arc<rsi_client::CommandSubmission>,
     cancelling: bool,
     cancellation_queued: bool,
     inspection: Option<StoreSessionInspection>,
@@ -207,6 +211,7 @@ impl Client {
             tasks: FuturesUnordered::new(),
             owned: BTreeSet::new(),
             submission: Submission::default(),
+            command: Arc::default(),
             cancelling: false,
             cancellation_queued: false,
             inspection: attached.inspection,
@@ -355,6 +360,13 @@ impl Client {
     }
 
     fn submit(&mut self, delivery: MessageDelivery, retry: bool) {
+        if let Some(pending) = self.command.view().pending {
+            self.state.notice(format!(
+                "Command {} is unresolved; use Actions → Session command result",
+                pending.request_id
+            ));
+            return;
+        }
         if self.submission.busy {
             self.state
                 .notice("Submission is still being reconciled; draft retained");
@@ -413,12 +425,25 @@ impl Client {
         };
         self.owned.insert(request.message_id.clone());
         let controller = self.controller.clone();
+        let command = self.command.clone();
         self.submission.busy = true;
         let was_rejected = self.submission.rejected;
         self.submission.rejected = false;
         self.state
             .notice(format!("Submitting {}", request.message_id));
         self.submission.busy = self.spawn_as(WorkKind::Submit, async move {
+            if !retry && let [MessageInput::Text { text }] = request.content.as_slice() {
+                let id = rsi_agent_session_protocol::DomainRequestId::new(format!(
+                    "command-{}",
+                    request.message_id
+                ))
+                .map_err(error)?;
+                match command.try_slash(&controller, text, id).await {
+                    Ok(Some(receipt)) => return Ok(Update::Command(Ok(receipt))),
+                    Ok(None) => {}
+                    Err(error) => return Ok(Update::Command(Err(error))),
+                }
+            }
             Ok(Update::Submitted(if retry {
                 controller.retry(request).await
             } else {
@@ -593,6 +618,12 @@ impl Client {
         let application = self.application.clone();
         self.state.view_revision = self.state.view_revision.wrapping_add(1);
         match action {
+            Action::Commands => self.command_menu(),
+            Action::CommandResult => self.command_result(),
+            Action::CommandHelp(name, description) => {
+                self.state.open_detail(format!("/{name}\n{description}"));
+                self.state.notice("Type the command in the composer and press Enter");
+            }
             Action::Exit => return true,
             Action::Retry => self.submit(MessageDelivery::NextTurn, true),
             Action::Submission => {
@@ -939,6 +970,7 @@ async fn run_inner(
                     }
                     if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
+                        Ok(Update::Command(result)) => client.command_finished(result),
                         Err(problem) => { if matches!(work.kind, WorkKind::History) { client.history.backfill = false; } client.state.notice(problem.to_string()); },
                         Ok(Update::Notice(message)) => client.state.notice(message),
                         Ok(Update::Copy(delivery)) => {
@@ -1019,9 +1051,10 @@ async fn run_inner(
                             let old = client.state.header.session_id().clone();
                             let draft = std::mem::take(&mut client.state.editor); let model = client.state.model.take();
                             let owned = std::mem::take(&mut client.owned);
-                            if !draft.text.is_empty() || model.is_some() || !owned.is_empty() { client.drafts.insert(old, SavedSession { editor: draft, model, owned }); }
+                            let command = std::mem::take(&mut client.command);
+                            if !draft.text.is_empty() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
                             client.handle = attached.handle; client.state = State::new(attached.header, client.state.remote);
-                            if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.owned = saved.owned; }
+                            if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.owned = saved.owned; client.command = saved.command; }
                             client.cancelling = false; client.cancellation_queued = false; client.interactions = None; client.inspection = attached.inspection; client.durability = if client.inspection.is_some() { Durability::Durable } else { Durability::Draft }; client.history.before = None; client.live_transcript = None;
                             client.state.active = client.inspection.as_ref().is_some_and(|snapshot| snapshot.active_turn_id.is_some());
                             client.history.loading = false; client.inspecting = false; client.history.pages = 0; client.history.bytes = 0; client.history.backfill = true;
