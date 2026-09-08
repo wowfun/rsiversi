@@ -111,6 +111,9 @@ The [development tutorial](../../../docs/tui-development.md)
 and [debugging reference](../../../docs/tui-debugging.md) explain isolated launch,
 source tracing and visual evidence. Pure projection, argument and controller
 tests live here; built-product CLI/PTY integration remains with the launcher.
+Tests that override process-global terminal rendering settings run in isolated
+child processes. Writer acknowledgment and byte-comparison scenarios have bounded
+waits; changing another test's color mode cannot alter an in-flight byte oracle.
 The terminal-restoration PTY probe bounds captured output and explicitly stops
 and joins its nonblocking reader after child exit. It never relies on the host
 PTY delivering EOF to complete fixture cleanup. Failure teardown starts draining

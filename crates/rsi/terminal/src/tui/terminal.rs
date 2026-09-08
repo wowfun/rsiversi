@@ -324,9 +324,32 @@ mod tests {
         assert!(frame(&buffer, Some(&buffer)).unwrap().is_empty());
     }
 
-    #[test]
-    fn diff_clears_wide_cells_changes_style_and_repaints_resize() {
+    #[tokio::test]
+    async fn diff_clears_wide_cells_changes_style_and_repaints_resize() {
         use ratatui::{backend::TestBackend, style::Color};
+        const CHILD: &str = "RSI_TUI_COLOR_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let buffer = Buffer::with_lines(["AAAA"]);
+            let before = frame(&buffer, None).unwrap();
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tui::terminal::tests::diff_clears_wide_cells_changes_style_and_repaints_resize"])
+                .env_clear().env(CHILD, "1").env("NO_COLOR", "1").kill_on_drop(true);
+            let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+                .await
+                .expect("isolated color test deadline")
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                frame(&buffer, None).unwrap(),
+                before,
+                "child color override cannot change the parent's byte oracle"
+            );
+            return;
+        }
         crossterm::style::force_color_output(true);
         let mut previous = Buffer::with_lines(["界ab"]);
         previous[(0, 0)].set_bg(Color::Blue);
@@ -390,109 +413,117 @@ mod tests {
 
     #[tokio::test]
     async fn coalesced_frames_diff_from_written_cells_and_generation_repaints() {
-        use tokio::io::AsyncReadExt as _;
-        let (output, mut input) = output_pair();
-        let (frames, receiver) = watch::channel(None);
-        let (_commands, commands) = mpsc::channel(2);
-        let (presented, mut acknowledged) = watch::channel(None);
-        let stop = CancellationToken::new();
-        let stopping = stop.clone();
-        let task = tokio::spawn(async move {
-            write_frames(
-                &output,
-                receiver,
-                commands,
-                presented,
-                &stopping,
-                &AtomicBool::new(true),
-            )
-            .await
-        });
-        let a = rendered(1, 1, Buffer::with_lines(["AAAA"]));
-        frames.send_replace(Some(a.clone()));
-        acknowledged.changed().await.unwrap();
-        let mut first = vec![0; frame(&a.buffer, None).unwrap().len()];
-        input.read_exact(&mut first).await.unwrap();
-        assert_eq!(first, frame(&a.buffer, None).unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            use tokio::io::AsyncReadExt as _;
+            let (output, mut input) = output_pair();
+            let (frames, receiver) = watch::channel(None);
+            let (_commands, commands) = mpsc::channel(2);
+            let (presented, mut acknowledged) = watch::channel(None);
+            let stop = CancellationToken::new();
+            let stopping = stop.clone();
+            let task = tokio::spawn(async move {
+                write_frames(
+                    &output,
+                    receiver,
+                    commands,
+                    presented,
+                    &stopping,
+                    &AtomicBool::new(true),
+                )
+                .await
+            });
+            let a = rendered(1, 1, Buffer::with_lines(["AAAA"]));
+            frames.send_replace(Some(a.clone()));
+            acknowledged.changed().await.unwrap();
+            let mut first = vec![0; frame(&a.buffer, None).unwrap().len()];
+            input.read_exact(&mut first).await.unwrap();
+            assert_eq!(first, frame(&a.buffer, None).unwrap());
 
-        // No yield between these sends: B cannot become the writer's baseline.
-        frames.send_replace(Some(rendered(1, 2, Buffer::with_lines(["BBBB"]))));
-        let c = rendered(1, 3, Buffer::with_lines(["AACA"]));
-        frames.send_replace(Some(c.clone()));
-        acknowledged.changed().await.unwrap();
-        assert_eq!(
-            acknowledged.borrow_and_update().as_ref().unwrap().revision,
-            3
-        );
-        let expected = frame(&c.buffer, Some(&a.buffer)).unwrap();
-        let mut bytes = vec![0; expected.len()];
-        input.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(bytes, expected);
+            // No yield between these sends: B cannot become the writer's baseline.
+            frames.send_replace(Some(rendered(1, 2, Buffer::with_lines(["BBBB"]))));
+            let c = rendered(1, 3, Buffer::with_lines(["AACA"]));
+            frames.send_replace(Some(c.clone()));
+            acknowledged.changed().await.unwrap();
+            assert_eq!(
+                acknowledged.borrow_and_update().as_ref().unwrap().revision,
+                3
+            );
+            let expected = frame(&c.buffer, Some(&a.buffer)).unwrap();
+            let mut bytes = vec![0; expected.len()];
+            input.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(bytes, expected);
 
-        frames.send_replace(Some(rendered(1, 4, c.buffer.clone())));
-        acknowledged.changed().await.unwrap();
-        assert_eq!(
-            input.try_read(&mut [0; 1]).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        frames.send_replace(Some(rendered(2, 5, c.buffer.clone())));
-        acknowledged.changed().await.unwrap();
-        let expected = frame(&c.buffer, None).unwrap();
-        let mut bytes = vec![0; expected.len()];
-        input.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(bytes, expected);
-        stop.cancel();
-        task.await.unwrap().unwrap();
+            frames.send_replace(Some(rendered(1, 4, c.buffer.clone())));
+            acknowledged.changed().await.unwrap();
+            assert_eq!(
+                input.try_read(&mut [0; 1]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            frames.send_replace(Some(rendered(2, 5, c.buffer.clone())));
+            acknowledged.changed().await.unwrap();
+            let expected = frame(&c.buffer, None).unwrap();
+            let mut bytes = vec![0; expected.len()];
+            input.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(bytes, expected);
+            stop.cancel();
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("writer scenario exceeded its acknowledgment/byte deadline");
     }
 
     #[tokio::test]
     async fn interrupted_partial_frame_does_not_advance_presented_cells() {
-        use tokio::io::AsyncReadExt as _;
-        let (output, mut input) = output_pair();
-        let (frames, receiver) = watch::channel(None);
-        let (_commands, commands) = mpsc::channel(2);
-        let (presented, mut acknowledged) = watch::channel(None);
-        let stop = CancellationToken::new();
-        let stopping = stop.clone();
-        let task = tokio::spawn(async move {
-            write_frames(
-                &output,
-                receiver,
-                commands,
-                presented,
-                &stopping,
-                &AtomicBool::new(true),
-            )
-            .await
-        });
-        let a = rendered(1, 1, Buffer::with_lines(["AAAA"]));
-        frames.send_replace(Some(a.clone()));
-        acknowledged.changed().await.unwrap();
-        let mut first = vec![0; frame(&a.buffer, None).unwrap().len()];
-        input.read_exact(&mut first).await.unwrap();
-
-        // Alternate styles keep this valid maximum-size screen larger than the
-        // socket buffer, so one byte proves progress while the rest stays blocked.
-        let mut buffer = Buffer::filled(
-            ratatui::layout::Rect::new(0, 0, 512, 256),
-            ratatui::buffer::Cell::new("x"),
-        );
-        for (index, cell) in buffer.content.iter_mut().enumerate() {
-            cell.set_fg(if index % 2 == 0 {
-                ratatui::style::Color::Red
-            } else {
-                ratatui::style::Color::Blue
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            use tokio::io::AsyncReadExt as _;
+            let (output, mut input) = output_pair();
+            let (frames, receiver) = watch::channel(None);
+            let (_commands, commands) = mpsc::channel(2);
+            let (presented, mut acknowledged) = watch::channel(None);
+            let stop = CancellationToken::new();
+            let stopping = stop.clone();
+            let task = tokio::spawn(async move {
+                write_frames(
+                    &output,
+                    receiver,
+                    commands,
+                    presented,
+                    &stopping,
+                    &AtomicBool::new(true),
+                )
+                .await
             });
-        }
-        frames.send_replace(Some(rendered(1, 2, buffer)));
-        input.read_exact(&mut [0; 1]).await.unwrap();
-        stop.cancel();
-        tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(acknowledged.borrow().as_ref().unwrap().revision, 1);
+            let a = rendered(1, 1, Buffer::with_lines(["AAAA"]));
+            frames.send_replace(Some(a.clone()));
+            acknowledged.changed().await.unwrap();
+            let mut first = vec![0; frame(&a.buffer, None).unwrap().len()];
+            input.read_exact(&mut first).await.unwrap();
+
+            // Alternate styles keep this valid maximum-size screen larger than the
+            // socket buffer, so one byte proves progress while the rest stays blocked.
+            let mut buffer = Buffer::filled(
+                ratatui::layout::Rect::new(0, 0, 512, 256),
+                ratatui::buffer::Cell::new("x"),
+            );
+            for (index, cell) in buffer.content.iter_mut().enumerate() {
+                cell.set_fg(if index % 2 == 0 {
+                    ratatui::style::Color::Red
+                } else {
+                    ratatui::style::Color::Blue
+                });
+            }
+            frames.send_replace(Some(rendered(1, 2, buffer)));
+            input.read_exact(&mut [0; 1]).await.unwrap();
+            stop.cancel();
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(acknowledged.borrow().as_ref().unwrap().revision, 1);
+        })
+        .await
+        .expect("writer scenario exceeded its acknowledgment/byte deadline");
     }
 
     #[tokio::test]
