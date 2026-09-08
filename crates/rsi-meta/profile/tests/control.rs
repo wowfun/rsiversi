@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
+#[path = "control/manual_clock.rs"]
+mod manual_clock;
+
 enum ProbeContract {}
 
 impl LocalContract for ProbeContract {
@@ -293,6 +296,7 @@ config = {{ mode = "{mode}", revision = {revision} }}
 
 #[tokio::test]
 async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_binding() {
+    let clock = manual_clock::hold().await;
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     write_isolated_pair(&path, 0, "bound");
@@ -337,6 +341,7 @@ async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_bin
     assert_eq!(provider(), original_fiber);
     assert!(handle.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_complete());
+    clock.finish().await;
 }
 
 async fn start(
@@ -483,6 +488,7 @@ async fn control_is_a_typed_local_service_and_healthy_equal_tree_is_unchanged() 
 
 #[tokio::test]
 async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
+    let clock = manual_clock::hold().await;
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     write_profile(&path, "ok");
@@ -501,6 +507,7 @@ async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
     assert_eq!(outcome.status().health(), ProfileHealth::Converged);
     assert_eq!(starts.load(Ordering::SeqCst), 3);
     let _ = runtime.shutdown().await;
+    clock.finish().await;
 }
 
 #[tokio::test]
