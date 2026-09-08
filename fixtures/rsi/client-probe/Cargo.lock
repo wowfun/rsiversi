@@ -357,6 +357,7 @@ name = "rsi-agent-composition-protocol"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "futures-util",
  "rsi-agent-context",
  "rsi-agent-session-protocol",
  "rsi-meta",
