@@ -2582,6 +2582,7 @@ dependencies = [
  "rsi-agent-context",
  "rsi-agent-executor",
  "rsi-agent-kernel",
+ "rsi-agent-plan-policy",
  "rsi-agent-presets",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -2782,6 +2783,34 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-plan-policy"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-context",
+ "rsi-agent-kernel",
+ "rsi-agent-presets",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-meta-profile",
+ "rsi-meta-scope",
+ "rsi-sandbox",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

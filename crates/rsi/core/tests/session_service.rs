@@ -26,6 +26,8 @@ use tokio_util::sync::CancellationToken;
 
 const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[path = "session_service/plan_policy.rs"]
+mod plan_policy;
 #[path = "session_service/session_api.rs"]
 mod session_api;
 #[path = "session_service/standard_api.rs"]
@@ -313,6 +315,87 @@ async fn built_in_standard_host_profile_boots_the_real_product_composition() {
         Arc::ptr_eq(&first, &second),
         "clients share one plugin-owned Session generation"
     );
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standard_plan_commands_reach_the_actual_projection_and_provider_context() {
+    use futures_util::StreamExt as _;
+    use rsi_agent_session_protocol::{CommandArguments, DomainRequestId, SessionCommandInvocation};
+    let (endpoint, requests, provider) = capturing_provider().await;
+    let fixture = fixture(&endpoint);
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let application = running.session_service().unwrap();
+    let handle = application
+        .create(CreateSession {
+            workspace_id: running
+                .workspace_registry()
+                .unwrap()
+                .get_or_create(&fixture.workspace)
+                .await
+                .unwrap()
+                .id,
+            session_id: SessionId::new("standard-plan-mode").unwrap(),
+            agent_preset_id: None,
+            workspace_trust: WorkspaceTrust::Untrusted,
+        })
+        .await
+        .unwrap();
+    for (id, argument, enabled) in [("plan-on", "on", true), ("plan-off", "off", false)] {
+        let catalog = handle.commands().await.unwrap();
+        let command = catalog
+            .commands()
+            .iter()
+            .find(|entry| entry.name() == "plan")
+            .unwrap();
+        let request_id = DomainRequestId::new(id).unwrap();
+        let receipt = handle
+            .execute_command(SessionCommandInvocation {
+                command: command.id().clone(),
+                request_id: request_id.clone(),
+                expected_revision: catalog.revision(),
+                arguments: CommandArguments::new(argument.into()).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.command_status(&request_id).await.unwrap(),
+            Some(receipt)
+        );
+        let mut views = handle.observe_projections().await.unwrap();
+        let view = views.next().await.unwrap().unwrap();
+        assert_eq!(
+            view.snapshot()
+                .entries()
+                .iter()
+                .find(|entry| entry.producer().as_str() == "rsi.plan-policy.view")
+                .unwrap()
+                .view()
+                .unwrap()
+                .value()["enabled"],
+            enabled
+        );
+        drop(views);
+        run_message_to_terminal(&handle, id).await;
+        let requests = requests.lock().unwrap();
+        let latest = requests.last().unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .map(serde_json::Value::to_string)
+            .find(|message| message.contains("Plan mode is "))
+            .unwrap();
+        assert!(latest.contains(if enabled {
+            "Plan mode is enabled."
+        } else {
+            "Plan mode is disabled."
+        }));
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }

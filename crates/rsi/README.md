@@ -296,6 +296,11 @@ time context commits one UTC clock reading before each new provider retry series
 Both belong to the immutable Agent generation. Custom presets select their own
 contributions through the Agent-only addon catalog.
 
+The standard preset selects [plan policy](../rsi-agent/plan-policy/README.md)
+through that same catalog. Planning starts disabled and can change through the
+shared Session command service before or after publication. Its Tool allowlist
+adds a constraint to existing approval and sandbox policy.
+
 On Linux, linking the standard coding Tools makes a successfully probed
 restricted sandbox backend a Host activation requirement. The Host does not
 begin serving and defer an unavailable enforcement backend until the first

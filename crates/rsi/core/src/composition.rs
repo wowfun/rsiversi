@@ -96,6 +96,7 @@ const CONTEXT_BUILDER_FACTORY: &str = "rsi.agent.context.default";
 const WORKSPACE_CONTEXT_FACTORY: &str = "rsi.agent.workspace-context.local";
 const WORKSPACE_CONTRIBUTOR_FACTORY: &str = "rsi.agent.workspace-context.contributor";
 const TIME_CONTEXT_FACTORY: &str = "rsi.agent.time-context";
+const PLAN_POLICY_FACTORY: &str = "rsi.agent.plan-policy";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
 const STANDARD_MAXIMUM_ACTIVE_TURNS: usize = 4;
 const AGENT_COMPOSITION_FACTORY: &str = "rsi.agent.composition";
@@ -204,6 +205,10 @@ fn standard_agent_addon(
     register(
         TIME_CONTEXT_FACTORY,
         Arc::new(rsi_agent_time_context::TimeContextFactory::default()),
+    )?;
+    register(
+        PLAN_POLICY_FACTORY,
+        Arc::new(rsi_agent_plan_policy::PlanPolicyFactory),
     )?;
     if let Some(coding) = coding_tools {
         register(
@@ -1725,6 +1730,7 @@ mod tests {
                 CONTEXT_BUILDER_FACTORY,
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
+                PLAN_POLICY_FACTORY,
                 OUTPUT_READ_FACTORY,
                 BASH_TOOL_FACTORY,
                 JOBS_TOOLS_FACTORY,
@@ -1745,6 +1751,7 @@ mod tests {
                 CONTEXT_BUILDER_FACTORY,
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
+                PLAN_POLICY_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
                 QUESTION_TOOLS_FACTORY

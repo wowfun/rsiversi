@@ -53,6 +53,7 @@ rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-tools = { path = "../../rsi-agent/tools" }
 rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
+rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
 rsi-ai = { path = "../../rsi-ai/core" }
 rsi-ai-deepseek = { path = "../../rsi-ai/deepseek" }
 rsi-ai-image = { path = "../../rsi-ai/image" }

@@ -28,8 +28,11 @@ workspace/time migration. The
 owns command dispatch, draft values, preset selection and transport binding.
 The [extension projection decision](../../implemented/architecture/2026-09-09-session-extension-projections.md)
 owns complete dual-watermark capture, isolated producers, draft subscriptions
-and retained API values. This proposal continues with planning policy and
-repeat-tool reminders consuming those established interfaces.
+and retained API values. The
+[planning policy decision](../../implemented/feature/2026-09-09-plan-policy.md)
+owns the ordinary planning command/state/context/policy/view plugin. This
+proposal continues with repeat-tool reminders and shared interactive command
+consumers of those established interfaces.
 
 ## Alternatives considered
 

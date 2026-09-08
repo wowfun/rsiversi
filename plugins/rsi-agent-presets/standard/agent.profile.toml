@@ -17,6 +17,11 @@ plugin = "rsi.agent.time-context"
 
 [[steps]]
 kind = "plugin"
+id = "plan-policy"
+plugin = "rsi.agent.plan-policy"
+
+[[steps]]
+kind = "plugin"
 id = "output-read"
 plugin = "rsi.output.read"
 enabled_rhai = "defines.standard_linux_coding_tools"
