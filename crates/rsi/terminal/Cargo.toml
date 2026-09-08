@@ -48,6 +48,7 @@ libc.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+vt100.workspace = true
 portable-pty.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }

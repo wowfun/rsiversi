@@ -8,6 +8,9 @@ struct TerminalClient {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     output: Arc<std::sync::Mutex<Vec<u8>>>,
     reader: Option<std::thread::JoinHandle<()>>,
+    screen: Arc<std::sync::Mutex<vt100::Parser>>,
+    capture_name: String,
+    capture_count: usize,
 }
 
 impl TerminalClient {
@@ -45,12 +48,15 @@ impl TerminalClient {
         }
         command.env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret");
         command.env("TERM", "xterm-256color");
+        command.env_remove("NO_COLOR");
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let writer = pair.master.take_writer().unwrap();
         let mut source = pair.master.try_clone_reader().unwrap();
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = output.clone();
+        let screen = Arc::new(std::sync::Mutex::new(vt100::Parser::new(30, 110, 0)));
+        let rendered = screen.clone();
         let reader = std::thread::spawn(move || {
             let mut bytes = [0; 8192];
             loop {
@@ -60,6 +66,7 @@ impl TerminalClient {
                         let mut output = captured.lock().unwrap();
                         if output.len() + count <= 16 * 1024 * 1024 {
                             output.extend_from_slice(&bytes[..count]);
+                            rendered.lock().unwrap().process(&bytes[..count]);
                         }
                     }
                 }
@@ -71,6 +78,9 @@ impl TerminalClient {
             child,
             output,
             reader: Some(reader),
+            screen,
+            capture_name: arguments.last().unwrap_or(&"tui").replace('/', "_"),
+            capture_count: 0,
         }
     }
 
@@ -82,8 +92,9 @@ impl TerminalClient {
     async fn until(&mut self, text: &str) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            let output = String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned();
+            let output = self.screen.lock().unwrap().screen().contents();
             if output.contains(text) {
+                self.capture();
                 return;
             }
             assert!(
@@ -104,6 +115,40 @@ impl TerminalClient {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    fn resize(&self, size: PtySize) {
+        let mut parser = self.screen.lock().unwrap();
+        parser.screen_mut().set_size(size.rows, size.cols);
+        self.master.resize(size).unwrap();
+    }
+
+    fn capture(&mut self) {
+        let Ok(directory) = std::env::var("RSI_TUI_PTY_REPORT") else {
+            return;
+        };
+        std::fs::create_dir_all(&directory).unwrap();
+        self.capture_count += 1;
+        let base = std::path::Path::new(&directory)
+            .join(format!("{}-{:02}", self.capture_name, self.capture_count));
+        let parser = self.screen.lock().unwrap();
+        let screen = parser.screen();
+        let (height, width) = screen.size();
+        let cells: Vec<_> = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| {
+            let cell = screen.cell(y, x).unwrap();
+            serde_json::json!({"x": x, "y": y, "text": cell.contents(), "fg": format!("{:?}", cell.fgcolor()), "bg": format!("{:?}", cell.bgcolor()), "bold": cell.bold()})
+        }).collect();
+        std::fs::write(
+            base.with_extension("json"),
+            serde_json::to_vec(
+                &serde_json::json!({"width": width, "height": height, "cells": cells}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(base.with_extension("txt"), screen.contents()).unwrap();
+        drop(parser);
+        std::fs::write(base.with_extension("ansi"), &*self.output.lock().unwrap()).unwrap();
     }
 
     async fn finish(&mut self) {
@@ -153,22 +198,25 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     terminal.until("fixture/fixture-model").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    terminal
-        .master
-        .resize(PtySize {
-            rows: 12,
-            cols: 42,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
+    terminal.resize(PtySize {
+        rows: 12,
+        cols: 42,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
     tokio::time::sleep(Duration::from_millis(300)).await;
     {
         let output = terminal.output.lock().unwrap();
         let output = String::from_utf8_lossy(&output);
         let frame = output.rsplit("\x1b[2J").next().unwrap();
         assert!(
-            frame.contains("exit interrupts"),
+            terminal
+                .screen
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("exit interrupts"),
             "resized header must remain on screen"
         );
         assert!(
@@ -176,6 +224,7 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
             "resized frame must not write below row 12"
         );
     }
+    terminal.capture();
     terminal.send(b"\x04");
     terminal.finish().await;
     let history = fixture.assert_success(&[
@@ -245,6 +294,7 @@ async fn fullscreen_answers_live_questions_through_the_real_tool_and_provider_lo
     terminal.until("Live question").await;
     terminal.send(b"2\rbecause verified\r");
     terminal.until("hello from daemon").await;
+    terminal.capture();
     terminal.send(b"\x04");
     terminal.finish().await;
     let requests = state.requests.lock().unwrap();
@@ -279,6 +329,7 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
     terminal.until("Approval response accepted: true").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(80)).await;
+    terminal.capture();
     terminal.send(b"\x04");
     terminal.finish().await;
     assert_eq!(state.requests.lock().unwrap().len(), 1);

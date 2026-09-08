@@ -798,7 +798,7 @@ async fn run_inner(
             attachment(resolve_application_handle(&application, &workspace, selection).await?, resumed).await
         } => attached?,
     };
-    let terminal = terminal::Terminal::enter(&application_work.tasks).map_err(error)?;
+    let mut terminal = terminal::Terminal::enter(&application_work.tasks).map_err(error)?;
     let stopped = application_work.stop.child_token();
     let mut input = input::spawn(stopped.clone(), &application_work.tasks).map_err(error)?;
     let (events, mut receiver) = mpsc::channel(super::CLI_RENDER_CHANNEL_CAPACITY);
@@ -835,6 +835,7 @@ async fn run_inner(
     let mut screen =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).map_err(error)?;
     let mut view = render::View::default();
+    let mut frame_revision = 0_u64;
     let mut tick = tokio::time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut inspect_tick = tokio::time::interval(Duration::from_secs(1));
@@ -850,7 +851,20 @@ async fn run_inner(
                 () = application_work.stop.cancelled() => break,
                 signal = tokio::signal::ctrl_c() => { signal.map_err(error)?; client.cancel(); dirty = true; },
                 () = &mut terminate => break,
+                changed = terminal.presented.changed() => {
+                    changed.map_err(error)?;
+                    if let Some(frame) = terminal.presented.borrow_and_update().as_ref() {
+                        view = if frame.generation == client.generation {
+                            frame.view.clone()
+                        } else {
+                            render::View::default()
+                        };
+                    }
+                },
                 incoming = input.recv() => {
+                    if terminal.presented.borrow().as_ref().is_none_or(|frame| frame.generation != client.generation) {
+                        view = render::View::default();
+                    }
                     dirty = true;
                     match incoming.unwrap_or(input::Input::Closed) {
                         input::Input::Closed => break,
@@ -1052,8 +1066,15 @@ async fn run_inner(
                     let (width,height) = terminal::size();
                     if screen.size().map_err(error)? != ratatui::layout::Size::new(width,height) { render::resize(&mut screen, width, height).map_err(error)?; dirty = true; }
                     if dirty {
-                        screen.draw(|frame| view = render::draw(frame, &client.state)).map_err(error)?;
-                        terminal.frames.send_replace(Some(terminal::frame(screen.backend().buffer()).map_err(error)?));
+                        let mut next_view = render::View::default();
+                        screen.draw(|frame| next_view = render::draw(frame, &client.state)).map_err(error)?;
+                        frame_revision = frame_revision.checked_add(1).ok_or_else(|| error("Terminal frame revision exhausted"))?;
+                        terminal.frames.send_replace(Some(Arc::new(terminal::RenderedFrame {
+                            generation: client.generation,
+                            revision: frame_revision,
+                            buffer: screen.backend().buffer().clone(),
+                            view: next_view,
+                        })));
                         dirty = false;
                     }
                     if client.history.backfill && !client.history.loading { client.history(false); }

@@ -56,6 +56,12 @@ behavior and presentation bounds. Input against an older rendered frame resolves
 its Session identity and source anchors in the current projection; removed
 sources are inert until redraw. Accepted-message detail uses a bounded JSON
 window with an explicit truncation marker.
+The producer submits complete cell buffers and their source maps through a
+coalescing channel. Only the output writer computes cell differences against its
+last completely written frame. Interrupted or short writes never advance that
+baseline or publish a new hit map. Identical cells emit no bytes; resize or a new
+attachment generation forces a full repaint. Input uses the last acknowledged
+source map for the current attachment generation.
 Incomplete bounded escape sequences expire after 50 ms without input. Paste and
 oversized-sequence quarantine retain their terminator rule across idle intervals.
 Line framing retries interrupted reads without discarding an accumulated prefix.

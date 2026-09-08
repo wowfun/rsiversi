@@ -39,6 +39,7 @@ memchr = "2.7"
 percent-encoding = "2.3"
 pulldown-cmark = "0.10"
 portable-pty = "0.9"
+vt100 = "0.16.2"
 ratatui = "0.30.2"
 # Repository CST checks depend on this unstable 0.0.x syntax API and token behavior.
 ra_ap_syntax = "=0.0.349"

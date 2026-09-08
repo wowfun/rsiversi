@@ -33,7 +33,7 @@ pub(super) struct Row {
     pub(super) title: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct View {
     rows: Vec<Row>,
     session: Option<rsi_agent_session_protocol::SessionId>,

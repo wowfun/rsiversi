@@ -7,7 +7,10 @@ use ratatui::{
 #[cfg(unix)]
 use std::io::Write as _;
 use std::io::{self, IsTerminal as _};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 #[cfg(unix)]
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -32,8 +35,17 @@ pub(super) fn size() -> (u16, u16) {
     (width.clamp(1, 512), height.clamp(1, 256))
 }
 
+#[derive(Debug)]
+pub(super) struct RenderedFrame {
+    pub(super) generation: u64,
+    pub(super) revision: u64,
+    pub(super) buffer: Buffer,
+    pub(super) view: super::render::View,
+}
+
 pub(super) struct Terminal {
-    pub(super) frames: watch::Sender<Option<Vec<u8>>>,
+    pub(super) frames: watch::Sender<Option<Arc<RenderedFrame>>>,
+    pub(super) presented: watch::Receiver<Option<Arc<RenderedFrame>>>,
     pub(super) commands: mpsc::Sender<String>,
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<io::Result<()>>>,
@@ -52,6 +64,7 @@ impl Terminal {
         terminal::enable_raw_mode()?;
         ACTIVE.store(true, Ordering::Release);
         let (frames, receiver) = watch::channel(None);
+        let (presented_sender, presented) = watch::channel(None);
         let stop = CancellationToken::new();
         let (commands, command_receiver) = mpsc::channel(2);
         let mut setup = Vec::new();
@@ -67,9 +80,16 @@ impl Terminal {
         )?;
         // The only reader recognizes protocol responses; legacy terminals ignore this query.
         setup.extend_from_slice(b"\x1b[?u");
-        let task = tasks.spawn(writer(receiver, command_receiver, setup, stop.clone()));
+        let task = tasks.spawn(writer(
+            receiver,
+            command_receiver,
+            presented_sender,
+            setup,
+            stop.clone(),
+        ));
         Ok(Self {
             frames,
+            presented,
             commands,
             stop,
             task: Some(task),
@@ -137,26 +157,58 @@ fn tty(read: bool) -> io::Result<std::fs::File> {
 
 #[cfg(unix)]
 async fn writer(
-    mut frames: watch::Receiver<Option<Vec<u8>>>,
-    mut commands: mpsc::Receiver<String>,
+    frames: watch::Receiver<Option<Arc<RenderedFrame>>>,
+    commands: mpsc::Receiver<String>,
+    presented: watch::Sender<Option<Arc<RenderedFrame>>>,
     setup: Vec<u8>,
     stop: CancellationToken,
 ) -> io::Result<()> {
     let tty = tokio::io::unix::AsyncFd::new(tty(false)?)?;
-    write_bytes(&tty, &setup, &stop).await?;
+    if write_bytes(&tty, &setup, &stop, &ACTIVE).await? == WriteStatus::Interrupted {
+        return Ok(());
+    }
+    write_frames(&tty, frames, commands, presented, &stop, &ACTIVE).await
+}
+
+#[cfg(unix)]
+async fn write_frames(
+    tty: &tokio::io::unix::AsyncFd<std::fs::File>,
+    mut frames: watch::Receiver<Option<Arc<RenderedFrame>>>,
+    mut commands: mpsc::Receiver<String>,
+    presented: watch::Sender<Option<Arc<RenderedFrame>>>,
+    stop: &CancellationToken,
+    active: &AtomicBool,
+) -> io::Result<()> {
+    let mut last: Option<Arc<RenderedFrame>> = None;
     loop {
-        let frame = tokio::select! {
+        tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            Some(command) = commands.recv() => Some(command.into_bytes()),
+            Some(command) = commands.recv() => {
+                if write_bytes(tty, command.as_bytes(), stop, active).await? == WriteStatus::Interrupted {
+                    return Ok(());
+                }
+            },
             changed = frames.changed() => {
                 if changed.is_err() { return Ok(()); }
-                frames.borrow_and_update().clone()
+                let Some(next) = frames.borrow_and_update().clone() else { continue; };
+                if last.as_ref().is_some_and(|last| next.revision <= last.revision) { continue; }
+                let previous = last.as_ref().filter(|last| last.generation == next.generation);
+                let bytes = frame(&next.buffer, previous.map(|last| &last.buffer))?;
+                if write_bytes(tty, &bytes, stop, active).await? == WriteStatus::Interrupted {
+                    return Ok(());
+                }
+                last = Some(next.clone());
+                presented.send_replace(Some(next));
             },
-        };
-        if let Some(frame) = frame {
-            write_bytes(&tty, &frame, &stop).await?;
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteStatus {
+    Complete,
+    Interrupted,
 }
 
 #[cfg(unix)]
@@ -164,14 +216,19 @@ async fn write_bytes(
     tty: &tokio::io::unix::AsyncFd<std::fs::File>,
     bytes: &[u8],
     stop: &CancellationToken,
-) -> io::Result<()> {
+    active: &AtomicBool,
+) -> io::Result<WriteStatus> {
+    if stop.is_cancelled() || !active.load(Ordering::Acquire) {
+        return Ok(WriteStatus::Interrupted);
+    }
     let mut remaining = bytes;
     while !remaining.is_empty() {
-        if !ACTIVE.load(Ordering::Acquire) {
-            return Ok(());
+        if !active.load(Ordering::Acquire) {
+            return Ok(WriteStatus::Interrupted);
         }
         let mut ready = tokio::select! {
-            () = stop.cancelled() => return Ok(()),
+            biased;
+            () = stop.cancelled() => return Ok(WriteStatus::Interrupted),
             ready = tty.writable() => ready?,
         };
         match ready.try_io(|fd| fd.get_ref().write(remaining)) {
@@ -181,22 +238,33 @@ async fn write_bytes(
             Err(_) => {}
         }
     }
-    Ok(())
+    Ok(WriteStatus::Complete)
 }
 
 #[cfg(not(unix))]
 async fn writer(
-    _: watch::Receiver<Option<Vec<u8>>>,
+    _: watch::Receiver<Option<Arc<RenderedFrame>>>,
     _: mpsc::Receiver<String>,
+    _: watch::Sender<Option<Arc<RenderedFrame>>>,
     _: Vec<u8>,
     _: CancellationToken,
 ) -> io::Result<()> {
     Err(io::Error::other("Unix terminal required"))
 }
 
-pub(super) fn frame(buffer: &Buffer) -> io::Result<Vec<u8>> {
+fn frame(buffer: &Buffer, previous: Option<&Buffer>) -> io::Result<Vec<u8>> {
     use unicode_width::UnicodeWidthStr as _;
     let mut bytes = Vec::new();
+    if let Some(previous) = previous.filter(|previous| previous.area == buffer.area) {
+        let mut updates = previous.diff_iter(buffer).peekable();
+        if updates.peek().is_none() {
+            return Ok(bytes);
+        }
+        let mut backend = CrosstermBackend::new(&mut bytes);
+        backend.draw(updates)?;
+        ratatui::backend::Backend::flush(&mut backend)?;
+        return Ok(bytes);
+    }
     bytes.extend_from_slice(b"\x1b[0m\x1b[2J");
     let mut backend = CrosstermBackend::new(&mut bytes);
     let width = usize::from(buffer.area.width);
@@ -212,8 +280,8 @@ pub(super) fn frame(buffer: &Buffer) -> io::Result<Vec<u8>> {
                 }
                 skip_until = index + cell.symbol().width().max(1);
                 Some((
-                    u16::try_from(index % width).unwrap_or(0),
-                    u16::try_from(index / width).unwrap_or(0),
+                    buffer.area.x + u16::try_from(index % width).unwrap_or(0),
+                    buffer.area.y + u16::try_from(index / width).unwrap_or(0),
                     cell,
                 ))
             }),
@@ -227,6 +295,183 @@ mod tests {
     use super::*;
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+    #[test]
+    fn identical_cells_emit_no_terminal_bytes() {
+        let buffer = Buffer::with_lines(["hello 界"]);
+        assert!(frame(&buffer, Some(&buffer)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn diff_clears_wide_cells_changes_style_and_repaints_resize() {
+        use ratatui::{backend::TestBackend, style::Color};
+        crossterm::style::force_color_output(true);
+        let mut previous = Buffer::with_lines(["界ab"]);
+        previous[(0, 0)].set_bg(Color::Blue);
+        let mut next = Buffer::with_lines(["x ab"]);
+        next[(2, 0)].set_fg(Color::Red);
+        let mut terminal = TestBackend::new(4, 1);
+        terminal
+            .draw(Buffer::empty(previous.area).diff_iter(&previous))
+            .unwrap();
+        terminal.draw(previous.diff_iter(&next)).unwrap();
+        terminal.assert_buffer(&next);
+        let delta = frame(&next, Some(&previous)).unwrap();
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process(&frame(&previous, None).unwrap());
+        parser.process(&delta);
+        assert_eq!(parser.screen().contents(), "x ab");
+        assert_eq!(
+            parser.screen().cell(0, 1).unwrap().bgcolor(),
+            vt100::Color::Default
+        );
+        assert_eq!(
+            parser.screen().cell(0, 2).unwrap().fgcolor(),
+            vt100::Color::Idx(1)
+        );
+        assert!(!delta.windows(4).any(|part| part == b"\x1b[2J"));
+        assert!(
+            previous
+                .diff_iter(&next)
+                .any(|(x, y, cell)| x == 1 && y == 0 && cell.symbol() == " ")
+        );
+        assert!(delta.contains(&b' '));
+        let resized = Buffer::with_lines(["smaller"]);
+        assert_eq!(
+            frame(&resized, Some(&next)).unwrap(),
+            frame(&resized, None).unwrap()
+        );
+    }
+
+    fn rendered(generation: u64, revision: u64, buffer: Buffer) -> Arc<RenderedFrame> {
+        Arc::new(RenderedFrame {
+            generation,
+            revision,
+            buffer,
+            view: super::super::render::View::default(),
+        })
+    }
+
+    fn output_pair() -> (
+        tokio::io::unix::AsyncFd<std::fs::File>,
+        tokio::net::UnixStream,
+    ) {
+        let (output, input) = std::os::unix::net::UnixStream::pair().unwrap();
+        output.set_nonblocking(true).unwrap();
+        input.set_nonblocking(true).unwrap();
+        let output = std::fs::File::from(std::os::fd::OwnedFd::from(output));
+        (
+            tokio::io::unix::AsyncFd::new(output).unwrap(),
+            tokio::net::UnixStream::from_std(input).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn coalesced_frames_diff_from_written_cells_and_generation_repaints() {
+        use tokio::io::AsyncReadExt as _;
+        let (output, mut input) = output_pair();
+        let (frames, receiver) = watch::channel(None);
+        let (_commands, commands) = mpsc::channel(2);
+        let (presented, mut acknowledged) = watch::channel(None);
+        let stop = CancellationToken::new();
+        let stopping = stop.clone();
+        let task = tokio::spawn(async move {
+            write_frames(
+                &output,
+                receiver,
+                commands,
+                presented,
+                &stopping,
+                &AtomicBool::new(true),
+            )
+            .await
+        });
+        let a = rendered(1, 1, Buffer::with_lines(["AAAA"]));
+        frames.send_replace(Some(a.clone()));
+        acknowledged.changed().await.unwrap();
+        let mut first = vec![0; frame(&a.buffer, None).unwrap().len()];
+        input.read_exact(&mut first).await.unwrap();
+        assert_eq!(first, frame(&a.buffer, None).unwrap());
+
+        // No yield between these sends: B cannot become the writer's baseline.
+        frames.send_replace(Some(rendered(1, 2, Buffer::with_lines(["BBBB"]))));
+        let c = rendered(1, 3, Buffer::with_lines(["AACA"]));
+        frames.send_replace(Some(c.clone()));
+        acknowledged.changed().await.unwrap();
+        assert_eq!(
+            acknowledged.borrow_and_update().as_ref().unwrap().revision,
+            3
+        );
+        let expected = frame(&c.buffer, Some(&a.buffer)).unwrap();
+        let mut bytes = vec![0; expected.len()];
+        input.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(bytes, expected);
+
+        frames.send_replace(Some(rendered(1, 4, c.buffer.clone())));
+        acknowledged.changed().await.unwrap();
+        assert_eq!(
+            input.try_read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        frames.send_replace(Some(rendered(2, 5, c.buffer.clone())));
+        acknowledged.changed().await.unwrap();
+        let expected = frame(&c.buffer, None).unwrap();
+        let mut bytes = vec![0; expected.len()];
+        input.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(bytes, expected);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_partial_frame_does_not_advance_presented_cells() {
+        use tokio::io::AsyncReadExt as _;
+        let (output, mut input) = output_pair();
+        let (frames, receiver) = watch::channel(None);
+        let (_commands, commands) = mpsc::channel(2);
+        let (presented, mut acknowledged) = watch::channel(None);
+        let stop = CancellationToken::new();
+        let stopping = stop.clone();
+        let task = tokio::spawn(async move {
+            write_frames(
+                &output,
+                receiver,
+                commands,
+                presented,
+                &stopping,
+                &AtomicBool::new(true),
+            )
+            .await
+        });
+        let a = rendered(1, 1, Buffer::with_lines(["AAAA"]));
+        frames.send_replace(Some(a.clone()));
+        acknowledged.changed().await.unwrap();
+        let mut first = vec![0; frame(&a.buffer, None).unwrap().len()];
+        input.read_exact(&mut first).await.unwrap();
+
+        // Alternate styles keep this valid maximum-size screen larger than the
+        // socket buffer, so one byte proves progress while the rest stays blocked.
+        let mut buffer = Buffer::filled(
+            ratatui::layout::Rect::new(0, 0, 512, 256),
+            ratatui::buffer::Cell::new("x"),
+        );
+        for (index, cell) in buffer.content.iter_mut().enumerate() {
+            cell.set_fg(if index % 2 == 0 {
+                ratatui::style::Color::Red
+            } else {
+                ratatui::style::Color::Blue
+            });
+        }
+        frames.send_replace(Some(rendered(1, 2, buffer)));
+        input.read_exact(&mut [0; 1]).await.unwrap();
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(acknowledged.borrow().as_ref().unwrap().revision, 1);
+    }
+
     #[tokio::test]
     async fn terminal_guard_child() {
         let Ok(mode) = std::env::var("RSI_TUI_GUARD_TEST_CHILD") else {
@@ -234,8 +479,17 @@ mod tests {
         };
         let terminal = Terminal::enter(&tokio_util::task::TaskTracker::new()).unwrap();
         if mode == "slow" {
-            for _ in 0..100 {
-                terminal.frames.send_replace(Some(vec![b'x'; 1024 * 1024]));
+            for revision in 1..=100 {
+                let buffer = Buffer::filled(
+                    ratatui::layout::Rect::new(0, 0, 512, 256),
+                    ratatui::buffer::Cell::new("x"),
+                );
+                terminal.frames.send_replace(Some(Arc::new(RenderedFrame {
+                    generation: 1,
+                    revision,
+                    buffer,
+                    view: super::super::render::View::default(),
+                })));
                 tokio::task::yield_now().await;
             }
         }
