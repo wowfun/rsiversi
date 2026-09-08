@@ -751,3 +751,125 @@ async fn finalizer_snapshot_starts_every_hook_before_waiting_and_contains_panics
     assert_eq!(*calls.lock().unwrap(), vec!["after-panic"]);
     assert!(runtime.shutdown().await.is_clean());
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Both startup attempts and the failure barrier prove one durable history.
+async fn partial_recovery_restarts_after_the_last_correlated_terminal_without_rewriting_it() {
+    let memory = Arc::new(MemoryStore::new());
+    let session = SessionId::new("partial-terminal-recovery").unwrap();
+    let first = TurnId::new("first-recovery-turn").unwrap();
+    let second = TurnId::new("second-recovery-turn").unwrap();
+    let accepted = |seq, turn_id| {
+        Arc::new(
+            SessionFact::new(
+                seq,
+                1,
+                SessionFactBody::TurnAccepted {
+                    turn_id,
+                    text: "unfinished".into(),
+                    model: None,
+                    sandbox: SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap(),
+        )
+    };
+    memory
+        .append(AppendBatch {
+            session_id: session.clone(),
+            expected_seq: 0,
+            header: Some(header(session.as_str())),
+            facts: vec![
+                accepted(1, first.clone()),
+                accepted(2, second.clone()),
+                Arc::new(
+                    SessionFact::new(
+                        3,
+                        1,
+                        SessionFactBody::CancelRequested {
+                            turn_id: second.clone(),
+                            reason: None,
+                        },
+                    )
+                    .unwrap(),
+                ),
+            ],
+        })
+        .await
+        .unwrap();
+    let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
+    observed.pause_next_agent_commit_after_apply();
+    let recovering = tokio::spawn({
+        let observed = observed.clone();
+        async move {
+            AgentKernel::recover_with_clock(observed, composition(), Arc::new(FixedClock)).await
+        }
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        observed.wait_until_agent_commit_is_applied(),
+    )
+    .await
+    .unwrap();
+    let first_boundary = memory.read_turn_boundary(&session, &first).await.unwrap();
+    assert!(matches!(
+        first_boundary.terminal().unwrap().body(),
+        SessionFactBody::TurnTerminal {
+            outcome: TurnOutcome::Interrupted { .. },
+            ..
+        }
+    ));
+    let first_marker = memory.read_controls(&session, 0, 8).await.unwrap().records;
+    assert_eq!(first_marker.len(), 1);
+    assert_eq!(
+        memory
+            .list_open_turns(&session, 0, 8)
+            .await
+            .unwrap()
+            .turns
+            .len(),
+        1
+    );
+    memory.fail_next_appends(1);
+    observed.release_applied_agent_commit();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), recovering)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    let recovered =
+        AgentKernel::recover_with_clock(memory.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let controls = memory.read_controls(&session, 0, 8).await.unwrap();
+    assert_eq!(controls.records.len(), 2);
+    assert_eq!(controls.records[0], first_marker[0]);
+    assert!(
+        matches!(controls.records[1].body(), AgentControlRecordBody::TurnBoundaryRecorded { turn_id, terminal_fact_seq: 5 } if turn_id == &second)
+    );
+    assert_eq!(
+        recovered.outcome(&session, &second).await.unwrap(),
+        Some(TurnOutcome::Cancelled)
+    );
+    assert_eq!(
+        memory
+            .read_turn_boundary(&session, &first)
+            .await
+            .unwrap()
+            .terminal(),
+        first_boundary.terminal()
+    );
+    assert!(
+        memory
+            .list_open_turns(&session, 0, 8)
+            .await
+            .unwrap()
+            .turns
+            .is_empty()
+    );
+    let worker = recovered.start_workers();
+    recovered.shutdown(worker).await.unwrap();
+}

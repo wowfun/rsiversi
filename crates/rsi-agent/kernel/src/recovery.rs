@@ -1,6 +1,6 @@
 use super::*;
 
-#[allow(clippy::too_many_lines)] // Recovery classifies every unfinished Turn and its activation in one ordered repair append.
+#[allow(clippy::too_many_lines)] // Recovery classifies each unfinished Turn and commits its Fact/control boundary atomically.
 pub(super) async fn repair_unfinished_session(
     store: &Arc<dyn SessionStore>,
     clock: &dyn Clock,
@@ -26,27 +26,25 @@ pub(super) async fn repair_unfinished_session(
     if turns.is_empty() {
         return Ok(());
     }
+    if turns
+        .values()
+        .filter(|turn| turn.activation_id.is_some())
+        .count()
+        > 1
+    {
+        return Err(KernelError::Invariant(
+            "recovery found multiple active activations in one session".into(),
+        ));
+    }
     let timestamp = clock.now_ms().max(1);
-    let mut final_seq = durable_seq;
-    let mut repair = Vec::with_capacity(turn_order.len().saturating_mul(2));
-    let mut activation_repair = None;
+    let mut durable_seq = durable_seq;
+    let mut durable_control_seq = store.read_controls(session_id, 0, 1).await?.durable_seq;
     for turn_id in turn_order {
         let turn = turns
             .get(&turn_id)
             .expect("validated recovery turn order references exact state");
-        if let Some(activation_id) = &turn.activation_id
-            && activation_repair
-                .replace((
-                    activation_id.clone(),
-                    turn_id.clone(),
-                    turn.current_step.clone(),
-                ))
-                .is_some()
-        {
-            return Err(KernelError::Invariant(
-                "recovery found multiple active activations in one session".into(),
-            ));
-        }
+        let mut final_seq = durable_seq;
+        let mut repair = Vec::with_capacity(2);
         let outcome = if turn.cancel_requested {
             TurnOutcome::Cancelled
         } else if let Some((dimension, consumed, limit)) = turn.budget_exhausted {
@@ -91,99 +89,106 @@ pub(super) async fn repair_unfinished_session(
         repair.push(SessionFact::new(
             final_seq,
             timestamp,
-            SessionFactBody::TurnTerminal { turn_id, outcome },
+            SessionFactBody::TurnTerminal {
+                turn_id: turn_id.clone(),
+                outcome,
+            },
         )?);
-    }
-    if let Some((activation_id, activation_turn_id, activation_step_id)) = activation_repair {
-        let controls = store.read_controls(session_id, 0, 1).await?;
-        let active = store.active_activation(session_id).await?.ok_or_else(|| {
-            KernelError::Invariant("recovery activation is absent from its durable index".into())
-        })?;
-        if active.activation_id != activation_id
-            || active.turn_id.as_ref() != Some(&activation_turn_id)
-        {
-            return Err(KernelError::Invariant(
-                "recovery activation disagrees with its durable index".into(),
-            ));
-        }
-        let mut next_control_seq = controls.durable_seq;
-        let mut control_repairs = Vec::with_capacity(2);
-        match active.phase {
-            StoreActivationPhase::Running => {}
-            StoreActivationPhase::Parked => {
+
+        let mut next_control_seq = durable_control_seq;
+        let mut control_repairs = Vec::new();
+        let mut guards = Vec::new();
+        if let Some(activation_id) = &turn.activation_id {
+            let active = store.active_activation(session_id).await?.ok_or_else(|| {
+                KernelError::Invariant(
+                    "recovery activation is absent from its durable index".into(),
+                )
+            })?;
+            if &active.activation_id != activation_id || active.turn_id.as_ref() != Some(&turn_id) {
+                return Err(KernelError::Invariant(
+                    "recovery activation disagrees with its durable index".into(),
+                ));
+            }
+
+            match active.phase {
+                StoreActivationPhase::Running => {}
+                StoreActivationPhase::Parked => {
+                    next_control_seq = next_control_seq.checked_add(1).ok_or_else(|| {
+                        KernelError::Invariant("recovery control sequence exhausted".into())
+                    })?;
+                    control_repairs.push(AgentControlRecord::new(
+                        next_control_seq,
+                        timestamp,
+                        AgentControlRecordBody::WaitResumed {
+                            activation_id: activation_id.clone(),
+                            turn_id,
+                            step_id: turn.current_step.clone().ok_or_else(|| {
+                                KernelError::Invariant(
+                                    "parked recovery activation has no open Step".into(),
+                                )
+                            })?,
+                            cause: WaitResumeCause::Cancel,
+                        },
+                    )?);
+                }
+                StoreActivationPhase::WaitingForDescendants => {
+                    return Err(KernelError::Invariant(
+                    "open recovery Turn belongs to an activation already waiting for descendants"
+                        .into(),
+                ));
+                }
+            }
+            let mailbox = store.read_agent_mailbox_summary(session_id).await?;
+            for message_id in mailbox.pending_promotable_message_ids {
                 next_control_seq = next_control_seq.checked_add(1).ok_or_else(|| {
                     KernelError::Invariant("recovery control sequence exhausted".into())
                 })?;
                 control_repairs.push(AgentControlRecord::new(
                     next_control_seq,
                     timestamp,
-                    AgentControlRecordBody::WaitResumed {
-                        activation_id: activation_id.clone(),
-                        turn_id: activation_turn_id,
-                        step_id: activation_step_id.ok_or_else(|| {
-                            KernelError::Invariant(
-                                "parked recovery activation has no open Step".into(),
-                            )
-                        })?,
-                        cause: WaitResumeCause::Cancel,
-                    },
+                    AgentControlRecordBody::MessagePromoted { message_id },
                 )?);
             }
-            StoreActivationPhase::WaitingForDescendants => {
-                return Err(KernelError::Invariant(
-                    "open recovery Turn belongs to an activation already waiting for descendants"
-                        .into(),
-                ));
-            }
-        }
-        let mailbox = store.read_agent_mailbox_summary(session_id).await?;
-        for message_id in mailbox.pending_promotable_message_ids {
             next_control_seq = next_control_seq.checked_add(1).ok_or_else(|| {
                 KernelError::Invariant("recovery control sequence exhausted".into())
             })?;
-            control_repairs.push(AgentControlRecord::new(
+            let waiting = AgentControlRecord::new(
                 next_control_seq,
                 timestamp,
-                AgentControlRecordBody::MessagePromoted { message_id },
-            )?);
-        }
-        next_control_seq = next_control_seq
-            .checked_add(1)
-            .ok_or_else(|| KernelError::Invariant("recovery control sequence exhausted".into()))?;
-        let waiting = AgentControlRecord::new(
-            next_control_seq,
-            timestamp,
-            AgentControlRecordBody::ActivationWaitingForDescendants {
-                activation_id: activation_id.clone(),
-            },
-        )?;
-        control_repairs.push(waiting);
-        store
-            .commit_agent(AtomicAgentCommit {
-                sessions: vec![AtomicSessionAppend {
-                    session_id: session_id.clone(),
-                    expected_fact_seq: durable_seq,
-                    expected_control_seq: controls.durable_seq,
-                    header: None,
-                    facts: repair.into_iter().map(Arc::new).collect(),
-                    controls: control_repairs,
-                }],
-                required_active_activations: vec![AgentActivationGuard {
-                    session_id: session_id.clone(),
-                    activation_id,
-                }],
-                quiescent_descendants_of: None,
-            })
-            .await?;
-    } else {
-        store
-            .append(AppendBatch {
+                AgentControlRecordBody::ActivationWaitingForDescendants {
+                    activation_id: activation_id.clone(),
+                },
+            )?;
+            control_repairs.push(waiting);
+
+            guards.push(AgentActivationGuard {
                 session_id: session_id.clone(),
-                expected_seq: durable_seq,
+                activation_id: activation_id.clone(),
+            });
+        }
+        let mut commit = AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session_id.clone(),
+                expected_fact_seq: durable_seq,
+                expected_control_seq: durable_control_seq,
                 header: None,
                 facts: repair.into_iter().map(Arc::new).collect(),
-            })
-            .await?;
+                controls: control_repairs,
+            }],
+            required_active_activations: guards,
+            quiescent_descendants_of: None,
+        };
+        notifications::correlate_terminal_boundaries(&mut commit)?;
+        let committed = store.commit_agent(commit).await?;
+        let watermark = committed
+            .sessions
+            .first()
+            .filter(|mark| &mark.session_id == session_id)
+            .ok_or_else(|| {
+                KernelError::Invariant("recovery commit returned no exact Session watermark".into())
+            })?;
+        durable_seq = watermark.durable_fact_seq;
+        durable_control_seq = watermark.durable_control_seq;
     }
     Ok(())
 }

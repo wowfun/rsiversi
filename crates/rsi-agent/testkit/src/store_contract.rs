@@ -1,11 +1,11 @@
 use super::{
     ActivationId, ActivationOutcome, AgentActivationGuard, AgentControlRecord,
     AgentControlRecordBody, AgentMessage, AgentMessageContent, AgentMessageSource, AgentPath,
-    AppendBatch, Arc, AtomicAgentCommit, AtomicSessionAppend, EMPTY_FACT_PREFIX_DIGEST, ForkOrigin,
-    ForkTurnSelection, InputMessageSource, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageId,
-    MessageOptions, MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId,
-    SessionStore, StepId, StoreAgentMailboxSummary, StoreError, StoredContextCheckpoint, TurnId,
-    TurnOutcome, WriteContextCheckpoint, fact_prefix_sha256,
+    AppendBatch, Arc, AtomicAgentCommit, AtomicSessionAppend, ForkOrigin, ForkTurnSelection,
+    InputMessageSource, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageId, MessageOptions, MessageTarget,
+    SessionFact, SessionFactBody, SessionHeader, SessionId, SessionStore, StepId,
+    StoreAgentMailboxSummary, StoreError, StoredContextCheckpoint, TurnId, TurnOutcome,
+    WriteContextCheckpoint, fact_prefix_sha256,
 };
 
 /// Exercises the backend-independent observable Store contract against one
@@ -131,18 +131,64 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(open_sessions.sessions, vec![session_id.clone()]);
     assert!(!open_sessions.has_more);
 
-    store
-        .append(AppendBatch {
+    let first_marker = AgentControlRecord::new(
+        1,
+        terminal.timestamp_ms(),
+        AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id: turn_id.clone(),
+            terminal_fact_seq: terminal.seq(),
+        },
+    )
+    .unwrap();
+    let terminal_commit = AtomicAgentCommit {
+        sessions: vec![AtomicSessionAppend {
             session_id: session_id.clone(),
-            expected_seq: 2,
+            expected_fact_seq: 2,
+            expected_control_seq: 0,
             header: None,
-            facts: (vec![terminal.clone()])
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        })
+            facts: vec![Arc::new(terminal.clone())],
+            controls: vec![first_marker.clone()],
+        }],
+        required_active_activations: Vec::new(),
+        quiescent_descendants_of: None,
+    };
+    let mut missing_marker = terminal_commit.clone();
+    missing_marker.sessions[0].controls.clear();
+    assert!(matches!(
+        store.commit_agent(missing_marker).await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        store
+            .append(AppendBatch {
+                session_id: session_id.clone(),
+                expected_seq: 2,
+                header: None,
+                facts: vec![Arc::new(terminal.clone())],
+            })
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(
+        store
+            .read_facts(&session_id, 0, 8)
+            .await
+            .unwrap()
+            .durable_seq,
+        2
+    );
+    assert_eq!(
+        store
+            .read_controls(&session_id, 0, 8)
+            .await
+            .unwrap()
+            .durable_seq,
+        0
+    );
+    store
+        .commit_agent(terminal_commit)
         .await
-        .expect("close turn");
+        .expect("close Turn with its exact control horizon");
     assert!(
         store
             .list_open_turns(&session_id, 0, 8)
@@ -252,7 +298,7 @@ pub async fn assert_mechanical_store_contract(
 
     let message_id = MessageId::new("message-control-contract").unwrap();
     let accepted_control = AgentControlRecord::new(
-        1,
+        2,
         10,
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
@@ -277,7 +323,7 @@ pub async fn assert_mechanical_store_contract(
                 sessions: vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
                     expected_fact_seq: 3,
-                    expected_control_seq: 0,
+                    expected_control_seq: 1,
                     header: None,
                     facts: Vec::new(),
                     controls: vec![accepted_control.clone()],
@@ -297,7 +343,7 @@ pub async fn assert_mechanical_store_contract(
             sessions: vec![AtomicSessionAppend {
                 session_id: session_id.clone(),
                 expected_fact_seq: 3,
-                expected_control_seq: 0,
+                expected_control_seq: 1,
                 header: None,
                 facts: Vec::new(),
                 controls: vec![accepted_control.clone()],
@@ -308,14 +354,14 @@ pub async fn assert_mechanical_store_contract(
         .await
         .expect("append a ready Agent message");
     assert_eq!(committed.sessions[0].durable_fact_seq, 3);
-    assert_eq!(committed.sessions[0].durable_control_seq, 1);
+    assert_eq!(committed.sessions[0].durable_control_seq, 2);
     assert_eq!(
         store
             .read_controls(&session_id, 0, 8)
             .await
             .unwrap()
             .records,
-        vec![accepted_control]
+        vec![first_marker, accepted_control]
     );
     assert_eq!(
         store
@@ -340,9 +386,9 @@ pub async fn assert_mechanical_store_contract(
     ] {
         assert!(matches!(store.commit_agent(AtomicAgentCommit {
             sessions: vec![AtomicSessionAppend {
-                session_id: session_id.clone(), expected_fact_seq: 3, expected_control_seq: 1,
+                session_id: session_id.clone(), expected_fact_seq: 3, expected_control_seq: 2,
                 header: None, facts: Vec::new(),
-                controls: vec![AgentControlRecord::new(2, 11, AgentControlRecordBody::ActivationStarted {
+                controls: vec![AgentControlRecord::new(3, 11, AgentControlRecordBody::ActivationStarted {
                     activation_id: ActivationId::new("wrong-lineage").unwrap(),
                     root_session_id: root, parent_session_id: parent, path,
                 }).unwrap()],
@@ -359,12 +405,12 @@ pub async fn assert_mechanical_store_contract(
                 sessions: vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
                     expected_fact_seq: 3,
-                    expected_control_seq: 1,
+                    expected_control_seq: 2,
                     header: None,
                     facts: Vec::new(),
                     controls: vec![
                         AgentControlRecord::new(
-                            2,
+                            3,
                             11,
                             AgentControlRecordBody::ActivationStarted {
                                 activation_id: activation_id.clone(),
@@ -375,7 +421,7 @@ pub async fn assert_mechanical_store_contract(
                         )
                         .unwrap(),
                         AgentControlRecord::new(
-                            3,
+                            4,
                             11,
                             AgentControlRecordBody::MessageClaimed {
                                 message_id: message_id.clone(),
@@ -447,7 +493,7 @@ pub async fn assert_mechanical_store_contract(
             sessions: vec![AtomicSessionAppend {
                 session_id: session_id.clone(),
                 expected_fact_seq: 3,
-                expected_control_seq: 1,
+                expected_control_seq: 2,
                 header: None,
                 facts: (message_facts.clone())
                     .into_iter()
@@ -455,7 +501,7 @@ pub async fn assert_mechanical_store_contract(
                     .collect(),
                 controls: vec![
                     AgentControlRecord::new(
-                        2,
+                        3,
                         11,
                         AgentControlRecordBody::ActivationStarted {
                             activation_id: activation_id.clone(),
@@ -466,7 +512,7 @@ pub async fn assert_mechanical_store_contract(
                     )
                     .unwrap(),
                     AgentControlRecord::new(
-                        3,
+                        4,
                         11,
                         AgentControlRecordBody::MessageClaimed {
                             message_id: message_id.clone(),
@@ -478,7 +524,7 @@ pub async fn assert_mechanical_store_contract(
                     )
                     .unwrap(),
                     AgentControlRecord::new(
-                        4,
+                        5,
                         12,
                         AgentControlRecordBody::MessageAccepted {
                             message: AgentMessage {
@@ -498,7 +544,7 @@ pub async fn assert_mechanical_store_contract(
                     )
                     .unwrap(),
                     AgentControlRecord::new(
-                        5,
+                        6,
                         12,
                         AgentControlRecordBody::MessageDiscarded {
                             message_id: step_message_id,
@@ -507,7 +553,7 @@ pub async fn assert_mechanical_store_contract(
                     )
                     .unwrap(),
                     AgentControlRecord::new(
-                        6,
+                        7,
                         13,
                         AgentControlRecordBody::WaitParked {
                             activation_id: activation_id.clone(),
@@ -515,6 +561,15 @@ pub async fn assert_mechanical_store_contract(
                             step_id: message_step_id.clone(),
                             kind: rsi_agent_session_protocol::WaitKind::Agent,
                             deadline_ms: Some(100),
+                        },
+                    )
+                    .unwrap(),
+                    AgentControlRecord::new(
+                        8,
+                        13,
+                        AgentControlRecordBody::TurnBoundaryRecorded {
+                            turn_id: message_turn_id.clone(),
+                            terminal_fact_seq: 7,
                         },
                     )
                     .unwrap(),
@@ -531,11 +586,11 @@ pub async fn assert_mechanical_store_contract(
                 sessions: vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
                     expected_fact_seq: 7,
-                    expected_control_seq: 6,
+                    expected_control_seq: 8,
                     header: None,
                     facts: Vec::new(),
                     controls: vec![AgentControlRecord::new(
-                        7,
+                        9,
                         13,
                         AgentControlRecordBody::ActivationWaitingForDescendants {
                             activation_id: activation_id.clone(),
@@ -554,12 +609,12 @@ pub async fn assert_mechanical_store_contract(
             sessions: vec![AtomicSessionAppend {
                 session_id: session_id.clone(),
                 expected_fact_seq: 7,
-                expected_control_seq: 6,
+                expected_control_seq: 8,
                 header: None,
                 facts: Vec::new(),
                 controls: vec![
                     AgentControlRecord::new(
-                        7,
+                        9,
                         13,
                         AgentControlRecordBody::WaitResumed {
                             activation_id: activation_id.clone(),
@@ -570,7 +625,7 @@ pub async fn assert_mechanical_store_contract(
                     )
                     .unwrap(),
                     AgentControlRecord::new(
-                        8,
+                        10,
                         13,
                         AgentControlRecordBody::ActivationSettled {
                             activation_id,
@@ -629,6 +684,8 @@ pub async fn assert_mechanical_store_contract(
         (0, 0)
     );
     assert_eq!(none.effective_turns, 0);
+    assert_eq!(none.resolved_terminal_control_seq, 0);
+    assert_eq!(none.terminal_control_prefix_sha256, "0".repeat(64));
     let all = store
         .resolve_fork_boundary(&session_id, &invoking_turn, ForkTurnSelection::All)
         .await
@@ -640,6 +697,17 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(all, last);
     assert_eq!((all.resolved_after_seq, all.resolved_terminal_seq), (0, 7));
     assert_eq!(all.effective_turns, 2);
+    assert_eq!(all.resolved_terminal_control_seq, 8);
+    let controls_at_terminal = store.read_controls(&session_id, 0, 8).await.unwrap();
+    assert_eq!(
+        controls_at_terminal.durable_seq, 10,
+        "later idle controls exist"
+    );
+    assert_eq!(
+        all.terminal_control_prefix_sha256,
+        rsi_agent_session_protocol::control_prefix_sha256(controls_at_terminal.records.iter())
+            .unwrap()
+    );
     assert_eq!(
         all.terminal_prefix_sha256,
         fact_prefix_sha256(
@@ -660,6 +728,8 @@ pub async fn assert_mechanical_store_contract(
         resolved_after_seq: all.resolved_after_seq,
         resolved_terminal_seq: all.resolved_terminal_seq,
         terminal_prefix_sha256: all.terminal_prefix_sha256.clone(),
+        resolved_terminal_control_seq: all.resolved_terminal_control_seq,
+        terminal_control_prefix_sha256: all.terminal_control_prefix_sha256.clone(),
         requested_turns: ForkTurnSelection::All,
         effective_turns: all.effective_turns,
     };
@@ -757,7 +827,9 @@ pub async fn assert_mechanical_store_contract(
                 invoking_turn_id: invoking_turn.clone(),
                 resolved_after_seq: 0,
                 resolved_terminal_seq: 0,
-                terminal_prefix_sha256: hex::encode(EMPTY_FACT_PREFIX_DIGEST),
+                terminal_prefix_sha256: "0".repeat(64),
+                resolved_terminal_control_seq: 0,
+                terminal_control_prefix_sha256: "0".repeat(64),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
             },
@@ -974,7 +1046,7 @@ pub async fn assert_mechanical_store_contract(
     ));
 
     let wrong_root_control = AgentControlRecord::new(
-        9,
+        11,
         20,
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
@@ -999,7 +1071,7 @@ pub async fn assert_mechanical_store_contract(
                 sessions: vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
                     expected_fact_seq: 8,
-                    expected_control_seq: 8,
+                    expected_control_seq: 10,
                     header: None,
                     facts: Vec::new(),
                     controls: vec![wrong_root_control],
@@ -1012,7 +1084,7 @@ pub async fn assert_mechanical_store_contract(
     ));
 
     let duplicate_control = AgentControlRecord::new(
-        9,
+        11,
         20,
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
@@ -1037,7 +1109,7 @@ pub async fn assert_mechanical_store_contract(
                 sessions: vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
                     expected_fact_seq: 8,
-                    expected_control_seq: 8,
+                    expected_control_seq: 10,
                     header: None,
                     facts: Vec::new(),
                     controls: vec![duplicate_control],
@@ -1067,12 +1139,12 @@ pub async fn assert_mechanical_store_contract(
                 sessions: vec![AtomicSessionAppend {
                     session_id: session_id.clone(),
                     expected_fact_seq: 8,
-                    expected_control_seq: 8,
+                    expected_control_seq: 10,
                     header: None,
                     facts: Vec::new(),
                     controls: vec![
-                        duplicate_activation(9, "duplicate-activation-one"),
-                        duplicate_activation(10, "duplicate-activation-two"),
+                        duplicate_activation(11, "duplicate-activation-one"),
+                        duplicate_activation(12, "duplicate-activation-two"),
                     ],
                 }],
                 required_active_activations: Vec::new(),
@@ -1126,7 +1198,7 @@ pub async fn assert_mechanical_store_contract(
     let bounded_controls = (0..rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1)
         .map(|offset| {
             AgentControlRecord::new(
-                9 + u64::try_from(offset).unwrap(),
+                11 + u64::try_from(offset).unwrap(),
                 20 + u64::try_from(offset).unwrap(),
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
@@ -1167,7 +1239,7 @@ pub async fn assert_mechanical_store_contract(
             sessions: vec![AtomicSessionAppend {
                 session_id: session_id.clone(),
                 expected_fact_seq: 8,
-                expected_control_seq: 8,
+                expected_control_seq: 10,
                 header: None,
                 facts: Vec::new(),
                 controls: bounded_controls,
@@ -1178,7 +1250,7 @@ pub async fn assert_mechanical_store_contract(
         .await
         .expect("fill every parent mailbox slot not reserved for child completion");
     let reserved_full_control_seq =
-        8 + u64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1).unwrap();
+        10 + u64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1).unwrap();
     assert!(matches!(
         store
             .commit_agent(AtomicAgentCommit {

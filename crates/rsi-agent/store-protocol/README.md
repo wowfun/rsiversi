@@ -1,5 +1,22 @@
 # rsi-agent-store-protocol
 
+Every terminal Fact is committed with one `TurnBoundaryRecorded` control in the
+same `AtomicAgentCommit`. Each Session append contains at most one terminal;
+its marker is the final control, names that exact Turn and Fact sequence, and
+defines the terminal's control horizon. A marker without that same-append
+terminal, a duplicate, a later business control, or a Fact-only terminal append
+is rejected before mutation. Recovery repairs separate terminal boundaries in
+separate appends. This permits one exact Fact/control prefix pair for every
+completed historical Turn without inferring a control horizon from timestamps.
+
+The terminal index retains both sequences and rolling prefix digests, derived
+only from canonical records. Fork boundary reads return that exact pair.
+`none` inherits neither prefix; `all` and `N` use the selected terminal's control
+horizon, so later idle commands cannot alter an already selected historical
+cut. Index and offline validation reject missing, mismatched or fabricated
+terminal correlations. The schema cutover is explicit; old database files are
+preserved and never automatically rewritten.
+
 `inspect_session` is one bounded read snapshot of immutable Header, durable
 Fact/control cursors, pending-message metadata, current Turn and activation
 phase, and complete bounded descendant activity. It decodes no message bodies

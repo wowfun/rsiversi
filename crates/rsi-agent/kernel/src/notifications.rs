@@ -107,8 +107,9 @@ impl Drop for SessionWatch {
 impl KernelInner {
     pub(super) async fn commit_agent(
         &self,
-        commit: AtomicAgentCommit,
+        mut commit: AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
+        correlate_terminal_boundaries(&mut commit)?;
         let created = commit
             .sessions
             .iter()
@@ -133,6 +134,41 @@ impl KernelInner {
         }
         result
     }
+}
+
+/// The only Kernel producer of terminal correlation records, including startup recovery.
+pub(super) fn correlate_terminal_boundaries(
+    commit: &mut AtomicAgentCommit,
+) -> rsi_agent_store_protocol::Result<()> {
+    for append in &mut commit.sessions {
+        if let Some(terminal) = append.facts.iter().find(|fact| is_terminal_fact(fact)) {
+            let seq = append
+                .controls
+                .last()
+                .map_or(append.expected_control_seq, AgentControlRecord::seq)
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Invalid("terminal control sequence exhausted".into()))?;
+            append.controls.push(
+                terminal_boundary_record(seq, terminal)
+                    .map_err(|error| StoreError::Invalid(error.to_string()))?,
+            );
+        }
+    }
+    commit.validate()
+}
+
+pub(super) fn terminal_boundary_record(
+    seq: u64,
+    terminal: &SessionFact,
+) -> rsi_agent_session_protocol::Result<AgentControlRecord> {
+    AgentControlRecord::new(
+        seq,
+        terminal.timestamp_ms(),
+        AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id: terminal.body().turn_id().clone(),
+            terminal_fact_seq: terminal.seq(),
+        },
+    )
 }
 
 #[cfg(test)]

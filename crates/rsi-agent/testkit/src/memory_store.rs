@@ -398,6 +398,7 @@ impl SessionStore for MemoryStore {
         )
     }
 
+    #[allow(clippy::too_many_lines)] // One selection validates balanced membership and both terminal prefixes.
     async fn resolve_fork_boundary(
         &self,
         session_id: &SessionId,
@@ -495,7 +496,24 @@ impl SessionStore for MemoryStore {
                     })
             },
         )?;
+        let (resolved_terminal_control_seq, terminal_control_prefix_sha256) =
+            selected.last().map_or_else(
+                || Ok((0, hex::encode(EMPTY_CONTROL_PREFIX_DIGEST))),
+                |(_, _, turn_id)| {
+                    session
+                        .turns
+                        .get(*turn_id)
+                        .and_then(|turn| turn.terminal_control.clone())
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "completed Turn has no terminal control boundary".into(),
+                            )
+                        })
+                },
+            )?;
         Ok(StoreForkBoundary {
+            resolved_terminal_control_seq,
+            terminal_control_prefix_sha256,
             resolved_after_seq,
             resolved_terminal_seq,
             terminal_prefix_sha256,
@@ -1213,8 +1231,27 @@ fn apply_atomic_memory_append(
     }
     let session = state
         .sessions
-        .get(&session_id)
+        .get_mut(&session_id)
         .expect("atomic append installed or updated its session");
+    if let Some(record) = append.controls.last()
+        && let AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id,
+            terminal_fact_seq,
+        } = record.body()
+    {
+        let boundary = session
+            .turns
+            .get_mut(turn_id)
+            .ok_or_else(|| StoreError::Corrupt("terminal marker lost its Turn".into()))?;
+        if boundary.terminal_seq != Some(*terminal_fact_seq) || boundary.terminal_control.is_some()
+        {
+            return Err(StoreError::Corrupt(
+                "terminal marker differs from its Fact".into(),
+            ));
+        }
+        boundary.terminal_control =
+            Some((record.seq(), hex::encode(session.control_prefix_digest)));
+    }
     Ok(AgentCommitWatermark {
         session_id,
         durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
@@ -1469,7 +1506,8 @@ fn apply_message_updates(
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
         }
     }
     Ok(())
@@ -1710,7 +1748,8 @@ fn apply_activation_updates(
                 ..
             }
             | AgentControlRecordBody::MessagePromoted { .. }
-            | AgentControlRecordBody::MessageDiscarded { .. } => {}
+            | AgentControlRecordBody::MessageDiscarded { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
         }
     }
     Ok(())
@@ -1800,7 +1839,8 @@ fn apply_ready_updates(
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
         }
     }
     Ok(())
@@ -1828,6 +1868,7 @@ fn index_appended_turns(
                         accepted_seq: fact.seq(),
                         terminal_seq: None,
                         terminal_prefix_sha256: None,
+                        terminal_control: None,
                     },
                 );
             }

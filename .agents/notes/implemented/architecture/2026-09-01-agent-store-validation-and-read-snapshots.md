@@ -19,16 +19,24 @@ The mechanical proof, cache, WAL snapshot, and offline-audit rationale below
 continues to apply to execution and history access.
 
 Open retains the exclusive writer lease, owned-root checks, and exact schema
-validation but does not scan session contents. First access to an existing
+validation but does not scan session contents. An existing nonempty database is
+first opened through the retained read-only foreground connection. Exact schema
+acceptance precedes writer PRAGMAs, writer recovery and CAS staging cleanup:
+rejecting a version after enabling WAL would already change the old database.
+The exclusive writer lease keeps that schema proof stable until writer admission.
+The preflight reader includes committed WAL state, so a current uncheckpointed
+Store remains recoverable without mutating a rejected old main database or WAL.
+First access to an existing
 session validates its bounded Header, watermark, digest shape, Fact/turn
 relationships, and canonical Agent-control projections in one deferred read
 transaction. One async single-flight gate
 and a 256-entry recency cache reuse that proof; new sessions enter the cache
 only after their creation transaction commits.
 
-The adapter owns one writer and one read-only, no-create, query-only connection
-in one shared connection pair. After the last Store clone and in-flight
-operation release that pair, clean shutdown closes the reader before the
+The adapter shares one writer and read-only, no-create, query-only readers under
+one Store owner; the later validation-lane decision linked above separates
+foreground and cold-validation admission. After the last Store clone and in-flight
+operation release that owner, clean shutdown closes the readers before the
 writer so SQLite checkpoints the WAL into the main database. A nonempty
 pre-existing database is never treated as an uninitialized Store.
 Multi-statement reads use one deferred snapshot. `SqliteStore::verify` acquires
@@ -81,7 +89,7 @@ Physical corruption in an untouched page is detected only when SQLite reads
 that page or an operator runs `rsi agent-store verify`. This is the intentional
 availability tradeoff and open is not represented as a full durability audit.
 The same startup boundary excludes a complete CAS-directory scan. Staging files
-are bounded and removed on reopen, but a crash after a digest file is published
+are bounded and removed only after a compatible schema is accepted on reopen, but a crash after a digest file is published
 and before its metadata insert commits can leave an unreachable complete file.
 Eliminating that residue requires a recoverable filesystem/SQLite publication
 protocol or an explicit bounded maintenance operation, not eager whole-CAS

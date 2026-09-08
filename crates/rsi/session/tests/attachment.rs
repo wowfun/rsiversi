@@ -1451,8 +1451,9 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
         test_settings(),
     )
     .unwrap();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        store.as_ref(),
+        AppendBatch {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header),
@@ -1482,9 +1483,10 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
             .into_iter()
             .map(Into::into)
             .collect(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let store: Arc<dyn SessionStore> = store;
     let workspace = Arc::new(RejectingWorkspace::default());
     let application = LocalSessionService::new(

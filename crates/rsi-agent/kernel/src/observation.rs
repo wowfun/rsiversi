@@ -71,6 +71,8 @@ pub(super) async fn read_fork_page_from_header(
         if boundary.resolved_after_seq != origin.resolved_after_seq
             || boundary.resolved_terminal_seq != origin.resolved_terminal_seq
             || boundary.terminal_prefix_sha256 != origin.terminal_prefix_sha256
+            || boundary.resolved_terminal_control_seq != origin.resolved_terminal_control_seq
+            || boundary.terminal_control_prefix_sha256 != origin.terminal_control_prefix_sha256
             || boundary.effective_turns != origin.effective_turns
         {
             return Err(TurnError::Invariant(

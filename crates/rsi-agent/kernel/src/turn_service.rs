@@ -287,6 +287,7 @@ impl TurnService for AgentKernel {
             ));
         }
         let admission = self.inner.submission_admission.acquire(session_id).await?;
+        self.fence_pending_terminal(session_id).await?;
         let scan = scan_durable_messages(&self.inner, session_id, Some(&message_id)).await?;
         let entry = scan.selected.ok_or_else(|| {
             TurnError::Invalid(format!(
@@ -648,6 +649,7 @@ async fn commit_wait_control(
     body: AgentControlRecordBody,
 ) -> std::result::Result<(), super::human_wait::WaitControlError> {
     let session_id = caller.session_id().clone();
+    kernel.fence_pending_terminal(&session_id).await?;
     let expected_fact_seq = read_facts_bounded(&kernel.inner, &session_id, 0, 1)
         .await?
         .durable_seq;
@@ -722,6 +724,7 @@ impl AgentKernel {
             return Err(TurnError::Flush(error));
         }
 
+        self.fence_pending_terminal(&session_id).await?;
         let durable_header = match read_validated_header_bounded(&self.inner, &session_id).await {
             Ok(header) => Some(header),
             Err(StoreError::NotFound(_)) if matches!(&request.session, SubmitSession::Fresh(_)) => {
@@ -1060,6 +1063,7 @@ impl AgentKernel {
             .expect("message claim always creates Facts")
             .seq();
         let parent_activation = if let Some(parent_session_id) = &parent_session_id {
+            self.fence_pending_terminal(parent_session_id).await?;
             let active = self
                 .inner
                 .store
@@ -1309,6 +1313,8 @@ impl AgentKernel {
             resolved_after_seq: boundary.resolved_after_seq,
             resolved_terminal_seq: boundary.resolved_terminal_seq,
             terminal_prefix_sha256: boundary.terminal_prefix_sha256,
+            resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             requested_turns: request.fork_turns,
             effective_turns: boundary.effective_turns,
         };

@@ -334,10 +334,14 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
                SELECT 1
                FROM turns AS turn
                WHERE turn.session_id = ?1 AND (
-                    (turn.terminal_seq IS NULL AND turn.terminal_prefix_sha256 IS NOT NULL)
+                    (turn.terminal_seq IS NULL AND (turn.terminal_prefix_sha256 IS NOT NULL
+                        OR turn.terminal_control_seq IS NOT NULL OR turn.terminal_control_prefix_sha256 IS NOT NULL))
                     OR (turn.terminal_seq IS NOT NULL AND
                         (turn.terminal_prefix_sha256 IS NULL
-                         OR length(turn.terminal_prefix_sha256) != 64))
+                         OR length(turn.terminal_prefix_sha256) != 64
+                         OR turn.terminal_control_seq IS NULL
+                         OR turn.terminal_control_prefix_sha256 IS NULL
+                         OR length(turn.terminal_control_prefix_sha256) != 64))
                     OR
                     NOT EXISTS (
                       SELECT 1 FROM facts AS accepted
@@ -554,7 +558,8 @@ impl MailboxProjection {
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
         }
         if let AgentControlRecordBody::MessageClaimed { message_id, .. }
         | AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
@@ -800,7 +805,8 @@ impl ActivationProjection {
                 ..
             }
             | AgentControlRecordBody::MessagePromoted { .. }
-            | AgentControlRecordBody::MessageDiscarded { .. } => {}
+            | AgentControlRecordBody::MessageDiscarded { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
         }
         Ok(())
     }
@@ -1048,6 +1054,7 @@ pub(super) fn validate_canonical_control_prefix(
         digest = advance_control_prefix_digest(digest, &record).map_err(|error| {
             StoreError::Corrupt(format!("stored Agent control record is invalid: {error}"))
         })?;
+        validate_terminal_control(connection, session_id, &record, digest)?;
         next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
             StoreError::Corrupt("Agent control sequence overflowed during audit".into())
         })?;
@@ -1166,7 +1173,8 @@ impl ReadyProjection {
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. } => {}
         }
         Ok(())
     }
@@ -1227,10 +1235,12 @@ pub(super) fn validate_agent_indexes(
     let mut ready = ReadyProjection::default();
     let mut activation = ActivationProjection::default();
     let mut decoded = 0_u64;
+    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
+    let mut terminals = 0_u64;
     let mut statement = connection
         .prepare(
             "SELECT length(CAST(control_json AS BLOB)),
-                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END
+                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq
          FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
         )
         .map_err(sql_error)?;
@@ -1250,12 +1260,65 @@ pub(super) fn validate_agent_indexes(
             MAXIMUM_SESSION_FACT_BYTES,
         )?;
         decoded += 1;
+        if record.seq() != decoded
+            || decode_u64("control row sequence", row.get(2).map_err(sql_error)?)? != decoded
+        {
+            return Err(StoreError::Corrupt(
+                "control JSON sequence differs from its canonical row".into(),
+            ));
+        }
+        digest = advance_control_prefix_digest(digest, &record)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if validate_terminal_control(connection, selected, &record, digest)? {
+            terminals += 1;
+        }
         mailbox.apply(connection, header, &record)?;
         ready.apply(selected.as_str(), &record)?;
         activation.apply(header, &record)?;
+    }
+    let indexed_terminals = connection
+        .query_row(
+            "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL",
+            [selected.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(sql_error)?;
+    if terminals != decode_u64("terminal index count", indexed_terminals)? {
+        return Err(StoreError::Corrupt(
+            "terminal index has no unique canonical control marker".into(),
+        ));
     }
     mailbox.finish(connection, selected)?;
     ready.finish(connection, selected)?;
     activation.finish(connection, selected)?;
     Ok(decoded)
+}
+
+/// Checks each marker against the sole derived index; counts detect indexed terminals without a marker.
+fn validate_terminal_control(
+    connection: &Connection,
+    session_id: &SessionId,
+    record: &AgentControlRecord,
+    digest: [u8; 32],
+) -> Result<bool> {
+    let AgentControlRecordBody::TurnBoundaryRecorded {
+        turn_id,
+        terminal_fact_seq,
+    } = record.body()
+    else {
+        return Ok(false);
+    };
+    let matches = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1 AND turn_id = ?2
+            AND terminal_seq = ?3 AND terminal_control_seq = ?4 AND terminal_control_prefix_sha256 = ?5)",
+        params![session_id.as_str(), turn_id.as_str(), sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?,
+            sqlite_u64("terminal control sequence", record.seq())?, hex::encode(digest)],
+        |row| row.get::<_, bool>(0),
+    ).map_err(sql_error)?;
+    if !matches {
+        return Err(StoreError::Corrupt(
+            "terminal index differs from the canonical Fact/control boundary".into(),
+        ));
+    }
+    Ok(true)
 }

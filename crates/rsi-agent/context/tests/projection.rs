@@ -50,7 +50,17 @@ fn fork_header(system: &str, terminal_seq: u64, effective_turns: u64) -> Session
                 invoking_turn_id: TurnId::new("turn-spawn").unwrap(),
                 resolved_after_seq: 0,
                 resolved_terminal_seq: terminal_seq,
-                terminal_prefix_sha256: "a".repeat(64),
+                terminal_prefix_sha256: if terminal_seq == 0 {
+                    "0".repeat(64)
+                } else {
+                    "a".repeat(64)
+                },
+                resolved_terminal_control_seq: effective_turns,
+                terminal_control_prefix_sha256: if terminal_seq == 0 {
+                    "0".repeat(64)
+                } else {
+                    "c".repeat(64)
+                },
                 requested_turns: ForkTurnSelection::All,
                 effective_turns,
             },

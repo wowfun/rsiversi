@@ -20,7 +20,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 12;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 13;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -237,6 +237,15 @@ impl AppendBatch {
                 "Store append must contain 1..={MAXIMUM_STORE_BATCH_FACTS} Facts"
             )));
         }
+        if self
+            .facts
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }))
+        {
+            return Err(StoreError::Invalid(
+                "terminal Facts require a correlated atomic Agent commit".into(),
+            ));
+        }
         if let Some(header) = &self.header {
             header
                 .validate()
@@ -318,6 +327,7 @@ impl AtomicSessionAppend {
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        self.validate_terminal_boundary()?;
         self.facts
             .iter()
             .map(|fact| fact.encoded_len())
@@ -327,6 +337,50 @@ impl AtomicSessionAppend {
                     .checked_add(bytes)
                     .ok_or_else(|| StoreError::Invalid("atomic Agent commit size overflow".into()))
             })
+    }
+
+    fn validate_terminal_boundary(&self) -> Result<()> {
+        use rsi_agent_session_protocol::AgentControlRecordBody;
+        let mut terminals = self
+            .facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }));
+        let terminal = terminals.next();
+        if terminals.next().is_some() {
+            return Err(StoreError::Invalid(
+                "one Session append may contain at most one terminal Fact".into(),
+            ));
+        }
+        let mut markers = self
+            .controls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, control)| match control.body() {
+                AgentControlRecordBody::TurnBoundaryRecorded {
+                    turn_id,
+                    terminal_fact_seq,
+                } => Some((index, turn_id, terminal_fact_seq)),
+                _ => None,
+            });
+        let marker = markers.next();
+        if markers.next().is_some() {
+            return Err(StoreError::Invalid(
+                "a terminal boundary marker must occur exactly once".into(),
+            ));
+        }
+        match (terminal, marker) {
+            (None, None) => Ok(()),
+            (Some(fact), Some((index, turn_id, fact_seq)))
+                if index + 1 == self.controls.len()
+                    && turn_id == fact.body().turn_id()
+                    && *fact_seq == fact.seq() =>
+            {
+                Ok(())
+            }
+            _ => Err(StoreError::Invalid(
+                "terminal Fact requires its exact same-append boundary as the final control".into(),
+            )),
+        }
     }
 }
 
@@ -1289,6 +1343,10 @@ pub struct StoreForkBoundary {
     pub resolved_terminal_seq: u64,
     /// Fact-prefix digest at `resolved_terminal_seq`.
     pub terminal_prefix_sha256: String,
+    /// Exact canonical control horizon recorded with the selected terminal, or zero.
+    pub resolved_terminal_control_seq: u64,
+    /// Canonical control-prefix digest at that horizon.
+    pub terminal_control_prefix_sha256: String,
     /// Completed turns selected by the request.
     pub effective_turns: u64,
 }
@@ -1575,7 +1633,8 @@ impl CasObjectRef {
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
-    /// Atomically creates a session if needed and appends one exact suffix.
+    /// Atomically creates a session if needed and appends one nonterminal Fact suffix.
+    /// Terminals require `commit_agent` with their exact control boundary.
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit>;
     /// Applies one closed Agent-control commit across up to three sessions.
     async fn commit_agent(&self, commit: AtomicAgentCommit) -> Result<AtomicAgentCommitResult> {
@@ -1963,6 +2022,133 @@ mod tests {
             impossible_empty_page.validate(),
             Err(StoreError::Corrupt(message)) if message.contains("cursor")
         ));
+    }
+
+    fn terminal_fact() -> Arc<SessionFact> {
+        Arc::new(
+            SessionFact::new(
+                2,
+                2,
+                SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new("terminal-correlation").unwrap(),
+                    outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn fact_only_terminal_append_is_rejected_before_store_mutation() {
+        let append = AppendBatch {
+            session_id: SessionId::new("terminal-correlation").unwrap(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![terminal_fact()],
+        };
+        assert!(
+            append.validate().is_err(),
+            "Fact-only terminal has no canonical control horizon"
+        );
+    }
+
+    #[test]
+    fn atomic_terminal_without_its_boundary_marker_is_rejected() {
+        let commit = AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: SessionId::new("terminal-correlation").unwrap(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![terminal_fact()],
+                controls: Vec::new(),
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        };
+        assert!(
+            commit.validate().is_err(),
+            "terminal commit has no canonical control horizon"
+        );
+    }
+
+    #[test]
+    fn terminal_correlation_requires_one_exact_final_control_in_the_same_session() {
+        use rsi_agent_session_protocol::AgentControlRecordBody;
+        let marker = |seq, turn: &str, terminal_fact_seq| {
+            AgentControlRecord::new(
+                seq,
+                2,
+                AgentControlRecordBody::TurnBoundaryRecorded {
+                    turn_id: TurnId::new(turn).unwrap(),
+                    terminal_fact_seq,
+                },
+            )
+            .unwrap()
+        };
+        let valid = AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: SessionId::new("terminal-correlation").unwrap(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![terminal_fact()],
+                controls: vec![marker(1, "terminal-correlation", 2)],
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        };
+        valid.validate().unwrap();
+        for controls in [
+            vec![marker(1, "wrong-turn", 2)],
+            vec![marker(1, "terminal-correlation", 1)],
+            vec![
+                marker(1, "terminal-correlation", 2),
+                marker(2, "terminal-correlation", 2),
+            ],
+            vec![
+                marker(1, "terminal-correlation", 2),
+                AgentControlRecord::new(
+                    2,
+                    2,
+                    AgentControlRecordBody::MessagePromoted {
+                        message_id: MessageId::new("later").unwrap(),
+                    },
+                )
+                .unwrap(),
+            ],
+        ] {
+            let mut invalid = valid.clone();
+            invalid.sessions[0].controls = controls;
+            assert!(matches!(invalid.validate(), Err(StoreError::Invalid(_))));
+        }
+        let mut orphan = valid.clone();
+        orphan.sessions[0].facts.clear();
+        assert!(orphan.validate().is_err());
+        let mut other_session = valid.clone();
+        other_session.sessions[0].controls.clear();
+        other_session.sessions.push(AtomicSessionAppend {
+            session_id: SessionId::new("other").unwrap(),
+            expected_fact_seq: 0,
+            expected_control_seq: 0,
+            header: None,
+            facts: Vec::new(),
+            controls: valid.sessions[0].controls.clone(),
+        });
+        assert!(other_session.validate().is_err());
+        let mut two_terminals = valid;
+        two_terminals.sessions[0].facts.push(Arc::new(
+            SessionFact::new(
+                3,
+                3,
+                SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new("second").unwrap(),
+                    outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                },
+            )
+            .unwrap(),
+        ));
+        assert!(two_terminals.validate().is_err());
     }
 
     #[test]

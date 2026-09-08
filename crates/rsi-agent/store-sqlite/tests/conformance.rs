@@ -67,10 +67,52 @@ fn terminal_fact(seq: u64, turn: u64) -> SessionFact {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Cold reads and offline audit exercise the same corruption matrix.
 async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata() {
     for (name, closed, mutation) in [
         ("valid-open", false, None),
         ("valid-closed", true, None),
+        (
+            "terminal-control-null",
+            true,
+            Some("UPDATE turns SET terminal_control_seq = NULL"),
+        ),
+        (
+            "terminal-control-digest-null",
+            true,
+            Some("UPDATE turns SET terminal_control_prefix_sha256 = NULL"),
+        ),
+        (
+            "terminal-control-digest-wrong",
+            true,
+            Some("UPDATE turns SET terminal_control_prefix_sha256 = printf('%064d', 0)"),
+        ),
+        (
+            "terminal-control-seq-wrong",
+            true,
+            Some("UPDATE turns SET terminal_control_seq = 2"),
+        ),
+        (
+            "marker-missing",
+            true,
+            Some(
+                "DELETE FROM agent_controls; UPDATE sessions SET control_seq = 0, control_prefix_sha256 = printf('%064d', 0)",
+            ),
+        ),
+        (
+            "marker-turn-wrong",
+            true,
+            Some(
+                "UPDATE agent_controls SET control_json = json_set(control_json, '$.turn_id', 'wrong-turn')",
+            ),
+        ),
+        (
+            "marker-fact-wrong",
+            true,
+            Some(
+                "UPDATE agent_controls SET control_json = json_set(control_json, '$.terminal_fact_seq', 1)",
+            ),
+        ),
         (
             "terminal-fields-null",
             true,
@@ -100,15 +142,17 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
         if closed {
             facts.push(terminal_fact(2, 1));
         }
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            &store,
+            AppendBatch {
                 session_id: session.clone(),
                 expected_seq: 0,
                 header: Some(header(name)),
                 facts: (facts).into_iter().map(Into::into).collect(),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         drop(store);
         if let Some(sql) = mutation {
             let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
@@ -125,6 +169,13 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
         let open = store.list_open_turns(&session, 0, 8).await;
         let facts = store.read_facts(&session, 0, 8).await;
         if mutation.is_some() {
+            if matches!(name, "marker-turn-wrong" | "marker-fact-wrong") {
+                assert!(
+                    matches!(&validation, Err(StoreError::Corrupt(message))
+                    if message.contains("canonical Fact/control boundary")),
+                    "must reject correlation, not JSON shape: {validation:?}"
+                );
+            }
             assert!(
                 matches!(validation, Err(StoreError::Corrupt(_))),
                 "{name}: {validation:?}"
@@ -166,8 +217,9 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
     let store = SqliteStore::open(root.path()).unwrap();
     let session_id = SessionId::new("session-fork-interleaved").unwrap();
     let invoking = TurnId::new("turn-3").unwrap();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
@@ -192,9 +244,10 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
             .into_iter()
             .map(Into::into)
             .collect(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         store
             .resolve_fork_boundary(&session_id, &invoking, ForkTurnSelection::Last(1))
@@ -221,8 +274,9 @@ async fn workspace_context_digests_are_recovered_from_the_sqlite_fact_projection
     let step_id = StepId::new("step-workspace-context-state").unwrap();
     let instructions_sha256 = "a".repeat(64);
     let skill_catalog_sha256 = "b".repeat(64);
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
@@ -294,9 +348,10 @@ async fn workspace_context_digests_are_recovered_from_the_sqlite_fact_projection
             .into_iter()
             .map(Into::into)
             .collect(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         store
@@ -510,7 +565,9 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                     invoking_turn_id: TurnId::new("turn-1").unwrap(),
                     resolved_after_seq: 0,
                     resolved_terminal_seq: 0,
-                    terminal_prefix_sha256: hex::encode(EMPTY_FACT_PREFIX_DIGEST),
+                    terminal_prefix_sha256: "0".repeat(64),
+                    resolved_terminal_control_seq: 0,
+                    terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
                 },
@@ -706,8 +763,9 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
         })
         .await
         .unwrap();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
             session_id: session.clone(),
             expected_seq: 3,
             header: None,
@@ -715,9 +773,10 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let first = store.read_facts(&session, 0, 2).await.unwrap();
     assert_eq!(first.facts, vec![fact(1), fact(2)]);
     assert!(!first.caught_up());
@@ -945,8 +1004,9 @@ async fn turn_indexes_support_exact_outcome_and_open_turn_queries() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let session = SessionId::new("session-turn-index").unwrap();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header(session.as_str())),
@@ -954,9 +1014,10 @@ async fn turn_indexes_support_exact_outcome_and_open_turn_queries() {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     let turn = store
         .read_turn_facts(&session, &TurnId::new("turn-2").unwrap(), 0, 8)
@@ -1601,10 +1662,28 @@ fn old_or_partial_schema_is_rejected_without_migration() {
             .execute_batch(&format!("PRAGMA user_version = {version};"))
             .unwrap();
         drop(connection);
+        let database = root.path().join("sessions.sqlite3");
+        let original = std::fs::read(&database).unwrap();
+        let staging = root.path().join("cas/staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("older-owned-staging"),
+            b"preserve rejected-version state",
+        )
+        .unwrap();
         assert!(matches!(
             SqliteStore::open(root.path()),
             Err(StoreError::SchemaMismatch { actual, .. }) if actual == version
         ));
+        assert_eq!(
+            std::fs::read(&database).unwrap(),
+            original,
+            "rejection changed database bytes for schema {version}"
+        );
+        assert_eq!(
+            std::fs::read(staging.join("older-owned-staging")).unwrap(),
+            b"preserve rejected-version state"
+        );
     }
 }
 
@@ -1771,8 +1850,9 @@ async fn a_missing_fork_terminal_digest_is_corruption() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let session_id = SessionId::new("missing-terminal-digest").unwrap();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
             session_id: session_id.clone(),
             expected_seq: 0,
             header: Some(header(session_id.as_str())),
@@ -1780,9 +1860,10 @@ async fn a_missing_fork_terminal_digest_is_corruption() {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     drop(store);
     Connection::open(root.path().join("sessions.sqlite3"))
         .unwrap()
@@ -1967,4 +2048,66 @@ async fn cold_activation_guard_rejects_a_fabricated_owner_outside_the_write_set(
         store.header(&destination).await,
         Err(StoreError::NotFound(_))
     ));
+}
+
+#[test]
+fn rejected_schema_in_an_uncheckpointed_wal_preserves_both_canonical_files() {
+    let source = tempfile::tempdir().unwrap();
+    let source_db = source.path().join("sessions.sqlite3");
+    let writer = Connection::open(&source_db).unwrap();
+    writer.execute_batch(&format!(
+        "PRAGMA journal_mode = WAL; CREATE TABLE legacy (payload TEXT); INSERT INTO legacy VALUES ('retained'); PRAGMA user_version = {};",
+        AGENT_STORE_SCHEMA_VERSION - 1,
+    )).unwrap();
+    let target = tempfile::tempdir().unwrap();
+    for name in ["sessions.sqlite3", "sessions.sqlite3-wal"] {
+        std::fs::copy(source.path().join(name), target.path().join(name)).unwrap();
+    }
+    let before = ["sessions.sqlite3", "sessions.sqlite3-wal"]
+        .map(|name| std::fs::read(target.path().join(name)).unwrap());
+    assert!(
+        matches!(SqliteStore::open(target.path()), Err(StoreError::SchemaMismatch { actual, .. }) if actual == AGENT_STORE_SCHEMA_VERSION - 1)
+    );
+    for (name, original) in ["sessions.sqlite3", "sessions.sqlite3-wal"]
+        .into_iter()
+        .zip(before)
+    {
+        assert_eq!(
+            std::fs::read(target.path().join(name)).unwrap(),
+            original,
+            "rejection changed {name}"
+        );
+    }
+    drop(writer);
+}
+
+#[tokio::test]
+async fn current_schema_preflight_reads_the_committed_wal_before_writer_recovery() {
+    let source = tempfile::tempdir().unwrap();
+    let live = SqliteStore::open(source.path()).unwrap();
+    let session = SessionId::new("wal-preflight").unwrap();
+    live.append(AppendBatch {
+        session_id: session.clone(),
+        expected_seq: 0,
+        header: Some(header(session.as_str())),
+        facts: vec![Arc::new(fact(1))],
+    })
+    .await
+    .unwrap();
+    let target = tempfile::tempdir().unwrap();
+    for name in ["sessions.sqlite3", "sessions.sqlite3-wal"] {
+        std::fs::copy(source.path().join(name), target.path().join(name)).unwrap();
+    }
+    let recovered = SqliteStore::open(target.path()).unwrap();
+    assert_eq!(
+        recovered.header(&session).await.unwrap(),
+        header(session.as_str())
+    );
+    assert_eq!(
+        recovered.read_facts(&session, 0, 8).await.unwrap().facts,
+        vec![fact(1)]
+    );
+    drop(recovered);
+    SqliteStore::verify(target.path()).unwrap();
+    drop(live);
 }

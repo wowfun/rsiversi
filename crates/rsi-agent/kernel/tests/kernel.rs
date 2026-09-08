@@ -1306,15 +1306,17 @@ async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: u
     }
     let mut expected_seq = 0;
     for (batch_index, batch_facts) in facts.chunks(512).enumerate() {
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store,
+            AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq,
                 header: (batch_index == 0).then(|| header(session_id.as_str())),
                 facts: batch_facts.iter().cloned().map(Into::into).collect(),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         expected_seq = batch_facts.last().unwrap().seq();
     }
 }

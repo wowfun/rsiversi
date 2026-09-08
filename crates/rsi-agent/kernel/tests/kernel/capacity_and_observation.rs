@@ -1222,8 +1222,9 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         let session_id = SessionId::new(format!("terminal-session-{index}")).unwrap();
         let turn_id = TurnId::new(format!("terminal-turn-{index}")).unwrap();
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store.as_ref(),
+            AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: Some(header(session_id.as_str())),
@@ -1253,9 +1254,10 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         terminal_turns.push((session_id, turn_id));
     }
     let kernel = kernel(store).await;
@@ -1290,8 +1292,9 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         let session_id = SessionId::new(format!("invalid-resume-session-{index}")).unwrap();
         let turn_id = TurnId::new(format!("invalid-resume-turn-{index}")).unwrap();
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store.as_ref(),
+            AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: Some(header(session_id.as_str())),
@@ -1321,9 +1324,10 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         terminal_sessions.push(session_id);
     }
     let kernel = kernel(store).await;
@@ -1873,15 +1877,17 @@ async fn retained_history(store: &MemoryStore, name: &str) -> usize {
         })
         .collect::<Vec<_>>();
     let bytes = facts.iter().map(|fact| fact.encoded_len()).sum();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        store,
+        AppendBatch {
             session_id: SessionId::new(name).unwrap(),
             expected_seq: 0,
             header: Some(header(name)),
             facts,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     bytes
 }
 
@@ -1899,14 +1905,26 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
     for _ in 0..admitted {
         streams.push(
             kernel
-                .observe_session(&session, ObservationCursor::default())
+                .observe_session(
+                    &session,
+                    ObservationCursor {
+                        control_seq: 1,
+                        fact_seq: 0,
+                    },
+                )
                 .await
                 .unwrap(),
         );
     }
     assert!(matches!(
         kernel
-            .observe_session(&session, ObservationCursor::default())
+            .observe_session(
+                &session,
+                ObservationCursor {
+                    control_seq: 1,
+                    fact_seq: 0
+                }
+            )
             .await,
         Err(TurnError::Capacity)
     ));
@@ -1922,7 +1940,13 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
     assert!(
         matches!(
             kernel
-                .observe_session(&session, ObservationCursor::default())
+                .observe_session(
+                    &session,
+                    ObservationCursor {
+                        control_seq: 1,
+                        fact_seq: 0
+                    }
+                )
                 .await,
             Err(TurnError::Capacity)
         ),
@@ -1930,14 +1954,20 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
     );
     drop(last_clone);
     let replacement = kernel
-        .observe_session(&session, ObservationCursor::default())
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 1,
+                fact_seq: 0,
+            },
+        )
         .await
         .unwrap();
     let mut resumed = kernel
         .observe_session(
             &session,
             ObservationCursor {
-                control_seq: 0,
+                control_seq: 1,
                 fact_seq: 2,
             },
         )
@@ -1970,7 +2000,7 @@ async fn unrelated_executor_changes_do_not_reread_idle_durable_observers() {
                 .observe_session(
                     &session,
                     ObservationCursor {
-                        control_seq: 0,
+                        control_seq: 1,
                         fact_seq: 2,
                     },
                 )
@@ -2013,7 +2043,13 @@ async fn minimum_retention_and_read_budgets_make_progress_one_page_at_a_time() {
     .unwrap();
     let session = SessionId::new("minimum-retention").unwrap();
     let mut stream = kernel
-        .observe_session(&session, ObservationCursor::default())
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 1,
+                fact_seq: 0,
+            },
+        )
         .await
         .unwrap();
     for expected in 1..=3 {
@@ -2039,7 +2075,7 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
     let memory = Arc::new(MemoryStore::new());
     let session = SessionId::new("alternating-pages").unwrap();
     append_terminal_history(&memory, session.as_str(), 300).await;
-    for start in [0_u64, 300] {
+    for start in [300_u64, 600] {
         let controls = (0..150)
             .flat_map(|offset| {
                 let seq = start + offset * 2 + 1;
@@ -2091,7 +2127,13 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
             .unwrap();
     observed.reset_read_attempts();
     let mut stream = kernel
-        .observe_session(&session, ObservationCursor::default())
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 300,
+                fact_seq: 0,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -2100,9 +2142,9 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
         "the initial control page must not retain a Fact page too"
     );
     for (controls, first, last) in [
-        (true, 1, 512),
+        (true, 301, 812),
         (false, 1, 512),
-        (true, 513, 600),
+        (true, 813, 900),
         (false, 513, 600),
     ] {
         for expected in first..=last {
@@ -2169,15 +2211,17 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
         },
     )
     .unwrap();
-    store
-        .append(AppendBatch {
+    rsi_agent_testkit::append_history_fixture(
+        store.as_ref(),
+        AppendBatch {
             session_id: session.clone(),
             header: Some(header(session.as_str())),
             expected_seq: 0,
             facts: vec![Arc::new(accepted), Arc::new(maximum), Arc::new(terminal)],
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let kernel = AgentKernel::recover_with_clock_and_limits(
         store,
         composition(),
@@ -2194,7 +2238,7 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
         .observe_session(
             &session,
             ObservationCursor {
-                control_seq: 0,
+                control_seq: 1,
                 fact_seq: 1,
             },
         )

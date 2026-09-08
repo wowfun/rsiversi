@@ -109,13 +109,18 @@ const EXPECTED_TABLES: [(&str, &str); 10] = [
             accepted_seq INTEGER NOT NULL CHECK (accepted_seq > 0),
             terminal_seq INTEGER CHECK (terminal_seq > accepted_seq),
             terminal_prefix_sha256 TEXT,
+            terminal_control_seq INTEGER CHECK (terminal_control_seq > 0),
+            terminal_control_prefix_sha256 TEXT,
             PRIMARY KEY (session_id, turn_id),
             UNIQUE (session_id, accepted_seq),
             UNIQUE (session_id, terminal_seq),
+            UNIQUE (session_id, terminal_control_seq),
             FOREIGN KEY (session_id, accepted_seq)
                 REFERENCES facts(session_id, seq) ON DELETE RESTRICT,
             FOREIGN KEY (session_id, terminal_seq)
-                REFERENCES facts(session_id, seq) ON DELETE RESTRICT
+                REFERENCES facts(session_id, seq) ON DELETE RESTRICT,
+            FOREIGN KEY (session_id, terminal_control_seq)
+                REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
          ) STRICT",
     ),
     (
@@ -335,15 +340,13 @@ impl SqliteStore {
     /// First access validates the selected session's bounded Header, mechanical
     /// watermark, stored digest shape, Fact/turn relationships, and canonical
     /// Agent-control index projections, then caches that proof with bounded recency. It does not decode every Fact or
-    /// recompute the canonical prefix digest; use [`Self::verify`] for that
+    /// recompute the canonical Fact-prefix digest; use [`Self::verify`] for that
     /// explicit full audit.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = prepare_root(root.as_ref())?;
         let writer_lock = acquire_writer_lock(&root)?;
         let cas_dir = root.join("cas");
-        prepare_owned_directory(&cas_dir, "CAS directory")?;
         let cas_staging_dir = cas_dir.join("staging");
-        prepare_cas_staging_directory(&cas_staging_dir)?;
         let database_path = root.join("sessions.sqlite3");
         reject_symlink_if_present(&database_path, "SQLite database")?;
         let may_initialize = match fs::metadata(&database_path) {
@@ -351,19 +354,42 @@ impl SqliteStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => return Err(io_error(error)),
         };
+        // Preserve rejected durable formats before any writer PRAGMA, WAL recovery, or staging cleanup.
+        // The process-wide writer lease keeps this proof valid through writer construction.
+        let validated_reader = if may_initialize {
+            None
+        } else {
+            let mut reader = Connection::open_with_flags(
+                &database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(sql_error)?;
+            configure_reader(&reader)?;
+            initialize_or_validate_schema(&mut reader, false)?;
+            Some(reader)
+        };
+        prepare_owned_directory(&cas_dir, "CAS directory")?;
+        prepare_cas_staging_directory(&cas_staging_dir)?;
         let mut writer_connection = Connection::open_with_flags(
             &database_path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(sql_error)?;
         configure_writer(&writer_connection)?;
-        initialize_or_validate_schema(&mut writer_connection, may_initialize)?;
-        let reader_connection = Connection::open_with_flags(
-            &database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(sql_error)?;
-        configure_reader(&reader_connection)?;
+        if may_initialize {
+            initialize_or_validate_schema(&mut writer_connection, true)?;
+        }
+        let reader_connection = if let Some(reader) = validated_reader {
+            reader
+        } else {
+            let reader = Connection::open_with_flags(
+                &database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(sql_error)?;
+            configure_reader(&reader)?;
+            reader
+        };
         let validation_connection = Connection::open_with_flags(
             &database_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,

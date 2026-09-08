@@ -672,20 +672,20 @@ impl SessionStore for SqliteStore {
                 ForkTurnSelection::All => available_completed_turns,
                 ForkTurnSelection::Last(count) => available_completed_turns.min(count),
             };
-            let (resolved_after_seq, resolved_terminal_seq, terminal_prefix_sha256) =
+            let (resolved_after_seq, resolved_terminal_seq, terminal_prefix_sha256, resolved_terminal_control_seq, terminal_control_prefix_sha256) =
                 if effective_turns == 0 {
-                    (0, 0, hex::encode(EMPTY_FACT_PREFIX_DIGEST))
+                    (0, 0, hex::encode(EMPTY_FACT_PREFIX_DIGEST), 0, hex::encode(EMPTY_CONTROL_PREFIX_DIGEST))
                 } else {
-                    let (sequence, digest) = transaction
+                    let (sequence, digest, control_seq, control_digest) = transaction
                     .query_row(
-                        "SELECT terminal_seq, terminal_prefix_sha256 FROM turns
+                        "SELECT terminal_seq, terminal_prefix_sha256, terminal_control_seq, terminal_control_prefix_sha256 FROM turns
                          WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2
                          ORDER BY terminal_seq DESC LIMIT 1",
                         params![
                             session_id.as_str(),
                             sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?,
                         ],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
                     )
                     .map_err(sql_error)?;
                     let resolved_terminal_seq =
@@ -749,9 +749,14 @@ impl SessionStore for SqliteStore {
                         ));
                     }
                     validate_sha256("terminal-prefix digest", &digest)?;
-                    (resolved_after_seq, resolved_terminal_seq, digest)
+                    {
+                        validate_sha256("terminal control-prefix digest", &control_digest)?;
+                        (resolved_after_seq, resolved_terminal_seq, digest, decode_u64("terminal control sequence", control_seq)?, control_digest)
+                    }
                 };
             let boundary = StoreForkBoundary {
+                resolved_terminal_control_seq,
+                terminal_control_prefix_sha256,
                 resolved_after_seq,
                 resolved_terminal_seq,
                 terminal_prefix_sha256,

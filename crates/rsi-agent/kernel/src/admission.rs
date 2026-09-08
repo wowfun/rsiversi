@@ -305,6 +305,7 @@ impl AgentKernel {
         outcome: &TurnOutcome,
         timestamp_ms: u64,
     ) -> TurnResult<AtomicSessionAppend> {
+        self.fence_pending_terminal(parent_session_id).await?;
         let mailbox = self
             .inner
             .store

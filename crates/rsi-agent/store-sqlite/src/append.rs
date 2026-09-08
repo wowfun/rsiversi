@@ -173,6 +173,24 @@ pub(super) fn apply_atomic_sqlite_append(
         )?;
         control_digest = advance_control_prefix_digest(control_digest, record)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if let AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id,
+            terminal_fact_seq,
+        } = record.body()
+        {
+            let changed = transaction.execute(
+                "UPDATE turns SET terminal_control_seq = ?1, terminal_control_prefix_sha256 = ?2
+                 WHERE session_id = ?3 AND turn_id = ?4 AND terminal_seq = ?5
+                   AND terminal_control_seq IS NULL",
+                params![sqlite_u64("terminal control sequence", record.seq())?, hex::encode(control_digest),
+                    append.session_id.as_str(), turn_id.as_str(), sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?],
+            ).map_err(sql_error)?;
+            if changed != 1 {
+                return Err(StoreError::Corrupt(
+                    "SQLite lost the terminal Fact/control correlation".into(),
+                ));
+            }
+        }
     }
     let durable_control_seq = append
         .controls
@@ -242,6 +260,8 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            // The enclosing atomic append derives the correlated digest after inserting this row.
+            AgentControlRecordBody::TurnBoundaryRecorded { .. } => Ok(()),
             AgentControlRecordBody::MessageAccepted {
                 message,
                 delivery,
@@ -1155,25 +1175,6 @@ pub(super) fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBat
     for fact in &batch.facts {
         fact_prefix_digest = advance_fact_prefix_digest(fact_prefix_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
-            let changed = transaction
-                .execute(
-                    "UPDATE turns SET terminal_prefix_sha256 = ?1
-                     WHERE session_id = ?2 AND turn_id = ?3 AND terminal_seq = ?4",
-                    params![
-                        hex::encode(fact_prefix_digest),
-                        batch.session_id.as_str(),
-                        fact.body().turn_id().as_str(),
-                        sqlite_u64("turn terminal sequence", fact.seq())?,
-                    ],
-                )
-                .map_err(sql_error)?;
-            if changed != 1 {
-                return Err(StoreError::Corrupt(
-                    "SQLite lost a terminal-prefix update predicate".into(),
-                ));
-            }
-        }
     }
     let changed = transaction
         .execute(

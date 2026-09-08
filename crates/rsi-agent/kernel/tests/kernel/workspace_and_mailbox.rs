@@ -680,6 +680,8 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                 resolved_after_seq: 0,
                 resolved_terminal_seq: 0,
                 terminal_prefix_sha256: empty_fact_prefix.clone(),
+                resolved_terminal_control_seq: 0,
+                terminal_control_prefix_sha256: "0".repeat(64),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
             };

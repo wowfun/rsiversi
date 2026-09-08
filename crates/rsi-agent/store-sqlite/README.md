@@ -4,7 +4,11 @@ SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
 exact current schema is accepted; this pre-release implementation does not
-migrate old layouts. Open validates root ownership and the exact schema without
+migrate old layouts. For an existing nonempty database, the retained read-only
+foreground connection validates the exact schema before opening a writer or
+cleaning CAS staging. Rejected-version database bytes and staging contents stay
+unchanged. A current WAL is read in that preflight snapshot before ordinary
+writer recovery. Open validates root ownership and the exact schema without
 scanning dormant session history. Header and recent-session reads validate only bounded immutable metadata.
 Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
 validate the selected session's mechanical durable invariants in one snapshot.
@@ -14,12 +18,14 @@ cache is an optional hint: a poisoned cache disables proof reuse and marking,
 so it cannot turn a successful durable commit into an error. Cold validation
 still runs before any indexed execution/history read.
 Every canonical terminal Fact must have the matching non-NULL terminal index
-sequence and prefix digest. Missing terminal metadata is corruption in both
+Fact and control sequences and prefix digests. The final control of each
+terminal commit is its exact `TurnBoundaryRecorded` marker. Missing terminal metadata is corruption in both
 online indexed reads and offline verification; it never describes an open Turn.
 The lazy
 check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
-It streams and decodes each canonical Agent control once, feeding separate
+It streams, decodes and hashes each canonical Agent control once, checking terminal
+control prefixes and feeding separate
 mailbox, ready, and active-activation projections. Completed pending payloads
 are released during that pass. All projections borrow the same immutable Header
 already decoded in that validation transaction; control history length does not
@@ -112,7 +118,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 12 admits only the current mandatory Agent-preset
+The exact schema version 13 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

@@ -4,8 +4,8 @@ name: Generation-pinned Agent contributions and durable domain state
 
 ## Problem
 
-Workspace context has dedicated Kernel branches. Fact-only budgets and fork boundaries cannot account
-for plugin control records or establish historical domain state.
+Workspace context has dedicated Kernel branches. Fact-only budgets cannot account
+for plugin control records, and Session controls have no typed domain-state admission.
 
 ## Proposal
 
@@ -18,10 +18,12 @@ validated proposals, revision CAS, and receipts. GeneratedRecords/Bytes charge
 Facts and Turn-attributed domain controls; user commands and baselines use
 separate bounded admission. Plugins cannot select their charging class.
 
-TurnBoundaryRecorded accompanies each terminal Fact in one atomic commit and
-defines its control horizon. Forks retain both prefixes. PluginContext preserves
-actual model input; ToolRejected records denial without a fake start. Initial
-domain baselines join Header and first acceptance atomically.
+The [terminal boundary decision](../../implemented/architecture/2026-09-08-terminal-control-boundaries.md)
+owns same-transaction Fact/control correlation, exact historical fork prefixes,
+control-admission fences and partial startup repair. Domain as-of selection uses
+that established control horizon. PluginContext preserves actual model input;
+ToolRejected records denial without a fake start. Initial domain baselines join
+Header and first acceptance atomically.
 
 Only after substrate tests pass, migrate workspace/time contributors, followed
 by commands, projections, draft controls, and planning policy. Ordered consumers

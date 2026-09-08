@@ -61,7 +61,11 @@ latched permanent failure also rejects later submissions to that session with
 the same flush error instead of admitting unreachable work. The Kernel retries
 with bounded backoff; it never drops, reorders, or reports the failed suffix as
 durable.
-Terminal completion performs a bounded final flush.
+Terminal completion performs a bounded final flush. Every terminal crosses the
+[correlated Fact/control Store commit](../store-protocol/README.md). The flusher
+ends each Session batch at its first terminal. Control mutations fence a queued
+terminal under submission admission before sampling their control cursor; the
+flusher remains independent of that admission so the fence cannot deadlock.
 
 Ordinary draft creation remains process-local. Its immutable Header becomes
 durable with the first accepted Turn or mailbox message. A spawned child is
@@ -109,7 +113,8 @@ lazily when an executor claim asks for work. Recovery reads only open per-turn
 Fact streams into compact live control state and does not materialize all
 mailboxes or dormant tree history. A ready message is claimed only when an
 executor lane requests work, subject to resident-session and per-tree running
-bounds. Recovery repairs every accepted nonterminal turn. A
+bounds. Recovery repairs every accepted nonterminal turn in a separate correlated commit;
+a later startup continues after any already committed repairs. A
 durable cancellation becomes `Cancelled`; every other unfinished turn becomes
 deterministically `Interrupted`. Terminal turn controls and idle sessions are
 not retained: historical headers, observations, and outcomes use indexed Store

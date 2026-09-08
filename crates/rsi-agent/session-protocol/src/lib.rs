@@ -17,7 +17,7 @@ use std::fmt;
 use thiserror::Error;
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 7;
+pub const SESSION_FORMAT_VERSION: u32 = 8;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -258,6 +258,10 @@ pub struct ForkOrigin {
     pub resolved_terminal_seq: u64,
     /// Canonical Fact-prefix digest at the resolved terminal sequence.
     pub terminal_prefix_sha256: String,
+    /// Exact canonical control horizon recorded with the selected terminal, or zero.
+    pub resolved_terminal_control_seq: u64,
+    /// Canonical control-prefix digest at that horizon.
+    pub terminal_control_prefix_sha256: String,
     /// Caller-requested selection.
     pub requested_turns: ForkTurnSelection,
     /// Number of completed turns actually retained.
@@ -270,6 +274,10 @@ impl ForkOrigin {
         self.requested_turns.validate()?;
         validate_sha256("parent header fingerprint", &self.parent_header_fingerprint)?;
         validate_sha256("fork terminal prefix", &self.terminal_prefix_sha256)?;
+        validate_sha256(
+            "fork terminal control prefix",
+            &self.terminal_control_prefix_sha256,
+        )?;
         validate_identifier("subagent task name", &self.task_name)?;
         if self.path.depth() == 0 {
             return Err(SessionError::Invalid(
@@ -283,6 +291,16 @@ impl ForkOrigin {
             ));
         }
         let empty = cursors_empty && self.effective_turns == 0;
+        if (self.resolved_terminal_control_seq == 0) != empty
+            || (empty
+                && (self.terminal_prefix_sha256 != hex::encode(EMPTY_FACT_PREFIX_DIGEST)
+                    || self.terminal_control_prefix_sha256
+                        != hex::encode(EMPTY_CONTROL_PREFIX_DIGEST)))
+        {
+            return Err(SessionError::Invalid(
+                "fork boundary requires an exact Fact/control pair".into(),
+            ));
+        }
         if matches!(self.requested_turns, ForkTurnSelection::None) && !empty {
             return Err(SessionError::Invalid(
                 "fork `none` selection must resolve to an empty parent prefix".into(),
@@ -594,6 +612,12 @@ pub enum WaitKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
+    /// Kernel-owned correlation committed with one terminal Fact. This record is
+    /// the final control in that Session append and defines its control horizon.
+    TurnBoundaryRecorded {
+        turn_id: TurnId,
+        terminal_fact_seq: u64,
+    },
     /// A bounded message entered the durable mailbox.
     MessageAccepted {
         message: AgentMessage,
@@ -660,6 +684,16 @@ impl AgentControlRecordBody {
     /// Revalidates bounded values independent of Store state.
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::TurnBoundaryRecorded {
+                terminal_fact_seq, ..
+            } => {
+                if *terminal_fact_seq == 0 {
+                    return Err(SessionError::Invalid(
+                        "terminal boundary requires a nonzero Fact sequence".into(),
+                    ));
+                }
+                Ok(())
+            }
             Self::MessageAccepted {
                 message,
                 delivery,

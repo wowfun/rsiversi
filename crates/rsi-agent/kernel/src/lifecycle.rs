@@ -230,7 +230,11 @@ impl AgentKernel {
                     .map_or(header.session_id(), |origin| &origin.root_session_id)
                     .clone()
             });
-            let result = self.inner.store.append(batch).await;
+            let result = if batch.facts.iter().any(|fact| is_terminal_fact(fact)) {
+                self.flush_terminal_batch(batch).await
+            } else {
+                self.inner.store.append(batch).await
+            };
             if result.is_ok() {
                 self.inner.session_changes.committed(&session_id);
             }
@@ -241,6 +245,63 @@ impl AgentKernel {
             }
             self.complete_flush(&session_id, result);
         }
+    }
+
+    async fn flush_terminal_batch(
+        &self,
+        batch: AppendBatch,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AppendCommit> {
+        // Control writers hold submission admission and fence queued terminals before sampling
+        // their control cursor. The flusher must not acquire that admission while they wait.
+        let control_seq = read_controls_bounded(&self.inner, &batch.session_id, 0, 1)
+            .await?
+            .durable_seq;
+        let committed = self
+            .inner
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: batch.session_id.clone(),
+                    expected_fact_seq: batch.expected_seq,
+                    expected_control_seq: control_seq,
+                    header: batch.header,
+                    facts: batch.facts,
+                    controls: Vec::new(),
+                }],
+                required_active_activations: Vec::new(),
+                quiescent_descendants_of: None,
+            })
+            .await?;
+        let watermark = committed
+            .sessions
+            .first()
+            .filter(|watermark| watermark.session_id == batch.session_id)
+            .ok_or_else(|| {
+                StoreError::Corrupt("terminal commit returned no exact Session watermark".into())
+            })?;
+        Ok(rsi_agent_store_protocol::AppendCommit {
+            durable_seq: watermark.durable_fact_seq,
+        })
+    }
+
+    /// Caller holds this Session's submission admission through its ensuing control commit.
+    pub(super) async fn fence_pending_terminal(&self, session_id: &SessionId) -> TurnResult<()> {
+        let wait = {
+            let state = lock_state(&self.inner);
+            state.sessions.get(session_id).and_then(|session| {
+                session
+                    .pending
+                    .iter()
+                    .rev()
+                    .find(|fact| is_terminal_fact(fact))
+                    .map(|terminal| DurabilityWait::new(session, terminal.seq()))
+            })
+        };
+        if let Some(wait) = wait {
+            self.wait_for_durable(wait)
+                .await
+                .map_err(turn_kernel_error)?;
+        }
+        Ok(())
     }
 
     pub(super) fn prepare_flush_batch(&self, session_id: &SessionId) -> Option<PreparedFlushBatch> {
@@ -262,11 +323,24 @@ impl AgentKernel {
                 break;
             }
             let encoded = fact.encoded_len();
-            if !facts.is_empty() && bytes.saturating_add(encoded) > MAXIMUM_STORE_BATCH_BYTES {
+            let marker_bytes = if is_terminal_fact(fact) {
+                notifications::terminal_boundary_record(u64::MAX, fact)
+                    .expect("bounded typed terminal identity fits its control envelope")
+                    .encoded_len()
+            } else {
+                0
+            };
+            if !facts.is_empty()
+                && bytes.saturating_add(encoded).saturating_add(marker_bytes)
+                    > MAXIMUM_STORE_BATCH_BYTES
+            {
                 break;
             }
             bytes = bytes.saturating_add(encoded);
             facts.push(Arc::clone(fact));
+            if is_terminal_fact(fact) {
+                break;
+            }
         }
         session.flush_inflight = true;
         Some(PreparedFlushBatch {

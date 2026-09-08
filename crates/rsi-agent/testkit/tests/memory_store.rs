@@ -103,13 +103,14 @@ async fn memory_store_is_compare_and_append_and_failure_injection_is_precommit()
 }
 
 #[tokio::test]
-async fn memory_store_rejects_a_terminal_fact_for_an_unknown_turn_at_append() {
+async fn memory_store_rejects_a_terminal_fact_for_an_unknown_turn_at_atomic_append() {
     let store = MemoryStore::new();
     let session = SessionId::new("memory-session").unwrap();
     let unknown = TurnId::new("unknown-turn").unwrap();
 
-    let result = store
-        .append(AppendBatch {
+    let result = rsi_agent_testkit::append_history_fixture(
+        &store,
+        AppendBatch {
             session_id: session,
             expected_seq: 0,
             header: Some(header()),
@@ -127,8 +128,9 @@ async fn memory_store_rejects_a_terminal_fact_for_an_unknown_turn_at_append() {
             .into_iter()
             .map(Into::into)
             .collect(),
-        })
-        .await;
+        },
+    )
+    .await;
 
     assert!(matches!(result, Err(StoreError::Corrupt(_))));
 }
@@ -255,7 +257,17 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
                 expected_control_seq: 0,
                 header: None,
                 facts: vec![terminal],
-                controls: vec![],
+                controls: vec![
+                    rsi_agent_session_protocol::AgentControlRecord::new(
+                        1,
+                        3,
+                        rsi_agent_session_protocol::AgentControlRecordBody::TurnBoundaryRecorded {
+                            turn_id: TurnId::new("turn-1").unwrap(),
+                            terminal_fact_seq: 3,
+                        },
+                    )
+                    .unwrap(),
+                ],
             }],
             required_active_activations: vec![],
             quiescent_descendants_of: None,

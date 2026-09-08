@@ -1,7 +1,7 @@
 # rsi-agent-session-protocol
 
 This package owns the exact pre-release durable Session format: immutable
-headers, bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 8), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.
@@ -26,10 +26,13 @@ have separate named 64-entry bounds. They currently share a value but are
 independent contracts and may evolve without accidental semantic coupling.
 
 Fork lineage records the parent Header fingerprint, tree path, invoking Turn,
-resolved balanced completed-turn interval, and terminal-prefix digest. Fork
+resolved balanced completed-turn interval, and exact terminal Fact/control
+sequences and prefix digests. The [Store contract](../store-protocol/README.md)
+owns their atomic correlation. Fork
 seeds retain provider replay events. The child has a new Session identity and
 never mutates or truncates its parent's log. An effective-turn count of zero is
-valid only for the exact empty interval whose cursors are both zero; every
+valid only for the exact empty interval whose Fact/control cursors and prefix
+digests are all empty; every
 nonempty resolved interval retains at least one complete Turn.
 
 Every header carries one required `AgentPresetId`. Its lowercase

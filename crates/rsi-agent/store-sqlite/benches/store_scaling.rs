@@ -215,15 +215,17 @@ async fn append_session(
             next_seq += 1;
             remaining -= 1;
         }
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store,
+            AppendBatch {
                 session_id: session.clone(),
                 expected_seq: next_seq - 1 - u64::try_from(facts.len()).unwrap(),
                 header: first.then(|| header(session.clone())),
                 facts: (facts).into_iter().map(Into::into).collect(),
-            })
-            .await
-            .expect("populate append");
+            },
+        )
+        .await
+        .expect("populate append");
         first = false;
     }
 }
@@ -393,8 +395,32 @@ async fn benchmark_metadata(sessions: usize) {
                     .map(Into::into)
                     .collect(),
                 };
-                let (read, write) =
-                    tokio::join!(store.list_recent_sessions(None, 256), store.append(batch));
+                let terminal = batch.facts.last().unwrap();
+                let marker = AgentControlRecord::new(
+                    2,
+                    terminal.timestamp_ms(),
+                    AgentControlRecordBody::TurnBoundaryRecorded {
+                        turn_id: terminal.body().turn_id().clone(),
+                        terminal_fact_seq: terminal.seq(),
+                    },
+                )
+                .unwrap();
+                let commit = AtomicAgentCommit {
+                    sessions: vec![AtomicSessionAppend {
+                        session_id: batch.session_id,
+                        expected_fact_seq: batch.expected_seq,
+                        expected_control_seq: 1,
+                        header: batch.header,
+                        facts: batch.facts,
+                        controls: vec![marker],
+                    }],
+                    required_active_activations: Vec::new(),
+                    quiescent_descendants_of: None,
+                };
+                let (read, write) = tokio::join!(
+                    store.list_recent_sessions(None, 256),
+                    store.commit_agent(commit)
+                );
                 black_box(read.unwrap());
                 write.unwrap();
             })
@@ -452,7 +478,7 @@ async fn benchmark_control_history(count: u64) {
     for start in (0..count).step_by(500) {
         let mut controls = Vec::new();
         for offset in (0..500).step_by(2) {
-            let sequence = start + offset + 1;
+            let sequence = start + offset + 2;
             let activation_id = ActivationId::new(format!("activation-{sequence}")).unwrap();
             controls.push(
                 AgentControlRecord::new(
@@ -484,7 +510,7 @@ async fn benchmark_control_history(count: u64) {
                 sessions: vec![AtomicSessionAppend {
                     session_id: cold.clone(),
                     expected_fact_seq: 2,
-                    expected_control_seq: start,
+                    expected_control_seq: start + 1,
                     header: None,
                     facts: vec![],
                     controls,
@@ -532,7 +558,7 @@ async fn benchmark_control_history(count: u64) {
         );
     }
     println!(
-        "control_case controls={count} cold_page_calls={} returned_facts={returned} warm_header_calls={}",
+        "control_case business_controls={count} terminal_markers=1 cold_page_calls={} returned_facts={returned} warm_header_calls={}",
         cold_pages.len(),
         concurrent_headers.len()
     );

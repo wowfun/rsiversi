@@ -585,7 +585,9 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
         invoking_turn_id: TurnId::new("turn-first").unwrap(),
         resolved_after_seq: 0,
         resolved_terminal_seq: 0,
-        terminal_prefix_sha256: "b".repeat(64),
+        terminal_prefix_sha256: "0".repeat(64),
+        resolved_terminal_control_seq: 0,
+        terminal_control_prefix_sha256: "0".repeat(64),
         requested_turns: ForkTurnSelection::All,
         effective_turns: 0,
     }
@@ -610,12 +612,28 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
         resolved_after_seq: 0,
         resolved_terminal_seq: 7,
         terminal_prefix_sha256: "b".repeat(64),
+        resolved_terminal_control_seq: 1,
+        terminal_control_prefix_sha256: "c".repeat(64),
         requested_turns: ForkTurnSelection::All,
         effective_turns: 2,
     })
     .unwrap();
     assert_eq!(child.format_version(), SESSION_FORMAT_VERSION);
     assert_eq!(child.fork_origin().unwrap().resolved_terminal_seq, 7);
+    for (field, value) in [
+        ("resolved_terminal_control_seq", json!(0)),
+        ("terminal_control_prefix_sha256", json!("bad-digest")),
+    ] {
+        let mut encoded = serde_json::to_value(&child).unwrap();
+        encoded["fork_origin"][field] = value;
+        assert!(
+            serde_json::from_value::<SessionHeader>(encoded).is_err(),
+            "accepted invalid {field}"
+        );
+    }
+    let mut previous_format = serde_json::to_value(&child).unwrap();
+    previous_format["format_version"] = json!(7);
+    assert!(serde_json::from_value::<SessionHeader>(previous_format).is_err());
     let mut encoded = serde_json::to_value(&child).unwrap();
     encoded["fork_origin"]["terminal_prefix_sha256"] = json!("not-a-digest");
     assert!(serde_json::from_value::<SessionHeader>(encoded).is_err());
@@ -633,6 +651,8 @@ fn fork_lineage_rejects_nonempty_intervals_with_zero_effective_turns() {
         resolved_after_seq: 0,
         resolved_terminal_seq: 7,
         terminal_prefix_sha256: "11".repeat(32),
+        resolved_terminal_control_seq: 1,
+        terminal_control_prefix_sha256: "c".repeat(64),
         requested_turns: ForkTurnSelection::All,
         effective_turns: 0,
     };
@@ -751,4 +771,31 @@ fn control_records_bound_message_authority_and_form_a_digest_chain() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn terminal_control_rejects_a_zero_fact_reference_on_construction_and_decode() {
+    assert!(
+        AgentControlRecord::new(
+            1,
+            1,
+            AgentControlRecordBody::TurnBoundaryRecorded {
+                turn_id: TurnId::new("boundary").unwrap(),
+                terminal_fact_seq: 0,
+            }
+        )
+        .is_err()
+    );
+    let valid = AgentControlRecord::new(
+        1,
+        1,
+        AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id: TurnId::new("boundary").unwrap(),
+            terminal_fact_seq: 2,
+        },
+    )
+    .unwrap();
+    let mut encoded = serde_json::to_value(valid).unwrap();
+    encoded["terminal_fact_seq"] = json!(0);
+    assert!(serde_json::from_value::<AgentControlRecord>(encoded).is_err());
 }
