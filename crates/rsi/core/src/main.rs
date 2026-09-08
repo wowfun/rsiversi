@@ -24,7 +24,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

@@ -3,8 +3,7 @@ use super::{
     AgentPresetRow, AgentPresetSource, AgentPresetTrust, AgentStoreCommand, ApplicationProfileId,
     BTreeMap, HostProfileId, ManagementOutput, PresetError, ProfileCatalog, ProfileCommand,
     ProfileKind, ProfileOperationKind, ProfileSource, RsiError, Serialize, SqliteStore,
-    StandardComposition, Write, report_error, standard_agent_preset_root, standard_coding_tools,
-    standard_paths,
+    StandardComposition, Write, report_error, standard_agent_preset_root, standard_paths,
 };
 use rsi_terminal::write_text_line;
 
@@ -181,10 +180,13 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
         Ok(document) => document,
         Err(error) => return report_error(&profile_management_error(error)),
     };
-    let coding = match standard_coding_tools() {
+    #[cfg(target_os = "linux")]
+    let coding = match super::standard_coding_tools() {
         Ok(coding) => coding,
         Err(error) => return report_error(&error),
     };
+    #[cfg(not(target_os = "linux"))]
+    let coding = None;
     let presets =
         match AgentPresetManager::open_standard_preview(paths.clone(), coding.is_some()).await {
             Ok(presets) => presets,

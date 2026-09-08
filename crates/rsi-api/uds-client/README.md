@@ -12,6 +12,10 @@ The response source directly owns and polls the Hyper connection; there is no
 detached socket driver. Dropping a read or retiring the connection releases that
 socket, while a mutation already admitted at the server retains its server owner.
 Local client shutdown never stops the independent deployment.
+The response owner closes its socket by dropping the connection after HTTP
+completion. It does not issue a redundant write shutdown after the peer has
+closed; that system call can report NotConnected on Unix even after a complete
+valid response. HTTP framing and body failures still fail the exchange.
 
 The local listener closes HTTP/1 after one exchange. Pipelined extra requests
 cannot dispatch a second operation and do not roll back an admitted first
