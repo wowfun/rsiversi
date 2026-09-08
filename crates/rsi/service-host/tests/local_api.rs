@@ -49,11 +49,8 @@ async fn fixture() -> (tempfile::TempDir, Runtime, ServiceHostPaths) {
         directory.path().join("cache"),
     )
     .unwrap();
-    let paths = ServiceHostPaths::from_host_paths_with_runtime(
-        &paths,
-        Some(&directory.path().join("runtime")),
-    )
-    .unwrap();
+    let paths =
+        ServiceHostPaths::from_host_paths_with_runtime(&paths, Some(directory.path())).unwrap();
     let runtime = Runtime::default();
     apply(
         &runtime,
@@ -260,12 +257,11 @@ async fn listener_cleanup_preserves_a_replacement_socket_inode() {
 #[tokio::test]
 async fn runtime_parent_symlink_is_rejected_without_changing_target_permissions() {
     let (directory, runtime, paths) = fixture().await;
-    let parent = directory.path().join("runtime");
+    let parent = paths.runtime_directory().parent().unwrap();
     let borrowed = directory.path().join("borrowed");
-    std::fs::create_dir(&parent).unwrap();
     std::fs::create_dir(&borrowed).unwrap();
     std::fs::set_permissions(&borrowed, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::os::unix::fs::symlink(&borrowed, parent.join("rsi")).unwrap();
+    std::os::unix::fs::symlink(&borrowed, parent).unwrap();
     let plugin = apply(
         &runtime,
         "local",
