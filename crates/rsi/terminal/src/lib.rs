@@ -471,6 +471,7 @@ impl rsi_client::MessageSink for CliMessageSink {
     ) -> Result<(), rsi_client::MessageRunError> {
         use rsi_client::MessageEvent;
         let terminal = matches!(event, MessageEvent::Outcome { .. });
+        let claimed = matches!(event, MessageEvent::Claimed { .. });
         let event = match event {
             MessageEvent::Accepted(receipt) => CliEvent::Message {
                 session_id: receipt.session_id,
@@ -482,24 +483,12 @@ impl rsi_client::MessageSink for CliMessageSink {
                 message_id,
                 turn_id,
                 entered_fact_seq,
-            } => {
-                *self
-                    .interactions
-                    .lock()
-                    .expect("message interaction watcher poisoned") =
-                    Some(session_cli::spawn_interactions(
-                        self.handle.clone(),
-                        self.renderer.clone(),
-                        &self.stopped,
-                        &self.work,
-                    ));
-                CliEvent::Turn {
-                    session_id,
-                    message_id,
-                    turn_id,
-                    entered_fact_seq,
-                }
-            }
+            } => CliEvent::Turn {
+                session_id,
+                message_id,
+                turn_id,
+                entered_fact_seq,
+            },
             MessageEvent::Fact {
                 session_id,
                 fact,
@@ -524,6 +513,18 @@ impl rsi_client::MessageSink for CliMessageSink {
         send_cli_event(&self.renderer, &self.stopped, &self.cancellation, event)
             .await
             .map_err(|_| rsi_client::MessageRunError::SinkStopped)?;
+        if claimed && !self.stopped.is_cancelled() && !self.cancellation.is_cancelled() {
+            *self
+                .interactions
+                .lock()
+                .expect("message interaction watcher poisoned") =
+                Some(session_cli::spawn_interactions(
+                    self.handle.clone(),
+                    self.renderer.clone(),
+                    &self.stopped,
+                    &self.work,
+                ));
+        }
         if terminal {
             send_finish_line(&self.renderer, &self.stopped)
                 .await

@@ -13,6 +13,10 @@ on attachment replacement. Line-mode text suppresses unsolicited projection
 payloads; JSONL emits typed replacement events. Projection failure does not stop
 core history observation.
 
+Headless message delivery admits its claimed-Turn envelope to the renderer before
+starting live interaction observation. Output backpressure or a stopped renderer
+cannot start that watcher before its Turn is visible in the ordered event queue.
+
 Interactive applications expose the pinned Session command catalog: the TUI
 action menu and line-mode `:commands`. Registered `/name arguments` inputs run
 through the shared controller; unknown slash names remain Human messages for

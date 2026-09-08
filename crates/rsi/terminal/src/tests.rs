@@ -1140,3 +1140,61 @@ async fn line_sigint_interrupts_initial_service_queries_and_drains_presentation(
         assert!(runtime.shutdown().await.is_clean());
     }
 }
+
+#[tokio::test]
+async fn headless_interactions_start_only_after_claimed_turn_is_admitted() {
+    use rsi_client::MessageSink;
+    let handle = Arc::new(UnknownThenAcceptedHandle::default());
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    sender.send(CliRenderMessage::FinishLine).await.unwrap();
+    let sink = CliMessageSink {
+        handle: handle.clone(),
+        renderer: sender,
+        cancellation: CancellationToken::new(),
+        stopped: CancellationToken::new(),
+        work: ApplicationWork::default(),
+        interactions: std::sync::Mutex::new(None),
+    };
+    let claimed = || rsi_client::MessageEvent::Claimed {
+        session_id: SessionId::new("session").unwrap(),
+        message_id: MessageId::new("message").unwrap(),
+        turn_id: TurnId::new("turn").unwrap(),
+        entered_fact_seq: 1,
+    };
+    let mut delivery = Box::pin(sink.event(claimed()));
+    assert!(futures_util::poll!(&mut delivery).is_pending());
+    tokio::task::yield_now().await;
+    assert_eq!(
+        handle
+            .interaction_polls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "watcher acquired the live stream before Turn admission"
+    );
+    receiver.recv().await.unwrap();
+    delivery.await.unwrap();
+    assert!(matches!(
+        receiver.recv().await,
+        Some(CliRenderMessage::Event(CliEvent::Turn { .. }))
+    ));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap(),
+        Some(CliRenderMessage::Event(CliEvent::Interactions { .. }))
+    ));
+    sink.interactions.lock().unwrap().take();
+    sink.stopped.cancel();
+    let polls = handle
+        .interaction_polls
+        .load(std::sync::atomic::Ordering::SeqCst);
+    sink.event(claimed()).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        handle
+            .interaction_polls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        polls
+    );
+    assert!(sink.interactions.lock().unwrap().is_none());
+}
