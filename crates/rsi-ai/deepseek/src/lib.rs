@@ -5,7 +5,9 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use rsi_ai_openai_compatible::{ChatCompletionsAdapter, ChatCompletionsConfig};
+use rsi_ai_openai_compatible::{
+    ChatCompletionsAdapter, ChatCompletionsConfig, DeveloperMessageRole,
+};
 use rsi_ai_protocol::{AiError, LanguageModelLimits, LanguageRequest};
 use rsi_ai_provider::{
     AdapterFuture, LanguageAdapter, LanguageAdapterStream, LanguageRegistrarContract,
@@ -27,7 +29,8 @@ impl Default for DeepSeekConfig {
             chat: ChatCompletionsConfig::new("https://api.deepseek.com")
                 .and_then(|config| config.with_path("/chat/completions"))
                 .expect("the static DeepSeek endpoint is valid")
-                .with_image_input(false),
+                .with_image_input(false)
+                .with_developer_role(DeveloperMessageRole::System),
         }
     }
 }
@@ -37,7 +40,8 @@ impl DeepSeekConfig {
     pub fn with_endpoint(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let chat = ChatCompletionsConfig::new(endpoint)?
             .with_path("/chat/completions")?
-            .with_image_input(false);
+            .with_image_input(false)
+            .with_developer_role(DeveloperMessageRole::System);
         Ok(Self { chat })
     }
 

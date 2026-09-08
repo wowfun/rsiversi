@@ -140,6 +140,43 @@ async fn too_many_tool_calls() -> Response {
 }
 
 #[tokio::test]
+async fn generic_chat_preserves_the_distinct_developer_role_by_default() {
+    let capture = Capture::default();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat))
+        .with_state(capture.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let adapter = ChatCompletionsAdapter::new(
+        ChatCompletionsConfig::new(format!("http://{address}"))
+            .unwrap()
+            .with_model_profile("fixture-model", model_limits())
+            .unwrap(),
+        Arc::new(ReqwestTransport::new().unwrap()),
+    );
+    complete(
+        &adapter,
+        LanguageRequest::new(vec![
+            Message::system_text("Root policy").unwrap(),
+            Message::developer_text("Sampled context").unwrap(),
+            Message::user_text("Continue").unwrap(),
+        ])
+        .unwrap(),
+        Arc::new(MissingMediaResolver),
+    )
+    .await
+    .unwrap();
+    let (_, body) = capture.0.lock().unwrap().take().unwrap();
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][1]["role"], "developer");
+    assert_eq!(body["messages"][1]["content"][0]["text"], "Sampled context");
+    assert_eq!(body["messages"][2]["role"], "user");
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn chat_stream_rejects_tool_state_before_exceeding_content_bounds() {
     let app = Router::new().route("/v1/chat/completions", post(too_many_tool_calls));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

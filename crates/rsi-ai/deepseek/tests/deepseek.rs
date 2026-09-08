@@ -26,9 +26,12 @@ fn context(model: &str) -> rsi_ai_provider::PrepareContext {
 
 #[tokio::test]
 async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
+    let received = Arc::new(std::sync::Mutex::new(None));
+    let capture = received.clone();
     let app = Router::new().route(
         "/chat/completions",
-        post(|| async {
+        post(move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+            *capture.lock().unwrap() = Some(body);
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
         }),
     );
@@ -53,11 +56,24 @@ async fn deepseek_uses_its_chat_path_and_requires_the_done_sentinel() {
         &adapter,
         context("deepseek-chat"),
         "deepseek-chat",
-        LanguageRequest::new(vec![Message::user_text("hi").expect("message")]).expect("request"),
+        LanguageRequest::new(vec![
+            Message::system_text("Root instructions").unwrap(),
+            Message::user_text("hi").unwrap(),
+            Message::developer_text("Sampled time: 42").unwrap(),
+        ])
+        .expect("request"),
     )
     .await
     .expect("complete");
     assert_eq!(output.visible_text(), "ok");
+    assert_eq!(
+        received.lock().unwrap().as_ref().unwrap()["messages"],
+        serde_json::json!([
+            {"role":"system", "content":[{"type":"text", "text":"Root instructions"}]},
+            {"role":"user", "content":[{"type":"text", "text":"hi"}]},
+            {"role":"system", "content":[{"type":"text", "text":"Sampled time: 42"}]},
+        ])
+    );
 }
 
 #[tokio::test]

@@ -32,12 +32,22 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
+/// Endpoint-owned wire representation of semantic Developer messages.
+#[derive(Clone, Copy, Debug)]
+pub enum DeveloperMessageRole {
+    /// Preserve the distinct developer role.
+    Developer,
+    /// Use system instructions on endpoints without a distinct developer role.
+    System,
+}
+
 /// Fixed endpoint policy for one compatible Chat Completions deployment.
 #[derive(Clone, Debug)]
 pub struct ChatCompletionsConfig {
     endpoint: String,
     path: String,
     allow_image_input: bool,
+    developer_role: DeveloperMessageRole,
     language_models: LanguageModelProfiles,
 }
 
@@ -48,6 +58,7 @@ impl ChatCompletionsConfig {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
             path: "/v1/chat/completions".to_owned(),
             allow_image_input: true,
+            developer_role: DeveloperMessageRole::Developer,
             language_models: LanguageModelProfiles::default(),
         };
         config.validate()?;
@@ -65,6 +76,13 @@ impl ChatCompletionsConfig {
     /// Enables or disables image input at request preparation time.
     pub const fn with_image_input(mut self, allow: bool) -> Self {
         self.allow_image_input = allow;
+        self
+    }
+
+    #[must_use]
+    /// Selects instruction role translation without changing the semantic request.
+    pub const fn with_developer_role(mut self, role: DeveloperMessageRole) -> Self {
+        self.developer_role = role;
         self
     }
 
@@ -218,14 +236,9 @@ impl LanguageAdapter for ChatCompletionsAdapter {
         Box::pin(async move {
             Ok(Prepared::new(snapshot, move |abort| {
                 Box::pin(async move {
-                    let body = build_request_body(
-                        &context,
-                        &model,
-                        &request,
-                        abort.clone(),
-                        config.allow_image_input,
-                    )
-                    .await?;
+                    let body =
+                        build_request_body(&context, &model, &request, abort.clone(), &config)
+                            .await?;
                     let credential = context.credential().ok_or_else(|| {
                         ai_error(
                             ErrorKind::Authentication,
@@ -443,9 +456,9 @@ async fn build_request_body(
     model: &str,
     request: &LanguageRequest,
     abort: rsi_ai_provider::AbortSignal,
-    allow_image_input: bool,
+    config: &ChatCompletionsConfig,
 ) -> Result<JsonRequestBody, AiError> {
-    let (messages, media) = serialize_messages(context, request, abort, allow_image_input).await?;
+    let (messages, media) = serialize_messages(context, request, abort, config).await?;
     let tools = request
         .tools()
         .iter()
@@ -521,7 +534,7 @@ async fn serialize_messages(
     context: &PrepareContext,
     request: &LanguageRequest,
     abort: rsi_ai_provider::AbortSignal,
-    allow_image_input: bool,
+    config: &ChatCompletionsConfig,
 ) -> Result<(Vec<Value>, Vec<JsonBase64Replacement>), AiError> {
     let mut messages = Vec::with_capacity(request.messages().len());
     let mut media = Vec::new();
@@ -542,7 +555,7 @@ async fn serialize_messages(
                     context,
                     tool_message,
                     abort.clone(),
-                    allow_image_input,
+                    config.allow_image_input,
                     image_index,
                     &mut media,
                 )
@@ -563,7 +576,7 @@ async fn serialize_messages(
                 context,
                 message,
                 abort.clone(),
-                allow_image_input,
+                config,
                 message_index,
                 &mut media,
             )
@@ -590,7 +603,7 @@ async fn serialize_message(
     context: &PrepareContext,
     message: &Message,
     abort: rsi_ai_provider::AbortSignal,
-    allow_image_input: bool,
+    config: &ChatCompletionsConfig,
     message_index: usize,
     media_replacements: &mut Vec<JsonBase64Replacement>,
 ) -> Result<Vec<Value>, AiError> {
@@ -598,7 +611,10 @@ async fn serialize_message(
         MessageRole::System | MessageRole::Developer | MessageRole::User => {
             let role = match message.role() {
                 MessageRole::System => "system",
-                MessageRole::Developer => "developer",
+                MessageRole::Developer => match config.developer_role {
+                    DeveloperMessageRole::Developer => "developer",
+                    DeveloperMessageRole::System => "system",
+                },
                 MessageRole::User => "user",
                 MessageRole::Assistant | MessageRole::Tool => unreachable!(),
             };
@@ -608,7 +624,7 @@ async fn serialize_message(
                     MessageContent::Text { text } => {
                         wire_blocks.push(json!({"type":"text", "text":text}));
                     }
-                    MessageContent::Image(media) if allow_image_input && role == "user" => {
+                    MessageContent::Image(media) if config.allow_image_input && role == "user" => {
                         let bytes = context.resolve_media(media, abort.clone()).await?;
                         media_replacements.push(JsonBase64Replacement::new(
                             format!(
@@ -687,7 +703,7 @@ async fn serialize_message(
                 context,
                 message,
                 abort,
-                allow_image_input,
+                config.allow_image_input,
                 message_index + 1,
                 media_replacements,
             )
