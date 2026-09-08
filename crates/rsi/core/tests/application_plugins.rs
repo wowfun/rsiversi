@@ -43,14 +43,23 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
             None,
         )
         .unwrap();
-        let profile = ProfileCatalog::new(paths.clone())
+        #[cfg(target_os = "linux")]
+        let program = ProfileCatalog::new(paths.clone())
             .application(&ApplicationProfileId::new("devices").unwrap())
+            .unwrap()
+            .program()
             .unwrap();
-        assert!(
-            host.start_program(profile.program().unwrap())
-                .await
-                .is_err()
-        );
+        // The standard operator transport is Linux-only. Exercise the same
+        // portable application factory directly where that backend is absent.
+        #[cfg(not(target_os = "linux"))]
+        let program = rsi_host::ProfileProgram::from_profile(rsi_host::Profile::new(vec![
+            rsi_host::ProfileEntry::new(
+                "application",
+                "rsi.application.devices",
+                serde_json::Value::Null,
+            ),
+        ]));
+        assert!(host.start_program(program).await.is_err());
         assert!(diagnostics.take().is_some());
     }
     for path in [paths.config(), paths.state(), paths.cache()] {
