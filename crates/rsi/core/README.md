@@ -308,3 +308,15 @@ identity. Installed-only changes do not affect either selected input. Host launc
 identity continues to use frozen base declarations. CLI list/show/copy use one
 such authoring snapshot; path/delete/default operations remain usable independently
 of native source health.
+
+Explicit `rsi addon refresh` runs the ordinary `addons` Application Profile over
+the existing local operator connection (currently Linux). It neither starts a
+Service Host nor installs/enables sources. An ordinary API plugin owns the local-only
+`native-addons.refresh` mutation and forwards it to the existing bounded staging
+worker through NativeAddonControl; Inspector operations remain reads. A receipt reports a decimal source
+revision, snapshot replacement and selected count, not Session generation or
+Runtime convergence. Delivery uncertainty requires inspecting current state
+before another explicit attempt; no client or transport retry is implied.
+API retirement cancels its pending Control waits before draining registration;
+the manager still joins in-flight native work during its own retirement, retaining
+the sole Loader's failure fence.

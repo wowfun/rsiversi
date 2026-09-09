@@ -300,6 +300,8 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             "inspector",
             "media",
             "models",
+            #[cfg(unix)]
+            "native-addons",
             "output",
             "session",
             "settings",
@@ -312,7 +314,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         dispatch
             .operations()
             .iter()
-            .filter(|spec| matches!(spec.id.domain(), "devices" | "inspector"))
+            .filter(|spec| matches!(spec.id.domain(), "devices" | "inspector" | "native-addons"))
             .all(|spec| spec.access == rsi_api_protocol::OperationAccess::Local)
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

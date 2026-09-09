@@ -308,6 +308,7 @@ async fn check_device_management(fixture: &CliFixture, address: &str, origin: &s
         "inspector/profile",
         "inspector/factories",
         "inspector/native",
+        "native-addons/refresh",
     ] {
         assert_eq!(
             request(address, operation, token, Some(epoch), "{}")

@@ -149,3 +149,8 @@ InspectorFactory owns the finite `runtime [AFTER_FIBER]`, `profile [OFFSET]`,
 `factories [OFFSET]` and `native` grammar. It prints a bounded JSON page through
 the same cancellable output owner as device administration and retains no live
 Session. The response carries the next cursor; each invocation reads one page.
+
+NativeAddonsFactory owns the finite `refresh` grammar over the local operator
+ApiClient. It uses the shared terminal lease, cancellation and bounded document
+delivery. A missing result never triggers automatic replay: inspect native state
+before another explicit attempt. The command needs no Session or model.

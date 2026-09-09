@@ -35,6 +35,7 @@ const TUI_PROFILE: &str = "tui";
 const SERVE_PROFILE: &str = "serve";
 const DEVICES_PROFILE: &str = "devices";
 const INSPECTOR_PROFILE: &str = "inspector";
+const ADDONS_PROFILE: &str = "addons";
 const STANDARD_HOST_PROFILE: &str = "standard";
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -381,6 +382,7 @@ impl ProfileCatalog {
             SERVE_PROFILE,
             DEVICES_PROFILE,
             INSPECTOR_PROFILE,
+            ADDONS_PROFILE,
         ];
         let mut ids = list_user_ids::<ApplicationProfileId>(
             &self.paths.config().join(APPLICATION_PROFILE_DIRECTORY),
@@ -496,10 +498,14 @@ fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
         TUI_PROFILE => ("rsi.application.tui", "rsi.application.connection"),
         SERVE_PROFILE => ("rsi.application.serve", "rsi.application.service"),
         DEVICES_PROFILE => ("rsi.application.devices", "rsi.application.operator"),
+        ADDONS_PROFILE => ("rsi.application.addons", "rsi.application.operator"),
         INSPECTOR_PROFILE => ("rsi.application.inspector", "rsi.application.operator"),
         _ => return None,
     };
-    let config = if matches!(id.as_str(), DEVICES_PROFILE | INSPECTOR_PROFILE) {
+    let config = if matches!(
+        id.as_str(),
+        DEVICES_PROFILE | INSPECTOR_PROFILE | ADDONS_PROFILE
+    ) {
         ""
     } else {
         "config = { host_profile = \"standard\" }"

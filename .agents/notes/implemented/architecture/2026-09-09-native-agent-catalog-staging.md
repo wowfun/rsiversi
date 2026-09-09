@@ -81,3 +81,14 @@ These checks distinguish successful release from expected failure retention;
 they do not simulate a library-close failure. Standard Host probes additionally
 verify automatic selection updates, cancelled bounded refresh waiters, and actual
 Service Owner lock exclusion until the blocked native callback has drained.
+
+A separate ordinary API plugin owns the local mutation for explicit refresh,
+with typed path-free failures and finite receipts. Its terminal application uses
+the existing-owner operator connection. Keeping API registration out of the
+source manager avoids delaying source initialization behind API availability.
+Read-only Inspector operations are not expanded into administrative authority.
+API retirement cancels its Control waits before draining registration, closing
+queued reply receivers. The original worker skips abandoned queued requests and
+still joins any in-flight native work when the manager retires. Hard dependencies
+retain the Control owner through API cleanup. This is an adapter over the same
+Control and Loader, not a second lifecycle or a way around failure retention.

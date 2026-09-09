@@ -1,8 +1,10 @@
 //! Explicit native staging; source publication is independent of Runtime apply.
+mod api;
 mod plugin;
 use crate::{
     AddonScope, NativeAddonRecord, NativeAddonStore, StandardAddonBuilder, StandardAddonSet,
 };
+pub(crate) use api::NativeAddonApiFactory;
 pub(crate) use plugin::NativeAddonFactory;
 pub use plugin::{
     MAXIMUM_NATIVE_ADDON_REFRESH_REQUESTS, NativeAddonControl, NativeAddonControlContract,

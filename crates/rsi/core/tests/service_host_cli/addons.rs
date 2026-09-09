@@ -21,7 +21,13 @@ async fn source_cli_default_root_drives_only_the_running_managers_explicit_selec
     .unwrap();
     fixture.assert_success(&["addon", "install", "native.toml", "--output", "json"]);
     assert_preset_health(&fixture, "broken");
+    assert!(!fixture.run(&["addon", "refresh"]).status.success());
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);
+    let refreshed = fixture.assert_success(&["addon", "refresh"]);
+    let refreshed: serde_json::Value = serde_json::from_slice(&refreshed.stdout).unwrap();
+    assert_eq!(refreshed["source_revision"], "1");
+    assert_eq!(refreshed["changed"], false);
+    assert_eq!(refreshed["selected"], 0);
     let initial = status(&fixture);
     assert_eq!(initial["health"], "ready");
     assert!(initial["desired"].as_array().unwrap().is_empty());
@@ -31,6 +37,9 @@ async fn source_cli_default_root_drives_only_the_running_managers_explicit_selec
     assert_eq!(failed["desired"][0]["id"], "fixture.cli");
     assert_eq!(failed["source_revision"], "2");
     assert_eq!(failed["retained_failed_finalizations"], 0);
+    let failed_refresh = fixture.run(&["addon", "refresh"]);
+    assert!(!failed_refresh.status.success());
+    assert!(String::from_utf8_lossy(&failed_refresh.stderr).contains("native load rejected"));
     fixture.assert_success(&["addon", "disable", "fixture.cli"]);
     let ready = wait_health(&fixture, "ready").await;
     assert!(ready["desired"].as_array().unwrap().is_empty());

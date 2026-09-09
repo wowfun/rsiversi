@@ -44,6 +44,7 @@ impl Drop for TerminalLease {
 
 #[derive(Clone, Copy, Debug)]
 enum Kind {
+    NativeAddons,
     Inspector,
     Devices,
     Cli,
@@ -52,6 +53,7 @@ enum Kind {
 }
 #[derive(Debug)]
 enum Prepared {
+    NativeAddons(crate::native_addons::Command),
     Inspector(crate::inspector::Command),
     Devices(crate::devices::Command),
     Cli(SessionCommand),
@@ -101,6 +103,9 @@ impl Factory {
             ));
         }
         let state = match self.kind {
+            Kind::NativeAddons => {
+                crate::native_addons::Command::parse(&self.arguments).map(Prepared::NativeAddons)
+            }
             Kind::Inspector => {
                 crate::inspector::Command::parse(&self.arguments).map(Prepared::Inspector)
             }
@@ -117,7 +122,7 @@ impl Factory {
                 .requiring_local::<WorkspaceRegistryContract>()
         };
         Ok(match self.kind {
-            Kind::Inspector | Kind::Devices => {
+            Kind::NativeAddons | Kind::Inspector | Kind::Devices => {
                 prepared.requiring_local::<rsi_api_protocol::ApiClientContract>()
             }
             Kind::Headless => {
@@ -144,6 +149,11 @@ impl Factory {
             tasks: tasks.clone(),
         };
         let run: BoxFuture<'static, u8> = match state {
+            Prepared::NativeAddons(command) => Box::pin(crate::native_addons::run(
+                plan.local::<rsi_api_protocol::ApiClientContract>()?,
+                command,
+                retiring,
+            )),
             Prepared::Inspector(command) => Box::pin(crate::inspector::run(
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
                 command,
@@ -318,4 +328,10 @@ factory!(
     InspectorFactory,
     Inspector,
     "Ordinary Session-independent local Inspector application."
+);
+
+factory!(
+    NativeAddonsFactory,
+    NativeAddons,
+    "Ordinary local native staging terminal application."
 );

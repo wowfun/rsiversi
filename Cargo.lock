@@ -2636,6 +2636,7 @@ dependencies = [
  "rsi-meta-native-loader",
  "rsi-meta-profile",
  "rsi-meta-scope",
+ "rsi-native-addons-api",
  "rsi-permission-presets",
  "rsi-process",
  "rsi-process-local",
@@ -3945,6 +3946,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-native-addons-api"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-api",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-permission-presets"
 version = "0.0.1"
 dependencies = [
@@ -4444,6 +4460,7 @@ dependencies = [
  "rsi-inspector",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-native-addons-api",
  "rsi-process",
  "rsi-sandbox",
  "rsi-session-files",

@@ -12,6 +12,7 @@ pub(super) const HELP: &str = "Usage:\n\
       tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
       devices: <register LABEL|list|revoke DEVICE_ID>\n\
+      addons: refresh\n\
       inspector: <runtime [AFTER_FIBER]|profile [OFFSET]|factories [OFFSET]|native>\n\
   rsi profile <application|host> <COMMAND> [--output text|json]\n\
   rsi host <start|serve|restart|stop|status|reload> [--profile HOST]\n\

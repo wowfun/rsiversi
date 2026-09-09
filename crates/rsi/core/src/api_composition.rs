@@ -85,6 +85,20 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
         };
         entries.push(ProfileEntry::new(id, id, config));
     }
+    #[cfg(unix)]
+    {
+        builder.register_linked(
+            "rsi.native-addons.api",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            std::sync::Arc::new(crate::native_addons::NativeAddonApiFactory),
+        )?;
+        entries.push(ProfileEntry::new(
+            "rsi.native-addons.api",
+            "rsi.native-addons.api",
+            Value::Null,
+        ));
+    }
     builder.register_fragment(ProfileFragment::new("rsi.standard.api", entries))?;
     Ok(())
 }

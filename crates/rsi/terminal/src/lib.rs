@@ -7,6 +7,7 @@ mod devices;
 mod document;
 mod headless_commands;
 mod inspector;
+mod native_addons;
 mod plugin;
 mod session_cli;
 mod surfaces;
@@ -19,7 +20,10 @@ use arguments::Command;
 use arguments::{output_value, run_preset_value, session_value, usage};
 pub use devices::HELP as DEVICES_HELP;
 pub use inspector::HELP as INSPECTOR_HELP;
-pub use plugin::{CliFactory, DevicesFactory, HeadlessFactory, InspectorFactory, TuiFactory};
+pub use native_addons::HELP as NATIVE_ADDONS_HELP;
+pub use plugin::{
+    CliFactory, DevicesFactory, HeadlessFactory, InspectorFactory, NativeAddonsFactory, TuiFactory,
+};
 use rsi_agent_session_protocol::{
     AgentControlRecordBody, AgentPresetId, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
     MAXIMUM_TURN_TEXT_BYTES, MessageId, SessionFact, SessionFactBody, SessionId, TurnId,

@@ -52,7 +52,9 @@ async fn standard_source_stages_before_pin_and_switches_real_native_code_only_af
         .start(rsi_host::Profile::default())
         .await
         .unwrap();
-    let control = host.lookup_local::<NativeAddonControlContract>().unwrap();
+    let control = host
+        .lookup_local::<NativeAddonControlContract>()
+        .unwrap_or_else(|| panic!("native control missing: {:?}", host.profile_status()));
     assert_eq!(control.inspect().health, NativeAddonHealth::Ready);
     let service = host
         .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
@@ -161,19 +163,19 @@ async fn polling_does_not_reexecute_an_unchanged_failed_candidate_and_preview_ke
     assert_eq!(composition.preview_host(&profile).unwrap().launch_key, key);
     tokio::time::sleep(Duration::from_millis(2100)).await;
     assert_eq!(fs::read(root.join("entered")).unwrap(), b"entered");
-    assert!(matches!(
-        control.refresh().await,
-        Err(NativeAddonUpdateError::Selection(_))
-    ));
+    assert_eq!(
+        refresh_failure(&host).await,
+        rsi_native_addons_api::RefreshFailure::Selection
+    );
     assert_eq!(fs::read(root.join("entered")).unwrap(), b"enteredentered");
     let index = root.join("config/native-addons/state.json");
     let original = fs::read(&index).unwrap();
     fs::write(&index, b"invalid metadata").unwrap();
     wait_health(control.as_ref(), NativeAddonHealth::InvalidSource).await;
-    assert!(matches!(
-        control.refresh().await,
-        Err(NativeAddonUpdateError::Store(_))
-    ));
+    assert_eq!(
+        refresh_failure(&host).await,
+        rsi_native_addons_api::RefreshFailure::Source
+    );
     fs::write(&index, original).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(fs::read(root.join("entered")).unwrap(), b"enteredentered");
@@ -209,7 +211,18 @@ async fn bounded_refresh_waiters_can_cancel_while_retirement_still_joins_the_nat
     store.install(&manifest).unwrap();
     store.enable("fixture.addon").unwrap();
     let release = Release(root.join("release"));
-    let mut first = Box::pin(control.refresh());
+    let dispatch = host
+        .lookup_local::<rsi_api_protocol::ApiDispatchContract>()
+        .unwrap();
+    let operation = rsi_api_protocol::OperationId::new("native-addons", "refresh", 1).unwrap();
+    let call = dispatch
+        .admit(&operation, rsi_api_protocol::CallOrigin::Local)
+        .unwrap();
+    let bytes = rsi_api_protocol::ByteBudget::new(1024)
+        .unwrap()
+        .encode(&serde_json::json!({}), 1024)
+        .unwrap();
+    let mut first = Box::pin(call.invoke(bytes));
     assert!(futures_util::poll!(first.as_mut()).is_pending());
     tokio::time::timeout(Duration::from_secs(5), async {
         while !root.join("entered").exists() {
@@ -240,6 +253,12 @@ async fn bounded_refresh_waiters_can_cancel_while_retirement_still_joins_the_nat
         }
     }).await.unwrap();
     assert!(control.inspect().active_callbacks > 0);
+    assert!(
+        !dispatch
+            .operations()
+            .iter()
+            .any(|value| value.id == operation)
+    );
     assert!(futures_util::poll!(shutdown.as_mut()).is_pending());
     assert!(
         !can_claim_service_owner(&root).await,
@@ -272,4 +291,25 @@ async fn can_claim_service_owner(root: &Path) -> bool {
         fiber.is_ok_and(|fiber| matches!(fiber.snapshot().state, rsi_meta::FiberState::Active));
     let _cleanup = runtime.shutdown().await;
     active
+}
+
+async fn refresh_failure(host: &rsi_host::RunningHost) -> rsi_native_addons_api::RefreshFailure {
+    use rsi_api_protocol::{ApiDispatchContract, ApiError, ByteBudget, CallOrigin, OperationId};
+    let dispatch = host.lookup_local::<ApiDispatchContract>().unwrap();
+    let input = ByteBudget::new(1024)
+        .unwrap()
+        .encode(&serde_json::json!({}), 1024)
+        .unwrap();
+    let result = dispatch
+        .admit(
+            &OperationId::new("native-addons", "refresh", 1).unwrap(),
+            CallOrigin::Local,
+        )
+        .unwrap()
+        .invoke(input)
+        .await;
+    let Err(ApiError::Domain(bytes)) = result else {
+        panic!("expected categorical refresh rejection: {result:?}")
+    };
+    serde_json::from_slice(bytes.as_bytes()).unwrap()
 }

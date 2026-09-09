@@ -159,6 +159,7 @@ pub struct ApplicationDiagnostics {
     web_serve: Arc<rsi_serve::ServeFactory>,
     devices: Arc<rsi_terminal::DevicesFactory>,
     inspector: Arc<rsi_terminal::InspectorFactory>,
+    native_addons: Arc<rsi_terminal::NativeAddonsFactory>,
 }
 impl ApplicationDiagnostics {
     /// Takes an actionable owner diagnostic after generic Profile bootstrap fails.
@@ -171,6 +172,7 @@ impl ApplicationDiagnostics {
             .or_else(|| self.web_serve.take_diagnostic())
             .or_else(|| self.devices.take_diagnostic())
             .or_else(|| self.inspector.take_diagnostic())
+            .or_else(|| self.native_addons.take_diagnostic())
             .or_else(|| {
                 self.connection
                     .diagnostic
@@ -196,6 +198,7 @@ pub fn standard_application_host(
         tui: Arc::new(rsi_terminal::TuiFactory::new(arguments.clone())),
         devices: Arc::new(rsi_terminal::DevicesFactory::new(arguments.clone())),
         inspector: Arc::new(rsi_terminal::InspectorFactory::new(arguments.clone())),
+        native_addons: Arc::new(rsi_terminal::NativeAddonsFactory::new(arguments.clone())),
         web_serve: Arc::new(rsi_serve::ServeFactory::with_web_assets(arguments.clone())),
         serve: Arc::new(rsi_serve::ServeFactory::new(arguments)),
     };
@@ -350,7 +353,7 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
 
 fn application_factories(
     diagnostics: &ApplicationDiagnostics,
-) -> [(&'static str, Arc<dyn PluginFactory>); 14] {
+) -> [(&'static str, Arc<dyn PluginFactory>); 15] {
     [
         ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
         ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
@@ -367,6 +370,7 @@ fn application_factories(
         ("rsi.web.assets", Arc::new(rsi_web_assets::WebAssetsFactory)),
         ("rsi.application.devices", diagnostics.devices.clone()),
         ("rsi.application.inspector", diagnostics.inspector.clone()),
+        ("rsi.application.addons", diagnostics.native_addons.clone()),
         (CONNECTION, diagnostics.connection.clone()),
         ("rsi.application.cli", diagnostics.cli.clone()),
         ("rsi.application.headless", diagnostics.headless.clone()),
