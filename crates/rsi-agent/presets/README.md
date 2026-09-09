@@ -68,7 +68,8 @@ unaffected.
 
 On Unix, opening the explicit user root accepts only an operating-system alias
 in the first path component directly below `/`. That component is canonicalized
-once, the untouched suffix is then traversed from `/` with directory-relative
+once through the shared [native filesystem helper](../../rsi-files/native-fs/README.md),
+the untouched suffix is then traversed from `/` with directory-relative
 `O_NOFOLLOW`, and every deeper symbolic link is rejected. Opening errors report
 the caller's logical path, while all mutations use the opened directory
 authority. The same owned-root interface is used by copy and delete and by the

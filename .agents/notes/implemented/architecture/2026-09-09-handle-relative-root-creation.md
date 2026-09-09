@@ -17,6 +17,14 @@ or existing component without following links. New directories request 0700;
 existing permissions remain unchanged. Products still choose and authorize the
 root and own filesystem quotas and lifetime.
 
+An explicit path helper resolves only the first component below `/` when a
+caller authorizes an OS-owned alias. It leaves the suffix untouched and grants
+no handle authority; subsequent acquisition remains no-follow. Agent preset
+roots consume this shared mechanism while retaining their own root policy and
+creation permissions. The ordinary root-acquisition APIs never enable alias
+resolution implicitly. Full preflight rejects embedded NUL before any parent
+creation, rather than relying on a later operating-system open to reject it.
+
 ## Alternatives considered
 
 A path precheck followed by recursive mkdir does not preserve the checked parent.
@@ -29,4 +37,6 @@ remove directories another actor already adopted.
 I/O failure may leave earlier created parents. Public tests cover creation,
 existing permissions, traversal rejection before writes, linked parents and
 retained-handle behavior after root replacement. The implementation is Unix;
-Linux tests do not establish native macOS behavior.
+additional probes cover NUL rejection before writes and explicit alias
+resolution without following deeper links. Linux tests do not establish native
+macOS behavior.

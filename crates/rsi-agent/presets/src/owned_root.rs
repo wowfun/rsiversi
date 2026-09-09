@@ -3,7 +3,7 @@
 use crate::{PresetError, Result};
 use std::ffi::OsString;
 use std::fs::File;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 /// An opened Unix preset root whose mutations stay relative to one directory handle.
 #[derive(Debug)]
@@ -43,8 +43,18 @@ pub fn open_or_create_preset_root(path: &Path) -> Result<OwnedPresetRoot> {
 fn open_preset_root(path: &Path, create: bool) -> Result<OwnedPresetRoot> {
     use rustix::fs::{Mode, OFlags};
 
-    let components = normalized_absolute_components(path)?;
-    let effective_path = resolve_first_component(&components, create, path)?;
+    let effective_path =
+        rsi_files_native_fs::resolve_absolute_root_alias(path, create).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                invalid_root(path)
+            } else {
+                PresetError::Io {
+                    operation: "resolve root-level alias",
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                }
+            }
+        })?;
     let effective_components = normalized_absolute_components(&effective_path)?;
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut directory = rustix::fs::open("/", flags, Mode::empty())
@@ -112,32 +122,6 @@ fn normalized_absolute_components(path: &Path) -> Result<Vec<OsString>> {
         return Err(invalid_root(path));
     }
     Ok(output)
-}
-
-fn resolve_first_component(
-    components: &[OsString],
-    create: bool,
-    logical_path: &Path,
-) -> Result<PathBuf> {
-    let Some((first, suffix)) = components.split_first() else {
-        return Ok(PathBuf::from("/"));
-    };
-    let logical_first = Path::new("/").join(first);
-    let resolved_first = match std::fs::canonicalize(&logical_first) {
-        Ok(path) => path,
-        Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => logical_first,
-        Err(error) => {
-            return Err(PresetError::Io {
-                operation: "resolve root-level alias",
-                path: logical_path.to_path_buf(),
-                message: error.to_string(),
-            });
-        }
-    };
-    normalized_absolute_components(&resolved_first)?;
-    Ok(suffix
-        .iter()
-        .fold(resolved_first, |path, name| path.join(name)))
 }
 
 fn invalid_root(path: &Path) -> PresetError {

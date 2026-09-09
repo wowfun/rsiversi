@@ -5,7 +5,48 @@
 #![allow(clippy::missing_errors_doc)]
 
 use cap_std::fs::Dir;
-use std::{fs::File, path::Path};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+};
+
+/// Resolve only the caller-trusted first component below `/`, preserving the suffix.
+/// This grants no directory authority; use no-follow acquisition on the result.
+pub fn resolve_absolute_root_alias(path: &Path, allow_missing: bool) -> std::io::Result<PathBuf> {
+    validate_absolute_root(path)?;
+    let mut components = path.components();
+    let _root = components.next();
+    let Some(first) = components.next() else {
+        return Ok(PathBuf::from("/"));
+    };
+    let logical_first = Path::new("/").join(first);
+    let mut resolved = match std::fs::canonicalize(&logical_first) {
+        Ok(path) => path,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            logical_first
+        }
+        Err(error) => return Err(error),
+    };
+    validate_absolute_root(&resolved)?;
+    resolved.extend(components);
+    Ok(resolved)
+}
+
+fn validate_absolute_root(path: &Path) -> std::io::Result<()> {
+    use std::path::Component;
+    if !path.is_absolute()
+        || path.as_os_str().as_encoded_bytes().contains(&0)
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "filesystem root is not absolute, normalized and NUL-free",
+        ));
+    }
+    Ok(())
+}
 
 /// Acquire an absolute directory by opening each path component without following links.
 pub fn open_absolute_directory_no_follow(path: &Path) -> std::io::Result<Dir> {
@@ -23,16 +64,7 @@ fn acquire_absolute_directory(path: &Path, create: bool) -> std::io::Result<Dir>
     use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::path::Component;
 
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "filesystem root is not absolute and normalized",
-        ));
-    }
+    validate_absolute_root(path)?;
     let root = openat(
         rustix::fs::CWD,
         "/",

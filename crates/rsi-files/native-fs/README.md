@@ -14,6 +14,16 @@ process umask). It preserves permissions on existing directories and validates
 all components before mutation. Each mkdir and subsequent no-follow open uses
 the retained parent handle. An I/O failure can leave earlier newly created
 parents; the helper does not remove pre-existing or partially created trees.
+Embedded NUL bytes are rejected during root preflight, before creating a parent.
+
+An explicit `resolve_absolute_root_alias` path operation canonicalizes only the
+first component below `/` and preserves the untouched suffix. Callers choose
+whether an absent first component may remain unresolved for later creation.
+This supports a caller-authorized OS alias such as `/var` on macOS; it neither
+opens the final root nor grants directory authority. The caller still acquires
+the returned path through the no-follow helpers. Relative paths, traversal and
+NUL are rejected before alias resolution. Root acquisition itself never opts into
+alias resolution implicitly.
 
 File opens are read-only, close-on-exec and nonblocking. They return a native
 file handle; callers must check the opened handle's type before reading content.

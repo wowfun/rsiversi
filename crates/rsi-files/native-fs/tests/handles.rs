@@ -161,3 +161,52 @@ fn creating_private_roots_rejects_traversal_before_mutation_and_never_follows_li
         b"same owner"
     );
 }
+
+#[test]
+fn nul_in_a_later_component_is_rejected_before_creating_a_parent() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    assert!(create_absolute_directory_no_follow(&base.join("not-created/nul\0suffix")).is_err());
+    assert!(!base.join("not-created").exists());
+}
+
+#[test]
+fn explicit_root_alias_resolution_preserves_unopened_and_symlinked_suffixes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    fs::create_dir(base.join("outside")).unwrap();
+    symlink(base.join("outside"), base.join("link")).unwrap();
+    let logical = base.join("link/unopened");
+    let resolved = resolve_absolute_root_alias(&logical, false).unwrap();
+    assert_eq!(resolved, logical);
+    assert!(create_absolute_directory_no_follow(&resolved).is_err());
+    assert!(!base.join("outside/unopened").exists());
+    // Read only OS-owned prefixes; the suffix is an isolated, never-opened name.
+    for prefix in ["/tmp", "/var", "/bin"] {
+        let suffix = temporary.path().file_name().unwrap();
+        let logical = Path::new(prefix).join(suffix).join("unopened");
+        assert_eq!(
+            resolve_absolute_root_alias(&logical, false).unwrap(),
+            fs::canonicalize(prefix)
+                .unwrap()
+                .join(suffix)
+                .join("unopened")
+        );
+    }
+    for invalid in ["relative", "/missing/../escape", "/tmp/nul\0suffix"] {
+        assert!(resolve_absolute_root_alias(Path::new(invalid), true).is_err());
+    }
+    assert_eq!(
+        resolve_absolute_root_alias(Path::new("/"), false).unwrap(),
+        Path::new("/")
+    );
+    let absent = Path::new("/")
+        .join(format!(
+            "rsi-absent-{}",
+            temporary.path().file_name().unwrap().to_str().unwrap()
+        ))
+        .join("suffix");
+    assert!(!absent.parent().unwrap().exists());
+    assert!(resolve_absolute_root_alias(&absent, false).is_err());
+    assert_eq!(resolve_absolute_root_alias(&absent, true).unwrap(), absent);
+}

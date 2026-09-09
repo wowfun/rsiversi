@@ -2838,6 +2838,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
+ "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta-profile",
  "rustix",
