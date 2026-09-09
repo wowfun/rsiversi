@@ -48,6 +48,20 @@ pub const MAXIMUM_TOOL_JSON_DEPTH: usize = 64;
 /// Maximum values and containers in model-produced Tool arguments.
 pub const MAXIMUM_TOOL_JSON_NODES: usize = 100_000;
 
+/// Decode byte-source Tool output lossily and replace disallowed terminal controls.
+pub fn safe_tool_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| {
+            if character.is_ascii_control() && !matches!(character, '\t' | '\n' | '\r') {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// Provider-neutral tool declaration shared by Tools, AI, and Agent.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

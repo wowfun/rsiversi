@@ -1,0 +1,27 @@
+[package]
+name = "rsi-files-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-files-protocol = { path = "../protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-files = { path = "../core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-tools = { path = "../../rsi-tools/core" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

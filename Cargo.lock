@@ -3612,6 +3612,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-files-tools"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-files",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-host"
 version = "0.0.1"
 dependencies = [

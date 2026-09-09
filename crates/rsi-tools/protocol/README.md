@@ -61,5 +61,8 @@ has no implicit answer or timer. The current
 pre-release result shape is exactly `{ value, content, is_error }`; image
 content contains a durable `MediaRef`, not an inline blob or status envelope.
 Model-facing text rejects C0 terminal controls other than tab and line breaks.
+`safe_tool_text` decodes UTF-8 lossily and replaces exactly those disallowed
+controls; byte-source Tools retain exact bytes separately and identify altered
+display text. This helper neither archives output nor grants content trust.
 The removed v0 status/blob tool-envelope shape is not forward-compatible and
 has no migration reader.
