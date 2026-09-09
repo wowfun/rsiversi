@@ -3572,6 +3572,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-files"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cap-std",
+ "hex",
+ "rsi-files-native-fs",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-files-native-fs"
 version = "0.0.1"
 dependencies = [
@@ -3579,6 +3595,20 @@ dependencies = [
  "libc",
  "rustix",
  "tempfile",
+]
+
+[[package]]
+name = "rsi-files-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-meta-contract",
+ "rsi-workspace-path",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio-util",
 ]
 
 [[package]]

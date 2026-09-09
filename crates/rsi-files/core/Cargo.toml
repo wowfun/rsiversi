@@ -1,0 +1,27 @@
+[package]
+name = "rsi-files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rsi-files-protocol = { path = "../protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+cap-std.workspace = true
+rsi-files-native-fs = { path = "../native-fs" }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true
