@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use wasm_bindgen::prelude::*;
 
 mod composition;
+mod inspection;
 #[path = "../../../../crates/rsi-meta/profile/tests/namespaces.rs"]
 mod profile_namespace_probe;
 
@@ -240,7 +241,11 @@ pub async fn run_probe() -> Result<String, JsValue> {
     profile_probe(execution.clone()).await;
     child_profiles_probe(execution.clone()).await;
     composition::probe(execution.clone()).await;
-    profile_namespace_probe::namespace_scenario(Runtime::with_execution(Default::default(), execution).unwrap()).await;
+    inspection::probe(execution.clone()).await;
+    profile_namespace_probe::namespace_scenario(
+        Runtime::with_execution(Default::default(), execution).unwrap(),
+    )
+    .await;
     let timers = rsi_meta_execution::browser_resource_snapshot();
     assert_eq!(timers.pending_timers, 0);
     assert_eq!(timers.active_alarms, 0);
@@ -252,7 +257,8 @@ pub async fn run_probe() -> Result<String, JsValue> {
             "wait cancellation", "rollback order", "shutdown resources",
             "Profile bundle and Rhai", "Profile reload without files",
             "child Profile isolation and disposal", "declaration order and prepend",
-            "registration snapshot and selective rebuild", "Scope contribution cleanup"]
+            "registration snapshot and selective rebuild", "Scope contribution cleanup",
+            "bounded redacted ownership inspection", "scoped inspection retirement fence"]
     })
     .to_string())
 }

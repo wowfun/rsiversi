@@ -1,5 +1,10 @@
 # rsi-host
 
+`RunningHost::inspect` exposes Meta's bounded redacted ownership pages without
+exporting mutable Runtime authority. Profile status and desired-tree snapshots
+remain owned by Profile control; observation does not establish atomic convergence
+or cleanup quiescence.
+
 Generic composition accepts a frozen environment with or without filesystem
 paths. `HostBuilder::without_paths` supports embedders such as browser Workers;
 its Profile source is an immutable bundle or programmatic document. Native file

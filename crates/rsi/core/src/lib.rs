@@ -62,6 +62,17 @@ pub struct RunningRsi {
     paths: HostPaths,
 }
 
+/// Read-only observations captured from the existing Profile and Meta owners.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsiInspection {
+    /// Bounded convergence status without configuration or raw plugin failures.
+    pub profile_status: rsi_host::ProfileStatus,
+    /// Redacted desired Profile tree.
+    pub profile: rsi_host::ProfileSnapshot,
+    /// Bounded owned Runtime metadata, scoped for embedded Hosts.
+    pub runtime: rsi_meta::RuntimeInspection,
+}
+
 impl RunningRsi {
     pub(crate) fn lookup_addon<C: rsi_meta::LocalContract>(
         &self,
@@ -172,6 +183,13 @@ impl RunningRsi {
     /// Returns the frozen Host paths.
     pub const fn paths(&self) -> &HostPaths {
         &self.paths
+    }
+
+    /// Inspects this Host without exporting mutation or cross-scope resource authority.
+    pub fn inspect(&self, request: rsi_meta::InspectionRequest) -> Result<RsiInspection> {
+        self.host
+            .inspect(request)
+            .map_err(|error| RsiError::Run(error.to_string()))
     }
 
     /// Clones the persisted deployment and live generation identity of this API.

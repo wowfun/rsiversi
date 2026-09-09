@@ -314,6 +314,12 @@ async fn built_in_standard_host_profile_boots_the_real_product_composition() {
     let running = RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
         .await
         .unwrap();
+    let inspection = running
+        .inspect(rsi_meta::InspectionRequest::default())
+        .unwrap();
+    assert!(inspection.runtime.resources.is_some());
+    assert!(!inspection.profile.nodes().is_empty());
+    assert!(!inspection.runtime.fibers.is_empty());
     let first = running.session_service().unwrap();
     let second = running.session_service().unwrap();
     assert!(

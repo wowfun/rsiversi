@@ -69,6 +69,24 @@ impl ScopedProfile {
     pub fn subscribe_profile(&self) -> tokio::sync::watch::Receiver<rsi_host::ProfileStatus> {
         self.control.subscribe()
     }
+
+    /// Returns this Profile's existing bounded convergence status.
+    pub fn profile_status(&self) -> rsi_host::ProfileStatus {
+        self.control.status()
+    }
+
+    /// Returns this Profile's existing redacted desired tree.
+    pub fn profile_snapshot(&self) -> rsi_host::ProfileSnapshot {
+        self.control.snapshot()
+    }
+
+    /// Inspects only this real scope's generation and descendants, without global counters.
+    pub fn inspect(
+        &self,
+        request: rsi_meta::InspectionRequest,
+    ) -> rsi_meta::Result<rsi_meta::RuntimeInspection> {
+        self.context.inspect(request)
+    }
     /// Disposes only this Profile's scope and returns Meta's exact cleanup report.
     pub async fn shutdown(&self) -> CleanupReport {
         self.scope.dispose().await

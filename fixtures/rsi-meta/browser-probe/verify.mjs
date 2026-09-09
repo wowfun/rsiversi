@@ -5,5 +5,5 @@ import { runWorkerProbe } from "../../tools/browser-worker.mjs";
 
 await runWorkerProbe({
   fixture: dirname(fileURLToPath(import.meta.url)), stem: "rsi_meta_browser_probe",
-  engines: [["chromium", chromium], ["firefox", firefox]], cases: 18, trap: true,
+  engines: [["chromium", chromium], ["firefox", firefox]], cases: 20, trap: true,
 });

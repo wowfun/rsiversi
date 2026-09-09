@@ -750,6 +750,14 @@ impl RunningHost {
         self.runtime.snapshot()
     }
 
+    /// Reads bounded redacted Meta ownership metadata without mutable Runtime authority.
+    pub fn inspect(
+        &self,
+        request: rsi_meta::InspectionRequest,
+    ) -> rsi_meta::Result<rsi_meta::RuntimeInspection> {
+        self.runtime.inspect(request)
+    }
+
     /// Starts or joins deterministic Runtime teardown.
     pub async fn shutdown(&self) -> ShutdownOutcome {
         self.runtime.shutdown().await

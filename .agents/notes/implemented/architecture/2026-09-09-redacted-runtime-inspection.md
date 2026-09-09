@@ -32,6 +32,12 @@ retained work after transfer, without creating a second effect registry or holdi
 extra strong cleanup owners. Supply publication metadata names the generation's
 publication history rather than promising current call admission.
 
+RunningHost forwards whole-Runtime observation without exporting mutable Runtime
+access. ScopedProfile uses its existing real scope Context; RunningRsi combines
+that observation with its existing Profile control status and desired snapshot.
+Two embedded Hosts therefore retain separate inspection membership and neither
+receives the shared Runtime's global resource counters through this product API.
+
 ## Alternatives considered
 
 Serializing the existing RuntimeSnapshot would expose arbitrary diagnostic strings

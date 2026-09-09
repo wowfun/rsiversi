@@ -21,6 +21,9 @@ retirement without granting parent shutdown authority. Preparation, activation f
 through their owning Meta/Profile errors. The caller owns the parent lifetime,
 including cancellation during bootstrap; ScopedProfile never creates or shuts down
 a Runtime. Native embedded service compositions and UI surfaces use this same seam.
+Its read-only `inspect` observes only that scope's owning generation and descendants,
+with no global resource counters; `profile_snapshot` and `profile_status` reuse the
+same Profile control. Inspection of a retired scope is generation-fenced.
 
 ShellFactory publishes a Session-free surface host. A frozen surface catalog is
 injected by its constructor; its Profile configuration sets at most 16 concurrent

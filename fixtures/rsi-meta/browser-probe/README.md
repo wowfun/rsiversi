@@ -15,6 +15,9 @@ the parent's services active.
 Ordered-contribution probes activate in reverse declaration order, exercise both
 listener lanes, reorder without generation changes, rebuild one contributor at
 its original position, retain old snapshots, and reclaim exact Scope registrations.
+Inspector probes exercise bounded Fiber pagination, real Local provider bindings,
+effect accounting, redacted failed/configuration state, scoped membership and
+retirement fencing. They read actual composition ranks before and after reorder.
 The Profile-owned namespace scenario also runs unchanged here: includes share
 named Local/event/Portable bindings, while two static wrappers remain independent
 and retiring one leaves the other callable. Immutable browser Profile sources

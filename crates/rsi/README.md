@@ -176,6 +176,10 @@ and construction of the Tokio runtime.
 The standard Host catalog maps Session, ingress and finite-read Local contracts
 into the same Host Profile isolation scope. Multiple Hosts inside one Runtime
 therefore share no raw Session read mapping.
+`RunningRsi::inspect` combines bounded redacted Meta ownership metadata with the
+existing Profile status and desired tree. Embedded Hosts inspect only their real
+scope; separately owned Hosts can include their global Runtime resource counters.
+The observations are captured at their owning boundaries, not as one atomic graph.
 
 The standard Host supplies the independent Files reader and Session-bound Files
 API. Embedded, UDS and HTTP applications use the same finite typed client.

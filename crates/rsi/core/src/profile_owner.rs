@@ -58,6 +58,29 @@ impl ProfileOwner {
             Self::Scoped { profile, .. } => profile.reload().await,
         }
     }
+
+    pub(crate) fn inspect(
+        &self,
+        request: rsi_meta::InspectionRequest,
+    ) -> rsi_meta::Result<crate::RsiInspection> {
+        let (profile_status, profile, runtime) = match self {
+            Self::Root(host) => (
+                host.profile_status(),
+                host.profile_snapshot(),
+                host.inspect(request)?,
+            ),
+            Self::Scoped { profile, .. } => (
+                profile.profile_status(),
+                profile.profile_snapshot(),
+                profile.inspect(request)?,
+            ),
+        };
+        Ok(crate::RsiInspection {
+            profile_status,
+            profile,
+            runtime,
+        })
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn subscribe_profile(
         &self,

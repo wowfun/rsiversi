@@ -97,6 +97,8 @@ pub(super) async fn probe(execution: Execution) {
         root.dispatch_local::<Notice>(()).unwrap();
         std::mem::take(&mut *events.lock().unwrap())
     };
+    let ranks = runtime.inspect(Default::default()).unwrap();
+    assert!(ranks.fibers[0].order > ranks.fibers[1].order);
     assert_eq!(dispatch(), ["bp", "ap", "aa", "ba"]);
     let original = second.snapshot().generation;
     let before = table.snapshot(None).unwrap();
@@ -106,6 +108,8 @@ pub(super) async fn probe(execution: Execution) {
     );
     assert!(Arc::ptr_eq(&before, &table.snapshot(None).unwrap()));
     root.reorder_children(&[b.clone(), a.clone()]).unwrap();
+    let reordered = runtime.inspect(Default::default()).unwrap();
+    assert!(reordered.fibers[0].order < reordered.fibers[1].order);
     assert_eq!(dispatch(), ["ap", "bp", "ba", "aa"]);
     assert_eq!(
         table

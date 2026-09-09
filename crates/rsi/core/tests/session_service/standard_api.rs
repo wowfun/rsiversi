@@ -111,6 +111,19 @@ async fn real_service_profiles_share_an_application_runtime_with_isolated_lifeti
     )
     .await
     .unwrap();
+    let inspection = one.inspect(rsi_meta::InspectionRequest::default()).unwrap();
+    let other = two.inspect(rsi_meta::InspectionRequest::default()).unwrap();
+    assert!(inspection.runtime.resources.is_none());
+    assert!(other.runtime.resources.is_none());
+    assert!(inspection.runtime.total_fibers < runtime.snapshot().fibers.len());
+    assert!(inspection.runtime.fibers.iter().all(|fiber| {
+        other
+            .runtime
+            .fibers
+            .iter()
+            .all(|other| fiber.id != other.id)
+    }));
+    assert!(!inspection.profile.nodes().is_empty());
     assert_ne!(
         one.connection_description().unwrap().endpoint_id,
         two.connection_description().unwrap().endpoint_id
