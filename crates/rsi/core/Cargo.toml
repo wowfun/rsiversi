@@ -15,6 +15,10 @@ name = "rsi"
 path = "src/main.rs"
 
 [dependencies]
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-files-tools = { path = "../../rsi-files/tools" }
+rsi-session-files = { path = "../session-files" }
 rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
 rsi-client-composition = { path = "../client-composition" }

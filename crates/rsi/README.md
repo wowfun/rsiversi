@@ -169,6 +169,16 @@ The standard Host catalog maps Session, ingress and finite-read Local contracts
 into the same Host Profile isolation scope. Multiple Hosts inside one Runtime
 therefore share no raw Session read mapping.
 
+The standard Host supplies the independent Files reader and Session-bound Files
+API. Embedded, UDS and HTTP applications use the same finite typed client.
+Authenticated users may browse both trusted and untrusted valid Session roots;
+expired drafts remain unavailable. The standard Unix Agent preset includes
+`file_read` and `directory_list` through its sealed Tool catalog and existing
+approval/Sandbox policy. Other platforms expose typed unsupported reads and omit
+these Tools from the standard preset. Reader guarantees and limits belong to
+[Files](../rsi-files/README.md), and authentication/binding belongs to
+[Session Files](session-files/README.md).
+
 The standard catalog links OpenAI, OpenAI-compatible, and DeepSeek factories
 without implicitly enabling a deployment. A persistent Profile instantiates
 the chosen provider and Settings names an exact default deployment/model.

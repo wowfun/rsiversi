@@ -1,6 +1,8 @@
 use crate::{SessionFilesApi, SessionFilesClient, SessionFilesContract};
 use async_trait::async_trait;
-use rsi_api_protocol::{ApiClientContract, ApiRegistrarContract};
+use rsi_api_protocol::{
+    ApiClientContract, ApiDispatchContract, ApiRegistrarContract, ConnectionDescriptionContract,
+};
 use rsi_files_protocol::FilesContract;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_session_protocol::SessionReadContract;
@@ -21,6 +23,8 @@ impl PluginFactory for SessionFilesApiFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(prepare(config)?
             .requiring_local::<ApiRegistrarContract>()
+            .requiring_local::<ApiDispatchContract>()
+            .requiring_local::<ConnectionDescriptionContract>()
             .requiring_local::<SessionReadContract>()
             .requiring_local::<FilesContract>())
     }
@@ -37,6 +41,23 @@ impl PluginFactory for SessionFilesApiFactory {
             Box::new(move || {
                 Box::pin(async move {
                     api.close().await;
+                    Ok(())
+                })
+            }),
+        )?;
+        let client = crate::local::client(
+            plan.local::<ApiDispatchContract>()?,
+            plan.local::<ConnectionDescriptionContract>()?,
+        )
+        .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let supply = plan
+            .context()
+            .provide_local::<SessionFilesContract>(Arc::new(client))?;
+        plan.defer(
+            "withdraw local Session Files client",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
                     Ok(())
                 })
             }),

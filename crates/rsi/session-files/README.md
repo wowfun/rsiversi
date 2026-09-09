@@ -7,6 +7,12 @@ Files reader and the actual Session read-lease service. `files/open`, `read`,
 waiter cancels work. They accept a Session/Header target and relative paths or
 retained file descriptors, never an absolute root or WorkspaceTrust override.
 
+The endpoint plugin also publishes the same typed client for trusted embedded
+applications. Its private adapter admits only these four exact read operations
+with Local origin through the same registry, byte pools, decoders and Session
+leases. It inherits the endpoint generation's retirement. Remote applications
+obtain this capability from the ordinary authenticated domain client plugin.
+
 Every call decodes its closed bounded request, reserves materialization
 scratch and validates ranges before acquiring the actual Session read lease. The Header's canonical cwd
 selects the root. Trusted and Untrusted Session workspaces are equally browseable

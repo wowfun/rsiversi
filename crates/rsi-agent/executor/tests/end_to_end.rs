@@ -1551,6 +1551,9 @@ mod budgets_and_recovery;
 mod context_builder;
 #[path = "end_to_end/contributions.rs"]
 mod contributions;
+#[cfg(unix)]
+#[path = "end_to_end/files.rs"]
+mod files;
 #[path = "end_to_end/image_and_shutdown.rs"]
 mod image_and_shutdown;
 #[path = "end_to_end/pool.rs"]

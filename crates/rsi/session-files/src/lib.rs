@@ -12,6 +12,7 @@ use rsi_session_protocol::SessionTarget;
 use std::fmt;
 
 mod client;
+mod local;
 mod plugin;
 mod server;
 mod wire;

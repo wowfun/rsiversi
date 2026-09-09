@@ -233,6 +233,7 @@ fn standard_agent_compiler(
         paths.cache(),
         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         BTreeMap::from([
+            ("standard_unix_files".to_owned(), Value::Bool(cfg!(unix))),
             (
                 "standard_linux_coding_tools".to_owned(),
                 Value::Bool(linux_tools_enabled),

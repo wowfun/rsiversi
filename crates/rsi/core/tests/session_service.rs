@@ -26,6 +26,9 @@ use tokio_util::sync::CancellationToken;
 
 const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[path = "session_service/files.rs"]
+mod files;
+
 #[path = "session_service/plan_policy.rs"]
 mod plan_policy;
 #[path = "session_service/repeat_reminder.rs"]

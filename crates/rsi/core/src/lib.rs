@@ -224,6 +224,11 @@ impl RunningRsi {
         required_local::<rsi_session_protocol::SessionContract>(&self.host, "Session service")
     }
 
+    /// Clones the finite workspace browser bound to this Host generation.
+    pub fn session_files(&self) -> Result<std::sync::Arc<dyn rsi_session_files::SessionFiles>> {
+        required_local::<rsi_session_files::SessionFilesContract>(&self.host, "Session Files")
+    }
+
     /// Clones independent canonical Media upload and read capabilities.
     pub fn media_service(&self) -> Result<std::sync::Arc<dyn rsi_media_protocol::Media>> {
         required_local::<rsi_media_protocol::MediaContract>(&self.host, "Media service")

@@ -11,13 +11,18 @@ pub fn domain_clients(platform: &str) -> rsi_host::Result<(HostBuilder, Vec<Prof
     let mut builder = HostBuilder::without_paths(platform);
     builder.register_local_contract::<rsi_api_protocol::ApiClientContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionContract>()?;
+    builder.register_local_contract::<rsi_session_files::SessionFilesContract>()?;
     builder.register_local_contract::<rsi_workspace_protocol::WorkspaceRegistryContract>()?;
     builder.register_local_contract::<rsi_ai_protocol::LanguageModelsContract>()?;
     builder.register_local_contract::<rsi_process::ProcessOutputCacheContract>()?;
     builder.register_local_contract::<rsi_settings_protocol::SettingsAccessContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaReadContract>()?;
-    let factories: [(&str, Arc<dyn PluginFactory>); 6] = [
+    let factories: [(&str, Arc<dyn PluginFactory>); 7] = [
+        (
+            "rsi.session.files.client",
+            Arc::new(rsi_session_files::SessionFilesClientFactory),
+        ),
         (
             "rsi.session.client",
             Arc::new(rsi_session_api::SessionClientFactory),

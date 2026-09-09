@@ -29,6 +29,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-tools = { path = "../../rsi-files/tools" }
+tempfile.workspace = true
 rsi-agent-kernel = { path = "../kernel" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-agent-testkit = { path = "../testkit" }

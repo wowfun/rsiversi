@@ -106,6 +106,7 @@ impl PluginFactory for ConnectionFactory {
         let models = connection.language_models();
         let output = connection.output_cache();
         let media = connection.media_service();
+        let files = connection.session_files();
         let lifetime = match connection.mode() {
             crate::ServiceHostConnectionMode::Embedded => rsi_client::ConnectionLifetime::Embedded,
             crate::ServiceHostConnectionMode::Remote => rsi_client::ConnectionLifetime::Remote,
@@ -125,6 +126,7 @@ impl PluginFactory for ConnectionFactory {
         let context = plan.context();
         let supplies = vec![
             context.provide_local::<rsi_session_protocol::SessionContract>(session)?,
+            context.provide_local::<rsi_session_files::SessionFilesContract>(files)?,
             context
                 .provide_local::<rsi_workspace_protocol::WorkspaceRegistryContract>(workspace)?,
             context.provide_local::<rsi_ai_protocol::LanguageModelsContract>(models)?,
@@ -314,6 +316,9 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_client::ConnectionLifetimeContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<rsi_session_files::SessionFilesContract>(scope)
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_session_protocol::SessionContract>(scope)

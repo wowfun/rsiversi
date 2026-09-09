@@ -264,6 +264,12 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .register("standard API fixture")
         .await
         .unwrap();
+    let retained_device = host
+        .lookup_local::<DeviceAdministrationContract>()
+        .unwrap()
+        .register("retained identity fixture")
+        .await
+        .unwrap();
     let authentication = host.lookup_local::<DeviceAuthenticationContract>().unwrap();
     let authority = authentication.authenticate(&registered.token).unwrap();
     let dispatch = host.lookup_local::<ApiDispatchContract>().unwrap();
@@ -277,6 +283,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         [
             "connection",
             "devices",
+            "files",
             "media",
             "models",
             "output",
@@ -356,6 +363,21 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             .sessions
             .is_empty()
     );
+    std::fs::write(fixture.workspace.join("sample"), b"a\0\xffz").unwrap();
+    let files = rsi_session_files::SessionFilesClient::new(api.clone()).unwrap();
+    let (target, file) =
+        super::files::browse(&sessions, &files, registered_workspace.id, "http").await;
+    host.lookup_local::<DeviceAdministrationContract>()
+        .unwrap()
+        .revoke(&registered.record.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        rsi_session_files::SessionFiles::read(&files, target, file, 0, 4)
+            .await
+            .unwrap_err(),
+        rsi_session_files::SessionFilesError::Api(rsi_api_protocol::ApiError::Unauthorized)
+    );
     api.close().await;
     stop.cancel();
     task.await.unwrap().unwrap();
@@ -373,14 +395,21 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .unwrap();
     assert_eq!(next.endpoint_id, description.endpoint_id);
     assert_ne!(next.host_epoch, description.host_epoch);
-    assert_eq!(
+    assert!(
         restarted
             .lookup_local::<DeviceAuthenticationContract>()
             .unwrap()
             .authenticate(&registered.token)
+            .is_err()
+    );
+    assert_eq!(
+        restarted
+            .lookup_local::<DeviceAuthenticationContract>()
+            .unwrap()
+            .authenticate(&retained_device.token)
             .unwrap()
             .id,
-        registered.record.id
+        retained_device.record.id
     );
     assert!(restarted.shutdown().await.is_clean());
 }

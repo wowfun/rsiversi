@@ -95,6 +95,7 @@ impl HttpFactory {
         }
         let supplies = vec![
             facet!(rsi_session_protocol::SessionContract),
+            facet!(rsi_session_files::SessionFilesContract),
             facet!(rsi_workspace_protocol::WorkspaceRegistryContract),
             facet!(rsi_ai_protocol::LanguageModelsContract),
             facet!(rsi_process::ProcessOutputCacheContract),

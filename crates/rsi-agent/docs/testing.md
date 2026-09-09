@@ -137,6 +137,12 @@ not the executor suite, own durable interruption repair and cancellation races.
 Executor Tool tests use two different immutable catalogs and prove schema
 projection, prepare, retained query/wait/commit, delayed retirement, and
 elapsed-budget cleanup never cross their claim generation.
+Files Tool integration uses the ordinary Files provider and contribution through
+the sealed catalog, Kernel and Executor. For every Sandbox mode it distinguishes
+header-required approval, contribution-required approval and policy denial.
+Denied reads cannot reach the Sandbox read planner or publish a Tool start;
+allowed reads retain exact bytes and no process enforcement stamp. A contribution
+catalog changed after Session admission cannot relax that Session's pinned policy.
 The deadline selector has a deterministic simultaneous-readiness regression:
 an already-terminal drive result wins over elapsed cancellation in the same
 scheduler poll.

@@ -369,7 +369,10 @@ async fn post_tool_contribution_observes_one_source_ordered_durable_batch() {
     stack.dispose(language_fiber, executor).await;
 }
 
-async fn install(stack: &BaseStack, callbacks: Vec<ContributionRegistration>) -> FiberHandle {
+pub(super) async fn install(
+    stack: &BaseStack,
+    callbacks: Vec<ContributionRegistration>,
+) -> FiberHandle {
     stack
         .runtime
         .root()

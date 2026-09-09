@@ -87,6 +87,8 @@ const JOBS_FACTORY: &str = "rsi.jobs.local";
 const JOBS_FINALIZER_FACTORY: &str = "rsi.session.jobs-finalizer";
 const PROJECTION_FACTORY: &str = "rsi.projection";
 const WORKSPACE_FACTORY: &str = "rsi.workspace";
+const FILES_FACTORY: &str = "rsi.files.local";
+const FILES_TOOLS_FACTORY: &str = "rsi.files.tools";
 const TOOLS_FACTORY: &str = "rsi.tools";
 const BASH_PRODUCER_FACTORY: &str = "rsi.shell.bash.producer";
 const BASH_TOOL_FACTORY: &str = "rsi.shell.bash.tool";
@@ -194,6 +196,10 @@ fn standard_agent_addon(
         Arc::new(rsi_agent_tools::QuestionToolsFactory),
     )?;
     register(JOBS_TOOLS_FACTORY, Arc::new(JobsToolsFactory))?;
+    register(
+        FILES_TOOLS_FACTORY,
+        Arc::new(rsi_files_tools::FilesToolsFactory),
+    )?;
     register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
     register(
         CONTEXT_BUILDER_FACTORY,
@@ -1135,6 +1141,12 @@ fn register_factories(
 ) -> rsi_host::Result<()> {
     register(
         builder,
+        FILES_FACTORY,
+        UpdateMode::Replayable,
+        rsi_files::FilesFactory,
+    )?;
+    register(
+        builder,
         STORAGE_FACTORY,
         UpdateMode::Replayable,
         rsi_storage::StorageFactory,
@@ -1372,6 +1384,8 @@ fn register(
 }
 
 fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
+    builder.register_local_contract::<rsi_files_protocol::FilesContract>()?;
+    builder.register_local_contract::<rsi_session_files::SessionFilesContract>()?;
     builder.register_local_contract::<StorageHubContract>()?;
     builder.register_local_contract::<DomainFacilityContract>()?;
     builder.register_local_contract::<SettingsProviderContract>()?;
@@ -1421,6 +1435,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
 #[allow(clippy::too_many_lines)] // One ordered declaration keeps Base plugin dependencies reviewable.
 fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
     let mut entries = vec![
+        ProfileEntry::new("rsi-files", FILES_FACTORY, Value::Null),
         ProfileEntry::new("rsi-storage", STORAGE_FACTORY, Value::Null),
         ProfileEntry::new(
             "rsi-storage-sqlite",
@@ -1708,24 +1723,27 @@ mod tests {
         .unwrap();
         let root = standard_agent_preset_root(&paths).unwrap();
         let profile = ProfileProgram::from_file(root.join("standard/agent.profile.toml"));
-        let compiler = |linux_tools_enabled| {
+        let compiler = |linux_tools_enabled, unix_files| {
             ProfileCompiler::new(
                 ProfileEnvironment::new(
                     paths.config(),
                     paths.state(),
                     paths.cache(),
                     "test-platform",
-                    BTreeMap::from([(
-                        "standard_linux_coding_tools".to_owned(),
-                        Value::Bool(linux_tools_enabled),
-                    )]),
+                    BTreeMap::from([
+                        (
+                            "standard_linux_coding_tools".to_owned(),
+                            Value::Bool(linux_tools_enabled),
+                        ),
+                        ("standard_unix_files".to_owned(), Value::Bool(unix_files)),
+                    ]),
                 )
                 .unwrap(),
                 ProfileLimits::default(),
             )
         };
 
-        let enabled = compiler(true).compile(&profile).unwrap();
+        let enabled = compiler(true, true).compile(&profile).unwrap();
         assert_eq!(
             enabled
                 .leaves()
@@ -1744,10 +1762,11 @@ mod tests {
                 AGENT_TOOLS_FACTORY,
                 APPLY_PATCH_FACTORY,
                 QUESTION_TOOLS_FACTORY,
+                FILES_TOOLS_FACTORY,
             ]
         );
         assert_eq!(
-            compiler(false)
+            compiler(false, false)
                 .compile(&profile)
                 .unwrap()
                 .leaves()

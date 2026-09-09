@@ -1169,6 +1169,36 @@ async fn canonical_identity_duplicate_start_and_retained_outcome_are_exact() {
 }
 
 #[tokio::test]
+async fn precancelled_invocation_never_polls_an_immediately_successful_tool() {
+    let (fiber, provider) = activated().await;
+    let tools = seal(&provider, vec![echo_registration("echo")]);
+    let prepared = tools
+        .prepare(
+            "precancelled",
+            ToolCall {
+                id: "precancelled".into(),
+                name: "echo".into(),
+                arguments: json!({"value":42}),
+            },
+        )
+        .unwrap();
+    let identity = prepared.identity().clone();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert!(matches!(
+        prepared.start(tool_start(cancellation)).await,
+        Err(ToolError::Cancelled)
+    ));
+    assert!(
+        matches!(tools.query(&identity).unwrap(), RetainedToolResult::Failed(failure)
+        if failure.kind == RetainedToolFailureKind::Cancelled)
+    );
+    tools.commit(&identity).unwrap();
+    drop((tools, provider));
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
 async fn cancellation_and_dropped_waiters_do_not_abandon_tool_settlement() {
     let (fiber, provider) = activated().await;
     let entered = Arc::new(Notify::new());

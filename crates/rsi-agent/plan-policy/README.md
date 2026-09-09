@@ -8,7 +8,8 @@ Forks inherit the canonical state at their declared boundary; recovery never
 replays a command callback. No Kernel, Store or UI dependency belongs here.
 
 Configuration is null for defaults or a closed object with `allow_tools`: at
-most 64 unique exact Tool names. Defaults are `ask_user` and `output_read`.
+most 64 unique exact Tool names. Defaults are `ask_user`, `directory_list`,
+`file_read` and `output_read`.
 An empty allowlist permits no Tools. Names use the Tool protocol's model-name
 grammar. Configuration is frozen in the Agent generation, independent of the
 typed enabled state; changing it never relaxes an already prepared call's other
@@ -24,6 +25,6 @@ apply. The projection exposes `enabled` and the frozen ordered allowlist.
 
 DSH plan mode informed the command/state/context composition. RSI deliberately
 uses the approved allowlist contract: plan mode constrains available Tool calls,
-while DSH's mode is advisory. Read-only Files Tools join the standard allowlist
-when that capability is supplied; this plugin does not classify arbitrary shell
+while DSH's mode is advisory. The allowlist grants no missing Tool capability;
+this plugin does not classify arbitrary shell
 commands as read-only.

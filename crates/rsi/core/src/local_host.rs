@@ -32,6 +32,7 @@ pub struct ServiceHostConnection {
     model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     media: Arc<dyn rsi_media_protocol::Media>,
+    files: Arc<dyn rsi_session_files::SessionFiles>,
     embedded: Option<EmbeddedServiceHost>,
     remote: Option<crate::ProfileOwner>,
 }
@@ -70,6 +71,10 @@ impl ServiceHostConnection {
                     &host,
                     "remote Media",
                 )?,
+                files: crate::required_local::<rsi_session_files::SessionFilesContract>(
+                    &host,
+                    "remote Files",
+                )?,
                 embedded: None,
                 remote: None,
             })
@@ -100,6 +105,11 @@ impl ServiceHostConnection {
     /// Clones the connected Session domain service.
     pub fn session_service(&self) -> Arc<dyn SessionService> {
         Arc::clone(&self.application)
+    }
+
+    /// Clones the connected finite Session workspace browser.
+    pub fn session_files(&self) -> Arc<dyn rsi_session_files::SessionFiles> {
+        self.files.clone()
     }
 
     /// Clones the connected independent canonical Media service.
@@ -299,6 +309,7 @@ async fn boot_embedded(
         model_catalog: booted.model_catalog.clone(),
         workspace: booted.workspace.clone(),
         media: booted.media.clone(),
+        files: booted.files.clone(),
         remote: None,
         embedded: Some(EmbeddedServiceHost {
             running: booted.running,
@@ -317,6 +328,7 @@ struct BootedServiceHost {
     model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     media: Arc<dyn rsi_media_protocol::Media>,
+    files: Arc<dyn rsi_session_files::SessionFiles>,
 }
 
 impl BootedServiceHost {
@@ -349,6 +361,7 @@ impl BootedServiceHost {
                 model_catalog: running.language_models()?,
                 workspace: running.workspace_registry()?,
                 media: running.media_service()?,
+                files: running.session_files()?,
                 running: running.clone(),
             })
         })();

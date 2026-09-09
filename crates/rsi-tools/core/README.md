@@ -25,6 +25,11 @@ carry exact evidence of already-applied effects; only a cooperative
 This preserves quiescence but cannot preempt a trusted tool that ignores
 cooperative cancellation.
 
+Cancellation already signalled before the settlement task first enters the body
+produces a retained Cancelled outcome without invoking Tool code. Body-first
+completion priority applies only after this initial cancellation fence; it never
+permits a pre-cancelled invocation to perform a new effect.
+
 A trusted Tool body returns a bounded typed result. Settlement attaches the
 collected enforcement stamps and validates that combined result once before it
 enters retained state; the provider does not immediately rewalk and

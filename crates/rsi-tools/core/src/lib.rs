@@ -654,6 +654,9 @@ async fn settle(
     shutdown: CancellationToken,
 ) -> Result<ToolResult> {
     let cancellation = start.cancellation.clone();
+    if cancellation.is_cancelled() || entry.retirement.is_cancelled() || shutdown.is_cancelled() {
+        return Err(ToolError::Cancelled);
+    }
     let owned_cancellation = CancellationToken::new();
     let execution_start = ToolStart {
         cancellation: owned_cancellation.clone(),

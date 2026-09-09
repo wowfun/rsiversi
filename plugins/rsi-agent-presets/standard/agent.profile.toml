@@ -57,3 +57,9 @@ enabled_rhai = "defines.standard_linux_coding_tools"
 kind = "plugin"
 id = "questions"
 plugin = "rsi.agent.questions"
+
+[[steps]]
+kind = "plugin"
+id = "files"
+plugin = "rsi.files.tools"
+enabled_rhai = "defines.standard_unix_files"

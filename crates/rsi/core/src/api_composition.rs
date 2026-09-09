@@ -23,7 +23,7 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
             std::sync::Arc::new(rsi_service_host::LocalApiFactory),
         )?;
     }
-    let factories: [(&str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 11] = [
+    let factories: [(&str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 12] = [
         ("rsi.api", std::sync::Arc::new(rsi_api::ApiFactory)),
         (
             "rsi.service.identity",
@@ -64,6 +64,10 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
         (
             "rsi.session.api",
             std::sync::Arc::new(rsi_session_api::SessionApiFactory),
+        ),
+        (
+            "rsi.session.files.api",
+            std::sync::Arc::new(rsi_session_files::SessionFilesApiFactory),
         ),
     ];
     let mut entries = Vec::with_capacity(factories.len());

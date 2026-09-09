@@ -30,7 +30,12 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            allow_tools: vec!["ask_user".into(), "output_read".into()],
+            allow_tools: vec![
+                "ask_user".into(),
+                "directory_list".into(),
+                "file_read".into(),
+                "output_read".into(),
+            ],
         }
     }
 }

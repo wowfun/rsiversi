@@ -190,7 +190,7 @@ async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_
     assert_eq!(draft.composition().contributions().entries().len(), 4);
     assert_eq!(
         view(&draft).await,
-        serde_json::json!({"enabled":false,"allow_tools":["ask_user","output_read"]})
+        serde_json::json!({"enabled":false,"allow_tools":["ask_user","directory_list","file_read","output_read"]})
     );
     for (id, argument, expected) in [
         ("on", "on", true),
@@ -352,6 +352,9 @@ async fn assert_enabled_plan(
     for (name, denied) in [
         ("ask_user", false),
         ("output_read", false),
+        ("directory_list", false),
+        ("file_read", false),
+        ("file_read_more", true),
         ("bash", true),
         ("output_read_more", true),
         ("apply_patch", true),
