@@ -19,7 +19,8 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-contributions"]);
     terminal.until("Ready").await;
-    terminal.action(14);
+    terminal.send(b"\x10");
+    terminal.select_menu("Session details").await;
     terminal.until("Session: tui-contributions").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -39,6 +40,65 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
     terminal.until(" · end").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(80)).await;
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_files_pages_exact_bytes_and_explicit_refresh() {
+    let (endpoint, provider) = provider().await;
+    let fixture = CliFixture::new(&endpoint);
+    let directory = fixture.workspace.join("browse");
+    std::fs::create_dir(&directory).unwrap();
+    for index in 0..20 {
+        std::fs::write(directory.join(format!("{index:02}.txt")), b"small").unwrap();
+    }
+    let mut bytes = b"FIRST-PAGE\n".to_vec();
+    bytes.resize(4096, b'x');
+    bytes.extend_from_slice(b"SECOND-PAGE\n\x00\x1b\xff\n");
+    std::fs::write(directory.join("00.txt"), &bytes).unwrap();
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-files"]);
+    terminal.until("Ready").await;
+    terminal.send(b"\x10");
+    terminal.select_menu("Workspace files").await;
+    terminal.until("Workspace-relative path").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Edit Workspace-relative path").await;
+    terminal.until("Enter accepts").await;
+    terminal.send(b"browse\r");
+    terminal.send(b"\r");
+    terminal.select_menu("List directory").await;
+    terminal.until("Entries: 0–16 of 20").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Next page").await;
+    terminal.until("Entries: 16–20 of 20").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Previous page").await;
+    terminal.until("Entries: 0–16 of 20").await;
+    terminal.send(b"\r");
+    terminal.select_menu("00.txt").await;
+    terminal.until("Bytes: 0–4096").await;
+    terminal.until("FIRST-PAGE").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Next page").await;
+    terminal.until("SECOND-PAGE").await;
+    terminal.send(b"\r");
+    terminal.select_menu("View exact hex").await;
+    terminal.until("00001000  53 45 43 4f 4e 44").await;
+    terminal.until("00 1b ff").await;
+    std::fs::write(directory.join("00.txt"), b"REFRESHED-PAGE\n").unwrap();
+    terminal.send(b"\r");
+    terminal.select_menu("View text").await;
+    terminal.until("Refresh to open a new snapshot").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Refresh").await;
+    terminal.until("REFRESHED-PAGE").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Release snapshot").await;
+    terminal.absent("REFRESHED-PAGE").await;
+    terminal.send(b"\x1b");
+    terminal.absent("Workspace-relative path").await;
     terminal.send(b"\x04");
     terminal.finish().await;
     provider.abort();
@@ -153,6 +213,10 @@ id = "session-ui"
 plugin = "rsi.session.ui"
 [[steps]]
 kind = "plugin"
+id = "files-ui"
+plugin = "rsi.session.files.ui"
+[[steps]]
+kind = "plugin"
 id = "application"
 plugin = "rsi.application.tui"
 "#,
@@ -227,6 +291,25 @@ plugin = "rsi.application.tui"
         keys.extend(b"\x1b[B".repeat(index));
         keys.push(b'\r');
         self.send(&keys);
+    }
+
+    async fn select_menu(&mut self, label: &str) {
+        self.until("Enter select · Esc close").await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let screen = self.screen.lock().unwrap().screen().contents();
+            if screen.contains(&format!("› {label}")) {
+                self.send(b"\r");
+                self.absent("Enter select · Esc close").await;
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "menu never selected {label}: {screen}"
+            );
+            self.send(b"\x1b[B");
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
     }
 
     async fn until(&mut self, text: &str) {

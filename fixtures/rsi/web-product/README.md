@@ -16,6 +16,11 @@ provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in
 and recorded separately.
 
+Files scenarios browse an actual unpublished Session through authenticated HTTP,
+including directory snapshots, byte pagination, text/hex display, Linux non-UTF8
+filenames, no-follow links and Changed followed by explicit refresh. They verify
+that browsing starts no model request and capture its actual generic UI cards.
+
 The runner freezes and hashes its native executable before starting either
 service. Concurrent Cargo builds cannot change that owner's executable gate.
 Only explicit non-secret build variables reach the test application, and an

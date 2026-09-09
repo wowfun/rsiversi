@@ -179,6 +179,7 @@ pub struct WebApplication {
     pub(crate) settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
     pub(crate) panes: [Arc<crate::panes::Pane>; 2],
     pub(crate) shell: Arc<Shell>,
+    pub(crate) has_files: bool,
     pub(crate) catalog: Mutex<Catalog>,
     pub(crate) catalog_work: tokio::sync::Mutex<()>,
     pub(crate) details: Mutex<crate::details::Details>,
@@ -336,7 +337,11 @@ impl PluginFactory for WebApplicationFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (changed, _) = watch::channel(0_u64);
-        let shell = start_shell(plan.context(), changed.clone()).await?;
+        let has_files = plan
+            .context()
+            .lookup_local::<rsi_session_files::SessionFilesContract>()
+            .is_some();
+        let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
         let app = Arc::new(WebApplication {
             ui: plan.local::<rsi_ui::UiContract>()?,
             session: plan.local::<rsi_session_protocol::SessionContract>()?,
@@ -345,6 +350,7 @@ impl PluginFactory for WebApplicationFactory {
             settings: plan.local::<rsi_settings_protocol::SettingsAccessContract>()?,
             panes: std::array::from_fn(|_| Arc::new(crate::panes::Pane::default())),
             shell,
+            has_files,
             catalog: Mutex::new(Catalog::default()),
             catalog_work: tokio::sync::Mutex::new(()),
             details: Mutex::new(crate::details::Details::default()),
@@ -402,8 +408,22 @@ impl PluginFactory for WebApplicationFactory {
 async fn start_shell(
     parent: &rsi_meta::Context,
     changed: watch::Sender<u64>,
+    has_files: bool,
 ) -> rsi_meta::Result<Arc<Shell>> {
     let mut catalog = HostBuilder::without_paths("browser");
+    if has_files {
+        catalog
+            .register_local_contract::<rsi_session_files_ui::FilesBrowserContract>()
+            .map_err(meta)?;
+        catalog
+            .register_linked(
+                "rsi.session.files.ui-target",
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_session_files_ui::FilesUiTargetFactory),
+            )
+            .map_err(meta)?;
+    }
     catalog
         .register_local_contract::<ObservationSinkContract>()
         .map_err(meta)?;
@@ -472,8 +492,9 @@ pub(crate) fn surface_program(
     generation: u64,
     session: &rsi_agent_session_protocol::SessionId,
     cursor: Option<rsi_agent_turn_protocol::ObservationCursor>,
+    has_files: bool,
 ) -> ProfileProgram {
-    ProfileProgram::from_profile(Profile::new([
+    let mut entries = vec![
         ProfileEntry::new(
             "renderer",
             "rsi.web.renderer",
@@ -485,5 +506,13 @@ pub(crate) fn surface_program(
             serde_json::json!({"session_id":session,"cursor":cursor}),
         ),
         ProfileEntry::new("ui-target", "rsi.session.ui-target", ConfigValue::Null),
-    ]))
+    ];
+    if has_files {
+        entries.push(ProfileEntry::new(
+            "files-ui-target",
+            "rsi.session.files.ui-target",
+            ConfigValue::Null,
+        ));
+    }
+    ProfileProgram::from_profile(Profile::new(entries))
 }

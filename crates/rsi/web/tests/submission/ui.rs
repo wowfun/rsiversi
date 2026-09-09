@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use sources::{fixture, view};
 use std::sync::atomic::Ordering;
 
-fn button(detail: &Value, label: Option<&str>) -> Value {
+pub(super) fn button(detail: &Value, label: Option<&str>) -> Value {
     let bound = &detail["view"];
     let element = bound["view"]["elements"]
         .as_array()

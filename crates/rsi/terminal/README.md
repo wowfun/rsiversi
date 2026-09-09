@@ -86,6 +86,11 @@ observation after acceptance and projection observation immediately. Switching c
 dropped surface waiters are cleaned up by the Shell. No additional Runtime is
 created for an attachment.
 
+When the connected Files capability is supplied, each UI surface also composes
+the independent [Files browser](../session-files-ui/README.md) state plugin. Its
+Local mapping and snapshot belong to that same surface. The generic action menu
+renders the contribution's directory, text and hex pages without another observer.
+
 The product [terminal contract](../README.md#terminal-application) owns user-visible
 behavior and presentation bounds. Input against an older rendered frame resolves
 its Session identity and source anchors in the current projection; removed

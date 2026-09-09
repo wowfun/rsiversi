@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import { mkdir, writeFile, symlink } from "node:fs/promises";
+import { join } from "node:path";
+
+export async function verifyFiles(page, pane, service, report, browser) {
+  const directory = join(service.workspace, "browse");
+  await mkdir(directory);
+  const prefix = Buffer.from("FIRST-PAGE · workspace notes\nBounded pages preserve their opened snapshot.\n".repeat(70)).subarray(0, 4096);
+  assert.equal(prefix.length, 4096);
+  const suffix = Buffer.concat([Buffer.from("SECOND-PAGE\n<script>window.filesExecuted = true</script>\n"), Buffer.from([0, 27, 255]), Buffer.from("\nRead as data.\n".repeat(320))]);
+  await writeFile(join(directory, "00-note.txt"), Buffer.concat([prefix, suffix]));
+  for (let index = 1; index < 20; index++) await writeFile(join(directory, `${String(index).padStart(2, "0")}.txt`), `File ${index}\n`);
+  await writeFile(Buffer.concat([Buffer.from(`${directory}/`), Buffer.from([255])]), "RAW-NAME\n");
+  await symlink("00-note.txt", join(directory, "zz-link"));
+  const before = service.provider.requests.length;
+  const card = page.locator(".ui-contribution");
+  const open = async () => {
+    if (await page.locator("#detail").isVisible()) await page.getByRole("button", { name: "Close details", exact: true }).click();
+    await pane.getByRole("button", { name: "Workspace files", exact: true }).click();
+    await card.getByRole("textbox", { name: "Workspace-relative path", exact: true }).fill("browse");
+    await card.getByRole("button", { name: "List directory", exact: true }).click();
+    await card.filter({ hasText: "0–16 of 22" }).waitFor();
+  };
+  await open();
+  await page.screenshot({ path: join(report, `${browser}-files-directory.png`) });
+  await card.getByRole("button", { name: "00-note.txt", exact: true }).click();
+  await card.locator("pre").filter({ hasText: "FIRST-PAGE" }).waitFor();
+  await card.getByRole("button", { name: "Next page", exact: true }).click();
+  await card.locator("pre").filter({ hasText: "SECOND-PAGE" }).waitFor();
+  assert.match(await card.locator("pre").innerText(), /<script>window.filesExecuted/);
+  assert.equal(await page.evaluate(() => window.filesExecuted), undefined);
+  assert.equal(await card.locator("script").count(), 0);
+  await page.screenshot({ path: join(report, `${browser}-files-text.png`) });
+  await card.getByRole("button", { name: "View exact hex", exact: true }).click();
+  await card.locator("pre").filter({ hasText: "00001000  53 45 43 4f" }).waitFor();
+  await page.screenshot({ path: join(report, `${browser}-files-hex.png`) });
+  await open();
+  await card.getByRole("button", { name: "Next page", exact: true }).click();
+  await card.filter({ hasText: "16–22 of 22" }).waitFor();
+  assert.equal(await card.getByRole("button", { name: "zz-link", exact: true }).count(), 0);
+  await card.filter({ hasText: "Link or special file · not readable" }).waitFor();
+  await card.getByRole("button", { name: "�", exact: true }).click();
+  await card.locator("pre").filter({ hasText: "RAW-NAME" }).waitFor();
+  assert.match(await card.innerText(), /62726f7773652fff/);
+  await open();
+  await writeFile(join(directory, "new.txt"), "new snapshot\n");
+  await card.getByRole("button", { name: "Next page", exact: true }).click();
+  await card.filter({ hasText: "changed. Refresh to open a new snapshot" }).waitFor();
+  await page.screenshot({ path: join(report, `${browser}-files-changed.png`) });
+  await card.getByRole("button", { name: "Refresh", exact: true }).click();
+  await card.filter({ hasText: "0–16 of 23" }).waitFor();
+  await card.getByRole("button", { name: "Release snapshot", exact: true }).click();
+  await card.getByRole("button", { name: "Current snapshot", exact: true }).waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "Close details", exact: true }).click();
+  assert.equal(service.provider.requests.length, before);
+}

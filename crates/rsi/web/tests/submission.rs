@@ -6,6 +6,8 @@ use rsi_session_protocol::*;
 use std::sync::{Arc, Mutex};
 #[path = "submission/commands.rs"]
 mod commands;
+#[path = "submission/files.rs"]
+mod files;
 #[path = "submission/settings.rs"]
 mod settings;
 #[path = "submission/sources.rs"]

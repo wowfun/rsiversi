@@ -244,20 +244,7 @@ pub fn standard_application_host(
             Arc::new(operator::OperatorFactory(diagnostics.connection.clone())),
         )
         .map_err(boot)?;
-    let factories: [(&str, Arc<dyn PluginFactory>); 11] = [
-        ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
-        ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
-        ("rsi.session.ui", Arc::new(rsi_session_ui::SessionUiFactory)),
-        ("rsi.application.serve-web", diagnostics.web_serve.clone()),
-        ("rsi.web.assets", Arc::new(rsi_web_assets::WebAssetsFactory)),
-        ("rsi.application.devices", diagnostics.devices.clone()),
-        (CONNECTION, diagnostics.connection.clone()),
-        ("rsi.application.cli", diagnostics.cli.clone()),
-        ("rsi.application.headless", diagnostics.headless.clone()),
-        ("rsi.application.tui", diagnostics.tui.clone()),
-        ("rsi.application.serve", diagnostics.serve.clone()),
-    ];
-    for (id, factory) in factories {
+    for (id, factory) in application_factories(&diagnostics) {
         builder
             .register_factory(
                 crate::AddonScope::Application,
@@ -354,4 +341,26 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .register_local_contract_at::<rsi_serve::ServingServiceContract>(scope)
         .map_err(boot)?;
     Ok(())
+}
+
+fn application_factories(
+    diagnostics: &ApplicationDiagnostics,
+) -> [(&'static str, Arc<dyn PluginFactory>); 12] {
+    [
+        ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
+        ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
+        ("rsi.session.ui", Arc::new(rsi_session_ui::SessionUiFactory)),
+        (
+            "rsi.session.files.ui",
+            Arc::new(rsi_session_files_ui::FilesUiFactory),
+        ),
+        ("rsi.application.serve-web", diagnostics.web_serve.clone()),
+        ("rsi.web.assets", Arc::new(rsi_web_assets::WebAssetsFactory)),
+        ("rsi.application.devices", diagnostics.devices.clone()),
+        (CONNECTION, diagnostics.connection.clone()),
+        ("rsi.application.cli", diagnostics.cli.clone()),
+        ("rsi.application.headless", diagnostics.headless.clone()),
+        ("rsi.application.tui", diagnostics.tui.clone()),
+        ("rsi.application.serve", diagnostics.serve.clone()),
+    ]
 }

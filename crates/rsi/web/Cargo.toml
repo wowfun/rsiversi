@@ -10,6 +10,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rsi-session-files = { path = "../session-files" }
+rsi-session-files-ui = { path = "../session-files-ui" }
 rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
 async-trait.workspace = true
@@ -46,6 +48,7 @@ wasm-bindgen-futures.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 

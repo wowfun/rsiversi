@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { chromium, firefox } from "playwright";
 import { boundedRun, startService } from "./service.mjs";
 import { verifyDom } from "./dom.mjs";
+import { verifyFiles } from "./files.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const report = process.env.RSI_WEB_REPORT ?? await mkdtemp(join(tmpdir(), "rsi-web-report-"));
@@ -75,6 +76,7 @@ try {
       await plan.filter({ hasText: '"enabled": false' }).waitFor();
       assert.equal(service.provider.requests.length, 0);
       await page.screenshot({ path: join(report, `${name}-projection-default.png`) });
+      await verifyFiles(page, left, service, report, name);
       await left.getByRole("button", { name: "Session commands", exact: true }).click();
       await left.getByRole("button", { name: "/plan", exact: true }).click();
       assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "/plan ");
@@ -242,7 +244,7 @@ try {
       assert.equal((await context.cookies()).length, 0);
       assert.deepEqual(errors, []);
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
-      results.at(-1).cases.push("contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
+      results.at(-1).cases.push("Files draft browsing, exact text/hex, raw names and changed snapshots", "contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

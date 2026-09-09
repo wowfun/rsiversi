@@ -344,6 +344,21 @@ fn assert_real_coding_results(lines: &[serde_json::Value], job_id: &str) {
     let patched = durable_tool_result(lines, "call-apply-patch");
     assert_eq!(patched["fact"]["result"]["is_error"], false);
     assert_eq!(patched["fact"]["result"]["value"]["status"], "applied");
+    let listed = durable_tool_result(lines, "call-directory-list");
+    assert_eq!(listed["fact"]["result"]["is_error"], false);
+    assert!(
+        listed["fact"]["result"]["value"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "from-model.txt")
+    );
+    let read = durable_tool_result(lines, "call-file-read");
+    assert_eq!(read["fact"]["result"]["is_error"], false);
+    assert_eq!(
+        read["fact"]["result"]["value"]["text"],
+        "written through the complete tool loop\n"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -391,6 +406,16 @@ async fn complete_coding_tools_then_chat(
                 &serde_json::json!({"patch":patch}),
             )
         }
+        6 => tool_call_response(
+            "call-directory-list",
+            "directory_list",
+            &serde_json::json!({}),
+        ),
+        7 => tool_call_response(
+            "call-file-read",
+            "file_read",
+            &serde_json::json!({"path":"from-model.txt"}),
+        ),
         _ => completed_chat_response("all coding tools completed"),
     }
 }
@@ -1111,14 +1136,14 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stderr.is_empty());
-    assert_eq!(calls.load(Ordering::SeqCst), 7);
+    assert_eq!(calls.load(Ordering::SeqCst), 9);
     assert_eq!(
         std::fs::read(fixture.workspace.join("from-model.txt")).unwrap(),
         b"written through the complete tool loop\n"
     );
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 7);
+    assert_eq!(requests.len(), 9);
     let mut tool_names = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -1132,6 +1157,8 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             "apply_patch",
             "ask_user",
             "bash",
+            "directory_list",
+            "file_read",
             "followup_task",
             "interrupt_agent",
             "job_kill",
@@ -1162,6 +1189,18 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             .as_str()
             .unwrap()
             .contains("applied")
+    );
+    assert!(
+        tool_message(&requests[7], "call-directory-list")["content"]
+            .as_str()
+            .unwrap()
+            .contains("from-model.txt")
+    );
+    assert!(
+        tool_message(&requests[8], "call-file-read")["content"]
+            .as_str()
+            .unwrap()
+            .contains("written through the complete tool loop")
     );
     drop(requests);
 

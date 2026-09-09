@@ -509,6 +509,10 @@ config = "application"
 kind = "plugin"
 id = "session-ui"
 plugin = "rsi.session.ui"
+[[steps]]
+kind = "plugin"
+id = "files-ui"
+plugin = "rsi.session.files.ui"
 "#
     } else {
         ""

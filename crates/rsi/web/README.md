@@ -127,3 +127,8 @@ The document renders generic contributed menus, cards, fields, forms and buttons
 Rust validates target and detail generations plus bundle-local action references.
 Registry changes request a new view. Closing a contributed detail cancels its
 read presentation; admitted actions stay tracked by their original owners.
+
+The standard Worker composes the independent [Files UI](../session-files-ui/README.md)
+contribution. Each actual pane supplies its own browser state over the connected
+Files client, with an isolated Local mapping and no additional observer or pane.
+The shared declarative inspector renders its directory and text/hex pages.

@@ -93,6 +93,7 @@ pub(crate) struct TerminalSurfaces {
     shell: Arc<Shell>,
     fiber: FiberHandle,
     has_ui: bool,
+    has_files: bool,
 }
 impl TerminalSurfaces {
     pub async fn start(
@@ -126,6 +127,23 @@ impl TerminalSurfaces {
             )
             .map_err(error)?;
         let has_ui = parent.lookup_local::<rsi_ui::UiContract>().is_some();
+        let has_files = has_ui
+            && parent
+                .lookup_local::<rsi_session_files::SessionFilesContract>()
+                .is_some();
+        if has_files {
+            catalog
+                .register_local_contract::<rsi_session_files_ui::FilesBrowserContract>()
+                .map_err(error)?;
+            catalog
+                .register_linked(
+                    "rsi.session.files.ui-target",
+                    env!("CARGO_PKG_VERSION"),
+                    UpdateMode::RestartRequired,
+                    Arc::new(rsi_session_files_ui::FilesUiTargetFactory),
+                )
+                .map_err(error)?;
+        }
         if has_ui {
             catalog
                 .register_local_contract::<rsi_ui::UiTargetContract>()
@@ -170,6 +188,7 @@ impl TerminalSurfaces {
             shell,
             fiber,
             has_ui,
+            has_files,
         })
     }
 
@@ -195,6 +214,13 @@ impl TerminalSurfaces {
             entries.push(ProfileEntry::new(
                 "ui-target",
                 "rsi.session.ui-target",
+                ConfigValue::Null,
+            ));
+        }
+        if self.has_files {
+            entries.push(ProfileEntry::new(
+                "files-ui-target",
+                "rsi.session.files.ui-target",
                 ConfigValue::Null,
             ));
         }

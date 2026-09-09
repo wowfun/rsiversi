@@ -230,6 +230,19 @@ fn prepare_profile(
             Arc::new(rsi_session_ui::SessionUiFactory),
         )
         .map_err(failure)?;
+    builder
+        .register_linked(
+            "rsi.session.files.ui",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_session_files_ui::FilesUiFactory),
+        )
+        .map_err(failure)?;
+    entries.push(ProfileEntry::new(
+        "files-ui",
+        "rsi.session.files.ui",
+        ConfigValue::Null,
+    ));
     entries.push(ProfileEntry::new("ui", "rsi.ui", ConfigValue::Null));
     entries.push(ProfileEntry::new(
         "session-ui",

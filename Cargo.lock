@@ -2643,6 +2643,7 @@ dependencies = [
  "rsi-session",
  "rsi-session-api",
  "rsi-session-files",
+ "rsi-session-files-ui",
  "rsi-session-protocol",
  "rsi-session-testkit",
  "rsi-session-ui",
@@ -4111,6 +4112,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-session-files-ui"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-client",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-session-files",
+ "rsi-session-protocol",
+ "rsi-tools-protocol",
+ "rsi-ui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-session-protocol"
 version = "0.0.1"
 dependencies = [
@@ -4337,6 +4357,8 @@ dependencies = [
  "rsi-meta",
  "rsi-process",
  "rsi-sandbox",
+ "rsi-session-files",
+ "rsi-session-files-ui",
  "rsi-session-protocol",
  "rsi-session-ui",
  "rsi-tools-protocol",
@@ -4440,10 +4462,13 @@ dependencies = [
  "rsi-client-composition",
  "rsi-conversation",
  "rsi-credentials-protocol",
+ "rsi-files-protocol",
  "rsi-host",
  "rsi-meta",
  "rsi-meta-execution",
  "rsi-sandbox",
+ "rsi-session-files",
+ "rsi-session-files-ui",
  "rsi-session-protocol",
  "rsi-session-ui",
  "rsi-settings-protocol",

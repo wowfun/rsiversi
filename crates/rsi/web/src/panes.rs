@@ -512,7 +512,13 @@ impl WebApplication {
         };
         let surface = self
             .shell
-            .open(surface_program(index, generation, &id, cursor))
+            .open(surface_program(
+                index,
+                generation,
+                &id,
+                cursor,
+                self.has_files,
+            ))
             .await
             .map_err(error)?;
         let controller = surface
