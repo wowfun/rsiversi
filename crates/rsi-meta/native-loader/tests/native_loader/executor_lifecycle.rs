@@ -102,6 +102,10 @@ async fn prepared_creates_fail_fast_at_the_shared_factory_gate() {
         )
         .unwrap();
 
+    // Prepare returns its result before the native worker releases accounting.
+    // Establish the callback baseline after both setup prepares, before create.
+    wait_for_callback_quiescence_async(&catalog).await;
+
     let first_application = tokio::spawn({
         let root = runtime.root();
         async move { root.apply_prepared(first).await }
