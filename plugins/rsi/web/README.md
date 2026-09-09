@@ -36,3 +36,11 @@ transport owners still bound and clean up their disconnected work.
 The ordinary application Profile selects `rsi.application.service`,
 `rsi.web.assets` with an explicit directory, and `rsi.application.serve-web`.
 See the [Serve contract](../../../crates/rsi/serve/README.md) for listener policy.
+
+Presentation frames are snapshots or patches. The document applies a patch only
+to its exact decimal base-frame ID, preserving unchanged pane data and stable
+block identities. A mismatch leaves the current DOM intact and requests a
+snapshot; a successful render acknowledges the resulting frame ID. The Worker
+admits one frame at a time, with a 30-second acknowledgement deadline. Expiry
+drains the connection before reporting failure. This presentation handshake never
+owns Fact or control cursors.

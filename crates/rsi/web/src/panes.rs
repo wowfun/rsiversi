@@ -23,6 +23,7 @@ use std::{
 #[derive(Debug, Default)]
 pub(crate) struct Pane {
     switching: tokio::sync::Mutex<()>,
+    revision: Mutex<Arc<()>>,
     current: Mutex<Option<Arc<Attachment>>>,
     generation: Mutex<u64>,
     drafts: Mutex<BTreeMap<SessionId, Arc<SavedDraft>>>,
@@ -243,6 +244,22 @@ impl Pane {
             .filter(|current| current.generation.to_string() == generation)
             .cloned()
             .ok_or_else(|| "This pane changed; retry the action in the current conversation".into())
+    }
+    pub(crate) fn changed(&self) {
+        *self.revision.lock().expect("Web pane revision poisoned") = Arc::new(());
+    }
+    pub(crate) fn stamp(&self, ui: u64) -> crate::frames::PaneStamp {
+        let current = self.current.lock().expect("Web pane poisoned");
+        crate::frames::PaneStamp {
+            generation: current.as_ref().map(|current| current.generation),
+            pane: self
+                .revision
+                .lock()
+                .expect("Web pane revision poisoned")
+                .clone(),
+            renderer: current.as_ref().map(|current| current.renderer.revision()),
+            ui,
+        }
     }
     pub fn view(&self, ui: &rsi_ui::Ui) -> serde_json::Value {
         let current = self.current.lock().expect("Web pane poisoned").clone();
@@ -580,6 +597,7 @@ impl WebApplication {
             }
             current.replace(attachment)
         };
+        pane.changed();
         self.changed();
         if let Some(old) = old {
             old.close().await?;

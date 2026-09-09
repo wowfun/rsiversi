@@ -5,6 +5,7 @@ export async function verifyTree(page, pane, service, report, browser) {
   const identities = await page.locator(".pane-session").allTextContents();
   await pane.getByRole("textbox", { name: "Right message" }).fill("Please inspect a child task");
   await pane.getByRole("button", { name: "Send ↗" }).click();
+  await pane.locator(".message.assistant").filter({ hasText: "Reviewed: Subagent activation completed." }).waitFor();
   await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
   await pane.getByRole("button", { name: "Agent tree", exact: true }).click();
   const detail = page.getByRole("dialog");

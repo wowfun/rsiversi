@@ -172,3 +172,20 @@ Files client, with an isolated Local mapping and no additional observer or pane.
 The shared declarative inspector renders its directory and text/hex pages.
 The independent [Agent tree UI](../session-tree-ui/README.md) uses that same
 registry and detail slot for finite child-tree/history/source inspection.
+
+The incremental presentation stream carries closed snapshot/patch frames with
+canonical decimal frame IDs. A patch names its exact base frame, replaces only
+changed top-level sections, and carries per-pane field changes plus stable block
+upserts, removals and order. First delivery, pane-generation replacement and a
+missing or mismatched base produce a complete snapshot. Each stream retains only
+its latest projected baseline, bounded to 32 MiB of serialized JSON; output uses
+the existing independent 32 MiB frame reservation. These are logical buffer
+bounds, not RSS limits. Unaffected pane revisions reuse their projection without
+re-encoding it. Domain cursors still advance when the Rust sink accepts updates.
+
+The document acknowledges the exact frame only after successful DOM rendering.
+A base mismatch requests a fresh snapshot. One pending frame and one acknowledgement
+wait are retained; a 30-second stalled acknowledgement closes the Worker
+connection and drains the application, requiring explicit reconnection. No queue
+of frames or domain records is retained behind a stalled document. Application
+withdrawal drops the baseline even while an external handle remains alive.

@@ -119,7 +119,7 @@ impl WebApplication {
             Ok(value) => value,
             Err(error) => return Box::pin(async { Err(error) }),
         };
-        self.admit(true, move |_| async move {
+        self.admit(true, Some(pane), move |_| async move {
             let (_work, _submission) = (work, submission);
             let reference = media.import_image(source).await.map_err(error)?;
             let mut input = attached.draft.input.lock().expect("Web draft poisoned");
@@ -253,7 +253,7 @@ impl WebApplication {
             Ok(value) => value,
             Err(error) => return Box::pin(async { Err(error) }),
         };
-        self.admit(false, move |_| async move {
+        self.admit(false, None, move |_| async move {
             let _work = work;
             tokio::select! { biased;
                 () = stop.cancelled() => Err("Image preview closed".into()),

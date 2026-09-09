@@ -353,7 +353,7 @@ impl Drop for Waiting {
 
 /// Delivers one coalesced view; the document bridge acknowledges it before requesting another.
 #[wasm_bindgen]
-pub async fn next_view() -> Result<JsValue, JsValue> {
+pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
     let app = application()?;
     let revision = OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
@@ -365,18 +365,21 @@ pub async fn next_view() -> Result<JsValue, JsValue> {
     })?;
     let _waiting = Waiting;
     let mut changed = app.changes();
-    if revision == Some(*changed.borrow_and_update()) {
+    if base.is_some() && base == app.frame_id() && revision == Some(*changed.borrow_and_update()) {
         tokio::select! { biased;
             () = app.closed() => return Err(failure("Web application closed")),
             result = changed.changed() => result.map_err(failure)?,
         }
     }
     let revision = *changed.borrow_and_update();
-    let frame = app.view().map_err(failure)?;
+    let frame = app.next_frame(base.as_deref()).map_err(failure)?;
     let text = std::str::from_utf8(frame.as_bytes()).map_err(failure)?;
-    let result = JsValue::from_str(text);
+    let result = js_sys::Array::of2(
+        &JsValue::from_str(&app.frame_id().expect("encoded frame")),
+        &JsValue::from_str(text),
+    );
     OWNER.with(|owner| owner.borrow_mut().revision = Some(revision));
-    Ok(result)
+    Ok(result.into())
 }
 
 /// Drains the actual Profile and optionally clears this origin's browser credential cookie.

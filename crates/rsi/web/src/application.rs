@@ -153,6 +153,45 @@ pub(crate) enum Command {
     CloseDetail,
 }
 
+impl Command {
+    fn affected_pane(&self) -> Option<u8> {
+        match self {
+            Self::Open { pane, .. }
+            | Self::Create { pane, .. }
+            | Self::Draft { pane, .. }
+            | Self::ImageEdit { pane, .. }
+            | Self::Model { pane, .. }
+            | Self::Submit { pane, .. }
+            | Self::Cancel { pane, .. }
+            | Self::History { pane, .. }
+            | Self::Commands { pane, .. }
+            | Self::RefreshCommandResult { pane, .. }
+            | Self::Live { pane, .. }
+            | Self::Answer { pane, .. }
+            | Self::Approve { pane, .. } => Some(*pane),
+            Self::UiSurface { .. }
+            | Self::UiBlock { .. }
+            | Self::UiInvoke { .. }
+            | Self::Refresh
+            | Self::WorkspacesNext
+            | Self::SessionsNext
+            | Self::ModelsNext
+            | Self::RegisterWorkspace { .. }
+            | Self::InspectImage { .. }
+            | Self::InspectSource { .. }
+            | Self::InspectBlock { .. }
+            | Self::BlockSourcesPage { .. }
+            | Self::SourcePage { .. }
+            | Self::InspectInteraction { .. }
+            | Self::SettingsRead { .. }
+            | Self::SettingsList
+            | Self::SettingsNext { .. }
+            | Self::SettingsSave { .. }
+            | Self::CloseDetail => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct Catalog {
     pub workspaces: Vec<rsi_workspace_protocol::WorkspaceRecord>,
@@ -206,6 +245,7 @@ pub struct WebApplication {
     tasks: TaskTracker,
     stop: CancellationToken,
     frames: ByteBudget,
+    stream: Mutex<crate::frames::FrameState>,
     admission: Mutex<()>,
 }
 impl WebApplication {
@@ -222,11 +262,14 @@ impl WebApplication {
             Ok(command) => command,
             Err(_) => return Box::pin(async { Err("Invalid Web command".into()) }),
         };
-        self.admit(true, move |app| async move { app.execute(command).await })
+        self.admit(true, command.affected_pane(), move |app| async move {
+            app.execute(command).await
+        })
     }
     pub(crate) fn admit<T, F, Fut>(
         self: &Arc<Self>,
         report_error: bool,
+        affected_pane: Option<u8>,
         operation: F,
     ) -> BoxFuture<'static, Result<T>>
     where
@@ -249,6 +292,7 @@ impl WebApplication {
                 result = operation(app.clone()) => result,
             };
             if report_error && let Err(error) = &result { app.notice.lock().expect("Web notice poisoned").clone_from(error); }
+            if let Some(pane) = affected_pane.and_then(|index| app.panes.get(usize::from(index))) { pane.changed(); }
             app.changed();
             result
         }));
@@ -281,9 +325,16 @@ impl WebApplication {
             .iter()
             .map(|pane| pane.view(&self.ui))
             .collect::<Vec<_>>();
+        let mut view = self.sections();
+        view.as_object_mut()
+            .expect("view sections")
+            .insert("panes".into(), panes.into());
+        reservation.encode(&view)
+    }
+    pub(crate) fn sections(&self) -> serde_json::Value {
         let details = self.details.lock().expect("Web details poisoned");
-        reservation.encode(&serde_json::json!({
-            "panes": panes, "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
+        serde_json::json!({
+            "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "preferences": self.preferences,
             "ui_detail": details.ui,
             "image_detail": details.image,
@@ -296,7 +347,25 @@ impl WebApplication {
             "source_detail": details.source,
             "block_sources": details.block_sources,
             "notice": *self.notice.lock().expect("Web notice poisoned"),
-        }))
+        })
+    }
+    /// Encodes one incremental presentation frame against the document's exact base.
+    /// An absent or mismatched base requests a full snapshot.
+    ///
+    /// # Panics
+    /// Panics if an earlier application panic poisoned its state.
+    pub fn next_frame(&self, base: Option<&str>) -> rsi_api_protocol::Result<RetainedBytes> {
+        let mut stream = self.stream.lock().expect("Web frame stream poisoned");
+        if self.stop.is_cancelled() {
+            return Err(ApiError::ShuttingDown);
+        }
+        stream.encode(self, &self.frames, base)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn frame_id(&self) -> Option<String> {
+        let id = self.stream.lock().expect("Web frame stream poisoned").id;
+        (id > 0).then(|| id.to_string())
     }
     async fn execute(&self, command: Command) -> Result<()> {
         match command {
@@ -405,6 +474,7 @@ impl PluginFactory for WebApplicationFactory {
             frames: ByteBudget::new(32 * 1024 * 1024)
                 .map_err(|error| MetaError::Activation(error.to_string()))?,
             admission: Mutex::new(()),
+            stream: Mutex::new(crate::frames::FrameState::default()),
         });
         let mut ui_changes = app.ui.changes();
         let watching = app.clone();
@@ -440,6 +510,8 @@ impl PluginFactory for WebApplicationFactory {
                     }
                     drop(supply);
                     app.tasks.wait().await;
+                    *app.stream.lock().expect("Web frame stream poisoned") =
+                        crate::frames::FrameState::default();
                     Ok(())
                 })
             }),

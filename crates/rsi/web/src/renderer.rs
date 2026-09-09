@@ -61,6 +61,7 @@ pub(crate) struct Renderer {
     pub state: Mutex<RenderState>,
     ready: watch::Sender<bool>,
     changed: watch::Sender<u64>,
+    revision: Mutex<Arc<()>>,
     stop: CancellationToken,
 }
 impl Renderer {
@@ -76,7 +77,17 @@ impl Renderer {
         self.ready.send_replace(true);
         self.changed();
     }
+    pub fn revision(&self) -> Arc<()> {
+        self.revision
+            .lock()
+            .expect("Web renderer revision poisoned")
+            .clone()
+    }
     pub fn changed(&self) {
+        *self
+            .revision
+            .lock()
+            .expect("Web renderer revision poisoned") = Arc::new(());
         self.changed
             .send_modify(|value| *value = value.saturating_add(1));
     }
@@ -225,6 +236,7 @@ impl PluginFactory for RendererFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let renderer = Arc::new(Renderer {
             state: Mutex::new(RenderState::default()),
+            revision: Mutex::default(),
             ready: watch::channel(false).0,
             changed: self.changed.clone(),
             stop: CancellationToken::new(),
@@ -241,6 +253,7 @@ impl PluginFactory for RendererFactory {
                 Box::pin(async move {
                     renderer.stop.cancel();
                     *renderer.state.lock().expect("Web renderer poisoned") = RenderState::default();
+                    renderer.changed();
                     drop(supplies);
                     Ok(())
                 })
@@ -258,6 +271,7 @@ mod tests {
     async fn a_recovered_interaction_stream_clears_its_notice() {
         let renderer = Renderer {
             state: Mutex::new(RenderState::default()),
+            revision: Mutex::default(),
             ready: watch::channel(true).0,
             changed: watch::channel(0).0,
             stop: CancellationToken::new(),

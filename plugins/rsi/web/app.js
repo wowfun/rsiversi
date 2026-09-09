@@ -100,14 +100,47 @@ function failWorker(error) {
   $("sign-out").hidden = true;
   notify(`${error}. Reconnect explicitly to start a new connection.`);
 }
+let frameId;
+function presentFrame(frame) {
+  if (typeof frame.frame_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(frame.frame_id) || BigInt(frame.frame_id) > 18446744073709551615n) throw new Error("Invalid presentation frame ID");
+  let next;
+  if (frame.kind === "snapshot") {
+    next = frame.view;
+  } else if (frame.kind === "patch") {
+    if (!view || frame.base_frame_id !== frameId) return false;
+    if (BigInt(frame.frame_id) !== BigInt(frameId) + 1n) return false;
+    next = { ...view, ...frame.sections, panes: [...view.panes] };
+    for (const change of frame.panes) {
+      if (![0, 1].includes(change.index) || !next.panes[change.index]) throw new Error("Invalid pane patch");
+      const pane = { ...next.panes[change.index], ...change.fields };
+      if (change.transcript) {
+        const delta = change.transcript;
+        const blocks = new Map(pane.transcript.blocks.map(block => [block.key, block]));
+        for (const key of delta.remove) blocks.delete(key);
+        for (const block of delta.upsert) blocks.set(block.key, block);
+        const order = delta.order ?? pane.transcript.blocks.map(block => block.key);
+        if (new Set(order).size !== order.length || order.length !== blocks.size || order.some(key => !blocks.has(key))) throw new Error("Invalid block order");
+        pane.transcript = { ...pane.transcript, ...delta.fields, blocks: order.map(key => blocks.get(key)) };
+      }
+      next.panes[change.index] = pane;
+    }
+  } else { throw new Error("Unknown presentation frame"); }
+  if (!Array.isArray(next?.panes) || next.panes.length !== 2) throw new Error("Invalid presentation snapshot");
+  render(next);
+  frameId = frame.frame_id;
+  return true;
+}
 function makeWorker() {
+  frameId = undefined;
   const current = new Worker("/worker.js", { type: "module" });
   current.onmessage = ({ data }) => {
     if (worker !== current) return;
     if (data.kind === "view") {
-      try { render(JSON.parse(data.view)); }
-      catch (error) { failWorker(`View rendering failed: ${error.message}`); }
-      finally { if (worker === current) current.postMessage({ kind: "ack" }); }
+      try {
+        const frame = JSON.parse(data.view);
+        const accepted = presentFrame(frame);
+        if (worker === current) current.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !accepted });
+      } catch (error) { failWorker(`View rendering failed: ${error.message}`); }
     } else if (data.kind === "reply") {
       const waiter = pending.get(data.id); pending.delete(data.id);
       if (data.error) waiter?.reject(new Error(data.error)); else waiter?.resolve(data.result);

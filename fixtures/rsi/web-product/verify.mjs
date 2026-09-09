@@ -10,6 +10,7 @@ import { boundedRun, startService } from "./service.mjs";
 import { verifyDom } from "./dom.mjs";
 import { verifyFiles } from "./files.mjs";
 import { verifyImages } from "./images.mjs";
+import { verifyAcknowledgementDeadline } from "./frames.mjs";
 import { verifyTree } from "./tree.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -42,6 +43,31 @@ try {
       await verifyDom(browser, root, report, name);
       const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
       await context.addInitScript(() => {
+        const NativeWorker = window.Worker;
+        window.frameEvidence = { snapshots: 0, patches: 0, blockUpserts: 0, noPaneChanges: 0, resyncs: 0, recovered: 0, maximumBytes: 0 };
+        window.Worker = class extends NativeWorker {
+          constructor(...args) {
+            super(...args);
+            let resync = false;
+            this.addEventListener("message", event => {
+              if (event.data.kind !== "view") return;
+              const frame = JSON.parse(event.data.view);
+              const evidence = window.frameEvidence;
+              evidence.maximumBytes = Math.max(evidence.maximumBytes, new TextEncoder().encode(event.data.view).length);
+              if (frame.kind === "snapshot") { evidence.snapshots++; if (resync) { evidence.recovered++; resync = false; } }
+              if (frame.kind === "patch") {
+                evidence.patches++;
+                evidence.blockUpserts += frame.panes.reduce((sum, pane) => sum + (pane.transcript?.upsert.length ?? 0), 0);
+                if (frame.panes.length === 0) evidence.noPaneChanges++;
+                if (window.resyncNextPatch) {
+                  window.resyncNextPatch = false; resync = true; evidence.resyncs++;
+                  event.stopImmediatePropagation();
+                  this.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: true });
+                }
+              }
+            });
+          }
+        };
         const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
         window.previewUrls = new Map();
         URL.createObjectURL = blob => { const url = create(blob); window.previewUrls.set(url, blob.size); return url; };
@@ -84,6 +110,7 @@ try {
       await plan.filter({ hasText: '"enabled": false' }).waitFor();
       assert.equal(service.provider.requests.length, 0);
       await page.screenshot({ path: join(report, `${name}-projection-default.png`) });
+      await page.evaluate(() => { window.resyncNextPatch = true; });
       await verifyFiles(page, left, service, report, name);
       await left.getByRole("button", { name: "Session commands", exact: true }).click();
       await left.getByRole("button", { name: "/plan", exact: true }).click();
@@ -326,6 +353,15 @@ try {
       results.at(-1).cases.push("Settings-backed Enter preference applied after application reconnect");
       results.at(-1).cases.push("binary image import, ordered provider input and shared draft/durable preview");
       results.at(-1).cases.push("actual subagent tree, breadcrumbs and read-only child history");
+      results.at(-1).frames = await page.evaluate(() => window.frameEvidence);
+      assert.ok(results.at(-1).frames.patches > 0 && results.at(-1).frames.blockUpserts > 0);
+      assert.ok(results.at(-1).frames.noPaneChanges > 0);
+      assert.equal(results.at(-1).frames.resyncs, 1);
+      assert.equal(results.at(-1).frames.recovered, 1);
+      assert.ok(results.at(-1).frames.maximumBytes <= 32 * 1024 * 1024);
+      results.at(-1).cases.push("actual snapshot/patch delivery and explicit baseline resynchronization");
+      results.at(-1).acknowledgement_deadline = await verifyAcknowledgementDeadline(page, service);
+      results.at(-1).cases.push("single pending Worker frame and exact ACK deadline cleanup");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

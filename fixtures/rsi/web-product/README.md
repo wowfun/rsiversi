@@ -62,3 +62,15 @@ a conversation, whose Header freezes the settings at creation.
 Failures retain their evidence and stop that run. Shutdown always closes the
 browser, exact service child, provider connections and fixture directories.
 Neither credentials nor user state are read by default.
+
+Incremental-frame checks distinguish document projection from lifecycle evidence.
+Synthetic document snapshots and patches assert stable DOM identity, retained
+focus, upsert/remove/order, rejected stale bases and generation replacement. A
+separate actual Dedicated Worker opens both Session panes through authenticated
+HTTP, deliberately receives no valid acknowledgement, and proves one pending
+frame, the 30-second deadline and zero Rust Worker resources after its drain.
+A wrong frame ID neither releases that frame nor renews the deadline.
+The product runner also counts real Worker snapshots, patches, block upserts and
+frames without pane changes. It deliberately requests resynchronization for one
+received patch and verifies the subsequent snapshot before continuing the same
+Files workflow. Only frame counts and sizes are retained by this instrumentation.
