@@ -184,6 +184,9 @@ impl Block {
                 .collect(),
         )
     }
+    pub(super) fn sources(&self) -> &SourceIndex {
+        &self.sources
+    }
     pub(super) fn text(&self) -> String {
         self.pieces
             .iter()

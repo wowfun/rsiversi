@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-ui = { path = "../ui" }
+rsi-session-ui = { path = "../session-ui" }
 zeroize.workspace = true
 rsi-api-device-api = { path = "../../rsi-api/device-api" }
 rsi-application = { path = "../application" }

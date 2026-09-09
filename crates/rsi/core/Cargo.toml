@@ -15,6 +15,8 @@ name = "rsi"
 path = "src/main.rs"
 
 [dependencies]
+rsi-ui = { path = "../ui" }
+rsi-session-ui = { path = "../session-ui" }
 rsi-client-composition = { path = "../client-composition" }
 rsi-web-assets = { path = "../web-assets" }
 rsi-api-http-client = { path = "../../rsi-api/http-client" }

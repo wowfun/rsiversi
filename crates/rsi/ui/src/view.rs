@@ -1,7 +1,7 @@
 use crate::{MAXIMUM_ELEMENTS, MAXIMUM_INPUT_BYTES, MAXIMUM_VIEW_BYTES, Result, UiError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Write;
 
 /// Explicit kind of actual Meta target.
@@ -97,15 +97,22 @@ pub enum UiElement {
 }
 impl UiView {
     pub(crate) fn validate(&self) -> Result<()> {
+        #[derive(Serialize)]
+        struct Input<'a> {
+            value: &'a Value,
+            fields: &'a BTreeMap<&'a String, &'a String>,
+        }
         if self.title.len() > 256 || self.elements.len() > MAXIMUM_ELEMENTS {
             return Err(UiError::Invalid(
                 "view exceeds element or title limit".into(),
             ));
         }
-        let mut fields = BTreeSet::new();
+        let mut fields = BTreeMap::new();
         for element in &self.elements {
             match element {
-                UiElement::Input { name, .. } if !name_valid(name) || !fields.insert(name) => {
+                UiElement::Input { name, value, .. }
+                    if !name_valid(name) || fields.insert(name, value).is_some() =>
+                {
                     return Err(UiError::Invalid("invalid or duplicate view input".into()));
                 }
                 UiElement::Button { action, .. } if !name_valid(action) => {
@@ -116,6 +123,24 @@ impl UiView {
         }
         if fields.len() > 32 {
             return Err(UiError::Invalid("too many view inputs".into()));
+        }
+        bounded(
+            &Input {
+                value: &Value::Null,
+                fields: &fields,
+            },
+            MAXIMUM_INPUT_BYTES,
+        )?;
+        for element in &self.elements {
+            if let UiElement::Button { value, .. } = element {
+                bounded(
+                    &Input {
+                        value,
+                        fields: &fields,
+                    },
+                    MAXIMUM_INPUT_BYTES,
+                )?;
+            }
         }
         bounded(self, MAXIMUM_VIEW_BYTES)
     }
@@ -162,4 +187,43 @@ pub(crate) fn bounded(value: &impl Serialize, maximum: usize) -> Result<()> {
     }
     serde_json::to_writer(Counter(maximum), value)
         .map_err(|_| UiError::Invalid("encoded UI data exceeds its limit".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn default_form_and_button_payload_must_fit_the_action_envelope() {
+        for (field, payload) in [
+            ("x".repeat(MAXIMUM_INPUT_BYTES), Value::Null),
+            ("x".repeat(32 * 1024), Value::String("y".repeat(32 * 1024))),
+            ("\u{0001}".repeat(12 * 1024), Value::Null),
+        ] {
+            let input = ActionInput {
+                value: payload.clone(),
+                fields: BTreeMap::from([("value".into(), field.clone())]),
+            };
+            assert!(input.validate().is_err());
+            let view = UiView {
+                title: "Form".into(),
+                elements: vec![
+                    UiElement::Input {
+                        name: "value".into(),
+                        label: "Value".into(),
+                        value: field,
+                        multiline: true,
+                    },
+                    UiElement::Button {
+                        action: "apply".into(),
+                        label: "Apply".into(),
+                        value: payload,
+                    },
+                ],
+            };
+            assert!(
+                view.validate().is_err(),
+                "a view must not publish defaults that cannot enter any action"
+            );
+        }
+    }
 }

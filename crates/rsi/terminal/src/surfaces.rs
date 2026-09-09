@@ -92,6 +92,7 @@ impl PluginFactory for RendererFactory {
 pub(crate) struct TerminalSurfaces {
     shell: Arc<Shell>,
     fiber: FiberHandle,
+    has_ui: bool,
 }
 impl TerminalSurfaces {
     pub async fn start(
@@ -124,6 +125,20 @@ impl TerminalSurfaces {
                 Arc::new(SessionControllerFactory),
             )
             .map_err(error)?;
+        let has_ui = parent.lookup_local::<rsi_ui::UiContract>().is_some();
+        if has_ui {
+            catalog
+                .register_local_contract::<rsi_ui::UiTargetContract>()
+                .map_err(error)?;
+            catalog
+                .register_linked(
+                    "rsi.session.ui-target",
+                    env!("CARGO_PKG_VERSION"),
+                    UpdateMode::RestartRequired,
+                    Arc::new(rsi_session_ui::SessionUiTargetFactory),
+                )
+                .map_err(error)?;
+        }
         let parent = parent
             .clone()
             .isolate_local_fresh::<ShellContract>()
@@ -151,7 +166,11 @@ impl TerminalSurfaces {
         let shell = parent
             .lookup_local::<ShellContract>()
             .ok_or_else(|| error("terminal Shell is unavailable"))?;
-        Ok(Self { shell, fiber })
+        Ok(Self {
+            shell,
+            fiber,
+            has_ui,
+        })
     }
 
     pub async fn open(
@@ -160,7 +179,7 @@ impl TerminalSurfaces {
         cursor: Option<ObservationCursor>,
         generation: u64,
     ) -> Result<Observer> {
-        let program = ProfileProgram::from_profile(Profile::new([
+        let mut entries = vec![
             ProfileEntry::new(
                 "renderer",
                 "rsi.terminal.renderer",
@@ -171,7 +190,15 @@ impl TerminalSurfaces {
                 "rsi.client.session-controller",
                 serde_json::json!({"session_id": session_id, "cursor": cursor}),
             ),
-        ]));
+        ];
+        if self.has_ui {
+            entries.push(ProfileEntry::new(
+                "ui-target",
+                "rsi.session.ui-target",
+                ConfigValue::Null,
+            ));
+        }
+        let program = ProfileProgram::from_profile(Profile::new(entries));
         let surface = self.shell.open(program).await.map_err(error)?;
         let controller = surface
             .lookup_local::<SessionControllerContract>()
@@ -179,7 +206,9 @@ impl TerminalSurfaces {
         let sink = surface
             .lookup_local::<TerminalObservation>()
             .ok_or_else(|| error("terminal observation sink is unavailable"))?;
+        let ui_target = surface.lookup_local::<rsi_ui::UiTargetContract>();
         Ok(Observer {
+            ui_target,
             surface,
             controller,
             finished: sink.finished.clone(),
@@ -203,6 +232,7 @@ impl TerminalSurfaces {
 pub(crate) struct Observer {
     surface: Surface,
     pub controller: Arc<SessionController>,
+    pub ui_target: Option<Arc<rsi_ui::UiTarget>>,
     pub finished: CancellationToken,
 }
 impl Observer {
@@ -223,6 +253,7 @@ impl Observer {
 pub(crate) async fn fixture(
     handle: Arc<dyn rsi_session_protocol::SessionHandle>,
     renderer: &mpsc::Sender<CliRenderMessage>,
+    ui: bool,
 ) -> (rsi_meta::Runtime, TerminalSurfaces) {
     #[derive(Debug)]
     struct Domain(Arc<dyn rsi_session_protocol::SessionHandle>);
@@ -287,6 +318,35 @@ pub(crate) async fn fixture(
         .await
         .unwrap();
     assert_eq!(domain.snapshot().state, FiberState::Active);
+    if ui {
+        for (name, factory, config) in [
+            (
+                "ui",
+                Arc::new(rsi_ui::UiFactory) as Arc<dyn PluginFactory>,
+                ConfigValue::Null,
+            ),
+            (
+                "ui-application",
+                Arc::new(rsi_ui::UiTargetFactory),
+                serde_json::json!("application"),
+            ),
+            (
+                "session-ui",
+                Arc::new(rsi_session_ui::SessionUiFactory),
+                ConfigValue::Null,
+            ),
+        ] {
+            let fiber = runtime
+                .root()
+                .apply(
+                    ResolvedFactory::linked(name, "test", UpdateMode::RestartRequired, factory),
+                    config,
+                )
+                .await
+                .unwrap();
+            assert_eq!(fiber.snapshot().state, FiberState::Active);
+        }
+    }
     let surfaces = TerminalSurfaces::start(&runtime.root(), renderer)
         .await
         .unwrap();

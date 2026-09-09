@@ -37,6 +37,8 @@ withdraws immediately and leaves final draining with its Meta effect owner.
 
 Views contain closed text, code, field, input and button elements. Buttons name
 only actions in their own bundle, and Rust supplies their bound references.
+Before publication, form defaults together with each button payload must fit
+the action input envelope, including JSON escaping.
 Applications render cards, menus, details and forms from this data; they own
 focus, editing, sanitization and layout. UI fields are non-secret. Linked
 callbacks are trusted application code; no dynamic frontend script admission

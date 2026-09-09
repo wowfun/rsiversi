@@ -1,6 +1,8 @@
 use super::*;
 use crate::tests::{UnknownThenAcceptedHandle, UnusedWorkspace};
 
+mod ui;
+
 #[tokio::test]
 async fn registered_slash_command_retains_unknown_identity_without_submitting_a_message() {
     let (mut client, handle, runtime, surface) = client().await;
@@ -262,20 +264,28 @@ async fn client_with(
 ) {
     let attached = attachment(handle.clone(), false).await.unwrap();
     let (events, receiver) = mpsc::channel(32);
-    let (runtime, surfaces) = crate::surfaces::fixture(handle.clone(), &events).await;
+    let (runtime, surfaces) = crate::surfaces::fixture(handle.clone(), &events, true).await;
     let surface = surfaces
         .open(attached.header.session_id(), None, 0)
         .await
         .unwrap();
     (
         Client::new(
-            Arc::new(Application(handle.clone())),
-            handle.clone(),
-            handle.clone(),
-            Arc::new(UnusedWorkspace),
+            Services {
+                application: Arc::new(Application(handle.clone())),
+                output_cache: handle.clone(),
+                model_catalog: handle.clone(),
+                workspace: Arc::new(UnusedWorkspace),
+                lifetime: rsi_client::ConnectionLifetime::Embedded,
+                ui: runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap(),
+                ui_target: runtime
+                    .root()
+                    .lookup_local::<rsi_ui::UiTargetContract>()
+                    .unwrap(),
+            },
             attached,
-            false,
             surface.controller.clone(),
+            surface.ui_target.clone().unwrap(),
         ),
         handle,
         runtime,

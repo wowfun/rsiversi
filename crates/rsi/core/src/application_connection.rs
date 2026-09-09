@@ -242,7 +242,10 @@ pub fn standard_application_host(
             Arc::new(operator::OperatorFactory(diagnostics.connection.clone())),
         )
         .map_err(boot)?;
-    let factories: [(&str, Arc<dyn PluginFactory>); 8] = [
+    let factories: [(&str, Arc<dyn PluginFactory>); 11] = [
+        ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
+        ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
+        ("rsi.session.ui", Arc::new(rsi_session_ui::SessionUiFactory)),
         ("rsi.application.serve-web", diagnostics.web_serve.clone()),
         ("rsi.web.assets", Arc::new(rsi_web_assets::WebAssetsFactory)),
         ("rsi.application.devices", diagnostics.devices.clone()),
@@ -281,100 +284,69 @@ fn boot(error: impl std::fmt::Display) -> RsiError {
 }
 
 fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
+    let scope = crate::AddonScope::Application;
     builder
-        .register_local_contract_at::<rsi_api_http::HttpAssetsContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_ui::UiContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_credentials_protocol::CredentialsResolveContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_ui::UiTargetContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_credentials_protocol::CredentialsAdminContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_api_http::HttpAssetsContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_settings_protocol::SettingsAccessContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_credentials_protocol::CredentialsResolveContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_media_protocol::MediaReadContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_credentials_protocol::CredentialsAdminContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_api_protocol::ApiClientContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_settings_protocol::SettingsAccessContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_application::ApplicationRunContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_media_protocol::MediaReadContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_client::ConnectionLifetimeContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_api_protocol::ApiClientContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_session_protocol::SessionContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_application::ApplicationRunContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_workspace_protocol::WorkspaceRegistryContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_client::ConnectionLifetimeContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_ai_protocol::LanguageModelsContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_session_protocol::SessionContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_process::ProcessOutputCacheContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_workspace_protocol::WorkspaceRegistryContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_media_protocol::MediaContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_ai_protocol::LanguageModelsContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_api_protocol::DeviceAdministrationContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_process::ProcessOutputCacheContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_api_http::HttpListenerContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_media_protocol::MediaContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_api_protocol::ApiDispatchContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_api_protocol::DeviceAdministrationContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_api_protocol::DeviceAuthenticationContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_api_http::HttpListenerContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_api_protocol::ConnectionDescriptionContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_api_protocol::ApiDispatchContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_serve::ServingServiceContract>(
-            crate::AddonScope::Application,
-        )
+        .register_local_contract_at::<rsi_api_protocol::DeviceAuthenticationContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<rsi_api_protocol::ConnectionDescriptionContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<rsi_serve::ServingServiceContract>(scope)
         .map_err(boot)?;
     Ok(())
 }

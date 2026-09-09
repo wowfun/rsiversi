@@ -1109,7 +1109,7 @@ async fn line_sigint_interrupts_initial_service_queries_and_drains_presentation(
     for arguments in [vec!["--list"], vec!["--history", "session-reconcile"]] {
         let handle = Arc::new(UnknownThenAcceptedHandle::default());
         let (renderer, _events) = tokio::sync::mpsc::channel(32);
-        let (runtime, surfaces) = crate::surfaces::fixture(handle.clone(), &renderer).await;
+        let (runtime, surfaces) = crate::surfaces::fixture(handle.clone(), &renderer, false).await;
         surfaces.close().await.unwrap();
         let work = ApplicationWork::default();
         let entered = CancellationToken::new();

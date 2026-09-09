@@ -64,6 +64,19 @@ operations; OSC52 sequences have a separate 32 KiB encoded limit and delivery is
 reported as confirmed, unverified, or failed. Completed process output is read
 only by its issued cache identity; it is not a general Fact archive.
 
+The fullscreen Application Profile explicitly composes the shared UI registry,
+an application target and ordinary Session inspection contributions. Each Session
+surface publishes a UI target depending on its controller. Ctrl+P includes
+contributed view entries and a Card details action. Cards use the same closed
+text/field/form/button contract as Web; Enter opens card actions, editable fields
+use the existing Unicode editor, Enter accepts the field, and Esc abandons that
+field edit. Opening another detail cancels presentation reads. Contribution or
+surface retirement rejects new actions and drains already admitted work.
+Opening and dismissing the action menu preserves the visible card, its field
+edits and any action in progress; choosing another view replaces that presentation.
+While a card field is being edited, its detail panel leaves the editor visible.
+Modal margins clear the obscured conversation, including its wide-text cells.
+
 Fullscreen exit follows the same remote-detach / embedded-shutdown lifecycle
 as the line application, and displays the actual consequence. TUI behavior tests
 use a pure controller and TestBackend, with Linux PTYs for input and terminal

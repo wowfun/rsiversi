@@ -9,6 +9,7 @@ mod terminal;
 #[cfg(test)]
 mod tests;
 mod transcript;
+mod ui;
 
 use super::*;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
@@ -34,6 +35,8 @@ pub(super) fn parse(arguments: Vec<OsString>) -> Result<SessionCommand> {
 }
 
 pub(super) struct Services {
+    pub ui: Arc<rsi_ui::Ui>,
+    pub ui_target: Arc<rsi_ui::UiTarget>,
     pub application: Arc<dyn SessionService>,
     pub output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
     pub model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
@@ -95,6 +98,7 @@ async fn attachment(handle: Arc<dyn SessionHandle>, durable: bool) -> Result<Att
 }
 
 enum Update {
+    Ui(rsi_ui::BoundView),
     Attached(Box<Attachment>),
     History(rsi_session_protocol::SessionHistoryPage),
     Inspect(Box<StoreSessionInspection>),
@@ -169,6 +173,7 @@ enum Durability {
 }
 
 struct Client {
+    ui: ui::Bindings,
     application: Arc<dyn SessionService>,
     output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
     model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
@@ -199,15 +204,26 @@ struct Client {
 
 impl Client {
     fn new(
-        application: Arc<dyn SessionService>,
-        output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
-        model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
-        workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
+        services: Services,
         attached: Attachment,
-        remote: bool,
         controller: Arc<rsi_client::SessionController>,
+        surface_target: Arc<rsi_ui::UiTarget>,
     ) -> Self {
+        let Services {
+            application,
+            output_cache,
+            model_catalog,
+            workspace,
+            lifetime,
+            ui,
+            ui_target,
+        } = services;
         let mut client = Self {
+            ui: ui::Bindings {
+                registry: ui,
+                application: ui_target,
+                surface: surface_target,
+            },
             application,
             output_cache,
             model_catalog,
@@ -219,7 +235,10 @@ impl Client {
             } else {
                 Durability::Draft
             },
-            state: State::new(attached.header, remote),
+            state: State::new(
+                attached.header,
+                lifetime == rsi_client::ConnectionLifetime::Remote,
+            ),
             generation: 0,
             tasks: FuturesUnordered::new(),
             owned: BTreeSet::new(),
@@ -644,11 +663,19 @@ impl Client {
                 .notice("Client requests are busy; try again shortly");
             return false;
         }
+        if matches!(action, Action::UiEdit(..) | Action::UiInvoke(..)) {
+            self.ui_action(action);
+            return false;
+        }
+        self.state.close_ui();
         let handle = self.handle.clone();
         let application = self.application.clone();
         self.state.invalidate_detail();
         self.extension_view = None;
         match action {
+            Action::UiSurface(reference) => self.ui_surface(&reference),
+            Action::UiCard => self.ui_card(),
+            Action::UiEdit(..) | Action::UiInvoke(..) => unreachable!("UI edit/actions dispatched above"),
             Action::Commands => self.command_menu(),
             Action::CommandResult => self.command_result(),
             Action::Extensions => self.extension_menu(),
@@ -838,6 +865,8 @@ async fn run_inner(
     context: rsi_meta::Context,
 ) -> Result<()> {
     let Services {
+        ui,
+        ui_target,
         application,
         output_cache,
         model_catalog,
@@ -891,18 +920,29 @@ async fn run_inner(
             .await?,
     );
     let mut client = Client::new(
-        application,
-        output_cache,
-        model_catalog,
-        workspace,
+        Services {
+            application,
+            output_cache,
+            model_catalog,
+            workspace,
+            lifetime: mode,
+            ui,
+            ui_target,
+        },
         attached,
-        mode == rsi_client::ConnectionLifetime::Remote,
         observer
             .as_ref()
             .expect("initial surface")
             .controller
             .clone(),
+        observer
+            .as_ref()
+            .expect("initial surface")
+            .ui_target
+            .clone()
+            .ok_or_else(|| error("TUI surface target is unavailable"))?,
     );
+    let mut ui_changes = client.ui.registry.changes();
     let (width, height) = terminal::size();
     let mut screen =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).map_err(error)?;
@@ -921,6 +961,9 @@ async fn run_inner(
             if let Some(answer) = &mut client.state.answer { answer.editor.limit = rsi_user_questions_protocol::MAXIMUM_QUESTION_BYTES.saturating_sub(answer.answers.iter().map(String::len).sum()); }
             tokio::select! {
                 () = application_work.stop.cancelled() => break,
+                changed = ui_changes.changed() => {
+                    if changed.is_ok() { client.ui_changed(); dirty = true; }
+                },
                 signal = tokio::signal::ctrl_c() => { signal.map_err(error)?; client.cancel(); dirty = true; },
                 () = &mut terminate => break,
                 changed = terminal.presented.changed() => {
@@ -942,6 +985,7 @@ async fn run_inner(
                         input::Input::Closed => break,
                         input::Input::Rejected(message) => client.state.notice(message),
                         input::Input::Terminal(termina::Event::Paste(text)) => {
+                            if client.state.ui_paste(&text) { continue; }
                             let total = client.drafts.values().map(|saved| saved.editor.text.capacity()).sum::<usize>() + client.state.editor.text.capacity();
                             if total.saturating_add(text.len()) > 4 * 1024 * 1024 { client.state.notice("Session drafts exceed 4 MiB; nothing was inserted"); }
                             else if let Err(message) = client.state.answer.as_mut().map_or(&mut client.state.editor, |answer| &mut answer.editor).insert(&text) { client.state.notice(message); }
@@ -951,7 +995,7 @@ async fn run_inner(
                             if control && key.code == KeyCode::Char('c') { client.cancel(); continue; }
                             if control && key.code == KeyCode::Char('y') { client.copy(); continue; }
                             if key.code == KeyCode::Escape { client.state.escape(); continue; }
-                            if control && key.code == KeyCode::Char('p') { client.state.invalidate_detail(); client.state.menu = Some(Menu::actions()); continue; }
+                            if control && key.code == KeyCode::Char('p') { client.action_menu(); continue; }
                             if control && key.code == KeyCode::Char('d') && client.state.editor.text.is_empty() && client.state.answer.is_none() && client.submission.request.is_none() { break; }
                             if let Some(menu) = &mut client.state.menu {
                                 match key.code {
@@ -960,7 +1004,8 @@ async fn run_inner(
                                     KeyCode::Enter => { let action = menu.items.get(menu.selected).map(|(_,action)| action.clone()); client.state.menu = None; if action.is_some_and(|action| client.action(action)) { break; } },
                                     _ => {},
                                 }
-                            } else if key.code == KeyCode::PageUp { client.scroll(&view, true); }
+                            } else if client.state.ui_key(key) {}
+                            else if key.code == KeyCode::PageUp { client.scroll(&view, true); }
                             else if key.code == KeyCode::PageDown { client.scroll(&view, false); }
                             else if key.code == KeyCode::End && !control { client.follow_live(); }
                             else if client.state.detail.is_some() && matches!(key.code, KeyCode::Up | KeyCode::Down) { client.scroll(&view, key.code == KeyCode::Up); }
@@ -1009,10 +1054,15 @@ async fn run_inner(
                         WorkKind::Cancel => client.cancelling = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
+                        Ok(Update::Ui(view)) => client.show_ui(view),
                         Ok(Update::Command(result)) => client.command_finished(result),
-                        Err(problem) => { if matches!(work.kind, WorkKind::History) { client.history.backfill = false; } client.state.notice(problem.to_string()); },
+                        Err(problem) => {
+                            if matches!(work.kind, WorkKind::Detail) { client.ui_failed(); }
+                            if matches!(work.kind, WorkKind::History) { client.history.backfill = false; }
+                            client.state.notice(problem.to_string());
+                        },
                         Ok(Update::Notice(message)) => client.state.notice(message),
                         Ok(Update::Copy(delivery)) => {
                             client.state.notice(delivery.status);
@@ -1087,6 +1137,7 @@ async fn run_inner(
                             };
                             if let Some(observer) = observer.take() { observer.stop().await?; }
                             client.controller = next.controller.clone();
+                            client.ui.surface = next.ui_target.clone().ok_or_else(|| error("TUI surface target is unavailable"))?;
                             client.projections = None; client.projection_notice.clear(); client.extension_view = None;
                             observer = Some(next);
                             client.tasks.clear(); client.generation += 1;

@@ -26,7 +26,7 @@ impl Editor {
         }
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.text.len().saturating_add(normalized.len()) > self.limit.min(MAX_TEXT) {
-            return Err("Draft exceeds 1 MiB; nothing was inserted");
+            return Err("Input exceeds its size limit; nothing was inserted");
         }
         self.text.reserve_exact(normalized.len());
         self.text.insert_str(self.cursor, &normalized);

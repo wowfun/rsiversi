@@ -120,6 +120,8 @@ impl Factory {
                 session(prepared).requiring_local::<rsi_process::ProcessOutputCacheContract>()
             }
             Kind::Tui => session(prepared)
+                .requiring_local::<rsi_ui::UiContract>()
+                .requiring_local::<rsi_ui::UiTargetContract>()
                 .requiring_local::<rsi_process::ProcessOutputCacheContract>()
                 .requiring_local::<rsi_ai_protocol::LanguageModelsContract>()
                 .requiring_local::<ConnectionLifetimeContract>(),
@@ -169,6 +171,8 @@ impl Factory {
                 let lifetime = *plan.local::<ConnectionLifetimeContract>()?;
                 Box::pin(crate::tui::run(
                     crate::tui::Services {
+                        ui: plan.local::<rsi_ui::UiContract>()?,
+                        ui_target: plan.local::<rsi_ui::UiTargetContract>()?,
                         application: session,
                         output_cache: output,
                         model_catalog: models,

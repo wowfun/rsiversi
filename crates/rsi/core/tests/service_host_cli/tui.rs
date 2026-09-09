@@ -14,6 +14,37 @@ struct TerminalClient {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_contributed_session_card_and_exact_source_pages() {
+    let (endpoint, provider) = provider().await;
+    let fixture = CliFixture::new(&endpoint);
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-contributions"]);
+    terminal.until("Ready").await;
+    terminal.action(14);
+    terminal.until("Session: tui-contributions").await;
+    terminal.send(b"\x1b");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let text = format!("{}second-page-marker", "x".repeat(16 * 1024));
+    terminal.send(format!("\x1b[200~{text}\x1b[201~\r").as_bytes());
+    terminal.until("hello from daemon").await;
+    terminal.action(13);
+    terminal.until("Block details").await;
+    terminal.send(b"\r");
+    terminal.until("Fact ").await;
+    terminal.send(b"\r");
+    terminal.until("0–16384 · more available").await;
+    terminal.send(b"\r");
+    terminal.until("Next page").await;
+    terminal.send(b"\r");
+    terminal.until("second-page-marker").await;
+    terminal.until(" · end").await;
+    terminal.send(b"\x1b");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -99,7 +130,30 @@ impl TerminalClient {
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
             directory.join("application.profile.toml"),
-            "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"connection\"\nplugin = \"rsi.application.connection\"\nconfig = { host_profile = \"fixture\" }\n[[steps]]\nkind = \"plugin\"\nid = \"application\"\nplugin = \"rsi.application.tui\"\n",
+            r#"format = 1
+[[steps]]
+kind = "plugin"
+id = "connection"
+plugin = "rsi.application.connection"
+config = { host_profile = "fixture" }
+[[steps]]
+kind = "plugin"
+id = "ui"
+plugin = "rsi.ui"
+[[steps]]
+kind = "plugin"
+id = "ui-target"
+plugin = "rsi.ui.target"
+config = "application"
+[[steps]]
+kind = "plugin"
+id = "session-ui"
+plugin = "rsi.session.ui"
+[[steps]]
+kind = "plugin"
+id = "application"
+plugin = "rsi.application.tui"
+"#,
         )
         .unwrap();
         let pair = native_pty_system()
@@ -164,6 +218,13 @@ impl TerminalClient {
     fn send(&mut self, bytes: &[u8]) {
         self.writer.write_all(bytes).unwrap();
         self.writer.flush().unwrap();
+    }
+
+    fn action(&mut self, index: usize) {
+        let mut keys = vec![0x10];
+        keys.extend(b"\x1b[B".repeat(index));
+        keys.push(b'\r');
+        self.send(&keys);
     }
 
     async fn until(&mut self, text: &str) {

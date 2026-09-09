@@ -160,10 +160,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
         frame.render_widget(Paragraph::new("Resize terminal: at least 28 × 9"), area);
         return View::default();
     }
-    let draft = state
-        .answer
-        .as_ref()
-        .map_or(&state.editor, |answer| &answer.editor);
+    let draft = state.ui_edit.as_ref().map_or_else(
+        || {
+            state
+                .answer
+                .as_ref()
+                .map_or(&state.editor, |answer| &answer.editor)
+        },
+        |edit| &edit.editor,
+    );
     let editor_height = u16::try_from(
         draft
             .text
@@ -366,15 +371,20 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
         area.width,
         editor_height,
     );
-    let title = state.answer.as_ref().map_or_else(
-        || " Input · Enter send · Ctrl+O steer ".into(),
-        |answer| {
-            format!(
-                " Answer {}/{} · Enter accepts option number or text ",
-                answer.answers.len() + 1,
-                answer.request.questions.len()
+    let title = state.ui_edit.as_ref().map_or_else(
+        || {
+            state.answer.as_ref().map_or_else(
+                || " Input · Enter send · Ctrl+O steer ".into(),
+                |answer| {
+                    format!(
+                        " Answer {}/{} · Enter accepts option number or text ",
+                        answer.answers.len() + 1,
+                        answer.request.questions.len()
+                    )
+                },
             )
         },
+        |edit| format!(" {} · Enter accepts · Esc discards ", edit.label),
     );
     let mut editor_text = super::super::terminal_text(&draft.text[..draft.cursor]);
     editor_text.push('▏');
@@ -417,6 +427,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
     if let Some(detail) = &state.detail {
         popup(
             frame,
+            Rect {
+                height: area.height.saturating_sub(if state.ui_edit.is_some() {
+                    editor_height
+                } else {
+                    0
+                }),
+                ..area
+            },
             "Detail · ↑/↓ scroll · Esc close",
             detail,
             state.detail_offset,
@@ -479,6 +497,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
             .join("\n");
         popup(
             frame,
+            area,
             &format!("{} · Enter select · Esc close", menu.title),
             &text,
             0,
@@ -528,15 +547,17 @@ fn markdown_styles(text: &str) -> MarkdownStyles {
         .collect()
 }
 
-fn popup(frame: &mut Frame<'_>, title: &str, text: &str, offset: usize, wrap: bool) {
-    let area = frame.area();
+fn popup(frame: &mut Frame<'_>, area: Rect, title: &str, text: &str, offset: usize, wrap: bool) {
+    frame.render_widget(
+        Clear,
+        Rect::new(0, 3, area.width, area.height.saturating_sub(6)),
+    );
     let popup = Rect::new(
         2,
         3,
         area.width.saturating_sub(4),
         area.height.saturating_sub(6),
     );
-    frame.render_widget(Clear, popup);
     let text = super::super::terminal_text(text);
     let mut lines = Vec::with_capacity(usize::from(popup.height.saturating_sub(2)));
     let mut line = 0;

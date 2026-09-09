@@ -495,6 +495,24 @@ fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
     } else {
         "config = { host_profile = \"standard\" }"
     };
+    let ui = if id.as_str() == TUI_PROFILE {
+        r#"[[steps]]
+kind = "plugin"
+id = "ui"
+plugin = "rsi.ui"
+[[steps]]
+kind = "plugin"
+id = "ui-target"
+plugin = "rsi.ui.target"
+config = "application"
+[[steps]]
+kind = "plugin"
+id = "session-ui"
+plugin = "rsi.session.ui"
+"#
+    } else {
+        ""
+    };
     Some(
         format!(
             r#"format = 1
@@ -503,7 +521,7 @@ kind = "plugin"
 id = "connection"
 plugin = "{connection}"
 {config}
-[[steps]]
+{ui}[[steps]]
 kind = "plugin"
 id = "application"
 plugin = "{plugin}"

@@ -820,7 +820,7 @@ mod tests {
             },
         };
         let (renderer, mut events) = tokio::sync::mpsc::channel(32);
-        let (runtime, surfaces) = crate::surfaces::fixture(handle.clone(), &renderer).await;
+        let (runtime, surfaces) = crate::surfaces::fixture(handle.clone(), &renderer, false).await;
         let mut observer = Some(surfaces.open(header.session_id(), None, 0).await.unwrap());
         let prior = observer.as_ref().unwrap().controller.clone();
         assert!(
@@ -878,7 +878,8 @@ mod tests {
             fixture.interaction_capacity.store(7, Ordering::SeqCst);
             fixture.observation_capacity.store(7, Ordering::SeqCst);
             let (renderer, mut events) = tokio::sync::mpsc::channel(128);
-            let (runtime, surfaces) = crate::surfaces::fixture(fixture.clone(), &renderer).await;
+            let (runtime, surfaces) =
+                crate::surfaces::fixture(fixture.clone(), &renderer, false).await;
             let observer = surfaces
                 .open(
                     fixture.header().await.unwrap().session_id(),
@@ -956,7 +957,7 @@ mod tests {
             ..Default::default()
         });
         let (renderer, mut events) = tokio::sync::mpsc::channel(32);
-        let (runtime, surfaces) = crate::surfaces::fixture(fixture.clone(), &renderer).await;
+        let (runtime, surfaces) = crate::surfaces::fixture(fixture.clone(), &renderer, false).await;
         let observer = surfaces
             .open(
                 fixture.header().await.unwrap().session_id(),

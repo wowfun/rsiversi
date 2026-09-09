@@ -7,6 +7,10 @@ use rsi_ai_protocol::ModelRef;
 
 #[derive(Clone, Debug)]
 pub(super) enum Action {
+    UiSurface(rsi_ui::UiReference),
+    UiCard,
+    UiEdit(String, u64),
+    UiInvoke(rsi_ui::UiReference, serde_json::Value, u64),
     New,
     Recent,
     Models,
@@ -63,7 +67,7 @@ impl Menu {
                 ("Agents".into(), Action::Agents),
                 ("Questions".into(), Action::Questions),
                 ("Approvals".into(), Action::Approvals),
-                ("Focused card / full output".into(), Action::Detail),
+                ("Raw sources / full output".into(), Action::Detail),
                 ("Pending / rejected submission".into(), Action::Submission),
                 ("Extension state".into(), Action::Extensions),
                 ("Exit".into(), Action::Exit),
@@ -81,6 +85,8 @@ pub(super) struct Answer {
 }
 
 pub(super) struct State {
+    pub(super) ui_form: Option<super::ui::Form>,
+    pub(super) ui_edit: Option<super::ui::Edit>,
     pub(super) view_revision: u64,
     pub(super) header: SessionHeader,
     pub(super) transcript: Transcript,
@@ -114,6 +120,8 @@ impl State {
         self.detail_stop = tokio_util::sync::CancellationToken::new();
     }
     pub(super) fn open_detail(&mut self, text: String) {
+        self.ui_form = None;
+        self.ui_edit = None;
         self.detail = Some(text);
         self.detail_offset = 0;
         self.detail_next = None;
@@ -122,6 +130,8 @@ impl State {
     }
     pub(super) fn new(header: SessionHeader, remote: bool) -> Self {
         Self {
+            ui_form: None,
+            ui_edit: None,
             view_revision: 0,
             header,
             remote,
@@ -169,11 +179,20 @@ impl State {
     }
 
     pub(super) fn escape(&mut self) {
-        self.invalidate_detail();
         if self.menu.take().is_some() {
+            if self.ui_form.is_none() {
+                self.invalidate_detail();
+            }
+            return;
+        }
+        self.invalidate_detail();
+        if self.ui_edit.take().is_some() {
+            self.refresh_ui();
+            self.notice("Field edit discarded");
             return;
         }
         if self.detail.take().is_some() {
+            self.ui_form = None;
             self.detail_next = None;
             self.detail_previous = None;
             self.detail_actions = None;
