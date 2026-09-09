@@ -78,6 +78,6 @@ retry, queued-Turn wakeup, exhausted open Steps and read-only recovery queries.
 A production Kernel-to-SQLite test reopens under a new codec generation and
 verifies further commits plus offline audit.
 
-The remaining [contribution proposal](../../proposed/architecture/2026-09-08-agent-domain-state.md)
+The [contribution decision](2026-09-08-agent-domain-state.md)
 owns PluginContext, ToolRejected, contribution execution and command/projection
 integration. This substrate does not make those consumers available by itself.

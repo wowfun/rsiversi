@@ -56,8 +56,8 @@ the worker before releasing the Service Owner dependency. The frozen factory
 retains only construction inputs, so pure preview never opens the source store
 or Loader, and a clean shutdown can release its cache lease. Unchanged failed
 candidates require explicit retry rather than repeated native execution.
-The [remaining management proposal](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-still covers build/watch actions.
+The [product management decision](2026-09-08-native-artifact-management.md)
+keeps build/watch source production separate from this runtime staging owner.
 
 ## Alternatives considered
 
