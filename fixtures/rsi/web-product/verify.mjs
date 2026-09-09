@@ -96,6 +96,19 @@ try {
       assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "A saved left draft");
       assert.match(await right.locator(".transcript").innerText(), /Reviewed: Review the right workspace/);
       assert.equal(await page.evaluate(() => window.untrustedExecuted), undefined);
+      await right.getByRole("textbox", { name: "Right message" }).fill("Show a Markdown example");
+      await right.getByRole("button", { name: "Send ↗" }).click();
+      const markdown = right.locator(".message-text.markdown").filter({ hasText: "Review notes" });
+      await markdown.locator("h2").filter({ hasText: "Review notes" }).waitFor();
+      assert.equal(await markdown.locator("strong").innerText(), "Unicode 界");
+      assert.equal(await markdown.locator("li").count(), 2);
+      assert.match(await markdown.locator("pre").innerText(), /printf 'hello'/);
+      assert.equal(await markdown.locator("a").count(), 1);
+      assert.equal(await markdown.locator("a").getAttribute("rel"), "noopener noreferrer");
+      assert.equal(await markdown.locator("img,script,iframe").count(), 0);
+      assert.equal(await page.evaluate(() => window.markdownExecuted), undefined);
+      assert.match(await markdown.innerText(), /<script>window.markdownExecuted = true<\/script>/);
+      await page.screenshot({ path: join(report, `${name}-markdown.png`) });
       await left.getByRole("textbox", { name: "Left message" }).fill("Please ask a question about the workspace");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".pending button").filter({ hasText: "Answer:" }).click();
@@ -261,6 +274,7 @@ try {
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
       results.at(-1).cases.push("Files draft browsing, exact text/hex, raw names and changed snapshots", "contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
       results.at(-1).cases.push("completed stdout/stderr byte pages and exact hex");
+      results.at(-1).cases.push("restricted Markdown with literal HTML, inert images and safe links");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

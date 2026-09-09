@@ -4453,6 +4453,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "pulldown-cmark",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
@@ -4485,6 +4486,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "zeroize",

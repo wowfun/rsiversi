@@ -5,7 +5,9 @@ The document owns DOM nodes, focus and input delivery; the Dedicated Worker owns
 the actual Rust Profile and application. One view crosses the bridge at a time,
 acknowledged only after DOM rendering. Input delivery admits eight calls and
 coalesces each pane's unsent draft. Switching panes flushes the input handoff;
-failed handoffs leave the visible draft intact. All dynamic content is text.
+failed handoffs leave the visible draft intact. Dynamic content enters text
+nodes or the Worker's restricted Markdown event stream, using only its closed
+element set. HTML and remote Markdown images remain inert text.
 Attachment replacement disables that pane's input until its new view arrives;
 typing cannot enter the retiring attachment between navigation and delivery.
 Clearing a pane also invalidates the cached pending-interaction projection;

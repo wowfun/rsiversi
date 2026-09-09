@@ -1,5 +1,17 @@
 # rsi-web
 
+Assistant text may carry a restricted Markdown event stream alongside its exact
+retained source. The Worker uses at most 64 KiB input, 4,096 events and 32 nested
+elements per block. Encoded events may occupy at most four times source bytes
+plus 256 bytes; exceeding any bound preserves the complete retained plain text.
+This limits aggregate frame expansion with the existing transcript budget.
+Headings, paragraphs, lists, quotes, emphasis, code and absolute HTTP(S) links
+are supported. Raw HTML is text; Markdown images show their alt text without
+fetching a URL. Tool/file/source contents keep their plain-text presentations.
+The document constructs only the closed element set with text nodes, and links
+open with no opener or referrer. Markdown does not grant script or media access.
+Input composition suppresses keyboard submission until composition has ended.
+
 Each pane displays the latest complete extension-state snapshot, including fresh
 drafts and idle control changes without a model request. Producer values and
 failures are rendered as text. Snapshot replacement releases the prior retention;

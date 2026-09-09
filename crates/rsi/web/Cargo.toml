@@ -16,6 +16,8 @@ rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
 async-trait.workspace = true
 futures-util.workspace = true
+pulldown-cmark.workspace = true
+url.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-application = { path = "../application" }
 rsi-client = { path = "../client" }

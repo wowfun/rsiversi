@@ -51,6 +51,9 @@ async function startProvider() {
         for (let index=0;index<180;index++) response.write(`data: ${JSON.stringify({choices:[{delta:{role:"assistant",content:`segment ${index}\n`},finish_reason:null}]})}\n\n`);
         response.end(sse({content:"Stream complete."})); return;
       }
+      if (prompt.includes("Markdown example")) {
+        response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n![Remote alt text](https://example.com/never-fetch.png)\n\n[Unsafe link](javascript:alert%281%29)" })); return;
+      }
       let name; let argumentsValue;
       if (!completedTool && prompt.includes("ask a question")) {
         name = "ask_user"; argumentsValue = { questions: [{ id: "color", prompt: "Which accent should the workspace use?", options: ["Teal", "Blue"] }, { id: "reason", prompt: "What matters for this change?", options: [] }] };

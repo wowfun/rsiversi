@@ -17,6 +17,27 @@ function element(tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+function markdown(nodes) {
+  const fragment = document.createDocumentFragment();
+  const stack = [fragment];
+  for (const node of nodes) {
+    const parent = stack.at(-1);
+    if (node.kind === "start") {
+      const value = node.element;
+      const tags = { paragraph: "p", quote: "blockquote", pre: "pre", item: "li", emphasis: "em", strong: "strong", strike: "s", span: "span", link: "a" };
+      const tag = value.kind === "heading" ? ["h1", "h2", "h3", "h4", "h5", "h6"][value.level - 1] : value.kind === "list" ? (value.start === null ? "ul" : "ol") : tags[value.kind];
+      const child = element(tag ?? "span");
+      if (value.kind === "link") { child.href = value.href; child.target = "_blank"; child.rel = "noopener noreferrer"; }
+      if (value.kind === "list" && value.start !== null) child.start = value.start;
+      parent.append(child); stack.push(child);
+    } else if (node.kind === "end") { stack.pop(); }
+    else if (node.kind === "text") parent.append(document.createTextNode(node.text));
+    else if (node.kind === "code") parent.append(element("code", undefined, node.text));
+    else if (node.kind === "break") parent.append(element("br"));
+    else if (node.kind === "rule") parent.append(element("hr"));
+  }
+  return fragment;
+}
 function button(label, run, className) {
   const node = element("button", className, label);
   node.type = "button";
@@ -152,6 +173,7 @@ class Pane {
       this.pump();
     });
     this.input.addEventListener("keydown", event => {
+      if (event.isComposing || event.keyCode === 229) return;
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); perform(() => this.submit(false)); }
     });
     this.composer.addEventListener("submit", event => { event.preventDefault(); perform(() => this.submit(false)); });
@@ -315,12 +337,17 @@ class Pane {
       let entry = this.blocks.get(block.key);
       if (!entry) {
         const node = element("article", `message ${block.role}`);
-        const title = element("p", "message-title"); const text = element("p", "message-text"); const clipped = element("p", "omitted", "Text shortened in this view.");
+        const title = element("p", "message-title"); const text = element("div", "message-text"); const clipped = element("p", "omitted", "Text shortened in this view.");
         const sources = element("div", "actions source-actions");
         node.append(title, text, clipped, sources); entry = { node, title, text, clipped, sources }; this.blocks.set(block.key, entry);
       }
       if (entry.title.textContent !== block.title) entry.title.textContent = block.title;
-      if (entry.text.textContent !== block.text) entry.text.textContent = block.text;
+      if (entry.source !== block.text || entry.markdown !== Boolean(block.markdown)) {
+        entry.source = block.text; entry.markdown = Boolean(block.markdown);
+        entry.text.classList.toggle("markdown", entry.markdown);
+        if (block.markdown) entry.text.replaceChildren(markdown(block.markdown));
+        else entry.text.textContent = block.text;
+      }
       entry.clipped.hidden = !block.clipped;
       const sourceKey = JSON.stringify([block.tool, block.sources, this.uiCards]);
       if (sourceKey !== entry.sourceKey) {

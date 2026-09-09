@@ -17,29 +17,43 @@ const MAX_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
 const MAX_METADATA: usize = 512 * 1024;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct Block {
     pub key: String,
     pub role: &'static str,
     pub title: String,
     pub text: String,
     pub clipped: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolState>,
-    #[serde(skip)]
     tool_argument_bytes: usize,
-    #[serde(serialize_with = "source_count")]
     sources: SourceIndex,
-    #[serde(skip)]
     source_bytes: VecDeque<usize>,
-    #[serde(skip)]
     first_seq: u64,
 }
-fn source_count<S: serde::Serializer>(
-    sources: &SourceIndex,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_u64(u64::try_from(sources.len()).expect("bounded source count"))
+impl Serialize for Block {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let markdown = (self.role == "assistant")
+            .then(|| crate::markdown::parse(&self.text))
+            .flatten();
+        let mut view = serializer.serialize_struct(
+            "Block",
+            6 + usize::from(self.tool.is_some()) + usize::from(markdown.is_some()),
+        )?;
+        view.serialize_field("key", &self.key)?;
+        view.serialize_field("role", &self.role)?;
+        view.serialize_field("title", &self.title)?;
+        view.serialize_field("text", &self.text)?;
+        view.serialize_field("clipped", &self.clipped)?;
+        view.serialize_field("sources", &self.sources.len())?;
+        if let Some(tool) = &self.tool {
+            view.serialize_field("tool", tool)?;
+        }
+        if let Some(markdown) = markdown {
+            view.serialize_field("markdown", &markdown)?;
+        }
+        view.end()
+    }
 }
 impl Block {
     fn refresh_tool_sources(&mut self, fact: &SessionFact) {

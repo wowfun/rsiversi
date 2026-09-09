@@ -68,6 +68,18 @@ export async function verifyDom(browser, root, report, name) {
       ],
       resolvedLabel: "Send ↗", resolvedSteerDisabled: false,
     });
+    const ime = await page.evaluate(() => {
+      let submitted = 0;
+      panes[0].submit = async () => { submitted++; };
+      const input = panes[0].input;
+      for (const options of [{ isComposing: true }, { keyCode: 229 }]) {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true, ...options }));
+      }
+      const composing = submitted;
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+      return { composing, after: submitted };
+    });
+    assert.deepEqual(ime, { composing: 0, after: 1 });
     const contributed = await page.evaluate(() => {
       const sent = [];
       command = async input => { sent.push(input); };

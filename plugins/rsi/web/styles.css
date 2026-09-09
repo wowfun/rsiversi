@@ -72,6 +72,15 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .message { margin-bottom:25px; overflow-wrap:anywhere; }
 .message-title { font-size:.7rem; color:var(--muted); font-weight:700; margin:0 0 7px; }
 .message-text { white-space:pre-wrap; line-height:1.65; font-size:.88rem; margin:0; overflow-wrap:anywhere; }
+.message-text.markdown { white-space:normal; }
+.markdown > :first-child { margin-top:0; }
+.markdown > :last-child { margin-bottom:0; }
+.markdown p, .markdown li { white-space:pre-wrap; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { font-size:1.05em; line-height:1.4; margin:1em 0 .5em; }
+.markdown pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--paper); padding:.7rem; border-radius:4px; }
+.markdown code, .markdown pre { font-family:Consolas,"Liberation Mono",monospace; font-size:.85em; }
+.markdown blockquote { margin:.75rem 0; padding-left:.75rem; border-left:2px solid var(--muted); color:var(--muted); }
+.markdown a { color:var(--teal); text-decoration:underline; }
 .message.user { background:#edf4f6; border-radius:8px; padding:14px 16px; }
 .message.user .message-title { color:#416673; }
 .message.tool { border-left:2px solid #abc4c7; padding:4px 0 4px 13px; }
