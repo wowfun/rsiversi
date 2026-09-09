@@ -12,3 +12,11 @@ Run manifest-scoped build, test and strict Clippy with its own lockfile. The
 native Tool integration test builds this manifest automatically into
 `target/native-addon-fixture-test`. Tests only establish the platform actually
 executed; no loader teardown failure or live-provider behavior is implied.
+
+An explicitly enabled AI port (`ai: true`, optionally `tools: false`) implements
+Describe, frozen Prepare and consuming Start through the public AI Portable
+protocol. It verifies a deterministic binary test credential, emits Language
+text and a binary Image body, and never contacts a model provider. The Image
+body tests normalized framing and descriptor assembly; it is not a raster codec
+fixture. `rsi-ai-portable` tests load this same dynamic library through ordinary
+Language and Image routers and verify normal withdrawal and resource release.

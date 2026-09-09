@@ -1,0 +1,39 @@
+[package]
+name = "rsi-ai-portable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-ai-protocol = { path = "../protocol" }
+rsi-ai-provider = { path = "../provider" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+tokio-util.workspace = true
+rsi-ai = { path = "../core" }
+rsi-ai-image = { path = "../image" }
+rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
+sha2.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "process"] }
+
+[lints]
+workspace = true

@@ -1,3 +1,4 @@
+mod ai;
 use rsi_meta_native::{
     Activation, Message, NativeInstance, NativePlugin, Prepared, ProviderChannel, export_plugin,
 };
@@ -12,6 +13,13 @@ struct Plugin;
 #[serde(deny_unknown_fields)]
 struct Config {
     label: String,
+    #[serde(default = "enabled")]
+    tools: bool,
+    #[serde(default)]
+    ai: bool,
+}
+fn enabled() -> bool {
+    true
 }
 impl NativePlugin for Plugin {
     type Prepared = Config;
@@ -36,21 +44,37 @@ impl NativePlugin for Plugin {
 struct Instance(Config);
 impl NativeInstance for Instance {
     fn activate(&mut self, activation: &mut Activation<'_>) -> Result<(), String> {
-        activation
-            .effects()
-            .provide(
-                "fixture.native.tools",
-                portable::CONTRACT,
-                u64::from(portable::VERSION),
-                b"tools",
-            )
-            .map_err(|error| error.to_string())?;
+        if self.0.tools {
+            activation
+                .effects()
+                .provide(
+                    "fixture.native.tools",
+                    portable::CONTRACT,
+                    u64::from(portable::VERSION),
+                    b"tools",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if self.0.ai {
+            activation
+                .effects()
+                .provide(
+                    "fixture.native.ai",
+                    rsi_ai_protocol::portable::PROVIDER_CONTRACT,
+                    u64::from(rsi_ai_protocol::portable::PROVIDER_VERSION),
+                    b"ai",
+                )
+                .map_err(|error| error.to_string())?;
+        }
         activation
             .effects()
             .commit()
             .map_err(|error| error.to_string())
     }
     fn serve(&mut self, port: &[u8], channel: &mut ProviderChannel<'_>) -> Result<(), String> {
+        if port == b"ai" {
+            return ai::serve(channel, &self.0.label);
+        }
         if port != b"tools" {
             return Err("unknown port".into());
         }

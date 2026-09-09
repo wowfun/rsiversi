@@ -353,6 +353,9 @@ available Agent contributor that imports an explicitly configured Portable Tool
 service into the same stage. It is enabled only by an explicit Profile leaf;
 the default preset has no native dependency. Its wire and confinement rules
 belong to [Tools](../rsi-tools/protocol/README.md#portable-contributions).
+The global factory catalog also provides `rsi.ai.portable` for explicit
+Language/Image provider composition. Its [provider contract](../rsi-ai/portable/README.md)
+requires global drain/restart and does not change the default DeepSeek Responses path.
 
 The standard preset selects [plan policy](../rsi-agent/plan-policy/README.md)
 through that same catalog. Planning starts disabled and can change through the

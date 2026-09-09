@@ -65,6 +65,7 @@ rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
 rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
 rsi-agent-repeat-tool-reminder = { path = "../../rsi-agent/repeat-tool-reminder" }
 rsi-ai = { path = "../../rsi-ai/core" }
+rsi-ai-portable = { path = "../../rsi-ai/portable" }
 rsi-ai-deepseek = { path = "../../rsi-ai/deepseek" }
 rsi-ai-image = { path = "../../rsi-ai/image" }
 rsi-ai-openai = { path = "../../rsi-ai/openai" }

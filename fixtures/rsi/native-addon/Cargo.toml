@@ -10,6 +10,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+rsi-ai-protocol = { path = "../../../crates/rsi-ai/protocol" }
+rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
 rsi-meta-native = { path = "../../../crates/rsi-meta/native" }
 rsi-tools-protocol = { path = "../../../crates/rsi-tools/protocol" }
 serde = { version = "1", features = ["derive"] }

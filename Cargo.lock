@@ -2598,6 +2598,7 @@ dependencies = [
  "rsi-ai-models-api",
  "rsi-ai-openai",
  "rsi-ai-openai-compatible",
+ "rsi-ai-portable",
  "rsi-ai-protocol",
  "rsi-ai-provider",
  "rsi-api",
@@ -3136,6 +3137,33 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+]
+
+[[package]]
+name = "rsi-ai-portable"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "hex",
+ "rsi-ai",
+ "rsi-ai-image",
+ "rsi-ai-protocol",
+ "rsi-ai-provider",
+ "rsi-api-protocol",
+ "rsi-credentials-protocol",
+ "rsi-credentials-testkit",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "rsi-meta-native-loader",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

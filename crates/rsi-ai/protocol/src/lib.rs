@@ -3,6 +3,9 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)] // Closed error types carry the machine-readable conditions.
 
+/// Bounded framing for explicit Portable provider business protocols.
+pub mod portable;
+
 mod error;
 mod language;
 mod media;

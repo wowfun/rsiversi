@@ -1343,6 +1343,17 @@ fn register_runtime_factories(
 fn register_agent_ai_factories(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
     register(
         builder,
+        "rsi.ai.portable",
+        UpdateMode::RestartRequired,
+        rsi_ai_portable::PortableProviderFactory,
+    )?;
+    builder.describe_factory(
+        "rsi.ai.portable",
+        "Publish explicitly injected Portable Language and Image provider facets",
+        None,
+    )?;
+    register(
+        builder,
         LANGUAGE_FACTORY,
         UpdateMode::Replayable,
         rsi_ai::LanguageRouterFactory,
@@ -1691,6 +1702,20 @@ mod tests {
     };
     use std::fs;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn portable_ai_is_an_explicit_service_factory_with_restart_semantics() {
+        let mut builder = StandardAddonBuilder::new("test.providers");
+        register_agent_ai_factories(&mut builder).unwrap();
+        let set = StandardAddonSet::new([builder.build().unwrap()]).unwrap();
+        let description = set
+            .descriptions()
+            .find(|value| value.plugin == "rsi.ai.portable")
+            .unwrap();
+        assert_eq!(description.scope, AddonScope::Service);
+        assert_eq!(description.update_mode, "restart_required");
+        assert!(!description.summary.is_empty());
+    }
 
     #[test]
     fn standard_unconfined_preset_requires_approval() {
