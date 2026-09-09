@@ -107,13 +107,7 @@ fn source_and_index_reject_links_fifos_directories_and_group_writes() {
         symlink(root.join("source/real.bin"), path).unwrap();
         assert!(store.install(&manifest).is_err());
         fs::remove_file(path).unwrap();
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        fifo(path);
         assert!(store.install(&manifest).is_err());
         fs::remove_file(path).unwrap();
         fs::create_dir(path).unwrap();
@@ -246,4 +240,20 @@ fn manifest_and_service_exact_bounds_accept_then_reject_one_more() {
         store.install(&manifest),
         Err(NativeAddonError::Capacity(_))
     ));
+}
+
+// Starting an external mkfifo can inherit another test's flock between fork and
+// exec, delaying release after that test drops its last parent descriptor.
+#[expect(
+    unsafe_code,
+    reason = "Unix FIFO fixture creation without forking the test process"
+)]
+fn fifo(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the CString supplies a live, NUL-terminated path throughout this
+    // synchronous call. mkfifo retains no pointer; mode is a valid permission
+    // bitmask. Callers use paths inside their own isolated temporary directories.
+    let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
 }
