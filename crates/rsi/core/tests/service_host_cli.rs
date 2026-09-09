@@ -24,6 +24,7 @@ use tokio::sync::Notify;
 struct CliFixture {
     temporary: TempDir,
     workspace: std::path::PathBuf,
+    binary: std::path::PathBuf,
 }
 
 impl CliFixture {
@@ -87,11 +88,12 @@ max_output_reserve_tokens = 16384
         Self {
             temporary,
             workspace,
+            binary: env!("CARGO_BIN_EXE_rsi").into(),
         }
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rsi"));
+        let mut command = Command::new(&self.binary);
         command
             .current_dir(&self.workspace)
             .env("HOME", self.temporary.path().join("home"))
@@ -104,7 +106,7 @@ max_output_reserve_tokens = 16384
     }
 
     fn tokio_command(&self) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"));
+        let mut command = tokio::process::Command::new(&self.binary);
         command
             .current_dir(&self.workspace)
             .env("HOME", self.temporary.path().join("home"))

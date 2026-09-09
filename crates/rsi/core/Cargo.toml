@@ -14,6 +14,10 @@ doctest = false
 name = "rsi"
 path = "src/main.rs"
 
+[[example]]
+name = "workbench-addon"
+path = "../../../fixtures/rsi/addon-workbench/main.rs"
+
 [dependencies]
 rsi-native-addons-api = { path = "../native-addons-api" }
 rsi-inspector = { path = "../inspector" }

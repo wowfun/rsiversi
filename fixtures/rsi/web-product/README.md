@@ -63,6 +63,11 @@ Failures retain their evidence and stop that run. Shutdown always closes the
 browser, exact service child, provider connections and fixture directories.
 Neither credentials nor user state are read by default.
 
+The shared service fixture accepts optional setup and request-observation
+callbacks for independent addon acceptance. Setup runs against isolated paths
+before any application starts; request observation receives only the local
+deterministic provider's admitted request. The standard product run uses neither.
+
 Incremental-frame checks distinguish document projection from lifecycle evidence.
 Synthetic document snapshots and patches assert stable DOM identity, retained
 focus, upsert/remove/order, rejected stale bases and generation replacement. A

@@ -281,6 +281,18 @@ async fn fullscreen_files_pages_exact_bytes_and_explicit_refresh() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
+    plan_application(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit RSI_WORKBENCH_BINARY built from the independent addon fixture"]
+async fn independent_addon_tui_and_headless_show_the_same_durable_business_state() {
+    let binary =
+        std::env::var_os("RSI_WORKBENCH_BINARY").expect("build workbench-addon example first");
+    plan_application(Some(binary.into())).await;
+}
+
+async fn plan_application(binary: Option<std::path::PathBuf>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
@@ -290,7 +302,11 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
     let provider = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
-    let fixture = CliFixture::new(&endpoint);
+    let mut fixture = CliFixture::new(&endpoint);
+    let independent = binary.is_some();
+    if let Some(binary) = binary {
+        configure_independent(&mut fixture, binary);
+    }
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "pty-plan-command"]);
     terminal.until("Ready").await;
     inspect_plan_projection(&mut terminal, false, "Draft").await;
@@ -331,7 +347,81 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
     assert_eq!(requests.lock().unwrap().len(), 1);
     terminal.send(b"\x04");
     terminal.finish().await;
+    if independent {
+        assert!(
+            requests.lock().unwrap()[0]
+                .to_string()
+                .contains("Independent workbench A")
+        );
+        independent_headless(&fixture);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].to_string().contains("Plan mode is enabled"));
+        assert!(requests[1].to_string().contains("Independent workbench A"));
+    }
     provider.abort();
+}
+
+fn configure_independent(fixture: &mut CliFixture, binary: std::path::PathBuf) {
+    fixture.binary = binary;
+    let config = fixture.temporary.path().join("config/rsi");
+    let preset = config.join("agent-presets/workbench");
+    std::fs::create_dir_all(&preset).unwrap();
+    let profile = fixture.assert_success(&["fixture-profile"]);
+    std::fs::write(preset.join("agent.profile.toml"), profile.stdout).unwrap();
+    let settings_path = config.join("settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["rsi.agent-presets"] = serde_json::json!({"default":"workbench"});
+    std::fs::write(settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+}
+fn independent_headless(fixture: &CliFixture) {
+    let output = fixture.assert_success(&[
+        "--profile",
+        "test-headless",
+        "--commands",
+        "--session-id",
+        "addon-headless",
+        "--output",
+        "jsonl",
+    ]);
+    let list = super::commands::result(&output);
+    let descriptor = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "plan")
+        .unwrap();
+    let command = serde_json::json!({"command":descriptor["id"],"request_id":"headless-plan-on","expected_revision":list["revision"],"arguments":"on"});
+    let output = fixture.assert_success(&[
+        "--profile",
+        "test-headless",
+        "--command",
+        &command.to_string(),
+        "inspect addon",
+        "--session-id",
+        "addon-headless",
+        "--output",
+        "jsonl",
+    ]);
+    assert_eq!(
+        super::commands::result(&output)["outcome"]["kind"],
+        "draft_changed"
+    );
+    let events: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    if let Some(report) = std::env::var_os("RSI_TUI_PTY_REPORT") {
+        std::fs::write(
+            std::path::PathBuf::from(report).join("independent-headless.jsonl"),
+            &output.stdout,
+        )
+        .unwrap();
+    }
+    assert!(events.iter().any(|event| event["type"] == "fact"
+        && event.to_string().contains("Plan mode is enabled")
+        && event.to_string().contains("rsi.plan-policy.context")));
 }
 
 async fn inspect_plan_projection(terminal: &mut TerminalClient, enabled: bool, cursor: &str) {
@@ -407,7 +497,7 @@ plugin = "rsi.application.tui"
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_rsi"));
+        let mut command = CommandBuilder::new(&fixture.binary);
         command.args(["--profile", "test-tui"]);
         command.args(arguments);
         command.cwd(&fixture.workspace);

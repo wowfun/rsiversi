@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 
-fn result(output: &Output) -> Value {
+pub(super) fn result(output: &Output) -> Value {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
