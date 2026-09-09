@@ -1,10 +1,7 @@
 #![cfg(unix)]
 
 use rsi_files_native_fs::*;
-use std::os::{
-    fd::AsFd as _,
-    unix::fs::{FileTypeExt as _, symlink},
-};
+use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _, symlink};
 use std::{
     fs,
     io::{Read as _, Write as _},
@@ -97,16 +94,21 @@ fn file_handle_is_read_only_and_fifo_open_has_nonblocking_flags() {
         fs::read_to_string(base.join("regular")).unwrap(),
         "retained"
     );
-    rustix::fs::mkfifoat(
-        root.as_fd(),
-        "fifo",
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(base.join("fifo"))
+            .status()
+            .unwrap()
+            .success()
+    );
     // Keep both ends open so a regression in O_NONBLOCK fails the flag assertion
     // instead of blocking this test's own process indefinitely.
-    let guard = fs::OpenOptions::new()
+    let reader = fs::OpenOptions::new()
         .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(base.join("fifo"))
+        .unwrap();
+    let writer = fs::OpenOptions::new()
         .write(true)
         .open(base.join("fifo"))
         .unwrap();
@@ -122,5 +124,5 @@ fn file_handle_is_read_only_and_fifo_open_has_nonblocking_flags() {
             .unwrap()
             .contains(rustix::io::FdFlags::CLOEXEC)
     );
-    drop(guard);
+    drop((reader, writer));
 }
