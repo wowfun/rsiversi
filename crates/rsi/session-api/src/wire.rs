@@ -105,27 +105,7 @@ impl Operation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Target {
-    pub session_id: SessionId,
-    pub header_key: String,
-}
-impl Target {
-    pub fn validate(&self) -> rsi_session_protocol::Result<()> {
-        if self.header_key.len() != 64
-            || !self
-                .header_key
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(SessionError::Invalid(
-                "invalid Session Header fingerprint".into(),
-            ));
-        }
-        Ok(())
-    }
-}
+pub(crate) type Target = rsi_session_protocol::SessionTarget;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HandleRequest<T> {

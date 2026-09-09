@@ -42,3 +42,10 @@ payloads are copied. The resulting immutable snapshot and all its clones retain
 the same byte lease. Its observer holds live services and identities, never a
 fresh composition pin. Native filesystem work remains outside shared protocol
 consumers.
+
+The same service generation also publishes `SessionReadContract`. A finite read
+acquires the existing draft activity owner, reconciles against the Store and
+compares the current Header under that activity. Durable reads need no Agent pin;
+expired drafts are rejected and service retirement cancels leases. The owning
+API establishes authentication separately, then retains this lease through the
+read. File tokens hold only correlation data and filesystem resources.

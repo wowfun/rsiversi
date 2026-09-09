@@ -32,6 +32,7 @@ mod drafts;
 mod interactions;
 mod plugin;
 mod projections;
+mod reads;
 pub use plugin::SessionFactory;
 
 use rsi_session_protocol::{
@@ -159,6 +160,22 @@ impl LocalSessionService {
 }
 
 impl LocalSessionService {
+    async fn attach_local(&self, session_id: &SessionId) -> Result<Arc<LocalSessionHandle>> {
+        if let Some(handle) = self.drafts.get(session_id).await? {
+            match handle.header().await {
+                Ok(_) => return Ok(handle),
+                Err(SessionError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let header = self
+            .store
+            .header(session_id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(self.handle_from_state(HandleState::Attached(Box::new(header)), None))
+    }
+
     /// Stops draft admission and waits for service-owned preparation and sweeping.
     pub async fn stop(&self) {
         self.projection_stopped.cancel();
@@ -228,19 +245,9 @@ impl SessionService for LocalSessionService {
     }
 
     async fn attach(&self, session_id: &SessionId) -> Result<Arc<dyn SessionHandle>> {
-        if let Some(handle) = self.drafts.get(session_id).await? {
-            match handle.header().await {
-                Ok(_) => return Ok(handle),
-                Err(SessionError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        let header = self
-            .store
-            .header(session_id)
+        self.attach_local(session_id)
             .await
-            .map_err(map_store_error)?;
-        Ok(self.handle_from_state(HandleState::Attached(Box::new(header)), None))
+            .map(|handle| handle as Arc<dyn SessionHandle>)
     }
 
     async fn list_recent(

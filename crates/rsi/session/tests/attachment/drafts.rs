@@ -560,3 +560,72 @@ async fn publish_competing(
         .unwrap();
     durable
 }
+
+#[tokio::test(start_paused = true)]
+async fn workspace_read_lease_holds_actual_draft_only_until_finite_read_ends() {
+    use rsi_session_protocol::{SessionReads as _, SessionTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(false);
+    let service = service(directory.path(), preparation.clone());
+    for trust in [WorkspaceTrust::Untrusted, WorkspaceTrust::Trusted] {
+        let mut input = request(directory.path(), format!("read-{trust:?}"));
+        input.workspace_trust = trust;
+        let handle = service.create(input).await.unwrap();
+        let header = handle.header().await.unwrap();
+        let target = SessionTarget {
+            session_id: header.session_id().clone(),
+            header_key: header.fingerprint().unwrap(),
+        };
+        let read = service.acquire(&target).await.unwrap();
+        assert_eq!(read.header(), &header);
+        tokio::time::advance(std::time::Duration::from_mins(61)).await;
+        tokio::task::yield_now().await;
+        assert!(service.acquire(&target).await.is_ok());
+        assert_eq!(preparation.leases.load(Ordering::SeqCst), 1);
+        drop(read);
+        tokio::time::advance(std::time::Duration::from_mins(61)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            service.acquire(&target).await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
+    }
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn workspace_read_binding_rejects_wrong_header_and_service_retirement_cancels_lease() {
+    use rsi_session_protocol::{SessionReads as _, SessionTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(false);
+    let service = service(directory.path(), preparation);
+    let handle = service
+        .create(request(directory.path(), "bound-read"))
+        .await
+        .unwrap();
+    let header = handle.header().await.unwrap();
+    let mut target = SessionTarget {
+        session_id: header.session_id().clone(),
+        header_key: "x".into(),
+    };
+    assert!(matches!(
+        service.acquire(&target).await,
+        Err(SessionError::Invalid(_))
+    ));
+    target.header_key = "0".repeat(64);
+    assert!(matches!(
+        service.acquire(&target).await,
+        Err(SessionError::NotFound(_))
+    ));
+    target.header_key = header.fingerprint().unwrap();
+    let read = service.acquire(&target).await.unwrap();
+    assert!(!read.retiring().is_cancelled());
+    service.stop().await;
+    assert!(read.retiring().is_cancelled());
+    assert!(matches!(
+        service.acquire(&target).await,
+        Err(SessionError::ShuttingDown)
+    ));
+    drop(read);
+}

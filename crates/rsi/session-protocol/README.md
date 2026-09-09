@@ -169,3 +169,14 @@ Completed-output reads belong to the Process `ProcessOutputCacheContract`.
 Clients inject that read-only capability independently of Session. An output
 identity and raw byte cursor suffice; attaching a Session is not a prerequisite
 for a read. The cache remains independent of durable Session history.
+
+`SessionReadContract` is a trusted server-side Local capability for finite
+workspace reads. It checks a `SessionTarget` against the actual current Header
+and returns a non-cloneable `SessionReadLease`. That lease keeps an unpublished
+draft active only for the admitted read and exposes the Session service's
+retirement signal. Consumers retain it until their finite operation completes;
+they never put it in idle file tokens or UI subscriptions. Every new read
+reacquires it, so expired drafts and changed Header bindings are rejected before
+filesystem work. Both workspace trust values are allowed: the lease establishes
+current Session correlation and lifetime, not API authentication, model Tool
+policy or permission to promote file content into instructions.

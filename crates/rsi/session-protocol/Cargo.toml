@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tokio-util.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }

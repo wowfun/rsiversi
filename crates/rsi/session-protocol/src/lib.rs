@@ -21,6 +21,9 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod reads;
+pub use reads::{SessionReadContract, SessionReadLease, SessionReads, SessionTarget};
+
 mod interactions;
 mod projections;
 pub use interactions::{

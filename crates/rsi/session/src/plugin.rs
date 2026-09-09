@@ -10,6 +10,7 @@ use rsi_media_protocol::MediaContract;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_session_protocol::{
     AgentSettingsContract, SessionApprovalControlContract, SessionContract, SessionIngressContract,
+    SessionReadContract,
 };
 use rsi_user_questions_protocol::UserQuestionsContract;
 use rsi_workspace_protocol::WorkspaceRegistryContract;
@@ -74,13 +75,17 @@ impl PluginFactory for SessionFactory {
             .provide_local::<SessionContract>(service.clone())?;
         let ingress = plan
             .context()
-            .provide_local::<SessionIngressContract>(service)?;
+            .provide_local::<SessionIngressContract>(service.clone())?;
+        let reads = plan
+            .context()
+            .provide_local::<SessionReadContract>(service)?;
         plan.defer(
             "withdraw Session",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
                     drop(ingress);
+                    drop(reads);
                     Ok(())
                 })
             }),

@@ -1599,6 +1599,17 @@ async fn attach_and_history_need_only_the_durable_store() {
         Arc::new(NoApprovalControl),
     );
 
+    let read = rsi_session_protocol::SessionReads::acquire(
+        &application,
+        &rsi_session_protocol::SessionTarget {
+            session_id: session_id.clone(),
+            header_key: header.fingerprint().unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(read.header(), &header);
+    drop(read);
     let handle = application.attach(&session_id).await.unwrap();
     assert_eq!(handle.header().await.unwrap(), header);
     assert_eq!(
