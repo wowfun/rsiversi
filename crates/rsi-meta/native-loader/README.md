@@ -5,7 +5,7 @@ artifact paths. It resolves a path to an immutable `ResolvedFactory` and
 preserves core's `Runtime -> Context -> Fiber` model; staging, mapping,
 callback, and foreign serialization policy remain outside core. It publishes
 no Loader service and performs no package discovery, installation, version
-solving, configured hash selection, or artifact watching.
+solving, hash-to-path lookup, or artifact watching.
 
 ## Catalog and artifact identity
 
@@ -13,6 +13,14 @@ solving, configured hash selection, or artifact watching.
 callback, live-instance, finalizer, destruction, staging-byte, and durable-byte
 admission. The source path is caller-selected authority, not an allowlist.
 Artifacts are trusted process code.
+
+`load_exact(path, expected_sha256)` additionally fences loading to one explicit
+lowercase SHA-256 selected by the caller. It validates the digest before admission
+or source I/O, then checks each source identity selected by the bounded load/rekey
+loop. A mismatch fails before any library mapping or native entry for those bytes,
+including when the source changes during staging or a same-digest wait. The exact
+call uses the same catalog admission, gates, cache and retained-failure fence as
+`load`; it does not locate an artifact by hash or create another catalog.
 
 The catalog rejects symlinks, special files, unmanaged cache entries, zero or
 overflowing limits, and callback deadlines above 24 hours. It first hashes a

@@ -384,6 +384,27 @@ impl NativeCatalog {
         self.load_admitted(source, &admission)
     }
 
+    /// Loads only the caller-selected top-level SHA-256, checked before native code runs.
+    /// Uses the same admission and failure-retention authority as [`Self::load`].
+    pub fn load_exact(
+        &self,
+        source: impl AsRef<Path>,
+        expected_sha256: &str,
+    ) -> Result<ResolvedFactory, LoaderError> {
+        if expected_sha256.len() != 64
+            || !expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(LoaderError::InvalidInput(
+                "expected native digest must be lowercase SHA-256 hex".into(),
+            ));
+        }
+        let _admission = self.try_reserve_load()?;
+        self.ensure_cache_healthy()?;
+        self.load_inner(source.as_ref(), Some(expected_sha256))
+    }
+
     pub(super) fn try_reserve_load(&self) -> Result<LoadAdmission, LoaderError> {
         if self.inner.host_resources.has_retained_failed_finalization() {
             self.inner
@@ -436,7 +457,7 @@ impl NativeCatalog {
             &self.inner.load_admission
         ));
         self.ensure_cache_healthy()?;
-        self.load_inner(source.as_ref())
+        self.load_inner(source.as_ref(), None)
     }
 
     fn source_digest(source: &Path) -> Result<String, LoaderError> {
@@ -754,6 +775,10 @@ mod tests {
 
         assert!(matches!(
             catalog.try_reserve_load(),
+            Err(LoaderError::FinalizationPoisoned)
+        ));
+        assert!(matches!(
+            catalog.load_exact(cache.path().join("missing"), &"0".repeat(64)),
             Err(LoaderError::FinalizationPoisoned)
         ));
     }

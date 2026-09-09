@@ -253,8 +253,9 @@ gate, cache lease, and accounting until foreign code actually returns.
 
 The native loader owns a dedicated content-addressed staging cache and its callback,
 instance, destruction, staging, and durable-byte limits. It accepts regular
-non-symlink files, hashes through bounded private staging, validates ABI before
-mapping, and records the digest of the exact stable copy. It performs no package
+non-symlink files, hashes through bounded private staging, optionally fences an
+expected digest before mapping, and validates ABI entry before publication. It
+records the digest of the exact stable copy. It performs no package
 discovery or version resolution. Unix operations resolve
 against the pinned and locked directory object; Windows support requires an
 exclusive private writer followed by a read-only handle denying write and

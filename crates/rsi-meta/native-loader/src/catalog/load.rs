@@ -79,13 +79,18 @@ impl Drop for StagedModuleLoad {
 }
 
 impl NativeCatalog {
-    pub(super) fn load_inner(&self, source: &Path) -> Result<ResolvedFactory, LoaderError> {
+    pub(super) fn load_inner(
+        &self,
+        source: &Path,
+        expected: Option<&str>,
+    ) -> Result<ResolvedFactory, LoaderError> {
         self.inner
             .modules
             .lock()
             .expect("catalog poisoned")
             .retain(|_, module| module.strong_count() != 0);
         let mut digest = Self::source_digest(source)?;
+        check_expected_digest(&digest, expected)?;
         if let Some(module) = self.live_module(&digest) {
             return Ok(Self::factory_for(module));
         }
@@ -93,6 +98,7 @@ impl NativeCatalog {
         let mut staged = None;
         let mut rekeys = SourceRekeyBudget::new();
         loop {
+            check_expected_digest(&digest, expected)?;
             let load_gate = self.load_gate(&digest);
             let load = load_gate
                 .callback
@@ -216,6 +222,14 @@ impl NativeCatalog {
 
     fn factory_for(module: Arc<NativeModule>) -> ResolvedFactory {
         NativeFactory::resolved(module)
+    }
+}
+
+fn check_expected_digest(digest: &str, expected: Option<&str>) -> Result<(), LoaderError> {
+    if expected.is_some_and(|expected| digest != expected) {
+        Err(LoaderError::ArtifactDigestMismatch)
+    } else {
+        Ok(())
     }
 }
 

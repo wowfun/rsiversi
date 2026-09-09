@@ -49,6 +49,8 @@ pub enum LoaderError {
     InvalidInput(String),
     #[error("native artifact exceeds the {MAX_ARTIFACT_BYTES}-byte limit")]
     ArtifactTooLarge,
+    #[error("native artifact does not match the expected SHA-256")]
+    ArtifactDigestMismatch,
     #[error("private staged artifact changed after its digest was computed")]
     StagedArtifactChanged,
     #[error("content-addressed cache collision at {0}")]
