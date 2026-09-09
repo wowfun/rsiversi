@@ -41,6 +41,8 @@ mod output_read;
 mod profile_owner;
 mod profiles;
 mod settings;
+#[cfg(unix)]
+mod writer_lock;
 
 pub use agent_preset::{
     AGENT_PRESET_SETTINGS_NAMESPACE, AgentPresetManager, DEFAULT_AGENT_PRESET_ID,

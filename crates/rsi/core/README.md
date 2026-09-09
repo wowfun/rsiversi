@@ -209,8 +209,10 @@ object bytes; constructor limits can tighten object count/bytes. Each artifact
 uses the Loader's artifact bound. A manifest is at most 64 KiB, the atomic state
 index at most 1 MiB, and explicit Portable keys at most 64 per manifest. Index
 reads validate format, identities, duplicate ids, cardinalities and selected
-records before use. Writers hold an independent cooperative directory lock;
-all index/object operations use pinned directories and no-follow regular files.
+records before use. Writers hold an independent cooperative directory lock and
+explicitly unlock it when their guard ends, including validation failures. Closing
+the descriptor alone would let a concurrent fork retain the lock until exec.
+All index/object operations use pinned directories and no-follow regular files.
 Store directories and index/object files must belong to the effective user and
 deny group/other writes. Source manifests and build inputs retain their explicit
 caller-selected trust.

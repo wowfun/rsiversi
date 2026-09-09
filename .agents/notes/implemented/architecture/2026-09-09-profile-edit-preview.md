@@ -53,7 +53,8 @@ configurations in generic tree snapshots would turn an inspection surface into
 a secret disclosure path.
 
 Locking only the replaceable source inode would allow two writers to lock different
-generations of the same pathname. The parent lock remains the cooperative unit
+generations of the same pathname. The writer explicitly unlocks on completion or failure so an unrelated fork cannot
+extend the transaction by retaining its descriptor. The parent lock remains the cooperative unit
 across root replacement. Treating a directory-sync error as an ordinary write
 failure would conceal a source publication that has already happened.
 

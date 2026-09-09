@@ -43,7 +43,10 @@ does not implement garbage collection.
 
 ## Consequences
 
-Cooperative writers serialize through independently opened directory locks.
+Cooperative writers serialize through independently opened directory locks. The
+writer guard explicitly unlocks before closing: another thread may fork while a
+close-on-exec descriptor is live, and the child must not extend a finished write
+transaction until it reaches exec.
 Private temporary files can be reclaimed under that lock; unmanaged files and
 oversized or linked staging entries are rejected. A failed index publication may
 leave a bounded immutable object. Directory sync failure after rename is reported

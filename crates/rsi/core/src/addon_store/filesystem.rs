@@ -2,6 +2,7 @@ use super::{
     MAXIMUM_NATIVE_ADDON_STATE_BYTES, NativeAddonError, NativeAddonStoreLimits, Result, State,
     source,
 };
+use crate::writer_lock::WriterLock;
 use rustix::fs::{AtFlags, Mode, OFlags, openat};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -65,10 +66,10 @@ impl StoreDirectory {
         owned(&regular_at(&self.objects, digest)?)?;
         Ok(self.path.join("objects").join(digest))
     }
-    pub(super) fn lock(&self) -> Result<File> {
+    pub(super) fn lock(&self) -> Result<WriterLock> {
         self.check()?;
         let lock = directory_at(&self.root, ".")?;
-        lock.try_lock().map_err(|error| match error {
+        let lock = WriterLock::acquire(lock).map_err(|error| match error {
             std::fs::TryLockError::WouldBlock => NativeAddonError::Busy,
             std::fs::TryLockError::Error(error) => NativeAddonError::Io(error),
         })?;

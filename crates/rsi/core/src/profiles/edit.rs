@@ -182,11 +182,12 @@ impl<'host> ProfileEdit<'host> {
 
     /// Publishes exactly this source edit, without applying or rolling back a Runtime.
     pub fn commit_once(self) -> Result<ProfileEditReceipt, ProfileEditError> {
-        self.directory.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => ProfileEditError::Busy,
-            std::fs::TryLockError::Error(error) => ProfileEditError::Io(error),
-        })?;
-        // This independently opened directory owns the lock until self is dropped.
+        let _lock = crate::writer_lock::WriterLock::acquire(self.directory.try_clone()?).map_err(
+            |error| match error {
+                std::fs::TryLockError::WouldBlock => ProfileEditError::Busy,
+                std::fs::TryLockError::Error(error) => ProfileEditError::Io(error),
+            },
+        )?;
         let mode = self.check_root()?;
         self.check_dependencies()?;
         let mut staged = Staged::create(&self.directory)?;
