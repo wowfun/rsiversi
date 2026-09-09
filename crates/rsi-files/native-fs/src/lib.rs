@@ -9,13 +9,28 @@ use std::{fs::File, path::Path};
 
 /// Acquire an absolute directory by opening each path component without following links.
 pub fn open_absolute_directory_no_follow(path: &Path) -> std::io::Result<Dir> {
-    use rustix::fs::{Mode, OFlags, openat};
+    acquire_absolute_directory(path, false)
+}
+
+/// Acquire a root without links, creating missing private directory components.
+/// Existing permissions are preserved; created permissions are 0700 subject to umask.
+/// Invalid components fail before mutation. An I/O failure may leave created parents.
+pub fn create_absolute_directory_no_follow(path: &Path) -> std::io::Result<Dir> {
+    acquire_absolute_directory(path, true)
+}
+
+fn acquire_absolute_directory(path: &Path, create: bool) -> std::io::Result<Dir> {
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::path::Component;
 
-    if !path.is_absolute() {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "filesystem root is not absolute",
+            "filesystem root is not absolute and normalized",
         ));
     }
     let root = openat(
@@ -29,7 +44,17 @@ pub fn open_absolute_directory_no_follow(path: &Path) -> std::io::Result<Dir> {
         match component {
             Component::RootDir => {}
             Component::Normal(component) => {
-                directory = open_relative_directory_no_follow(&directory, Path::new(component))?;
+                let next = open_relative_directory_no_follow(&directory, Path::new(component));
+                directory = match next {
+                    Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                        match mkdirat(&directory, component, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                        open_relative_directory_no_follow(&directory, Path::new(component))?
+                    }
+                    result => result?,
+                };
             }
             _ => {
                 return Err(std::io::Error::new(

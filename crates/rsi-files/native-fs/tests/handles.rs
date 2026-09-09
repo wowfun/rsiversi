@@ -126,3 +126,38 @@ fn file_handle_is_read_only_and_fifo_open_has_nonblocking_flags() {
     );
     drop((reader, writer));
 }
+
+#[test]
+fn creating_private_roots_rejects_traversal_before_mutation_and_never_follows_links() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let path = base.join("new/private/store");
+    let root = create_absolute_directory_no_follow(&path).unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    root.write("value", b"owned").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+    drop(create_absolute_directory_no_follow(&path).unwrap());
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert!(create_absolute_directory_no_follow(&base.join("not-created/../escape")).is_err());
+    assert!(!base.join("not-created").exists());
+    assert!(create_absolute_directory_no_follow(Path::new("relative")).is_err());
+    fs::create_dir(base.join("outside")).unwrap();
+    symlink(base.join("outside"), base.join("alias")).unwrap();
+    assert!(create_absolute_directory_no_follow(&base.join("alias/escaped")).is_err());
+    assert!(!base.join("outside/escaped").exists());
+    fs::rename(&path, path.with_file_name("moved")).unwrap();
+    symlink(base.join("outside"), &path).unwrap();
+    root.write("after", b"same owner").unwrap();
+    assert!(!base.join("outside/after").exists());
+    assert_eq!(
+        fs::read(path.with_file_name("moved").join("after")).unwrap(),
+        b"same owner"
+    );
+}

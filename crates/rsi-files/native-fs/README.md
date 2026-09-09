@@ -8,6 +8,13 @@ absolute paths are rejected at relative entry points. Empty relative directory
 paths clone the supplied handle. Renaming the root leaves existing handles bound
 to the original directory.
 
+`create_absolute_directory_no_follow` acquires the same authority while creating
+missing components with owner-only directory permissions (0700, reduced by the
+process umask). It preserves permissions on existing directories and validates
+all components before mutation. Each mkdir and subsequent no-follow open uses
+the retained parent handle. An I/O failure can leave earlier newly created
+parents; the helper does not remove pre-existing or partially created trees.
+
 File opens are read-only, close-on-exec and nonblocking. They return a native
 file handle; callers must check the opened handle's type before reading content.
 Opening a FIFO cannot wait for a writer. These helpers neither enumerate nor
