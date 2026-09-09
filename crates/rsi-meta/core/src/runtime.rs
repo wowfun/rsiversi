@@ -37,6 +37,13 @@ mod context_scope;
 mod diagnostics;
 mod effects;
 mod generation_activation;
+mod inspection;
+pub use inspection::{
+    InspectedCleanupState, InspectedCollection, InspectedDependency, InspectedEffect,
+    InspectedFiber, InspectedFiberState, InspectedOwner, InspectedProvider, InspectedService,
+    InspectedSupply, InspectionRequest, MAXIMUM_INSPECTION_FIBERS, MAXIMUM_INSPECTION_ITEMS,
+    RuntimeInspection,
+};
 mod lifecycle;
 mod limits;
 mod local_event_registry;

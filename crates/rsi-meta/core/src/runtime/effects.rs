@@ -9,6 +9,10 @@ pub(super) struct GenerationBudget {
 }
 
 impl GenerationBudget {
+    pub(super) fn current(&self) -> usize {
+        self.current.load(Ordering::Acquire)
+    }
+
     pub(super) fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -89,6 +93,25 @@ pub(super) struct EffectRecord {
 }
 
 impl EffectRecord {
+    pub(super) fn inspection(&self) -> InspectedEffect {
+        let state = self.state.lock().expect("effect record poisoned");
+        InspectedEffect {
+            id: self.id,
+            open: state.open,
+            cleanup: if state.result.is_some() {
+                InspectedCleanupState::Complete
+            } else if self.started.load(Ordering::Acquire) {
+                InspectedCleanupState::Running
+            } else if state.claim.is_some() {
+                InspectedCleanupState::Claimed
+            } else {
+                InspectedCleanupState::Unclaimed
+            },
+            cleanup_failures: state.result.as_ref().map(CleanupReport::total_failures),
+            queued_entries: state.effects.len(),
+        }
+    }
+
     fn new(
         id: u64,
         owner: Owner,

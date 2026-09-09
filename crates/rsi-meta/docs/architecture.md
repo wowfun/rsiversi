@@ -447,6 +447,31 @@ Built-in entry stores publish each new exact undo to the surrounding action
 transaction before returning it to product code, so an action error or panic
 after insertion cannot strand an unowned visible entry.
 
+## Read-only inspection
+
+`Runtime::inspect` returns a bounded, owned page of redacted Fiber metadata;
+`Context::inspect` restricts membership to its owning Fiber and descendants and
+fences a retired generation. A root Context observes the Runtime. Neither entry
+point prepares plugins, invokes callbacks, mutates registries, or exposes config,
+opaque state, service values, effect labels or raw failure/terminal diagnostics.
+The page includes exact factory provenance, lifecycle kind, parent generation,
+actual composition order, prepared requirements with captured provider bindings,
+owned supplies, effect state/counts and listener/child counts. Only whole-Runtime
+inspection includes the existing global resource snapshot.
+
+Inspection accepts at most 64 Fibers and 128 items per Fiber collection. Each
+collection reports its total as well as its retained prefix. An exclusive Fiber
+ID cursor pages membership in ID order; clients use the captured order paths for
+contribution order. Registry membership is captured under its lock, Fiber data
+outside that lock, and effect/order observations outside Fiber locks. This is an
+operational observation across those boundaries, not a transactional graph or a
+proof of cleanup quiescence. Callers own retention of returned pages. Bounded
+identifiers and provenance remain observable metadata, not secret storage.
+Effect-table counts exclude records already transferred to the cleanup driver;
+the generation's existing effect budgets and cleanup phase report that retained
+work separately. A supply records whether its generation reached publication,
+not a guarantee that an observed supply remains callable.
+
 ## Native adapter
 
 The native path remains an adapter chain:
