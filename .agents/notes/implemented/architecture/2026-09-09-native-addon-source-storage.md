@@ -29,9 +29,6 @@ The binary's explicit source commands use the same store on a joined blocking
 worker and report source publication separately from runtime selection. They
 never start a Host or open the Loader cache. The ordinary
 [native staging plugin](2026-09-09-native-agent-catalog-staging.md) owns live selection.
-The remaining [runtime management proposal](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-still owns command-line build/watch actions beyond the managed build service
-described below.
 
 ## Alternatives considered
 
@@ -75,3 +72,19 @@ with the final input check before index publication. Failed or cancelled command
 cannot install a stale artifact. Input races can leave a bounded immutable source
 object without publishing a new index, as ordinary install failures can. Enable
 remains a separate source mutation.
+
+Conditional enable compares both the exact installation receipt and the previously
+observed enabled record under the same source-store writer lock. Checking only
+the addon id could enable another build's output; checking only the installed
+record could undo a concurrent operator disable. A conflict leaves the current
+index unchanged. This source-level comparison is independent of asynchronous
+Runtime staging and grants no ability to bypass Loader failure retention.
+
+The explicit CLI build/watch producer uses this managed build service. Polling
+only declared inputs makes compiler work finite and reviewable without inferring
+dependencies or introducing OS watcher ownership. Invalid manifest edits suspend
+that producer; losing its originally selected directory ends it. Conditional
+enable conflicts end the producer after reporting any completed installation.
+Signal cancellation joins Process and terminal delivery before exit. A cancelled
+output wait can make delivery uncertain after publication, so receipts are never
+rolled back or replayed merely because the terminal stopped accepting bytes.

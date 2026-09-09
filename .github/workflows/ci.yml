@@ -289,6 +289,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> target
+      - name: Fetch native addon build fixture dependencies
+        run: cargo fetch --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml
       - name: Lint standard rsi
         run: cargo clippy --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p rsi-terminal -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20

@@ -5,6 +5,8 @@
 mod arguments;
 mod devices;
 mod document;
+#[cfg(unix)]
+pub use document::ManagementWriter;
 mod headless_commands;
 mod inspector;
 mod native_addons;

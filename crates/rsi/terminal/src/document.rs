@@ -2,6 +2,91 @@ use crate::work::ApplicationWork;
 use rsi_api_protocol::ApiError;
 use std::io::Write;
 
+/// Owned, bounded management-document delivery with the ordinary terminal lease.
+#[cfg(unix)]
+pub struct ManagementWriter {
+    owner: std::sync::Arc<ManagementOwner>,
+}
+#[cfg(unix)]
+struct ManagementOwner {
+    _lease: crate::plugin::TerminalLease,
+    stop: tokio_util::sync::CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
+    capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    maximum_bytes: usize,
+}
+#[cfg(unix)]
+impl std::fmt::Debug for ManagementWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagementWriter")
+            .field("maximum_bytes", &self.owner.maximum_bytes)
+            .finish_non_exhaustive()
+    }
+}
+#[cfg(unix)]
+impl ManagementWriter {
+    /// Acquires the process terminal lease and a finite frame bound in 1..=4 MiB.
+    pub fn new(
+        maximum_bytes: usize,
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> crate::Result<Self> {
+        if !(1..=4 * 1024 * 1024).contains(&maximum_bytes) {
+            return Err(crate::RsiError::Boot(
+                "invalid management document limit".into(),
+            ));
+        }
+        Ok(Self {
+            owner: std::sync::Arc::new(ManagementOwner {
+                _lease: crate::plugin::TerminalLease::acquire()
+                    .map_err(|error| crate::RsiError::Boot(error.to_string()))?,
+                stop: stop.child_token(),
+                tasks: tokio_util::task::TaskTracker::new(),
+                capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+                maximum_bytes,
+            }),
+        })
+    }
+    /// Writes one complete document and newline. Callers own encoding/sanitization.
+    /// A dropped wait does not release the terminal lease before delivery stops.
+    pub async fn write(&self, bytes: Vec<u8>) -> crate::Result<()> {
+        let bytes = zeroize::Zeroizing::new(bytes);
+        if bytes.len() > self.owner.maximum_bytes {
+            return Err(crate::RsiError::Run(
+                "management document exceeds its byte limit".into(),
+            ));
+        }
+        let permit = self
+            .owner
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| crate::RsiError::Run("management document delivery busy".into()))?;
+        let owner = self.owner.clone();
+        let token = owner.tasks.token();
+        tokio::task::spawn_blocking(move || {
+            let _token = token;
+            let result = write_to(std::io::stdout(), &bytes, owner.stop.clone());
+            drop(permit);
+            result.map_err(|error| crate::stdout_write_error(&error))
+        })
+        .await
+        .map_err(|_| crate::RsiError::Run("management output worker failed".into()))?
+    }
+    /// Cancels and joins output before releasing the terminal lease.
+    pub async fn close(self) {
+        self.owner.stop.cancel();
+        self.owner.tasks.close();
+        self.owner.tasks.wait().await;
+    }
+}
+#[cfg(unix)]
+impl Drop for ManagementWriter {
+    fn drop(&mut self) {
+        self.owner.stop.cancel();
+        self.owner.tasks.close();
+    }
+}
+
 pub(crate) async fn run(
     execute: impl std::future::Future<Output = rsi_api_protocol::Result<zeroize::Zeroizing<Vec<u8>>>>,
     work: ApplicationWork,

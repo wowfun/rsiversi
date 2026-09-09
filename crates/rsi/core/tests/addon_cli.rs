@@ -76,6 +76,10 @@ fn invalid_source_grammar_is_rejected_before_opening_a_store() {
         vec!["list", "extra"],
         vec!["install"],
         vec!["disable", "a", "b"],
+        vec!["list", "--enable"],
+        vec!["build"],
+        vec!["watch"],
+        vec!["build", "addon.toml", "--enable", "--enable"],
     ] {
         assert!(!run(&root, &arguments).status.success());
         assert!(!root.exists());
@@ -87,4 +91,69 @@ fn invalid_source_grammar_is_rejected_before_opening_a_store() {
         .unwrap();
     assert!(help.status.success());
     assert!(String::from_utf8_lossy(&help.stdout).contains("uninstall"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("build|watch"));
 }
+
+#[test]
+fn explicit_build_command_reports_installation_and_opt_in_enable_separately() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let store = root.join("store");
+    fs::write(root.join("input"), b"built by CLI").unwrap();
+    fs::write(
+        root.join("build.sh"),
+        "cp input artifact.bin\nprintf compiler-output\n",
+    )
+    .unwrap();
+    fs::write(root.join("addon.toml"), format!("format = 1\nid = 'fixture.build-cli'\nplugin = 'fixture.build-cli'\ntarget = '{}'\nartifact = 'artifact.bin'\n[build]\ncommand = ['/bin/sh', 'build.sh']\nwatch = ['input', 'build.sh']\n", rsi::native_addon_target())).unwrap();
+    let first = success(&store, &["build", "addon.toml"]);
+    assert_eq!(first["status"], "succeeded");
+    assert_eq!(first["installed"]["revision"], "1");
+    assert_eq!(
+        first["stdout"]["bytes_hex"],
+        hex::encode(b"compiler-output")
+    );
+    assert!(
+        success(&store, &["list"])["enabled"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let next = success(&store, &["build", "addon.toml", "--enable"]);
+    assert_eq!(next["enabled"]["revision"], "2");
+    assert_eq!(
+        success(&store, &["list"])["enabled"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    fs::write(root.join("build.sh"), "exit 17\n").unwrap();
+    let failed = run(&store, &["build", "addon.toml", "--enable"]);
+    assert!(!failed.status.success());
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["exit_code"], 17);
+    assert!(failed["installed"].is_null());
+    assert_eq!(success(&store, &["list"])["revision"], "2");
+    fs::write(
+        root.join("build.sh"),
+        "cp input artifact.bin\nprintf '\\033[2Jcompiler\\routput'\n",
+    )
+    .unwrap();
+    let text = Command::new(env!("CARGO_BIN_EXE_rsi"))
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .current_dir(&root)
+        .args(["addon", "build", "addon.toml", "--root"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(!text.contains(['\u{1b}', '\r']));
+    assert!(text.contains("�[2Jcompiler�output"));
+}
+
+#[path = "addon_cli/watch.rs"]
+mod watch;

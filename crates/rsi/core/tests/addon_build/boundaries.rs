@@ -31,10 +31,13 @@ fn fingerprint_captures_missing_and_nested_inputs_and_rejects_changed_authority(
     fs::remove_file(root.join("source/missing")).unwrap();
     fs::write(&path, format!("{text}\n# revised\n")).unwrap();
     assert!(build.fingerprint().is_err());
+    assert_ne!(first, build.reopen().unwrap().fingerprint().unwrap());
     fs::write(&path, text).unwrap();
     fs::rename(root.join("source"), root.join("replaced")).unwrap();
+    assert!(matches!(build.reopen(), Err(NativeAddonError::Conflict)));
     fs::create_dir(root.join("source")).unwrap();
     assert!(build.fingerprint().is_err());
+    assert!(matches!(build.reopen(), Err(NativeAddonError::Conflict)));
 }
 #[test]
 fn fingerprint_bounds_tree_and_file_bytes_before_build_and_rejects_output_watch() {

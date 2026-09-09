@@ -45,6 +45,28 @@ impl NativeAddonBuild {
         }
         Ok(Self { source })
     }
+    /// Reopens the current manifest while retaining the originally selected directory authority.
+    /// An inaccessible or replaced root is a conflict, distinct from an invalid manifest edit.
+    pub fn reopen(&self) -> Result<Self> {
+        self.check_root().map_err(|_| NativeAddonError::Conflict)?;
+        let next = Self::open(&self.source.path)?;
+        let original = self
+            .source
+            .directory
+            .try_clone()?
+            .into_std_file()
+            .metadata()?;
+        let current = next
+            .source
+            .directory
+            .try_clone()?
+            .into_std_file()
+            .metadata()?;
+        if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
+            return Err(NativeAddonError::Conflict);
+        }
+        Ok(next)
+    }
     /// Captured local addon identity.
     pub fn id(&self) -> &str {
         &self.source.manifest.id

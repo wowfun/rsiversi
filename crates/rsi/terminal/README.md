@@ -154,3 +154,10 @@ NativeAddonsFactory owns the finite `refresh` grammar over the local operator
 ApiClient. It uses the shared terminal lease, cancellation and bounded document
 delivery. A missing result never triggers automatic replay: inspect native state
 before another explicit attempt. The command needs no Session or model.
+
+`ManagementWriter` gives finite management documents the same exclusive terminal
+lease and cancellable nonblocking Unix output primitive as operator applications.
+It admits one frame at a time (caller-selected maximum, at most 4 MiB), retains
+its lease through a dropped write waiter, and restores descriptor flags before
+tracked completion. Closing or dropping the writer cancels delivery; explicit
+close joins work. The caller owns text sanitization and the document format.

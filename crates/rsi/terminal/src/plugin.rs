@@ -23,9 +23,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 static TERMINAL_IN_USE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
-struct TerminalLease;
+pub(super) struct TerminalLease;
 impl TerminalLease {
-    fn acquire() -> rsi_meta::Result<Self> {
+    pub(super) fn acquire() -> rsi_meta::Result<Self> {
         TERMINAL_IN_USE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| {

@@ -33,8 +33,8 @@ pub enum NativeAddonError {
     /// A cooperating writer owns the store directory.
     #[error("native addon store is busy")]
     Busy,
-    /// The public root no longer identifies the acquired directories.
-    #[error("native addon store directory changed")]
+    /// The observed source selection or public directory no longer matches.
+    #[error("native addon source changed")]
     Conflict,
     /// The selected installed identity is absent.
     #[error("native addon is not installed")]
@@ -247,6 +247,28 @@ impl NativeAddonStore {
             }
             state.enabled.insert(id.to_owned(), record.clone());
             Ok(Some(record))
+        })
+    }
+    /// Selects this installed record only if both installation and prior selection match.
+    /// A conflict preserves concurrent installs, selections and explicit disables.
+    pub fn enable_exact(
+        &self,
+        installed: &NativeAddonRecord,
+        expected_enabled: Option<&NativeAddonRecord>,
+    ) -> Result<NativeAddonReceipt> {
+        self.mutate(installed.id(), |state| {
+            if state.installed.get(installed.id()) != Some(installed)
+                || state.enabled.get(installed.id()) != expected_enabled
+            {
+                return Err(NativeAddonError::Conflict);
+            }
+            if installed.target() != native_addon_target() {
+                return Err(NativeAddonError::UnsupportedTarget);
+            }
+            state
+                .enabled
+                .insert(installed.id().to_owned(), installed.clone());
+            Ok(Some(installed.clone()))
         })
     }
     /// Removes future selection while existing Runtime pins remain independent.

@@ -13,6 +13,13 @@ native Tool integration test builds this manifest automatically into
 `target/native-addon-fixture-test`. Tests only establish the platform actually
 executed; no loader teardown failure or live-provider behavior is implied.
 
+The product managed-build test deliberately runs this fixture's compiler offline
+with a restricted toolchain environment. Before running that target in a clean
+checkout, fetch this standalone lockfile with
+`cargo fetch --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml`.
+The product CI job performs that dependency preparation before its tests; a warm
+workspace registry cache alone does not establish that these exact versions exist.
+
 An explicitly enabled AI port (`ai: true`, optionally `tools: false`) implements
 Describe, frozen Prepare and consuming Start through the public AI Portable
 protocol. It verifies a deterministic binary test credential, emits Language

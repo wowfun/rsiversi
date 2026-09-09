@@ -2,20 +2,25 @@
 use super::{ManagementOutput, Parse, RsiError, report_error};
 #[cfg(unix)]
 use std::{ffi::OsString, path::PathBuf};
+#[cfg(unix)]
+mod build;
 
-pub(super) const HELP: &str = "Usage:\n  rsi addon refresh (existing local Service Host; Linux)\n  rsi addon list [--root ABSOLUTE] [--output text|json]\n  rsi addon install MANIFEST [--root ABSOLUTE] [--output text|json]\n  rsi addon <enable|disable|uninstall> ID [--root ABSOLUTE] [--output text|json]\nInstallation never executes or enables artifacts. Uninstall requires disabling first.\nSource receipts are separate from running Host staging; inspect with --profile inspector native.\n";
+pub(super) const HELP: &str = "Usage:\n  rsi addon <build|watch> MANIFEST [--root ABSOLUTE] [--enable] [--output text|json]\n  rsi addon refresh (existing local Service Host; Linux)\n  rsi addon list [--root ABSOLUTE] [--output text|json]\n  rsi addon install MANIFEST [--root ABSOLUTE] [--output text|json]\n  rsi addon <enable|disable|uninstall> ID [--root ABSOLUTE] [--output text|json]\nInstallation never executes or enables artifacts. Uninstall requires disabling first.\nSource receipts are separate from running Host staging; inspect with --profile inspector native.\n";
 #[cfg(unix)]
 #[derive(Debug)]
 pub(super) struct Command {
     operation: Operation,
     root: Option<PathBuf>,
     output: ManagementOutput,
+    enable: bool,
 }
 #[cfg(unix)]
 #[derive(Debug)]
 enum Operation {
     List,
     Install(PathBuf),
+    Build(PathBuf),
+    Watch(PathBuf),
     Enable(String),
     Disable(String),
     Uninstall(String),
@@ -26,6 +31,8 @@ impl Operation {
         match self {
             Self::List => "list",
             Self::Install(_) => "install",
+            Self::Build(_) => "build",
+            Self::Watch(_) => "watch",
             Self::Enable(_) => "enable",
             Self::Disable(_) => "disable",
             Self::Uninstall(_) => "uninstall",
@@ -45,11 +52,13 @@ pub(super) fn parse(arguments: impl Iterator<Item = OsString>) -> rsi::Result<Pa
     let mut positional = Vec::new();
     let mut root = None;
     let mut output = None;
+    let mut enable = false;
     let mut arguments = arguments.peekable();
     let invalid = || RsiError::Boot(HELP.into());
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--help" | "-h") => return Ok(Parse::Help(HELP)),
+            Some("--enable") if !enable => enable = true,
             Some("--root") if root.is_none() => {
                 let path = PathBuf::from(arguments.next().ok_or_else(invalid)?);
                 if !path.is_absolute() {
@@ -78,6 +87,8 @@ pub(super) fn parse(arguments: impl Iterator<Item = OsString>) -> rsi::Result<Pa
     let operation = match positional.as_slice() {
         [kind] if kind == "list" => Operation::List,
         [kind, path] if kind == "install" => Operation::Install(PathBuf::from(path)),
+        [kind, path] if kind == "build" => Operation::Build(PathBuf::from(path)),
+        [kind, path] if kind == "watch" => Operation::Watch(PathBuf::from(path)),
         [kind, id] => {
             let id = id.to_str().ok_or_else(invalid)?.to_owned();
             match kind.to_str() {
@@ -89,15 +100,22 @@ pub(super) fn parse(arguments: impl Iterator<Item = OsString>) -> rsi::Result<Pa
         }
         _ => return Err(invalid()),
     };
+    if enable && !matches!(operation, Operation::Build(_) | Operation::Watch(_)) {
+        return Err(invalid());
+    }
     Ok(Parse::Addon(Command {
         operation,
         root,
         output: output.unwrap_or(ManagementOutput::Text),
+        enable,
     }))
 }
 
 #[cfg(unix)]
 pub(super) async fn run(command: Command) -> u8 {
+    if matches!(command.operation, Operation::Build(_) | Operation::Watch(_)) {
+        return build::run(command).await;
+    }
     let result = tokio::task::spawn_blocking(move || execute(command)).await;
     match result {
         Ok(Ok(())) => 0,
@@ -143,7 +161,9 @@ fn execute(command: Command) -> rsi::Result<()> {
         Operation::Enable(id) => store.enable(&id),
         Operation::Disable(id) => store.disable(&id),
         Operation::Uninstall(id) => store.uninstall(&id),
-        Operation::List => unreachable!("handled list"),
+        Operation::List | Operation::Build(_) | Operation::Watch(_) => {
+            unreachable!("handled separately")
+        }
     }
     .map_err(boot)?;
     match command.output {

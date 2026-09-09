@@ -65,3 +65,38 @@ fn object_quotas_reject_without_publishing_a_new_installation() {
     assert!(store.install(&manifest).is_err());
     assert_eq!(store.snapshot().unwrap(), before);
 }
+
+#[test]
+fn conditional_enable_rejects_other_installations_and_preserves_external_disable() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let path = source(&root.join("source"), b"A");
+    let store = NativeAddonStore::open(root.join("store")).unwrap();
+    let a = store.install(&path).unwrap().record.unwrap();
+    store.enable_exact(&a, None).unwrap();
+    fs::write(root.join("source/artifact.bin"), b"B").unwrap();
+    let b = store.install(&path).unwrap().record.unwrap();
+    let before = store.snapshot().unwrap();
+    assert!(matches!(
+        store.enable_exact(&a, Some(&a)),
+        Err(rsi::NativeAddonError::Conflict)
+    ));
+    assert!(matches!(
+        store.enable_exact(&b, None),
+        Err(rsi::NativeAddonError::Conflict)
+    ));
+    assert_eq!(store.snapshot().unwrap(), before);
+    store.disable("fixture.addon").unwrap();
+    let disabled = store.snapshot().unwrap();
+    assert!(matches!(
+        store.enable_exact(&b, Some(&a)),
+        Err(rsi::NativeAddonError::Conflict)
+    ));
+    assert_eq!(store.snapshot().unwrap(), disabled);
+    store.enable_exact(&b, None).unwrap();
+    assert_eq!(store.snapshot().unwrap().enabled, std::slice::from_ref(&b));
+    let revision = store.snapshot().unwrap().revision;
+    let unchanged = store.enable_exact(&b, Some(&b)).unwrap();
+    assert!(!unchanged.changed);
+    assert_eq!(unchanged.revision, revision);
+}

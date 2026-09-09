@@ -28,7 +28,8 @@ until process recovery. Management cannot bypass this with another catalog.
 The [local source store](../../implemented/architecture/2026-09-09-native-addon-source-storage.md)
 and [explicit catalog staging](../../implemented/architecture/2026-09-09-native-agent-catalog-staging.md)
 now supply installation, immutable Agent selection and ordinary Runtime staging
-ownership. Build/watch actions remain proposed. A Meta installer would violate its
+ownership, including explicit managed build/watch actions. Final cross-surface
+acceptance remains the condition for closing this proposal. A Meta installer would violate its
 generic ownership. Remote marketplaces and version
 solving are unnecessary for local artifacts. Forced unload risks use-after-free.
 

@@ -350,3 +350,30 @@ not infer compiler dependencies or make the build hermetic.
 Only an exit-zero, settled, uncancelled build with unchanged captured inputs may
 install the exact opened output through the existing source-store transaction.
 A failed command never installs an old output. Installation does not enable it.
+
+`NativeAddonStore::enable_exact` publishes a built selection only when both the
+latest installed record and the previously observed enabled record still match.
+A concurrent install, disable or selection change rejects that compare-and-set
+without writing an index. This lets explicit build/watch producers avoid enabling
+another writer's output or undoing an external disable. The ordinary `enable ID`
+command remains an explicit request to select the latest installed record.
+
+`rsi addon build MANIFEST [--root ABSOLUTE] [--enable] [--output text|json]`
+runs one managed build and reports installation separately from optional explicit
+enable. `rsi addon watch MANIFEST` accepts the same options and polls bounded
+explicit inputs once per second, building initially and after a changed fingerprint.
+It requires a nonempty watch declaration. Unchanged command failures are not
+repeated; edited inputs permit another attempt. The captured source directory
+and addon id remain fixed while manifest edits can update the build declaration.
+An input parse/read failure suspends execution and is reported once until it
+changes; losing directory authority ends the watch. No OS watcher is installed.
+
+With `--enable`, an external change to the observed enabled record ends the watch
+and is never reverted. Each publication compares the exact installation receipt
+and previous selection. JSON reports preserve stdout/stderr bytes as hex and
+whole-stream offsets as decimal strings; text reports sanitize terminal controls.
+SIGINT, SIGTERM and SIGHUP cancel and join build/output work. Output delivery is
+bounded and cancellable under backpressure. Interrupted or lost delivery requires
+inspecting source/runtime state before another explicit action; publication is
+not rolled back. A source watch cannot reopen a failed Loader or override its
+retained-failure admission fence.
