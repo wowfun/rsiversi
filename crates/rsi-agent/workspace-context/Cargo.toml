@@ -24,7 +24,7 @@ yaml_serde.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-rustix.workspace = true
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
 rsi-agent-composition = { path = "../composition" }

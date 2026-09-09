@@ -11,6 +11,11 @@ use cap_std::fs::Dir;
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, SessionHeader, WorkspaceTrust,
 };
+#[cfg(unix)]
+use rsi_files_native_fs::{
+    is_link_rejection, open_absolute_directory_no_follow, open_relative_directory_no_follow,
+    open_relative_file_no_follow,
+};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
@@ -264,92 +269,6 @@ impl ProjectAuthority {
         entries.truncate(maximum);
         Ok(Some((entries, overflow)))
     }
-}
-
-#[cfg(unix)]
-fn open_absolute_directory_no_follow(path: &Path) -> std::io::Result<Dir> {
-    use rustix::fs::{Mode, OFlags, openat};
-    use std::path::Component;
-
-    if !path.is_absolute() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "project root is not absolute",
-        ));
-    }
-    let root = openat(
-        rustix::fs::CWD,
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    let mut directory = Dir::from_std_file(root.into());
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(component) => {
-                directory = open_relative_directory_no_follow(&directory, Path::new(component))?;
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "project root is not normalized",
-                ));
-            }
-        }
-    }
-    Ok(directory)
-}
-
-#[cfg(unix)]
-fn open_relative_directory_no_follow(directory: &Dir, path: &Path) -> std::io::Result<Dir> {
-    use rustix::fs::{Mode, OFlags, openat};
-    use std::os::fd::AsFd as _;
-    use std::path::Component;
-
-    let mut current = directory.try_clone()?;
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "project-relative directory is not normalized",
-            ));
-        };
-        let next = openat(
-            current.as_fd(),
-            Path::new(component),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-        current = Dir::from_std_file(next.into());
-    }
-    Ok(current)
-}
-
-#[cfg(unix)]
-fn open_relative_file_no_follow(directory: &Dir, path: &Path) -> std::io::Result<File> {
-    use rustix::fs::{Mode, OFlags, openat};
-    use std::os::fd::AsFd as _;
-
-    let parent = path.parent().unwrap_or_else(|| Path::new(""));
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "file path has no name")
-    })?;
-    let parent = open_relative_directory_no_follow(directory, parent)?;
-    let file = openat(
-        parent.as_fd(),
-        Path::new(name),
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    Ok(file.into())
-}
-
-#[cfg(unix)]
-fn is_link_rejection(error: &std::io::Error) -> bool {
-    error
-        .raw_os_error()
-        .is_some_and(|code| code == libc::ELOOP || code == libc::ENOTDIR)
 }
 
 #[derive(Debug, Deserialize)]

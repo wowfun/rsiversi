@@ -77,6 +77,9 @@ redirect a read outside the selected project. A project skill root or entry
 that is itself a symbolic link is a complete omission rather than an unexpected
 I/O failure. The source is still reopened on each observation, so edits remain
 visible before the next provider request.
+The Unix handle mechanics are shared through
+[`rsi-files-native-fs`](../../rsi-files/native-fs/README.md); instruction discovery,
+WorkspaceTrust and snapshot capacity remain owned here.
 The typed Session Header is trusted at this process-local seam; only its cwd and
 workspace-trust value cross into the blocking discovery task.
 

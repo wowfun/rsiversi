@@ -2985,13 +2985,13 @@ dependencies = [
  "rsi-agent-store-sqlite",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-meta-profile",
  "rsi-meta-scope",
  "rsi-sandbox",
  "rsi-tools",
- "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -3569,6 +3569,16 @@ dependencies = [
  "rsi-credentials-protocol",
  "rsi-meta",
  "serde_json",
+]
+
+[[package]]
+name = "rsi-files-native-fs"
+version = "0.0.1"
+dependencies = [
+ "cap-std",
+ "libc",
+ "rustix",
+ "tempfile",
 ]
 
 [[package]]

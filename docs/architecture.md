@@ -19,11 +19,13 @@ and retained wire-buffer budgets. Domain operations and durable semantics remain
 with their owning product; the API foundation does not import those products.
 
 Base capability families own Storage, Settings, Credentials, Media, Tools,
-Commands, Approval, User Questions, Sandbox, Process, Shell, Jobs, Apply-Patch, Workspace, Permission Presets, and derived
+Commands, Approval, User Questions, Sandbox, Process, Shell, Jobs, Apply-Patch, Workspace, Files, Permission Presets, and derived
 projections. Their protocols and deterministic test support are libraries;
 stateful providers, registries, schedulers, and policy implementations are
 ordinary `rsi-meta` plugins. `rsi-meta` and `rsi-host` do not know those
 products, and `rsi-host` does not select a default implementation.
+The [native Files library](../crates/rsi-files/native-fs/README.md) supplies shared
+directory-handle mechanics; callers retain their own trust and authorization policy.
 
 [`rsi-ai`](../crates/rsi-ai/README.md) owns provider-neutral Language and Image
 contracts, exact routing, provider authoring, and transports. Routers and
