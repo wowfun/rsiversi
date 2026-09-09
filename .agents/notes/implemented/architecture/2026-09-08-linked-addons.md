@@ -28,7 +28,9 @@ continues to freeze its own catalog and reject duplicate registrations.
 A linker inventory introduces ambient discovery. An extra schema validator
 creates a competing normalization/requirements authority. Repeating factory IDs
 for preset validation lets preview accept a different product from execution.
-Native factories require provenance-aware Host identity and remain later work.
+The generic Host accepts resolver-owned Native identities through the
+[resolved catalog decision](2026-09-09-host-resolved-catalog.md). Standard product
+native artifact management remains separate from linked addon declarations.
 
 ## Consequences
 

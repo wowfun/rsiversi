@@ -10,12 +10,12 @@ does not invent storage authority for a path-free application.
 `rsi-host` is the generic static composition SDK above
 [`rsi-meta`](../rsi-meta/README.md) and
 [`rsi-meta-profile`](../rsi-meta/profile/README.md). It owns an explicit per-Host
-linked factory catalog, stable Local marker registration, frozen Profile
+resolved factory catalog, stable Local marker registration, frozen Profile
 environment, Host paths, and the authority to start exactly one top-level
 Profile bootstrap. It does not own Profile parsing or convergence, a second
 runtime, product implementations, package discovery, or live remote control.
 
-`HostBuilder` rejects duplicate linked `PluginId`, Local contract key, Local
+`HostBuilder` rejects duplicate `PluginId`, Local contract key, Local
 event key, and linked-fragment registration before it creates a Host. Building
 freezes all bootstrap input. The Host supplies an immutable resolver to its
 Profile plugin, which delegates lifecycle work to the public Meta
@@ -60,9 +60,18 @@ final limits before creating the Runtime.
 
 Construction requires explicit absolute config, state, and cache paths; Host
 never discovers them from the process environment. The builder also receives
-bounded Host and Meta limits. Linked registrations bind one `PluginId`, build
-revision, `UpdateMode`, and factory implementation. Neither Profile parsing nor
-factory execution may replace that identity. Local contract and event names are
+bounded Host and Meta limits. `register_factory(ResolvedFactory)` accepts explicit
+trusted embedder provenance, update policy and implementation. Linked identity
+contains a build revision; Native identity contains the exact artifact SHA-256
+from the existing NativeCatalog load path. Host validates identifier bounds and
+canonical native digests but performs no artifact discovery or provenance
+attestation. Identity describes origin, not permission or cryptographic authority.
+`register_linked` constructs the same resolved registration for linked code.
+`maximum_factories` bounds both variants together. Accepted and rejected factory
+destruction is unwind-contained. Neither Profile parsing nor factory execution
+may replace the frozen identity. Composition digests tag the identity variant and
+include the linked revision or native digest. Preview reports the resolved
+identity without preparing its implementation. Local contract and event names are
 configuration keys only: the builder records their exact Rust `TypeId` and
 rejects key or type duplication before any factory is prepared.
 

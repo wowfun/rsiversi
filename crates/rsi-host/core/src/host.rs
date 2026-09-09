@@ -1,12 +1,12 @@
-use crate::builder::{HostLimits, LinkedRegistration};
+use crate::builder::HostLimits;
 use crate::{
     HostError, HostPaths, Profile, ProfileControl, ProfileControlContract, ProfileFragment,
     ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus, ReloadOutcome, Result,
 };
 use rsi_meta::{
-    ConfigValue, Context, FiberHandle, FiberState, LocalContract, LocalContractKey, LocalEvent,
-    LocalEventKey, PluginId, ResolvedFactory, Runtime, RuntimeSnapshot, ShutdownOutcome,
-    UpdateMode,
+    ConfigValue, Context, FactoryIdentity, FiberHandle, FiberState, LocalContract,
+    LocalContractKey, LocalEvent, LocalEventKey, PluginId, ResolvedFactory, Runtime,
+    RuntimeSnapshot, ShutdownOutcome, UpdateMode,
 };
 use rsi_meta_profile::{ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileResolver};
 use sha2::{Digest as _, Sha256};
@@ -31,34 +31,31 @@ pub struct HostProfilePreview {
 pub struct HostProfilePreviewLeaf {
     /// Stable all-tree instance identity.
     pub instance_id: String,
-    /// Exact linked plugin identity.
+    /// Stable catalog key.
     pub plugin_id: String,
+    /// Exact resolver-owned provenance; configuration has not been prepared.
+    pub identity: FactoryIdentity,
 }
 
 pub(crate) const PROFILE_PLUGIN_ID: &str = "rsi.meta.profile";
 
 #[derive(Debug)]
-pub(crate) struct LinkedCatalog {
-    pub(crate) linked: BTreeMap<PluginId, LinkedRegistration>,
+pub(crate) struct FrozenCatalog {
+    pub(crate) factories: BTreeMap<PluginId, ResolvedFactory>,
     pub(crate) fragments: Vec<ProfileFragment>,
     pub(crate) local_contracts: BTreeMap<LocalContractKey, TypeId>,
     pub(crate) local_events: BTreeMap<LocalEventKey, TypeId>,
     pub(crate) launch_patches: Vec<ProfilePatch>,
 }
 
-impl ProfileResolver for LinkedCatalog {
+impl ProfileResolver for FrozenCatalog {
     fn resolve(&self, plugin: &PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
-        let registration = self.linked.get(plugin).ok_or_else(|| {
+        let registration = self.factories.get(plugin).ok_or_else(|| {
             rsi_meta_profile::ProfileError::UnknownPlugin {
                 plugin: plugin.clone(),
             }
         })?;
-        Ok(ResolvedFactory::linked(
-            plugin.clone(),
-            registration.revision.clone(),
-            registration.update_mode,
-            Arc::clone(&registration.implementation),
-        ))
+        Ok(registration.clone())
     }
 
     fn local_contract_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
@@ -87,7 +84,7 @@ pub struct Host {
     limits: HostLimits,
     runtime_limits: rsi_meta::RuntimeLimits,
     execution: Option<rsi_meta::Execution>,
-    catalog: Arc<LinkedCatalog>,
+    catalog: Arc<FrozenCatalog>,
 }
 
 impl std::fmt::Debug for Host {
@@ -97,7 +94,7 @@ impl std::fmt::Debug for Host {
             .field("paths", &self.paths)
             .field("platform", &self.environment.platform())
             .field("defines", &self.environment.defines().keys())
-            .field("plugins", &self.catalog.linked.keys())
+            .field("plugins", &self.catalog.factories.keys())
             .finish_non_exhaustive()
     }
 }
@@ -109,7 +106,7 @@ impl Host {
         limits: HostLimits,
         runtime_limits: rsi_meta::RuntimeLimits,
         execution: Option<rsi_meta::Execution>,
-        catalog: LinkedCatalog,
+        catalog: FrozenCatalog,
     ) -> Self {
         Self {
             paths,
@@ -129,14 +126,14 @@ impl Host {
     /// Returns a canonical digest of the generic Host inputs frozen by its builder.
     ///
     /// The digest includes paths, platform, defines, compiler and Runtime limits,
-    /// linked factory revisions and update modes, registered marker keys, linked
+    /// resolved factory identities and update modes, registered marker keys, linked
     /// fragments, and launch patches. It deliberately has no top-level Profile
     /// source, current Profile digest, application argument, session identity, or
     /// credential-store value.
     pub fn composition_digest(&self) -> Result<String> {
         let preview = self.preview(Profile::default())?;
         let mut digest = Sha256::new();
-        hash_component(&mut digest, b"domain", b"rsi.host.composition.v1");
+        hash_component(&mut digest, b"domain", b"rsi.host.composition.v2");
         hash_component(
             &mut digest,
             b"compiled-empty-program",
@@ -144,13 +141,22 @@ impl Host {
         );
         hash_host_limits(&mut digest, &self.limits);
         hash_runtime_limits(&mut digest, &self.runtime_limits);
-        for (plugin, registration) in &self.catalog.linked {
+        for (plugin, registration) in &self.catalog.factories {
             hash_component(&mut digest, b"plugin", plugin.as_str().as_bytes());
-            hash_component(&mut digest, b"revision", registration.revision.as_bytes());
+            match registration.identity() {
+                FactoryIdentity::Linked { revision, .. } => {
+                    hash_component(&mut digest, b"identity-kind", b"linked");
+                    hash_component(&mut digest, b"revision", revision.as_bytes());
+                }
+                FactoryIdentity::Native { sha256, .. } => {
+                    hash_component(&mut digest, b"identity-kind", b"native");
+                    hash_component(&mut digest, b"sha256", sha256.as_bytes());
+                }
+            }
             hash_component(
                 &mut digest,
                 b"update-mode",
-                match registration.update_mode {
+                match registration.update_mode() {
                     UpdateMode::Replayable => b"replayable",
                     UpdateMode::RestartRequired => b"restart-required",
                 },
@@ -204,10 +210,11 @@ impl Host {
             ProfileCompiler::new(environment, self.limits.profile.clone()).compile(&program)?;
         let mut leaves = Vec::with_capacity(candidate.leaves().len());
         for leaf in candidate.leaves() {
-            let _resolved = self.catalog.resolve(leaf.plugin())?;
+            let resolved = self.catalog.resolve(leaf.plugin())?;
             leaves.push(HostProfilePreviewLeaf {
                 instance_id: leaf.id().as_str().to_owned(),
                 plugin_id: leaf.plugin().as_str().to_owned(),
+                identity: resolved.identity().clone(),
             });
         }
         Ok(HostProfilePreview {
@@ -363,7 +370,7 @@ fn hash_duration(digest: &mut Sha256, name: &[u8], value: std::time::Duration) {
 fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
     let HostLimits {
         profile,
-        maximum_linked_plugins,
+        maximum_factories,
         maximum_fragments,
         maximum_local_contracts,
         maximum_local_events,
@@ -412,7 +419,7 @@ fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
             b"profile.maximum-diagnostic-bytes",
             *maximum_diagnostic_bytes,
         ),
-        (b"host.maximum-linked-plugins", *maximum_linked_plugins),
+        (b"host.maximum-factories", *maximum_factories),
         (b"host.maximum-fragments", *maximum_fragments),
         (b"host.maximum-local-contracts", *maximum_local_contracts),
         (b"host.maximum-local-events", *maximum_local_events),
@@ -602,7 +609,7 @@ fn hash_runtime_execution_limits(digest: &mut Sha256, execution: &rsi_meta::Exec
 pub struct RunningHost {
     paths: Option<HostPaths>,
     runtime: Runtime,
-    catalog: Arc<LinkedCatalog>,
+    catalog: Arc<FrozenCatalog>,
     profile_fiber: FiberHandle,
     control: Arc<dyn ProfileControl>,
 }

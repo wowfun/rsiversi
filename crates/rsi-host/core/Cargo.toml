@@ -22,5 +22,8 @@ rsi-meta-scope = { path = "../../rsi-meta/scope" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
+
 [lints]
 workspace = true

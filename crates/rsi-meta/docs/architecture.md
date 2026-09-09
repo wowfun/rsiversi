@@ -49,7 +49,9 @@ Contexts can apply root plugins but cannot impersonate a plugin generation.
 ## Preparation, injection, and activation
 
 `ResolvedFactory` contains one already bounded `FactoryIdentity`, static
-`UpdateMode`, and the `PluginFactory` implementation. The Runtime validates and
+`UpdateMode`, and the `PluginFactory` implementation. `into_parts` lets a trusted resolver consume that value to wrap its implementation
+while retaining provenance and policy; it performs no execution or attestation.
+The Runtime validates and
 accounts the captured identity for the Fiber lifetime but never asks executable
 plugin code to report it. The Runtime validates each desired
 configuration at its owning input boundary, then retains that bounded value as

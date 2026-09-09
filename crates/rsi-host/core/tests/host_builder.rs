@@ -121,13 +121,13 @@ fn path_and_collection_bounds_fail_before_runtime_construction() {
         Err(HostError::PathNotAbsolute { kind: "config", .. })
     ));
     let limits = HostLimits {
-        maximum_linked_plugins: 0,
+        maximum_factories: 0,
         ..HostLimits::default()
     };
     assert!(matches!(
         HostBuilder::new(paths()).limits(limits).build(),
         Err(HostError::CapacityExceeded {
-            resource: "linked plugins",
+            resource: "factories",
             maximum: 0
         })
     ));
@@ -236,4 +236,149 @@ fn composition_digest_tracks_frozen_host_inputs_but_not_top_level_profile_source
         )]))
         .unwrap();
     assert_eq!(first.composition_digest().unwrap(), before);
+}
+
+#[tokio::test]
+async fn resolved_native_identity_survives_preview_and_runtime_and_changes_digest() {
+    use rsi_meta::{FactoryIdentity, ResolvedFactory};
+    let identity = FactoryIdentity::native("test.noop", "a".repeat(64));
+    let make = |identity: FactoryIdentity, mode| {
+        let mut builder = HostBuilder::without_paths("test");
+        builder
+            .register_factory(ResolvedFactory::new(identity, mode, Arc::new(Noop)))
+            .unwrap();
+        builder
+            .register_fragment(ProfileFragment::new(
+                "base",
+                [ProfileEntry::new("base", "test.noop", Value::Null)],
+            ))
+            .unwrap();
+        builder.build().unwrap()
+    };
+    let host = make(identity.clone(), UpdateMode::Replayable);
+    let digest = host.composition_digest().unwrap();
+    assert_eq!(
+        host.preview(rsi_host::Profile::default()).unwrap().leaves[0].identity,
+        identity
+    );
+    for other in [
+        make(
+            FactoryIdentity::linked("test.noop", "a".repeat(64)),
+            UpdateMode::Replayable,
+        ),
+        make(
+            FactoryIdentity::native("test.noop", "b".repeat(64)),
+            UpdateMode::Replayable,
+        ),
+        make(identity.clone(), UpdateMode::RestartRequired),
+    ] {
+        assert_ne!(digest, other.composition_digest().unwrap());
+    }
+    let running = host.start(rsi_host::Profile::default()).await.unwrap();
+    assert!(
+        running
+            .runtime_snapshot()
+            .fibers
+            .iter()
+            .any(|fiber| fiber.factory == identity)
+    );
+    let _ = running.shutdown().await;
+    assert!(running.runtime_snapshot().fibers.is_empty());
+}
+
+#[test]
+fn factory_registration_rejects_malformed_native_provenance_and_shared_capacity() {
+    use rsi_meta::ResolvedFactory;
+    let mut builder = HostBuilder::without_paths("test").limits(HostLimits {
+        maximum_factories: 1,
+        ..HostLimits::default()
+    });
+    for digest in [
+        String::new(),
+        "a".repeat(63),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        assert!(
+            builder
+                .register_factory(ResolvedFactory::native(
+                    "test.noop",
+                    digest,
+                    UpdateMode::Replayable,
+                    Arc::new(Noop),
+                ))
+                .is_err()
+        );
+    }
+    builder
+        .register_factory(ResolvedFactory::native(
+            "test.noop",
+            "a".repeat(64),
+            UpdateMode::Replayable,
+            Arc::new(Noop),
+        ))
+        .unwrap();
+    assert!(matches!(
+        builder.register_linked("another", "1", UpdateMode::Replayable, Arc::new(Noop)),
+        Err(HostError::CapacityExceeded {
+            resource: "factories",
+            maximum: 1
+        })
+    ));
+    builder.build().unwrap();
+}
+
+#[test]
+fn accepted_and_rejected_factory_destructors_are_contained() {
+    #[derive(Debug)]
+    struct PanickingDrop;
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            panic!("expected factory destructor panic");
+        }
+    }
+    #[async_trait]
+    impl PluginFactory for PanickingDrop {
+        fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+        async fn activate(&self, _plan: ActivationPlan) -> rsi_meta::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut builder = HostBuilder::without_paths("test");
+            builder
+                .register_factory(rsi_meta::ResolvedFactory::native(
+                    "test.noop",
+                    "a".repeat(64),
+                    UpdateMode::Replayable,
+                    Arc::new(PanickingDrop),
+                ))
+                .unwrap();
+            assert!(
+                builder
+                    .register_linked(
+                        "test.noop",
+                        "1",
+                        UpdateMode::Replayable,
+                        Arc::new(PanickingDrop)
+                    )
+                    .is_err()
+            );
+            assert!(
+                builder
+                    .register_factory(rsi_meta::ResolvedFactory::native(
+                        "bad",
+                        "invalid",
+                        UpdateMode::Replayable,
+                        Arc::new(PanickingDrop),
+                    ))
+                    .is_err()
+            );
+            drop(builder.build().unwrap());
+        })
+        .is_ok()
+    );
 }

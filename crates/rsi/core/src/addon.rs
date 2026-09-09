@@ -172,10 +172,10 @@ impl StandardAddonBuilder {
                 plugin: plugin.into(),
             });
         }
-        if self.addon.factories.len() >= HostLimits::default().maximum_linked_plugins {
+        if self.addon.factories.len() >= HostLimits::default().maximum_factories {
             return Err(capacity(
                 "addon factories",
-                HostLimits::default().maximum_linked_plugins,
+                HostLimits::default().maximum_factories,
             ));
         }
         let revision = revision.into();
@@ -394,10 +394,10 @@ impl StandardAddonSet {
                 )));
             }
             for plugin in addon.factories.keys() {
-                if plugins.len() >= HostLimits::default().maximum_linked_plugins {
+                if plugins.len() >= HostLimits::default().maximum_factories {
                     return Err(capacity(
                         "addon factories",
-                        HostLimits::default().maximum_linked_plugins,
+                        HostLimits::default().maximum_factories,
                     ));
                 }
                 if !plugins.insert(plugin.clone()) {

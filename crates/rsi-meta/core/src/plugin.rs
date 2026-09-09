@@ -97,7 +97,9 @@ impl ResolvedFactory {
         self.update_mode
     }
 
-    pub(crate) fn into_parts(self) -> (FactoryIdentity, UpdateMode, Arc<dyn PluginFactory>) {
+    /// Consumes the resolved value for trusted resolver-side implementation wrapping.
+    /// This does not execute code, validate provenance, or confer Runtime authority.
+    pub fn into_parts(self) -> (FactoryIdentity, UpdateMode, Arc<dyn PluginFactory>) {
         (self.identity, self.update_mode, self.implementation)
     }
 }

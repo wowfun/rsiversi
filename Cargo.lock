@@ -3662,6 +3662,7 @@ dependencies = [
  "async-trait",
  "hex",
  "rsi-meta",
+ "rsi-meta-native-loader",
  "rsi-meta-profile",
  "rsi-meta-scope",
  "serde",
