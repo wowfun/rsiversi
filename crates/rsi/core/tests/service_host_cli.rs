@@ -991,3 +991,128 @@ async fn host_restart_interrupts_a_human_wait_without_recreating_its_question() 
     );
     task.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_edit_cli_reviews_exact_source_and_commits_without_starting_host() {
+    let fixture = CliFixture::new("http://127.0.0.1:1");
+    let source = fixture.workspace.join("proposed.toml");
+    let root = fixture
+        .temporary
+        .path()
+        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+    let before = std::fs::read(&root).unwrap();
+    std::fs::write(&source, "format = 1\n# reviewed\n").unwrap();
+    let preview = fixture.assert_success(&[
+        "profile",
+        "host",
+        "preview-edit",
+        "fixture",
+        source.to_str().unwrap(),
+        "--output",
+        "json",
+    ]);
+    let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["configuration_validation"], "not_prepared");
+    assert_eq!(
+        preview["source"]["before"],
+        String::from_utf8(before.clone()).unwrap()
+    );
+    assert!(
+        preview["effective_changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "fixture-provider" && entry["kind"] == "removed")
+    );
+    assert_eq!(std::fs::read(&root).unwrap(), before);
+    let digest = preview["review_digest"].as_str().unwrap();
+    let receipt = fixture.assert_success(&[
+        "profile",
+        "host",
+        "commit-edit",
+        "fixture",
+        source.to_str().unwrap(),
+        digest,
+        "--output",
+        "json",
+    ]);
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout).unwrap();
+    assert_eq!(receipt["source"], "published");
+    assert_eq!(receipt["runtime"], "not_requested");
+    assert_eq!(
+        std::fs::read(&root).unwrap(),
+        std::fs::read(&source).unwrap()
+    );
+    let replay = fixture
+        .command()
+        .args([
+            "profile",
+            "host",
+            "commit-edit",
+            "fixture",
+            source.to_str().unwrap(),
+            digest,
+        ])
+        .output()
+        .unwrap();
+    assert!(!replay.status.success());
+    let status = fixture.assert_success(&["host", "status"]);
+    assert!(String::from_utf8_lossy(&status.stdout).contains("stopped"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_edit_cli_repairs_application_and_rejects_changed_proposals() {
+    let fixture = CliFixture::new("http://127.0.0.1:1");
+    let source = fixture.workspace.join("proposal.toml");
+    let root = fixture
+        .temporary
+        .path()
+        .join("config/rsi/application-profiles/test-headless/application.profile.toml");
+    std::fs::write(&root, "config = 'unfinished-secret").unwrap();
+    std::fs::write(&source, "format = 1\n").unwrap();
+    let preview = fixture.assert_success(&[
+        "profile",
+        "application",
+        "preview-edit",
+        "test-headless",
+        source.to_str().unwrap(),
+        "--output",
+        "json",
+    ]);
+    let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert!(preview["previous"].is_null());
+    assert!(preview["effective_changes"].is_null());
+    let digest = preview["review_digest"].as_str().unwrap();
+    std::fs::write(&source, "format = 1\n# changed after review\n").unwrap();
+    let conflict = fixture.run(&[
+        "profile",
+        "application",
+        "commit-edit",
+        "test-headless",
+        source.to_str().unwrap(),
+        digest,
+    ]);
+    assert!(!conflict.status.success());
+    assert!(!String::from_utf8_lossy(&conflict.stderr).contains("unfinished-secret"));
+    assert_eq!(
+        std::fs::read(&root).unwrap(),
+        b"config = 'unfinished-secret"
+    );
+    std::fs::write(&source, "format = 1\n").unwrap();
+    fixture.assert_success(&[
+        "profile",
+        "application",
+        "commit-edit",
+        "test-headless",
+        source.to_str().unwrap(),
+        digest,
+    ]);
+    assert_eq!(std::fs::read(&root).unwrap(), b"format = 1\n");
+    assert!(
+        !fixture
+            .temporary
+            .path()
+            .join("cache/rsi/agent-presets")
+            .exists()
+    );
+}

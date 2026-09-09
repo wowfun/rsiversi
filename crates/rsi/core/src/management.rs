@@ -7,6 +7,9 @@ use super::{
 };
 use rsi_terminal::write_text_line;
 
+#[cfg(unix)]
+mod profile_edit;
+
 pub(super) async fn run_agent_store(command: AgentStoreCommand) -> u8 {
     let root = match command.root {
         Some(root) => root,
@@ -41,6 +44,13 @@ pub(super) async fn run_agent_store(command: AgentStoreCommand) -> u8 {
 
 #[allow(clippy::too_many_lines)] // One closed Profile command matrix owns all output variants.
 pub(super) async fn run_profile(command: &ProfileCommand) -> u8 {
+    #[cfg(unix)]
+    if matches!(
+        command.operation,
+        ProfileOperationKind::PreviewEdit | ProfileOperationKind::CommitEdit
+    ) {
+        return profile_edit::run(command).await;
+    }
     if matches!(
         (command.kind, command.operation),
         (ProfileKind::Host, ProfileOperationKind::Preview)
@@ -161,6 +171,10 @@ pub(super) async fn run_profile(command: &ProfileCommand) -> u8 {
             }
             (ProfileKind::Host | ProfileKind::Application, ProfileOperationKind::Preview) => {
                 unreachable!()
+            }
+            #[cfg(unix)]
+            (_, ProfileOperationKind::PreviewEdit | ProfileOperationKind::CommitEdit) => {
+                unreachable!("source editing is dispatched before catalog operations")
             }
         }
     })();

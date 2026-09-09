@@ -11,6 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+#[cfg(unix)]
+mod edit;
+#[cfg(unix)]
+pub use edit::{ProfileEdit, ProfileEditError, ProfileEditReceipt};
+
 /// Directory containing user-authored Application Profiles.
 pub const APPLICATION_PROFILE_DIRECTORY: &str = "application-profiles";
 /// File name owned by one Application Profile directory.
@@ -21,7 +26,8 @@ pub const HOST_PROFILE_DIRECTORY: &str = "host-profiles";
 /// File name owned by one Host Profile directory.
 pub const HOST_PROFILE_FILE: &str = "host.profile.toml";
 
-const MAXIMUM_PROFILE_BYTES: usize = 1024 * 1024;
+/// Maximum bytes in one product-owned Profile root document.
+pub const MAXIMUM_PROFILE_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAXIMUM_PROFILE_ENTRIES: usize = 4096;
 const CLI_PROFILE: &str = "cli";
 const HEADLESS_PROFILE: &str = "headless";
@@ -325,7 +331,7 @@ impl ProfileCatalog {
                 path: None,
             });
         }
-        let contents = read_regular_file(&path, MAXIMUM_PROFILE_BYTES)?;
+        let contents = read_regular_file(&path, MAXIMUM_PROFILE_DOCUMENT_BYTES)?;
         let table: toml::Table =
             toml::from_slice(&contents).map_err(|error| ProfileCatalogError::InvalidDocument {
                 path: path.clone(),
@@ -354,7 +360,7 @@ impl ProfileCatalog {
                 contents: b"format = 1\n".to_vec(),
             });
         }
-        let contents = read_regular_file(&path, MAXIMUM_PROFILE_BYTES)?;
+        let contents = read_regular_file(&path, MAXIMUM_PROFILE_DOCUMENT_BYTES)?;
         Ok(HostProfileDocument {
             id: id.clone(),
             source: ProfileSource::User,
@@ -691,10 +697,10 @@ fn read_regular_file(path: &Path, maximum: usize) -> Result<Vec<u8>, ProfileCata
 }
 
 fn create_new_document(path: &Path, bytes: &[u8]) -> Result<(), ProfileCatalogError> {
-    if bytes.len() > MAXIMUM_PROFILE_BYTES {
+    if bytes.len() > MAXIMUM_PROFILE_DOCUMENT_BYTES {
         return Err(ProfileCatalogError::DocumentTooLarge {
             path: path.to_path_buf(),
-            maximum: MAXIMUM_PROFILE_BYTES,
+            maximum: MAXIMUM_PROFILE_DOCUMENT_BYTES,
         });
     }
     let directory = path.parent().expect("catalog document has a parent");

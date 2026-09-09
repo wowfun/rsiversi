@@ -28,7 +28,9 @@ pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> path ID [--output text|json]\n\
   rsi profile <application|host> copy FROM TO [--output text|json]\n\
   rsi profile <application|host> delete ID [--output text|json]\n\
-  rsi profile host preview ID [--output text|json]\n";
+  rsi profile host preview ID [--output text|json]\n\
+  rsi profile <application|host> preview-edit ID SOURCE_FILE [--output text|json] (Unix)\n\
+  rsi profile <application|host> commit-edit ID SOURCE_FILE REVIEW_DIGEST [--output text|json] (Unix)\n";
 pub(super) const HOST_HELP: &str = "Usage:\n\
   rsi host start [--profile HOST]\n\
   rsi host serve [--profile HOST]\n\
@@ -97,6 +99,10 @@ pub(super) enum ProfileOperationKind {
     Copy,
     Delete,
     Preview,
+    #[cfg(unix)]
+    PreviewEdit,
+    #[cfg(unix)]
+    CommitEdit,
 }
 
 #[derive(Clone, Debug)]
@@ -470,6 +476,10 @@ pub(super) fn parse_profile_command(
         Some("copy") => ProfileOperationKind::Copy,
         Some("delete") => ProfileOperationKind::Delete,
         Some("preview") if kind == ProfileKind::Host => ProfileOperationKind::Preview,
+        #[cfg(unix)]
+        Some("preview-edit") => ProfileOperationKind::PreviewEdit,
+        #[cfg(unix)]
+        Some("commit-edit") => ProfileOperationKind::CommitEdit,
         Some(value) => return Err(profile_usage(format!("unknown Profile command `{value}`"))),
         None => return Err(profile_usage("missing Profile command")),
     };
@@ -506,6 +516,10 @@ pub(super) fn parse_profile_command(
         | ProfileOperationKind::Delete
         | ProfileOperationKind::Preview => 1,
         ProfileOperationKind::Copy => 2,
+        #[cfg(unix)]
+        ProfileOperationKind::PreviewEdit => 2,
+        #[cfg(unix)]
+        ProfileOperationKind::CommitEdit => 3,
     };
     if ids.len() != expected {
         return Err(profile_usage(format!(

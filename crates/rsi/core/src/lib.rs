@@ -41,9 +41,11 @@ pub use local_host::{
 pub use profiles::{
     APPLICATION_PROFILE_DIRECTORY, APPLICATION_PROFILE_FILE, ApplicationProfileDocument,
     ApplicationProfileId, HOST_PROFILE_DIRECTORY, HOST_PROFILE_FILE, HostLaunchKey,
-    HostProfileDocument, HostProfileId, ProfileCatalog, ProfileCatalogError, ProfileRow,
-    ProfileSource,
+    HostProfileDocument, HostProfileId, MAXIMUM_PROFILE_DOCUMENT_BYTES, ProfileCatalog,
+    ProfileCatalogError, ProfileRow, ProfileSource,
 };
+#[cfg(unix)]
+pub use profiles::{ProfileEdit, ProfileEditError, ProfileEditReceipt};
 pub use rsi_agent_presets::{AgentPresetSource, AgentPresetTrust};
 pub use rsi_apply_patch::maybe_run_apply_patch_helper;
 pub use rsi_session_protocol;

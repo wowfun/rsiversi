@@ -2620,6 +2620,7 @@ dependencies = [
  "rsi-credentials-local",
  "rsi-credentials-protocol",
  "rsi-files",
+ "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-files-tools",
  "rsi-host",

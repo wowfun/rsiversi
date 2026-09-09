@@ -1015,6 +1015,12 @@ impl StandardComposition {
             .map(|(host, _presets, _factories)| host)
     }
 
+    /// Freezes the standard catalog for pure inspection without materializing preset assets.
+    pub fn build_for_preview(&self) -> rsi_host::Result<Host> {
+        self.build_internal(false, None)
+            .map(|(host, _presets, _factories)| host)
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn build_daemon(self, launch_key: &str) -> rsi_host::Result<Host> {
         self.build_internal(true, Some(launch_key))

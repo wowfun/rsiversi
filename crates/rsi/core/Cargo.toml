@@ -129,6 +129,7 @@ axum.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 rsi-api-uds-client = { path = "../../rsi-api/uds-client" }
 libc.workspace = true
 rustix.workspace = true

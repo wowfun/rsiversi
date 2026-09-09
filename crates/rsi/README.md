@@ -254,9 +254,42 @@ asset or activate the selected Host Profile.
 Catalog listing includes only regular profile documents; a symbolic-link
 document is neither opened nor advertised as an available profile.
 
+On Unix, `ProfileCatalog::preview_host_edit` and `preview_application_edit`
+select one existing user document and borrow an explicit frozen Host. Builtins
+are immutable; includes and linked fragments have no writable selection. The
+consuming edit value exposes bounded original/proposed source bytes and the
+Host's redacted effective tree diff and factory identities. Its Debug output
+omits source and configuration. Preview does not prepare configuration semantics,
+activate plugins, create temporary files, or acquire a persistent write lock.
+An invalid old source can be repaired if the proposed program compiles/resolves.
+
+`commit_once` acquires a nonblocking cooperative lock on the opened parent
+directory, verifies that directory identity, the original root digest, and all
+captured prospective source fingerprints against the same frozen Host, then
+stages a private sibling, syncs it and atomically replaces only the selected root
+through its directory handle. Symlink components and special files are rejected.
+Conflicts require a fresh preview; the edit value cannot be replayed or retargeted.
+The source limit is the catalog's existing document bound. Includes remain subject
+to the supplied Host's compiler bounds. Locking coordinates cooperating writers;
+it is not an atomic compare-and-swap against arbitrary external file writers.
+
+A successful receipt means source publication and reports directory durability
+separately. It does not report Runtime activation: apply, restart, rollback and
+degraded outcomes remain with Profile control. Neither commit nor activation
+failure rewrites the previous source. Parent renames cannot redirect the handle's
+write authority. This writer uses Unix directory-handle operations; no equivalent
+Windows writer is exposed.
+
 The exact management surfaces are `rsi profile application
 <list|show|path|copy|delete>` and `rsi profile host
-<list|show|path|copy|delete|preview>`. `rsi host start` is the only operation
+<list|show|path|copy|delete|preview>`. On Unix both kinds also provide
+`preview-edit ID SOURCE_FILE` and `commit-edit ID SOURCE_FILE REVIEW_DIGEST`.
+The preview prints original/proposed source, redacted effective changes and a
+digest binding the original root, complete proposal and frozen composition.
+Commit recomputes that preview and requires the exact reviewed digest before
+consuming it. The digest is a comparison token, not an authorization credential.
+The command reports `runtime: not_requested`; an existing source watcher may
+independently observe the publication. `rsi host start` is the only operation
 that detaches a new daemon; `serve` runs it in the foreground, `status` probes
 the recorded generation, `reload` requests a full Profile rebuild, `stop`
 drains it, and `restart` composes stop and start. `stop --force` and `restart
