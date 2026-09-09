@@ -178,6 +178,7 @@ def clean_environment():
     # change which sources or oracle flags get compiled.
     keep = {name: os.environ[name] for name in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "LANG"] if name in os.environ}
     keep["CARGO_NET_OFFLINE"] = "true"
+    keep["CARGO_BUILD_JOBS"] = "2"
     return keep
 
 
