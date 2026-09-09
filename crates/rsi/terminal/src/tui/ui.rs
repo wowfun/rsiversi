@@ -243,11 +243,10 @@ impl Client {
                     .filter(|(key, _)| **key != name)
                     .map(|(_, value)| value.len())
                     .sum();
-                let editor = Editor {
-                    cursor: value.len(),
-                    text: value,
-                    limit: rsi_ui::MAXIMUM_INPUT_BYTES.saturating_sub(other_bytes),
-                };
+                let editor = Editor::with_text(
+                    value,
+                    rsi_ui::MAXIMUM_INPUT_BYTES.saturating_sub(other_bytes),
+                );
                 self.state.invalidate_detail();
                 self.state.ui_edit = Some(Edit {
                     name,

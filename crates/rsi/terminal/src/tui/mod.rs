@@ -3,6 +3,7 @@ mod clipboard;
 mod commands;
 mod editor;
 mod input;
+mod prompts;
 mod render;
 mod state;
 mod terminal;
@@ -98,6 +99,10 @@ async fn attachment(handle: Arc<dyn SessionHandle>, durable: bool) -> Result<Att
 }
 
 enum Update {
+    Completions {
+        prefix: String,
+        names: Result<Vec<String>>,
+    },
     Ui(rsi_ui::BoundView),
     Attached(Box<Attachment>),
     History(rsi_session_protocol::SessionHistoryPage),
@@ -173,6 +178,7 @@ enum Durability {
 }
 
 struct Client {
+    prompts: prompts::Prompts,
     ui: ui::Bindings,
     application: Arc<dyn SessionService>,
     output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
@@ -219,6 +225,7 @@ impl Client {
             ui_target,
         } = services;
         let mut client = Self {
+            prompts: prompts::Prompts::default(),
             ui: ui::Bindings {
                 registry: ui,
                 application: ui_target,
@@ -467,6 +474,7 @@ impl Client {
                 },
                 sandbox: None,
             });
+            self.remember_prompt();
         }
         let Some(request) = self.submission.request.clone() else {
             self.state.notice("No unresolved submission");
@@ -673,128 +681,399 @@ impl Client {
         self.state.invalidate_detail();
         self.extension_view = None;
         match action {
+            Action::RecallPrompt(id) => self.recall_prompt(id),
+            Action::CompleteCommand(prefix, name) => self.insert_completion(&prefix, &name),
             Action::UiSurface(reference) => self.ui_surface(&reference),
             Action::UiCard => self.ui_card(),
-            Action::UiEdit(..) | Action::UiInvoke(..) => unreachable!("UI edit/actions dispatched above"),
+            Action::UiEdit(..) | Action::UiInvoke(..) => {
+                unreachable!("UI edit/actions dispatched above")
+            }
             Action::Commands => self.command_menu(),
             Action::CommandResult => self.command_result(),
             Action::Extensions => self.extension_menu(),
             Action::Extension(producer) => self.extension_detail(&producer),
             Action::CommandHelp(name, description) => {
                 self.state.open_detail(format!("/{name}\n{description}"));
-                self.state.notice("Type the command in the composer and press Enter");
+                self.state
+                    .notice("Type the command in the composer and press Enter");
             }
             Action::Exit => return true,
             Action::Retry => self.submit(MessageDelivery::NextTurn, true),
             Action::Submission => {
                 if let Some(request) = &self.submission.request {
-                    let body = request.content.iter().filter_map(|input| if let MessageInput::Text { text } = input { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
+                    let body = request
+                        .content
+                        .iter()
+                        .filter_map(|input| {
+                            if let MessageInput::Text { text } = input {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     self.state.open_detail(super::terminal_text(&body));
-                    let mut items = vec![("Retry the exact same input and identity".into(), Action::Retry)];
-                    if self.submission.rejected { items.push(("Discard this rejected input; keep editor draft".into(), Action::DiscardRejected)); }
-                    self.state.detail_actions = Some(Menu { title: format!("{} · Enter actions · Ctrl+Y copy", request.message_id), selected: 0, items });
-                } else { self.state.notice("No unresolved submission"); }
-            },
+                    let mut items = vec![(
+                        "Retry the exact same input and identity".into(),
+                        Action::Retry,
+                    )];
+                    if self.submission.rejected {
+                        items.push((
+                            "Discard this rejected input; keep editor draft".into(),
+                            Action::DiscardRejected,
+                        ));
+                    }
+                    self.state.detail_actions = Some(Menu {
+                        title: format!("{} · Enter actions · Ctrl+Y copy", request.message_id),
+                        selected: 0,
+                        items,
+                    });
+                } else {
+                    self.state.notice("No unresolved submission");
+                }
+            }
             Action::DiscardRejected => {
-                if self.submission.rejected { self.submission.request = None; self.submission.rejected = false; self.state.escape(); self.state.notice("Rejected input discarded; editor draft retained"); }
-            },
-            Action::New | Action::Attach(_) if self.submission.request.is_some() => self.state.notice("Resolve the outstanding submission before changing sessions"),
-            Action::New if self.drafts.len() >= 64 => self.state.notice("64 session drafts retained; clear an existing draft before opening another session"),
-            Action::Attach(ref id) if self.drafts.len() >= 64 && !self.drafts.contains_key(id) => self.state.notice("64 session drafts retained; open an existing saved session first"),
+                if self.submission.rejected {
+                    self.submission.request = None;
+                    self.submission.rejected = false;
+                    self.state.escape();
+                    self.state
+                        .notice("Rejected input discarded; editor draft retained");
+                }
+            }
+            Action::New | Action::Attach(_) if self.submission.request.is_some() => self
+                .state
+                .notice("Resolve the outstanding submission before changing sessions"),
+            Action::New if self.drafts.len() >= 64 => self.state.notice(
+                "64 saved Sessions retained; open an existing Session or restart this application",
+            ),
+            Action::Attach(ref id) if self.drafts.len() >= 64 && !self.drafts.contains_key(id) => {
+                self.state
+                    .notice("64 session drafts retained; open an existing saved session first");
+            }
             Action::New => {
                 let cwd = PathBuf::from(self.state.header.canonical_cwd());
                 let workspace = self.workspace.clone();
                 self.spawn(async move {
                     let session_id = super::generated_cli_session_id().map_err(error)?;
                     let registered = workspace.get_or_create(&cwd).await.map_err(error)?;
-                    let handle = application.create(CreateSession { workspace_id: registered.id, session_id, agent_preset_id: None, workspace_trust: WorkspaceTrust::Untrusted }).await.map_err(error)?;
-                    attachment(handle, false).await.map(|attached| Update::Attached(Box::new(attached)))
+                    let handle = application
+                        .create(CreateSession {
+                            workspace_id: registered.id,
+                            session_id,
+                            agent_preset_id: None,
+                            workspace_trust: WorkspaceTrust::Untrusted,
+                        })
+                        .await
+                        .map_err(error)?;
+                    attachment(handle, false)
+                        .await
+                        .map(|attached| Update::Attached(Box::new(attached)))
                 });
-            },
-            Action::Attach(id) => self.spawn(async move { attachment(read(|| application.attach(&id)).await?, true).await.map(|attached| Update::Attached(Box::new(attached))) }),
+            }
+            Action::Attach(id) => self.spawn(async move {
+                attachment(read(|| application.attach(&id)).await?, true)
+                    .await
+                    .map(|attached| Update::Attached(Box::new(attached)))
+            }),
             Action::Recent | Action::MoreRecent => {
-                if matches!(action, Action::Recent) { self.recent = None; }
+                if matches!(action, Action::Recent) {
+                    self.recent = None;
+                }
                 let cursor = self.recent.clone();
                 self.spawn(async move {
                     let page = read(|| application.list_recent(cursor.as_ref(), 64)).await?;
                     Ok(Update::Recent(page))
                 });
-            },
+            }
             Action::Models | Action::MoreModels => {
-                if matches!(action, Action::Models) { self.models = None; }
+                if matches!(action, Action::Models) {
+                    self.models = None;
+                }
                 let after = self.models.clone();
                 let model_catalog = self.model_catalog.clone();
-                self.spawn(async move { model_catalog.list_models(after.as_ref(), 64).await.map(Update::Models).map_err(error) });
-            },
-            Action::Model(model) => { self.state.model = model; self.state.notice("Model selected for explicit NextTurn inputs"); },
+                self.spawn(async move {
+                    model_catalog
+                        .list_models(after.as_ref(), 64)
+                        .await
+                        .map(Update::Models)
+                        .map_err(error)
+                });
+            }
+            Action::Model(model) => {
+                self.state.model = model;
+                self.state
+                    .notice("Model selected for explicit NextTurn inputs");
+            }
             Action::Queue | Action::Agents => self.spawn(async move {
                 let snapshot = read(|| handle.inspect()).await?;
                 let (title, items) = if matches!(action, Action::Queue) {
-                    ("Pending inputs", snapshot.pending.into_iter().map(|message| (format!("{} · {:?} → {:?}", message.message_id, message.delivery, message.target), Action::Message(message))).collect())
-                } else { ("Agents · history inspection", snapshot.tree.descendants.into_iter().map(|child| (format!("{} · {}", child.task_name, child.status.session_id), Action::Child(child.status.session_id))).collect()) };
-                Ok(Update::Menu(Menu { title: title.into(), items, selected: 0 }))
+                    (
+                        "Pending inputs",
+                        snapshot
+                            .pending
+                            .into_iter()
+                            .map(|message| {
+                                (
+                                    format!(
+                                        "{} · {:?} → {:?}",
+                                        message.message_id, message.delivery, message.target
+                                    ),
+                                    Action::Message(message),
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    (
+                        "Agents · history inspection",
+                        snapshot
+                            .tree
+                            .descendants
+                            .into_iter()
+                            .map(|child| {
+                                (
+                                    format!("{} · {}", child.task_name, child.status.session_id),
+                                    Action::Child(child.status.session_id),
+                                )
+                            })
+                            .collect(),
+                    )
+                };
+                Ok(Update::Menu(Menu {
+                    title: title.into(),
+                    items,
+                    selected: 0,
+                }))
             }),
             Action::Child(id) => self.spawn_detail(async move {
                 let child = read(|| application.attach(&id)).await?;
                 let page = read(|| child.history_before(None, 128)).await?;
                 let mut transcript = transcript::Transcript::default();
-                for fact in &page.facts { transcript.apply(fact); }
-                let text = transcript.blocks.iter().map(|block| format!("{}\n{}", block.title, block.text())).collect::<Vec<_>>().join("\n\n");
-                Ok(Update::Detail(format!("Child {id} · latest 128 Facts · history only\n\n{text}")))
+                for fact in &page.facts {
+                    transcript.apply(fact);
+                }
+                let text = transcript
+                    .blocks
+                    .iter()
+                    .map(|block| format!("{}\n{}", block.title, block.text()))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                Ok(Update::Detail(format!(
+                    "Child {id} · latest 128 Facts · history only\n\n{text}"
+                )))
             }),
             Action::Message(message) => {
-                self.state.menu = Some(Menu { title: format!("{} · {:?}", message.message_id, message.target), selected: 0, items: vec![("Cancel this pending input".into(), Action::CancelMessage(message.message_id.clone()))] });
-                self.spawn_detail(async move { read(|| handle.read_message(&message.message_id, message.accepted_control_seq)).await.map(Update::Message) });
-            },
-            Action::CancelMessage(id) => self.spawn(async move { let result = handle.cancel(CancelTarget::Message(id), None).await.map_err(error)?; Ok(Update::Notice(format!("Cancellation accepted: {}", result.accepted))) }),
-            Action::Questions => self.state.menu = Some(Menu { title: "Live questions".into(), selected: 0, items: self.interactions.as_ref().map_or_else(Vec::new, |snapshot| snapshot.questions().iter().map(|request| (format!("{} · {}", request.id, request.questions[0].prompt), Action::Question(request.clone()))).collect()) }),
-            Action::Approvals => self.state.menu = Some(Menu { title: "Live approvals".into(), selected: 0, items: self.interactions.as_ref().map_or_else(Vec::new, |snapshot| snapshot.approvals().iter().map(|request| (format!("{} · {}", request.action, request.reason), Action::Approval(request.clone()))).collect()) }),
+                self.state.menu = Some(Menu {
+                    title: format!("{} · {:?}", message.message_id, message.target),
+                    selected: 0,
+                    items: vec![(
+                        "Cancel this pending input".into(),
+                        Action::CancelMessage(message.message_id.clone()),
+                    )],
+                });
+                self.spawn_detail(async move {
+                    read(|| handle.read_message(&message.message_id, message.accepted_control_seq))
+                        .await
+                        .map(Update::Message)
+                });
+            }
+            Action::CancelMessage(id) => self.spawn(async move {
+                let result = handle
+                    .cancel(CancelTarget::Message(id), None)
+                    .await
+                    .map_err(error)?;
+                Ok(Update::Notice(format!(
+                    "Cancellation accepted: {}",
+                    result.accepted
+                )))
+            }),
+            Action::Questions => {
+                self.state.menu = Some(Menu {
+                    title: "Live questions".into(),
+                    selected: 0,
+                    items: self
+                        .interactions
+                        .as_ref()
+                        .map_or_else(Vec::new, |snapshot| {
+                            snapshot
+                                .questions()
+                                .iter()
+                                .map(|request| {
+                                    (
+                                        format!("{} · {}", request.id, request.questions[0].prompt),
+                                        Action::Question(request.clone()),
+                                    )
+                                })
+                                .collect()
+                        }),
+                });
+            }
+            Action::Approvals => {
+                self.state.menu = Some(Menu {
+                    title: "Live approvals".into(),
+                    selected: 0,
+                    items: self
+                        .interactions
+                        .as_ref()
+                        .map_or_else(Vec::new, |snapshot| {
+                            snapshot
+                                .approvals()
+                                .iter()
+                                .map(|request| {
+                                    (
+                                        format!("{} · {}", request.action, request.reason),
+                                        Action::Approval(request.clone()),
+                                    )
+                                })
+                                .collect()
+                        }),
+                });
+            }
             Action::Question(request) => {
-                if self.interactions.as_ref().is_some_and(|snapshot| snapshot.questions().contains(&request)) {
-                    self.state.answer = Some(state::Answer { scroll: 0, request, answers: Vec::new(), editor: editor::Editor::default() });
-                } else { self.state.notice("Question is no longer live"); }
-            },
+                if self
+                    .interactions
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.questions().contains(&request))
+                {
+                    self.state.answer = Some(state::Answer {
+                        scroll: 0,
+                        request,
+                        answers: Vec::new(),
+                        editor: editor::Editor::default(),
+                    });
+                } else {
+                    self.state.notice("Question is no longer live");
+                }
+            }
             Action::Approval(request) => {
-                if self.interactions.as_ref().is_some_and(|snapshot| snapshot.approvals().contains(&request)) {
+                if self
+                    .interactions
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.approvals().contains(&request))
+                {
                     self.state.open_detail(transcript::json_window(&request));
-                    self.state.detail_actions = Some(Menu { title: format!("{} · {}", request.action, request.reason), selected: 0, items: vec![("Deny".into(), Action::Decide(request.clone(), rsi_approval_protocol::ApprovalDecision::Deny)), ("Allow once".into(), Action::Decide(request, rsi_approval_protocol::ApprovalDecision::AllowOnce))] });
-                    self.state.notice("Review the prepared request; Enter opens Deny / Allow once");
-                } else { self.state.notice("Approval is no longer live"); }
-            },
+                    self.state.detail_actions = Some(Menu {
+                        title: format!("{} · {}", request.action, request.reason),
+                        selected: 0,
+                        items: vec![
+                            (
+                                "Deny".into(),
+                                Action::Decide(
+                                    request.clone(),
+                                    rsi_approval_protocol::ApprovalDecision::Deny,
+                                ),
+                            ),
+                            (
+                                "Allow once".into(),
+                                Action::Decide(
+                                    request,
+                                    rsi_approval_protocol::ApprovalDecision::AllowOnce,
+                                ),
+                            ),
+                        ],
+                    });
+                    self.state
+                        .notice("Review the prepared request; Enter opens Deny / Allow once");
+                } else {
+                    self.state.notice("Approval is no longer live");
+                }
+            }
             Action::Decide(request, decision) => {
                 self.state.escape();
-                if self.interactions.as_ref().is_some_and(|snapshot| snapshot.approvals().contains(&request)) {
-                    self.spawn(async move { let owner = SessionId::new(request.subject.session_id()).map_err(error)?; let accepted = handle.answer_approval(&owner, &request.id, decision).await.map_err(error)?; Ok(Update::Notice(format!("Approval response accepted: {accepted}"))) });
-                } else { self.state.notice("Approval changed; reopen the current request"); }
-            },
+                if self
+                    .interactions
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.approvals().contains(&request))
+                {
+                    self.spawn(async move {
+                        let owner = SessionId::new(request.subject.session_id()).map_err(error)?;
+                        let accepted = handle
+                            .answer_approval(&owner, &request.id, decision)
+                            .await
+                            .map_err(error)?;
+                        Ok(Update::Notice(format!(
+                            "Approval response accepted: {accepted}"
+                        )))
+                    });
+                } else {
+                    self.state
+                        .notice("Approval changed; reopen the current request");
+                }
+            }
             Action::Detail => {
                 if let Some(block) = self.state.transcript.blocks.get(self.state.focused) {
-                    let mut items = block.pieces.iter().filter(|piece| piece.omitted).take(64).map(|piece| (format!("Fact {} · field {} · first window", piece.source.seq, piece.source.field), Action::Window(piece.source, 0))).collect::<Vec<_>>();
+                    let mut items = block
+                        .pieces
+                        .iter()
+                        .filter(|piece| piece.omitted)
+                        .take(64)
+                        .map(|piece| {
+                            (
+                                format!(
+                                    "Fact {} · field {} · first window",
+                                    piece.source.seq, piece.source.field
+                                ),
+                                Action::Window(piece.source, 0),
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     if let Some(tool) = &block.tool {
-                        for (label, source) in [("Arguments", tool.arguments), ("Result value", tool.result), ("Rejection", tool.rejection)] {
-                            if let Some(source) = source { items.push((format!("{label} · Fact {}", source.seq), Action::Window(source, 0))); }
+                        for (label, source) in [
+                            ("Arguments", tool.arguments),
+                            ("Result value", tool.result),
+                            ("Rejection", tool.rejection),
+                        ] {
+                            if let Some(source) = source {
+                                items.push((
+                                    format!("{label} · Fact {}", source.seq),
+                                    Action::Window(source, 0),
+                                ));
+                            }
                         }
                     }
-                    for (stream, output) in ["stdout", "stderr"].into_iter().zip(&block.outputs) { if let Some(output) = output { items.push((format!("Full {stream}"), Action::Output(output.clone(), 0))); } }
+                    for (stream, output) in ["stdout", "stderr"].into_iter().zip(&block.outputs) {
+                        if let Some(output) = output {
+                            items.push((
+                                format!("Full {stream}"),
+                                Action::Output(output.clone(), 0),
+                            ));
+                        }
+                    }
                     self.state.open_detail(block.text());
-                    if !items.is_empty() { self.state.menu = Some(Menu { title: "Source reads".into(), selected: 0, items }); }
+                    if !items.is_empty() {
+                        self.state.menu = Some(Menu {
+                            title: "Source reads".into(),
+                            selected: 0,
+                            items,
+                        });
+                    }
                 }
-            },
+            }
             Action::Window(source, offset) => {
                 let controller = self.controller.clone();
                 let stop = self.state.detail_stop.clone();
                 self.spawn_as(WorkKind::Detail, async move {
-                    let window = controller.source_window(source, offset, transcript::WINDOW, stop).await.map_err(error)?;
-                    Ok(Update::Window(transcript::Piece::from_window(source, &window)))
+                    let window = controller
+                        .source_window(source, offset, transcript::WINDOW, stop)
+                        .await
+                        .map_err(error)?;
+                    Ok(Update::Window(transcript::Piece::from_window(
+                        source, &window,
+                    )))
                 });
-            },
+            }
             Action::Output(id, offset) => {
                 let output_cache = self.output_cache.clone();
                 self.spawn_detail(async move {
-                    let page = output_cache.read(&id, offset, 16 * 1024).await.map_err(error)?;
+                    let page = output_cache
+                        .read(&id, offset, 16 * 1024)
+                        .await
+                        .map_err(error)?;
                     Ok(Update::Output(page))
                 });
-            },
+            }
         }
         false
     }
@@ -957,7 +1236,7 @@ async fn run_inner(
     let result: Result<()> = async {
         loop {
             client.state.busy = client.submission.busy || !client.tasks.is_empty();
-            client.state.editor.limit = (4 * 1024 * 1024usize).saturating_sub(client.drafts.values().map(|saved| saved.editor.text.capacity()).sum());
+            client.state.editor.set_retention_limit((4 * 1024 * 1024usize).saturating_sub(client.drafts.values().map(|saved| saved.editor.retained_bytes()).sum()));
             if let Some(answer) = &mut client.state.answer { answer.editor.limit = rsi_user_questions_protocol::MAXIMUM_QUESTION_BYTES.saturating_sub(answer.answers.iter().map(String::len).sum()); }
             tokio::select! {
                 () = application_work.stop.cancelled() => break,
@@ -986,9 +1265,7 @@ async fn run_inner(
                         input::Input::Rejected(message) => client.state.notice(message),
                         input::Input::Terminal(termina::Event::Paste(text)) => {
                             if client.state.ui_paste(&text) { continue; }
-                            let total = client.drafts.values().map(|saved| saved.editor.text.capacity()).sum::<usize>() + client.state.editor.text.capacity();
-                            if total.saturating_add(text.len()) > 4 * 1024 * 1024 { client.state.notice("Session drafts exceed 4 MiB; nothing was inserted"); }
-                            else if let Err(message) = client.state.answer.as_mut().map_or(&mut client.state.editor, |answer| &mut answer.editor).insert(&text) { client.state.notice(message); }
+                            if let Err(message) = client.state.answer.as_mut().map_or(&mut client.state.editor, |answer| &mut answer.editor).insert(&text) { client.state.notice(message); }
                         },
                         input::Input::Terminal(termina::Event::Key(key)) if key.kind != KeyEventKind::Release => {
                             let control = key.modifiers.contains(Modifiers::CONTROL);
@@ -996,6 +1273,7 @@ async fn run_inner(
                             if control && key.code == KeyCode::Char('y') { client.copy(); continue; }
                             if key.code == KeyCode::Escape { client.state.escape(); continue; }
                             if control && key.code == KeyCode::Char('p') { client.action_menu(); continue; }
+                            if control && key.code == KeyCode::Char('r') && client.state.ui_edit.is_none() && client.state.answer.is_none() && client.state.detail.is_none() { client.prompt_menu(); continue; }
                             if control && key.code == KeyCode::Char('d') && client.state.editor.text.is_empty() && client.state.answer.is_none() && client.submission.request.is_none() { break; }
                             if let Some(menu) = &mut client.state.menu {
                                 match key.code {
@@ -1014,6 +1292,7 @@ async fn run_inner(
                                 let action = if key.code == KeyCode::Right { client.state.detail_next.clone() } else { client.state.detail_previous.clone() };
                                 if let Some(action) = action { client.action(action); }
                             }
+                            else if key.code == KeyCode::Tab && client.state.detail.is_none() && client.state.answer.is_none() && client.complete_command() {}
                             else if key.code == KeyCode::Tab { client.state.focused = (client.state.focused+1) % client.state.transcript.blocks.len().max(1); if let Some(block) = client.state.transcript.blocks.get_mut(client.state.focused) { block.collapsed = !block.collapsed; client.state.top = block.anchor(0); } }
                             else if key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT) {
                                 if client.state.answer.is_some() { client.answer(); } else { client.submit(MessageDelivery::NextTurn, false); }
@@ -1054,8 +1333,9 @@ async fn run_inner(
                         WorkKind::Cancel => client.cancelling = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Completions { .. } | Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
+                        Ok(Update::Completions { prefix, names }) => client.command_completions(&prefix, names),
                         Ok(Update::Ui(view)) => client.show_ui(view),
                         Ok(Update::Command(result)) => client.command_finished(result),
                         Err(problem) => {
@@ -1123,7 +1403,7 @@ async fn run_inner(
                                         client.submission.cancel_when_accepted = false;
                                         if client.state.editor.text.is_empty()
                                             && let Some(request) = client.submission.request.take()
-                                            && let Some(MessageInput::Text { text }) = request.content.into_iter().next() { client.state.editor.cursor = text.len(); client.state.editor.text = text; }
+                                            && let Some(MessageInput::Text { text }) = request.content.into_iter().next() { client.state.editor = editor::Editor::with_text(text, input::MAX_TEXT); }
                                     }
                                     client.state.notice(format!("Submission failed: {problem}. Input retained in the editor or Actions → Pending / rejected submission."));
                                 },
@@ -1145,7 +1425,7 @@ async fn run_inner(
                             let draft = std::mem::take(&mut client.state.editor); let model = client.state.model.take();
                             let owned = std::mem::take(&mut client.owned);
                             let command = std::mem::take(&mut client.command);
-                            if !draft.text.is_empty() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
+                            if !draft.text.is_empty() || draft.has_edits() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
                             client.handle = attached.handle; client.state = State::new(attached.header, client.state.remote);
                             if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.owned = saved.owned; client.command = saved.command; }
                             client.cancelling = false; client.cancellation_queued = false; client.interactions = None; client.inspection = attached.inspection; client.durability = if client.inspection.is_some() { Durability::Durable } else { Durability::Draft }; client.history.before = None; client.live_transcript = None;

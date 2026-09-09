@@ -7,6 +7,8 @@ use rsi_ai_protocol::ModelRef;
 
 #[derive(Clone, Debug)]
 pub(super) enum Action {
+    RecallPrompt(u64),
+    CompleteCommand(String, String),
     UiSurface(rsi_ui::UiReference),
     UiCard,
     UiEdit(String, u64),

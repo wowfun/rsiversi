@@ -4,6 +4,65 @@ use crate::tests::{UnknownThenAcceptedHandle, UnusedWorkspace};
 mod ui;
 
 #[tokio::test]
+async fn command_completion_is_discovered_undoable_and_inert_after_draft_change() {
+    let (mut client, handle, runtime, surface) = client().await;
+    client.state.editor.insert("/pl").unwrap();
+    assert!(client.complete_command());
+    let work = client.tasks.next().await.unwrap();
+    let Update::Completions { prefix, names } = work.result.unwrap() else {
+        panic!("discovered completions")
+    };
+    client.command_completions(&prefix, names);
+    assert_eq!(client.state.editor.text, "/plan ");
+    assert!(handle.commands.lock().unwrap().is_empty());
+    assert!(handle.submitted_requests.lock().unwrap().is_empty());
+    let mut undo: termina::event::KeyEvent = KeyCode::Char('z').into();
+    undo.modifiers = Modifiers::CONTROL;
+    client.state.editor.key(undo).unwrap();
+    assert_eq!(client.state.editor.text, "/pl");
+    assert!(client.complete_command());
+    client.state.editor.insert("changed").unwrap();
+    let work = client.tasks.next().await.unwrap();
+    let Update::Completions { prefix, names } = work.result.unwrap() else {
+        panic!("discovered completions")
+    };
+    client.command_completions(&prefix, names);
+    assert_eq!(client.state.editor.text, "/plchanged");
+    assert!(client.state.menu.is_none());
+    let notice = client.state.status.clone();
+    client.command_completions("/pl", Err(error("stale discovery error")));
+    assert_eq!(client.state.status, notice);
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn recalling_only_this_sessions_prompt_is_an_edit_without_submission() {
+    let (mut client, handle, runtime, surface) = client().await;
+    client
+        .prompts
+        .remember(client.state.header.session_id(), "first\nsecond");
+    client
+        .prompts
+        .remember(&SessionId::new("another-session").unwrap(), "foreign text");
+    client.state.editor.insert("unfinished draft").unwrap();
+    client.prompt_menu();
+    let menu = client.state.menu.take().unwrap();
+    assert_eq!(menu.items.len(), 1);
+    client.action(menu.items[0].1.clone());
+    assert_eq!(client.state.editor.text, "first\nsecond");
+    let mut undo: termina::event::KeyEvent = KeyCode::Char('z').into();
+    undo.modifiers = Modifiers::CONTROL;
+    client.state.editor.key(undo).unwrap();
+    assert_eq!(client.state.editor.text, "unfinished draft");
+    assert!(handle.submitted_requests.lock().unwrap().is_empty());
+    assert!(handle.commands.lock().unwrap().is_empty());
+    assert!(client.tasks.is_empty());
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn registered_slash_command_retains_unknown_identity_without_submitting_a_message() {
     let (mut client, handle, runtime, surface) = client().await;
     client.state.editor.insert("/plan on").unwrap();
@@ -15,6 +74,8 @@ async fn registered_slash_command_retains_unknown_identity_without_submitting_a_
     assert!(result.is_err());
     client.command_finished(result);
     assert_eq!(client.state.editor.text, "/plan on");
+    client.prompt_menu();
+    assert_eq!(client.state.menu.take().unwrap().items[0].0, "/plan on");
     assert!(client.submission.request.is_none());
     assert!(client.owned.is_empty());
     let original = client.command.view().pending.unwrap();

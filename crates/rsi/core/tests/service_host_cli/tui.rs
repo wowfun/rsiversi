@@ -75,7 +75,9 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
         assert!(Instant::now() < closed, "command menu did not close");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    terminal.send(b"/plan on\r");
+    terminal.send(b"/pl\t");
+    terminal.until("Command completed").await;
+    terminal.send(b"on\r");
     terminal.until("DraftChanged").await;
     inspect_plan_projection(&mut terminal, true, "Draft").await;
     assert!(requests.lock().unwrap().is_empty());
@@ -255,6 +257,28 @@ plugin = "rsi.application.tui"
         }
     }
 
+    async fn absent(&mut self, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !self
+                .screen
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains(text)
+            {
+                self.capture();
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "terminal still displays {text:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn resize(&self, size: PtySize) {
         let mut parser = self.screen.lock().unwrap();
         parser.screen_mut().set_size(size.rows, size.cols);
@@ -330,8 +354,20 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-paste"]);
     terminal.until("Describe a change").await;
-    terminal.send(b"\x1b[200~Repair UTF-8\nsecond line\x1b[201~\r");
+    terminal.send(b"\x1b[200~Repair UTF-8\nsecond line\x1b[201~");
+    terminal.until("Repair UTF-8").await;
+    terminal.send(b"\x1a");
+    terminal.absent("Repair UTF-8").await;
+    terminal.send(b"\x1bz");
+    terminal.until("Repair UTF-8").await;
+    terminal.send(b"\r");
     terminal.until("hello from daemon").await;
+    terminal.until("Accepted ").await;
+    terminal.send(b"\x12");
+    terminal.until("Submitted input history").await;
+    terminal.send(b"\r");
+    terminal.until("Input recalled").await;
+    terminal.send(b"\x1a");
     terminal.send(b"\x10\x1b[B\x1b[B\r");
     terminal.until("fixture/fixture-model").await;
     terminal.send(b"\x1b");

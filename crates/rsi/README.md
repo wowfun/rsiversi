@@ -22,8 +22,28 @@ layer or selection. Ctrl+D with an empty editor exits. Bracketed paste is
 enabled; enhanced keyboard events are negotiated when supported. Alt+Enter is
 left to the terminal. A bounded input framer rejects an entire oversized paste
 and discards through its terminator before accepting keys again. Drafts are
-limited to 1 MiB UTF-8 each and 4 MiB in aggregate; rejected insertion preserves
+limited to 1 MiB UTF-8 each; draft and undo/redo text buffers share a 4 MiB
+aggregate budget across saved Sessions. Rejected insertion preserves
 the previous draft. Real SIGINT invokes cancellation; SIGTERM and SIGHUP exit.
+Ctrl+Z undoes an edit and Alt+Z (or enhanced Ctrl+Shift+Z) redoes it. A bracketed
+paste is one edit. Editing after undo discards the redo branch. Each editor keeps
+at most 128 changes and 1 MiB of removed/inserted text; the oldest changes are
+discarded first when a bound is reached. A change too large for the journal
+resets it without rejecting otherwise valid input. Submission clears that
+editor's journal so undo cannot recreate a submitted input; saved drafts retain
+their own journal when switching Sessions. Question and contributed-field editors
+have independent journals under the same per-editor bound.
+Ctrl+R opens this application's submitted text inputs for the current Session.
+The history keeps at most 100 entries and 1 MiB across Sessions, preserves exact
+text and skips consecutive duplicates within a Session. Entries are captured from
+the frozen local request, including failed or unresolved attempts; their receipts
+and outcomes remain in submission details. History is memory-only and
+does not replay requests or restore image attachments. Selecting an entry replaces
+the draft as one undoable edit without submitting it. Tab completes a registered
+Session command when the composer contains only a slash-name prefix; multiple
+matches open a choice menu. Completion reads never submit a command, and a result
+for a changed draft or attachment is discarded. Outside that prefix, Tab retains
+its conversation-card behavior.
 
 Model selection is client-local and affects future explicit NextTurn requests.
 An admitted request freezes its identity, model, and content through retries.

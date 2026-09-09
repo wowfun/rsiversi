@@ -413,7 +413,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
         Paragraph::new(Line::from(vec![Span::raw(if area.width < 70 {
             " ^P actions  ^C cancel  ^Y copy  Esc close"
         } else {
-            " ^P actions   ^C cancel   ^Y copy   PgUp history   Tab card   Esc close"
+            " ^P actions   ^C cancel   ^Y copy   ^Z undo   PgUp history   Tab card   Esc close"
         })]))
         .style(Style::default().fg(Color::DarkGray)),
         Rect::new(0, area.height - 2, area.width, 1),
