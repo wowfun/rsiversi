@@ -9,6 +9,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+revision-b = []
+
 [dependencies]
 rsi-ai-protocol = { path = "../../../crates/rsi-ai/protocol" }
 rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }

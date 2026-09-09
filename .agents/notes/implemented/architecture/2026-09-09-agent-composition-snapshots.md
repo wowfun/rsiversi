@@ -44,7 +44,7 @@ Public tests cover unchanged-source catalog replacement, replacement during
 blocked activation, source failures, typed marker/isolation/mode cache changes,
 real Portable provider bindings and final-pin catalog reclamation. Catalog entry
 and key bounds apply before generation work; Runtime Context budgets can be
-stricter. This seam supports the separate
-[native artifact management proposal](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-and does not itself implement installation, automatic updates or native failure
-recovery.
+stricter. The product's [native catalog staging owner](2026-09-09-native-agent-catalog-staging.md)
+consumes this seam; Agent composition itself does not implement installation,
+automatic updates or native failure recovery. Preset compiler rebinding preserves
+root/default/authoring authority while existing clones keep their own compiler.

@@ -860,6 +860,29 @@ impl Drop for AssetStaging {
 }
 
 impl StandardComposition {
+    /// Constructs an explicit native Agent staging owner from one acquired store
+    /// and Loader. This does not load code or change this composition's provider.
+    #[cfg(unix)]
+    pub fn native_addon_manager(
+        &self,
+        store: Arc<crate::NativeAddonStore>,
+        catalog: rsi_meta_native_loader::NativeCatalog,
+    ) -> crate::Result<Arc<crate::NativeAddonManager>> {
+        let boot = |error: rsi_host::HostError| crate::RsiError::Boot(error.to_string());
+        let addons = self.agent_addons().map_err(boot)?;
+        let presets = self.preset_catalog(false, &addons).map_err(boot)?;
+        crate::NativeAddonManager::new(
+            store,
+            catalog,
+            self.paths.clone(),
+            self.coding_tools.is_some(),
+            presets,
+            addons,
+        )
+        .map(Arc::new)
+        .map_err(boot)
+    }
+
     /// Creates a standard composition from explicit Host paths and captured secrets.
     pub fn new(
         paths: HostPaths,

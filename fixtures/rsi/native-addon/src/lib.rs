@@ -7,6 +7,12 @@ use rsi_tools_protocol::{ToolDefinition, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+const DESCRIPTION: &str = if cfg!(feature = "revision-b") {
+    "Native fixture tool revision B"
+} else {
+    "Native fixture tool"
+};
+
 #[derive(Default)]
 struct Plugin;
 #[derive(Deserialize, Serialize)]
@@ -93,7 +99,7 @@ impl NativeInstance for Instance {
                         Ok(Definition {
                             definition: ToolDefinition::new(
                                 name,
-                                "Native fixture tool",
+                                DESCRIPTION,
                                 json!({"type":"object"}),
                             )
                             .map_err(|error| error.to_string())?,

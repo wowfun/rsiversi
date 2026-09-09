@@ -48,6 +48,11 @@ impl StoreDirectory {
         }
         Ok(())
     }
+    pub(super) fn object_path(&self, digest: &str) -> Result<PathBuf> {
+        self.check()?;
+        owned(&regular_at(&self.objects, digest)?)?;
+        Ok(self.path.join("objects").join(digest))
+    }
     pub(super) fn lock(&self) -> Result<File> {
         self.check()?;
         let lock = directory_at(&self.root, ".")?;

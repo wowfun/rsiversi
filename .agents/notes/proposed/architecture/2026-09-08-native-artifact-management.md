@@ -25,8 +25,11 @@ until process recovery. Management cannot bypass this with another catalog.
 
 ## Alternatives considered
 
-Trusted-path-only loading remains current until this proposal ships. A Meta
-installer would violate its generic ownership. Remote marketplaces and version
+The [local source store](../../implemented/architecture/2026-09-09-native-addon-source-storage.md)
+and [explicit catalog staging](../../implemented/architecture/2026-09-09-native-agent-catalog-staging.md)
+now supply installation and immutable Agent selection. Automatic Runtime wiring
+and build/watch actions remain proposed. A Meta installer would violate its
+generic ownership. Remote marketplaces and version
 solving are unnecessary for local artifacts. Forced unload risks use-after-free.
 
 ## Acceptance criteria

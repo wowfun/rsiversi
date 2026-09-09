@@ -230,3 +230,23 @@ failure never becomes an ordinary pre-publication error or triggers a rollback.
 Root and object-directory replacement reject subsequent operations. These are
 local storage mechanics, without a Windows writer, remote marketplace or version
 solver.
+
+`StandardComposition::native_addon_manager` constructs an explicit local staging
+owner from an acquired store and one supplied `NativeCatalog`. Construction
+does not load native code. Its blocking `refresh` validates the complete enabled
+selection before loading, checks every artifact's recorded digest and ABI plugin
+identity, and publishes one immutable compiler/contribution pair only if the
+enabled selection still matches after staging. Only Agent factories and explicit
+Portable isolation keys enter that pair. Linked base declarations remain fixed.
+Installation-only index changes do not rebuild the executable catalog.
+
+The manager implements `AgentCompositionSource`. Capturing a snapshot reads the
+bounded desired metadata but never loads code. Pending or failed refresh rejects
+new selection instead of returning a stale cached catalog. Existing pins retain
+their own immutable factories. `close` closes future selection; it does not
+revoke existing pins or claim that native cleanup has finished. The manager
+retains its single Loader, exposes path-free selection/retention metadata, and
+permanently rejects refresh and new snapshots after a retained native finalization
+failure. It never rotates the Loader or its cache to bypass admission closure.
+These explicit library operations do not start a watcher or install a Runtime
+plugin; callers supervise blocking refresh work and retain its owner to completion.

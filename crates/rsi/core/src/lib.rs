@@ -29,6 +29,13 @@ mod client_composition;
 pub use client_composition::probe_service_host;
 mod composition;
 mod local_host;
+#[cfg(unix)]
+mod native_addons;
+#[cfg(unix)]
+pub use native_addons::{
+    NativeAddonHealth, NativeAddonInspection, NativeAddonManager, NativeAddonRefresh,
+    NativeAddonUpdateError,
+};
 mod output_read;
 mod profile_owner;
 mod profiles;

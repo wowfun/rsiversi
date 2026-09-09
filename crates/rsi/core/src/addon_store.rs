@@ -186,6 +186,9 @@ impl NativeAddonStore {
             enabled: state.enabled.into_values().collect(),
         })
     }
+    pub(crate) fn artifact_path(&self, record: &NativeAddonRecord) -> Result<PathBuf> {
+        self.directory.object_path(record.artifact_sha256())
+    }
     /// Installs exactly the bytes copied from an explicit source manifest.
     /// This never enables the record, runs its build command or loads native code.
     pub fn install(&self, manifest_path: &Path) -> Result<NativeAddonReceipt> {

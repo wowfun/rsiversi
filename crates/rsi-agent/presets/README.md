@@ -17,7 +17,11 @@ byte-identical across its selected-source preflight. The application injects one
 whose frozen paths, platform, defines, limits, and Agent-only contribution-id
 allowlist are shared by roster preflight and generation compilation. The
 allowlist is not the Host factory catalog and contains no executable factory. A
-roster row is healthy only when the complete Profile source,
+catalog clone can replace its compiler with `with_compiler`; it preserves root
+precedence, trust, the default-store authority and the shared authoring lock.
+The caller must pair the replacement with the executable contribution snapshot
+used for the same Agent build. Existing catalog values keep their own compiler.
+A roster row is healthy only when the complete Profile source,
 including required includes and pure expressions, compiles semantically and
 every enabled leaf belongs to that allowlist. Agent-forbidden Local or event
 isolation is rejected by the same pure preflight. Valid-id directories with a
