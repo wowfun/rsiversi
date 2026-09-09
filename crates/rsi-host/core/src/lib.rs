@@ -11,7 +11,10 @@ mod paths;
 
 pub use builder::{HostBuilder, HostLimits};
 pub use error::{HostError, Result};
-pub use host::{Host, HostProfilePreview, HostProfilePreviewLeaf, RunningHost};
+pub use host::{
+    Host, HostProfileEditPreview, HostProfilePreview, HostProfilePreviewLeaf,
+    HostProfileSourceFingerprint, RunningHost,
+};
 pub use paths::HostPaths;
 pub use rsi_meta_profile::{
     Profile, ProfileBootstrap, ProfileBundle, ProfileControl, ProfileControlContract, ProfileEntry,

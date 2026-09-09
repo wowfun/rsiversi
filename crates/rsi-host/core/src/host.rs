@@ -37,6 +37,30 @@ pub struct HostProfilePreviewLeaf {
     pub identity: FactoryIdentity,
 }
 
+/// Prospective source edit compiled and resolved without preparing any factory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostProfileEditPreview {
+    /// Prior compiled tree, absent when the current source cannot compile.
+    pub previous: Option<ProfileSnapshot>,
+    /// Complete redacted proposed tree, at pure-preview revision zero.
+    pub proposed: ProfileSnapshot,
+    /// Redacted changes, absent when the prior tree is unavailable.
+    pub changes: Option<Vec<rsi_meta_profile::NodeChange>>,
+    /// Exact resolved enabled factories in proposed executable order.
+    pub leaves: Vec<HostProfilePreviewLeaf>,
+    /// Captured native source identities, including the prospective root bytes.
+    pub sources: Vec<HostProfileSourceFingerprint>,
+}
+
+/// One native source fingerprint captured by pure compilation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostProfileSourceFingerprint {
+    /// Exact canonical source path.
+    pub path: std::path::PathBuf,
+    /// SHA-256 of the bytes evaluated at that path.
+    pub sha256: [u8; 32],
+}
+
 pub(crate) const PROFILE_PLUGIN_ID: &str = "rsi.meta.profile";
 
 #[derive(Debug)]
@@ -202,12 +226,64 @@ impl Host {
 
     /// Purely compiles and resolves one explicit immutable source program.
     pub fn preview_program(&self, program: ProfileProgram) -> Result<HostProfilePreview> {
-        let environment = self.environment.clone();
-        let program = program
+        let program = self.configured_program(program);
+        let candidate = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone())
+            .compile(&program)?;
+        Ok(HostProfilePreview {
+            source_digest: candidate.source_digest().to_owned(),
+            source_paths: candidate.watch_paths().to_vec(),
+            leaves: self.resolve_preview_leaves(&candidate)?,
+        })
+    }
+
+    /// Compiles one prospective native root edit against every frozen Host input.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn preview_file_edit(
+        &self,
+        path: impl Into<std::path::PathBuf>,
+        contents: &[u8],
+    ) -> Result<HostProfileEditPreview> {
+        let program = self.configured_program(ProfileProgram::from_file(path));
+        let compiler = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone());
+        let previous = compiler.compile(&program).ok();
+        let candidate = compiler.preview_file_edit(&program, contents)?;
+        let leaves = self.resolve_preview_leaves(&candidate)?;
+        let sources = candidate
+            .watch_paths()
+            .iter()
+            .map(|path| {
+                let sha256 = candidate.source_fingerprint(path).ok_or_else(|| {
+                    rsi_meta_profile::ProfileError::Source {
+                        message: "compiled native source has no fingerprint".to_owned(),
+                    }
+                })?;
+                Ok(HostProfileSourceFingerprint {
+                    path: path.clone(),
+                    sha256: *sha256,
+                })
+            })
+            .collect::<rsi_meta_profile::Result<Vec<_>>>()?;
+        Ok(HostProfileEditPreview {
+            changes: previous
+                .as_ref()
+                .map(|previous| candidate.changes_from(previous)),
+            previous: previous.map(|previous| previous.snapshot()),
+            proposed: candidate.snapshot(),
+            leaves,
+            sources,
+        })
+    }
+
+    fn configured_program(&self, program: ProfileProgram) -> ProfileProgram {
+        program
             .with_linked_fragments(self.catalog.fragments.clone())
-            .with_launch_patches(self.catalog.launch_patches.clone());
-        let candidate =
-            ProfileCompiler::new(environment, self.limits.profile.clone()).compile(&program)?;
+            .with_launch_patches(self.catalog.launch_patches.clone())
+    }
+
+    fn resolve_preview_leaves(
+        &self,
+        candidate: &rsi_meta_profile::ProfileCandidate,
+    ) -> Result<Vec<HostProfilePreviewLeaf>> {
         let mut leaves = Vec::with_capacity(candidate.leaves().len());
         for leaf in candidate.leaves() {
             let resolved = self.catalog.resolve(leaf.plugin())?;
@@ -217,11 +293,7 @@ impl Host {
                 identity: resolved.identity().clone(),
             });
         }
-        Ok(HostProfilePreview {
-            source_digest: candidate.source_digest().to_owned(),
-            source_paths: candidate.watch_paths().to_vec(),
-            leaves,
-        })
+        Ok(leaves)
     }
 
     /// Starts one immutable in-memory root after the linked prefix.
@@ -268,9 +340,7 @@ impl Host {
         program: ProfileProgram,
     ) -> Result<ProfileBootstrap> {
         let environment = self.environment.clone();
-        let program = program
-            .with_linked_fragments(self.catalog.fragments.clone())
-            .with_launch_patches(self.catalog.launch_patches.clone());
+        let program = self.configured_program(program);
         let preparation_runtime = runtime.clone();
         let resolver = Arc::clone(&self.catalog) as Arc<dyn ProfileResolver>;
         let limits = self.limits.profile.clone();

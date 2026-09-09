@@ -23,6 +23,13 @@ values. Per-source fingerprints let a product detect changes to captured include
 before publishing its selected root. These APIs perform no factory preparation,
 Runtime mutation or filesystem write.
 
+Host preview attaches its frozen fragments, launch patches and environment and
+resolves every enabled proposed factory through that same frozen catalog. It
+returns these identities alongside both redacted trees and source fingerprints.
+An invalid old program leaves the previous tree and effective diff unavailable;
+it does not prevent previewing a valid repair. An unresolved proposed factory
+still rejects the preview before any preparation.
+
 ## Alternatives considered
 
 A temporary sibling root would give preview and committed programs different

@@ -101,3 +101,12 @@ During explicit product assembly, builder `has_local_contract` and
 `has_local_event` report exact marker membership without mutation. An embedder
 may use these to share repeated declarations. The registering methods continue
 to reject duplicates and conflicting keys; no factory code runs during lookup.
+
+Native `Host::preview_file_edit` applies the frozen catalog, fragments, launch
+patches and environment to a prospective root edit. It returns the prior compiled
+tree when available, the complete redacted proposed tree and differences, exact
+resolved enabled factories, and fingerprints for every prospective native source.
+An invalid prior source has no comparison tree; it does not prevent previewing a
+valid repair. An unresolved proposed enabled factory rejects preview. This method
+performs no factory preparation, activation or write. Its caller owns the source
+transaction and must recheck captured inputs before committing a reviewed edit.
