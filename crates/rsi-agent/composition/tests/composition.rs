@@ -35,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 mod contributions;
 #[path = "composition/domains.rs"]
 mod domains;
+#[path = "composition/snapshots.rs"]
+mod snapshots;
 
 #[derive(Debug)]
 struct NoopFactory;
@@ -322,6 +324,17 @@ async fn activate_composition(
     presets: AgentPresetCatalog,
     contributions: AgentContributionCatalog,
 ) -> (Runtime, FiberHandle, FiberHandle, Arc<dyn AgentComposition>) {
+    activate_composition_factory(AgentCompositionFactory::new(
+        presets,
+        contributions,
+        ScopeRoot::new(128).unwrap(),
+    ))
+    .await
+}
+
+async fn activate_composition_factory(
+    factory: AgentCompositionFactory,
+) -> (Runtime, FiberHandle, FiberHandle, Arc<dyn AgentComposition>) {
     let runtime = Runtime::default();
     let (parent, _) = runtime
         .root()
@@ -371,11 +384,7 @@ async fn activate_composition(
                 "rsi.agent.composition",
                 "test-revision",
                 UpdateMode::RestartRequired,
-                Arc::new(AgentCompositionFactory::new(
-                    presets,
-                    contributions,
-                    ScopeRoot::new(128).unwrap(),
-                )),
+                Arc::new(factory),
             ),
             ConfigValue::Null,
         )

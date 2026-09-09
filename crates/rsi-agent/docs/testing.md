@@ -107,6 +107,11 @@ resident state, resume tokens preserve resident pins, token failure/drop
 releases cold pins, and every claim returns the exact admitted pin. Standard
 application tests also prove generation preparation precedes durable Workspace
 registration for both fresh and resumed sessions.
+Composition snapshot tests replace only the executable catalog while leaving the
+Profile unchanged, check nominal/isolation/update-mode cache identities, and
+replace a snapshot during blocked activation. They prove failure does not return
+a stale cache hit, old pins retain their complete catalog through Scope cleanup,
+and overlapping Portable providers bind consumers inside the same generation.
 Composition tests also run beneath explicit service Local isolation. Generation
 contributions must inherit that mapping while their pins remain independent of
 composition-provider retirement; acquiring a fresh Runtime root would violate it.

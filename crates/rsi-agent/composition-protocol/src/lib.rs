@@ -95,7 +95,10 @@ impl AgentCompositionPin {
         &self.preset_id
     }
 
-    /// Returns the exact source digest used to build this generation.
+    /// Returns the effective source identity used to build this generation.
+    ///
+    /// The standing builder combines the Profile program and frozen executable
+    /// catalog. This process-local identity is not a persisted artifact locator.
     pub fn source_digest(&self) -> &str {
         &self.source_digest
     }

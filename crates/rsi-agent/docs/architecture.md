@@ -93,15 +93,17 @@ activates the preset's allowlisted contribution Profile, requires every child
 Fiber to become Active, requires one explicitly selected context builder, seals
 the exact Tool and typed domain catalogs, and only then publishes the
 generation. Candidate failure disposes the complete stage and never replaces a
-healthy current generation. Construction is single-flight per preset identity
-and source digest. A superseded generation remains alive while a draft,
+healthy current generation. Construction is single-flight per preset identity; reuse requires the compiled
+source and the exact factory/marker/isolation catalog identity. Each build obtains
+one application-owned immutable snapshot of the preset compiler and contributions
+before compilation. Existing pins retain their old generation across publication. A superseded generation remains alive while a draft,
 resident session, or admitted Tool result holds its pin, then tears down after
 the final pin releases. Domain registrations use exact Meta registration credentials
 and leases. Rollback and sealing close the unpublished registrar; frozen pins
 retain the validated definitions and bounded initial states.
 
-The preset catalog and generation builder share one application-supplied frozen
-Profile compiler. Fresh roster discovery compiles each winning source, including
+Within each selected snapshot, the preset catalog and generation builder share
+one application-supplied frozen Profile compiler. Fresh roster discovery compiles each winning source, including
 required includes and pure expressions, checks enabled contribution identities
 against the frozen Agent-only allowlist, and keeps failed rows visible with a
 bounded categorical diagnostic. The roster receives neither concrete factories
