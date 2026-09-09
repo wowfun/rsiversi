@@ -49,6 +49,9 @@ unknown retries, stale ordering revisions, and detail/application cancellation.
 
 The runner freezes and hashes its native executable before starting either
 service. Concurrent Cargo builds cannot change that owner's executable gate.
+Agent tree cases create an actual child through the model Tool path, inspect its
+recorded parent and history through authenticated HTTP, and close the shared
+detail slot while preserving both main panes. No synthetic tree enters the UI.
 Only explicit non-secret build variables reach the test application, and an
 absent private D-Bus address prevents access to the operator's native keyring.
 `RSI_WEB_BROWSER=chromium` or `firefox` selects a diagnostic subset.

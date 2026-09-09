@@ -347,11 +347,15 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
 
 fn application_factories(
     diagnostics: &ApplicationDiagnostics,
-) -> [(&'static str, Arc<dyn PluginFactory>); 12] {
+) -> [(&'static str, Arc<dyn PluginFactory>); 13] {
     [
         ("rsi.ui", Arc::new(rsi_ui::UiFactory)),
         ("rsi.ui.target", Arc::new(rsi_ui::UiTargetFactory)),
         ("rsi.session.ui", Arc::new(rsi_session_ui::SessionUiFactory)),
+        (
+            "rsi.session.tree.ui",
+            Arc::new(rsi_session_tree_ui::SessionTreeUiFactory),
+        ),
         (
             "rsi.session.files.ui",
             Arc::new(rsi_session_files_ui::FilesUiFactory),

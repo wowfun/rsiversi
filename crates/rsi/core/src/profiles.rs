@@ -511,6 +511,10 @@ id = "session-ui"
 plugin = "rsi.session.ui"
 [[steps]]
 kind = "plugin"
+id = "tree-ui"
+plugin = "rsi.session.tree.ui"
+[[steps]]
+kind = "plugin"
 id = "files-ui"
 plugin = "rsi.session.files.ui"
 "#

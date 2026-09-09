@@ -112,7 +112,6 @@ enum Update {
     Models(rsi_ai_protocol::LanguageModelPage),
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_process::OutputPage),
-    Detail(String),
     Notice(String),
     Copy(clipboard::Delivery),
     Submitted(rsi_session_protocol::Result<rsi_agent_turn_protocol::MessageReceipt>),
@@ -806,63 +805,25 @@ impl Client {
                 self.state
                     .notice("Model selected for explicit NextTurn inputs");
             }
-            Action::Queue | Action::Agents => self.spawn(async move {
+            Action::Queue => self.spawn(async move {
                 let snapshot = read(|| handle.inspect()).await?;
-                let (title, items) = if matches!(action, Action::Queue) {
-                    (
-                        "Pending inputs",
-                        snapshot
-                            .pending
-                            .into_iter()
-                            .map(|message| {
-                                (
-                                    format!(
-                                        "{} · {:?} → {:?}",
-                                        message.message_id, message.delivery, message.target
-                                    ),
-                                    Action::Message(message),
-                                )
-                            })
-                            .collect(),
-                    )
-                } else {
-                    (
-                        "Agents · history inspection",
-                        snapshot
-                            .tree
-                            .descendants
-                            .into_iter()
-                            .map(|child| {
-                                (
-                                    format!("{} · {}", child.task_name, child.status.session_id),
-                                    Action::Child(child.status.session_id),
-                                )
-                            })
-                            .collect(),
-                    )
-                };
                 Ok(Update::Menu(Menu {
-                    title: title.into(),
-                    items,
+                    title: "Pending inputs".into(),
+                    items: snapshot
+                        .pending
+                        .into_iter()
+                        .map(|message| {
+                            (
+                                format!(
+                                    "{} · {:?} → {:?}",
+                                    message.message_id, message.delivery, message.target
+                                ),
+                                Action::Message(message),
+                            )
+                        })
+                        .collect(),
                     selected: 0,
                 }))
-            }),
-            Action::Child(id) => self.spawn_detail(async move {
-                let child = read(|| application.attach(&id)).await?;
-                let page = read(|| child.history_before(None, 128)).await?;
-                let mut transcript = transcript::Transcript::default();
-                for fact in &page.facts {
-                    transcript.apply(fact);
-                }
-                let text = transcript
-                    .blocks
-                    .iter()
-                    .map(|block| format!("{}\n{}", block.title, block.text()))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                Ok(Update::Detail(format!(
-                    "Child {id} · latest 128 Facts · history only\n\n{text}"
-                )))
             }),
             Action::Message(message) => {
                 self.state.menu = Some(Menu {
@@ -1347,7 +1308,7 @@ async fn run_inner(
                         WorkKind::Cancel => client.cancelling = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Completions { .. } | Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Detail(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Completions { .. } | Update::Ui(_) | Update::Menu(_) | Update::Recent(_) | Update::Models(_) | Update::Message(_) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
                         Ok(Update::Completions { prefix, names }) => client.command_completions(&prefix, names),
                         Ok(Update::Ui(view)) => client.show_ui(view),
@@ -1385,7 +1346,6 @@ async fn run_inner(
                             client.state.detail_next = (page.next_offset < page.total_bytes).then(|| Action::Output(page.id, page.next_offset));
                             client.state.notice("Output page · ←/→ pages · ↑/↓ scroll · Ctrl+Y copies this displayed page");
                         },
-                        Ok(Update::Detail(text)) => { client.state.open_detail(super::terminal_text(&text)); },
                         Ok(Update::Window(piece)) => {
                             let source = piece.source; let next = piece.anchor(piece.text.len()).offset;
                             client.state.open_detail(piece.text);

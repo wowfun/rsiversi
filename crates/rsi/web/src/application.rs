@@ -453,6 +453,17 @@ async fn start_shell(
     has_files: bool,
 ) -> rsi_meta::Result<Arc<Shell>> {
     let mut catalog = HostBuilder::without_paths("browser");
+    catalog
+        .register_local_contract::<rsi_session_tree_ui::TreeReaderContract>()
+        .map_err(meta)?;
+    catalog
+        .register_linked(
+            "rsi.session.tree.ui-target",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_session_tree_ui::TreeTargetFactory),
+        )
+        .map_err(meta)?;
     if has_files {
         catalog
             .register_local_contract::<rsi_session_files_ui::FilesBrowserContract>()
@@ -548,6 +559,11 @@ pub(crate) fn surface_program(
             serde_json::json!({"session_id":session,"cursor":cursor}),
         ),
         ProfileEntry::new("ui-target", "rsi.session.ui-target", ConfigValue::Null),
+        ProfileEntry::new(
+            "tree-ui-target",
+            "rsi.session.tree.ui-target",
+            ConfigValue::Null,
+        ),
     ];
     if has_files {
         entries.push(ProfileEntry::new(

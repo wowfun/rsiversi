@@ -15,6 +15,7 @@ name = "rsi"
 path = "src/main.rs"
 
 [dependencies]
+rsi-session-tree-ui = { path = "../session-tree-ui" }
 rsi-client-preferences = { path = "../client-preferences" }
 rsi-session-files-ui = { path = "../session-files-ui" }
 rsi-files = { path = "../../rsi-files/core" }

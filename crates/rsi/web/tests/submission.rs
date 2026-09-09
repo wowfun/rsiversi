@@ -16,6 +16,10 @@ mod output;
 mod settings;
 #[path = "submission/sources.rs"]
 mod sources;
+#[path = "submission/tree.rs"]
+mod tree;
+#[path = "submission/tree_replacement.rs"]
+mod tree_replacement;
 #[path = "submission/ui.rs"]
 mod ui;
 
@@ -26,6 +30,9 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    children: Mutex<std::collections::BTreeMap<SessionId, Arc<Backend>>>,
+    tree: Mutex<Vec<rsi_agent_store_protocol::StoreAgentDescendantStatus>>,
+    observations: std::sync::atomic::AtomicUsize,
     media: Arc<images::Reader>,
     settings: Arc<settings::Fixture>,
     block_source: std::sync::atomic::AtomicBool,
@@ -67,6 +74,9 @@ impl SessionService for Service {
         Ok(self.0.clone())
     }
     async fn attach(&self, id: &SessionId) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        if let Some(child) = self.0.children.lock().unwrap().get(id) {
+            return Ok(child.clone());
+        }
         if self
             .0
             .header
@@ -232,7 +242,7 @@ impl SessionHandle for Backend {
                     has_active_activation: false,
                     has_waking_message: false,
                 },
-                descendants: vec![],
+                descendants: self.tree.lock().unwrap().clone(),
             },
             header,
             durable_fact_seq: self
@@ -251,14 +261,20 @@ impl SessionHandle for Backend {
         &self,
         _: ObservationCursor,
     ) -> rsi_session_protocol::Result<SessionObservationStream> {
+        self.observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
     }
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
+        self.observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
     }
     async fn observe_interactions(&self) -> rsi_session_protocol::Result<InteractionStream> {
+        self.observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
     }
     async fn pending_questions(

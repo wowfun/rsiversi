@@ -232,6 +232,19 @@ fn prepare_profile(
         .map_err(failure)?;
     builder
         .register_linked(
+            "rsi.session.tree.ui",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_session_tree_ui::SessionTreeUiFactory),
+        )
+        .map_err(failure)?;
+    entries.push(ProfileEntry::new(
+        "tree-ui",
+        "rsi.session.tree.ui",
+        ConfigValue::Null,
+    ));
+    builder
+        .register_linked(
             "rsi.session.files.ui",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,

@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rsi-session-tree-ui = { path = "../session-tree-ui" }
 bytes.workspace = true
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-client-preferences = { path = "../client-preferences" }

@@ -100,6 +100,10 @@ Opening and dismissing the action menu preserves the visible card, its field
 edits and any action in progress; choosing another view replaces that presentation.
 While a card field is being edited, its detail panel leaves the editor visible.
 Modal margins clear the obscured conversation, including its wide-text cells.
+The ordinary [Agent tree inspector](session-tree-ui/README.md) supplies finite
+tree, breadcrumb, activity and paged conversation views through that same UI
+registry. Child inspection starts no observer or execution and uses the existing
+detail slot in both applications.
 
 Fullscreen exit follows the same remote-detach / embedded-shutdown lifecycle
 as the line application, and displays the actual consequence. TUI behavior tests

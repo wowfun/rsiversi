@@ -14,6 +14,67 @@ struct TerminalClient {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_agent_tree_reads_child_history_without_switching_session() {
+    for remote in [false, true] {
+        let (endpoint, state, provider) = gated_provider("spawn_agent").await;
+        *state.arguments.lock().unwrap() = Some(serde_json::json!({
+            "task_name":"inspect-child", "message":"Child inspector evidence", "fork_turns":"none"
+        }));
+        let fixture = CliFixture::new(&endpoint);
+        if remote {
+            fixture.assert_success(&["host", "start", "--profile", "fixture"]);
+        }
+        let name = if remote {
+            "tui-tree-remote"
+        } else {
+            "tui-tree-local"
+        };
+        let mut terminal = TerminalClient::start(&fixture, &["--session-id", name]);
+        terminal.until("Ready").await;
+        terminal.send(b"Inspect a child task\r");
+        tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
+            .await
+            .unwrap();
+        state.release.notify_one();
+        terminal.until("hello from daemon").await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while state.requests.lock().unwrap().len() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        terminal.send(b"\x10");
+        terminal.select_menu("Agent tree").await;
+        terminal.until("Read-only snapshots of agents").await;
+        terminal.send(b"\r");
+        terminal.select_menu("Inspect agent tree").await;
+        terminal.until("1–1 of 1").await;
+        terminal.send(b"\r");
+        terminal.select_menu("Inspect inspect-child").await;
+        terminal.until("Direct children: 0–0 of 0").await;
+        terminal.until("Agent path: Root › inspect-child").await;
+        terminal.send(b"\r");
+        terminal.select_menu("Read conversation").await;
+        terminal.until("Child inspector evidence").await;
+        terminal.until("Read-only history").await;
+        terminal.send(b"\r");
+        terminal.select_menu("Root agent").await;
+        terminal.until(name).await;
+        terminal.send(b"\x1b");
+        terminal.absent("Activity snapshot").await;
+        terminal.send(b"Continue parent conversation\r");
+        terminal.until("Continue parent conversation").await;
+        terminal.send(b"\x04");
+        terminal.finish().await;
+        if remote {
+            fixture.assert_success(&["host", "stop"]);
+        }
+        provider.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_contributed_session_card_and_exact_source_pages() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
@@ -27,7 +88,8 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
     let text = format!("{}second-page-marker", "x".repeat(16 * 1024));
     terminal.send(format!("\x1b[200~{text}\x1b[201~\r").as_bytes());
     terminal.until("hello from daemon").await;
-    terminal.action(13);
+    terminal.send(b"\x10");
+    terminal.select_menu("Card details").await;
     terminal.until("Block details").await;
     terminal.send(b"\r");
     terminal.until("Fact ").await;
@@ -123,7 +185,8 @@ async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
     state.release.notify_one();
     terminal.until("hello from daemon").await;
     terminal.send(b"\t");
-    terminal.action(13);
+    terminal.send(b"\x10");
+    terminal.select_menu("Card details").await;
     terminal.until("bash · command failed").await;
     terminal.send(b"\r");
     terminal.select_menu("Read stdout").await;
@@ -140,7 +203,8 @@ async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
     terminal.until("00 ff").await;
     terminal.send(b"\x1b");
     terminal.absent("Completed stdout").await;
-    terminal.action(13);
+    terminal.send(b"\x10");
+    terminal.select_menu("Card details").await;
     terminal.send(b"\r");
     terminal.select_menu("Read stderr").await;
     terminal.until("fixture stderr").await;
@@ -271,10 +335,8 @@ async fn fullscreen_discovers_plan_changes_real_draft_then_durable_state() {
 }
 
 async fn inspect_plan_projection(terminal: &mut TerminalClient, enabled: bool, cursor: &str) {
-    let mut keys = vec![0x10];
-    keys.extend(b"\x1b[B".repeat(11));
-    keys.push(b'\r');
-    terminal.send(&keys);
+    terminal.send(b"\x10");
+    terminal.select_menu("Extension state").await;
     terminal.until("rsi.plan-policy.view").await;
     terminal.send(b"\r");
     terminal.until(&format!("\"enabled\": {enabled}")).await;
@@ -322,6 +384,10 @@ config = "application"
 kind = "plugin"
 id = "session-ui"
 plugin = "rsi.session.ui"
+[[steps]]
+kind = "plugin"
+id = "tree-ui"
+plugin = "rsi.session.tree.ui"
 [[steps]]
 kind = "plugin"
 id = "files-ui"
@@ -411,7 +477,7 @@ plugin = "rsi.application.tui"
             let screen = self.screen.lock().unwrap().screen().contents();
             if screen.contains(&format!("› {label}")) {
                 self.send(b"\r");
-                self.absent("Enter select · Esc close").await;
+                self.absent(&format!("› {label}")).await;
                 return;
             }
             assert!(
@@ -673,7 +739,8 @@ async fn fullscreen_answers_live_questions_through_the_real_tool_and_provider_lo
         .unwrap();
     state.release.notify_one();
     terminal.until("1 questions").await;
-    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    terminal.send(b"\x10");
+    terminal.select_menu("Questions").await;
     terminal.until("Live questions").await;
     terminal.send(b"\r");
     terminal.until("Live question").await;
@@ -703,7 +770,8 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
         .unwrap();
     state.release.notify_one();
     terminal.until("1 approvals").await;
-    terminal.send(b"\x10\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    terminal.send(b"\x10");
+    terminal.select_menu("Approvals").await;
     terminal.until("Live approvals").await;
     terminal.send(b"\r");
     terminal.until("Review the prepared request").await;

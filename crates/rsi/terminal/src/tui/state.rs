@@ -22,7 +22,6 @@ pub(super) enum Action {
     Extensions,
     Extension(String),
     Queue,
-    Agents,
     Questions,
     Approvals,
     Detail,
@@ -35,7 +34,6 @@ pub(super) enum Action {
     MoreRecent,
     MoreModels,
     Message(rsi_agent_store_protocol::StorePendingMessage),
-    Child(SessionId),
     Question(rsi_user_questions_protocol::QuestionRequest),
     Approval(rsi_approval_protocol::ApprovalRequest),
     Decide(
@@ -66,7 +64,6 @@ impl Menu {
                 ("Session commands".into(), Action::Commands),
                 ("Session command result".into(), Action::CommandResult),
                 ("Pending inputs".into(), Action::Queue),
-                ("Agents".into(), Action::Agents),
                 ("Questions".into(), Action::Questions),
                 ("Approvals".into(), Action::Approvals),
                 ("Raw sources / full output".into(), Action::Detail),

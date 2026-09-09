@@ -62,7 +62,9 @@ async function startProvider() {
         response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n![Remote alt text](https://example.com/never-fetch.png)\n\n[Unsafe link](javascript:alert%281%29)" })); return;
       }
       let name; let argumentsValue;
-      if (!completedTool && prompt.includes("ask a question")) {
+      if (!completedTool && prompt.includes("inspect a child task")) {
+        name = "spawn_agent"; argumentsValue = { task_name: "inspect-child", message: "Child inspector evidence", fork_turns: "none" };
+      } else if (!completedTool && prompt.includes("ask a question")) {
         name = "ask_user"; argumentsValue = { questions: [{ id: "color", prompt: "Which accent should the workspace use?", options: ["Teal", "Blue"] }, { id: "reason", prompt: "What matters for this change?", options: [] }] };
       } else if (!completedTool && prompt.includes("run the failing command")) {
         name = "bash"; argumentsValue = { command: "printf 'fixture stdout\\n'; printf '%16384s' '' | tr ' ' x; printf 'OUTPUT-NEXT\\000\\377\\n'; printf 'fixture stderr\\000\\377\\n' >&2; exit 7\n# <script>window.untrustedExecuted = true</script> " + "界".repeat(23_000) + " SOURCE-END" };

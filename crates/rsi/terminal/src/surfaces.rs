@@ -131,32 +131,7 @@ impl TerminalSurfaces {
             && parent
                 .lookup_local::<rsi_session_files::SessionFilesContract>()
                 .is_some();
-        if has_files {
-            catalog
-                .register_local_contract::<rsi_session_files_ui::FilesBrowserContract>()
-                .map_err(error)?;
-            catalog
-                .register_linked(
-                    "rsi.session.files.ui-target",
-                    env!("CARGO_PKG_VERSION"),
-                    UpdateMode::RestartRequired,
-                    Arc::new(rsi_session_files_ui::FilesUiTargetFactory),
-                )
-                .map_err(error)?;
-        }
-        if has_ui {
-            catalog
-                .register_local_contract::<rsi_ui::UiTargetContract>()
-                .map_err(error)?;
-            catalog
-                .register_linked(
-                    "rsi.session.ui-target",
-                    env!("CARGO_PKG_VERSION"),
-                    UpdateMode::RestartRequired,
-                    Arc::new(rsi_session_ui::SessionUiTargetFactory),
-                )
-                .map_err(error)?;
-        }
+        register_ui_targets(&mut catalog, has_ui, has_files)?;
         let parent = parent
             .clone()
             .isolate_local_fresh::<ShellContract>()
@@ -211,6 +186,11 @@ impl TerminalSurfaces {
             ),
         ];
         if self.has_ui {
+            entries.push(ProfileEntry::new(
+                "tree-ui-target",
+                "rsi.session.tree.ui-target",
+                ConfigValue::Null,
+            ));
             entries.push(ProfileEntry::new(
                 "ui-target",
                 "rsi.session.ui-target",
@@ -377,4 +357,45 @@ pub(crate) async fn fixture(
         .await
         .unwrap();
     (runtime, surfaces)
+}
+
+fn register_ui_targets(catalog: &mut HostBuilder, has_ui: bool, has_files: bool) -> Result<()> {
+    if has_files {
+        catalog
+            .register_local_contract::<rsi_session_files_ui::FilesBrowserContract>()
+            .map_err(error)?;
+        catalog
+            .register_linked(
+                "rsi.session.files.ui-target",
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_session_files_ui::FilesUiTargetFactory),
+            )
+            .map_err(error)?;
+    }
+    if has_ui {
+        catalog
+            .register_local_contract::<rsi_session_tree_ui::TreeReaderContract>()
+            .map_err(error)?;
+        catalog
+            .register_linked(
+                "rsi.session.tree.ui-target",
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_session_tree_ui::TreeTargetFactory),
+            )
+            .map_err(error)?;
+        catalog
+            .register_local_contract::<rsi_ui::UiTargetContract>()
+            .map_err(error)?;
+        catalog
+            .register_linked(
+                "rsi.session.ui-target",
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_session_ui::SessionUiTargetFactory),
+            )
+            .map_err(error)?;
+    }
+    Ok(())
 }

@@ -170,3 +170,5 @@ The standard Worker composes the independent [Files UI](../session-files-ui/READ
 contribution. Each actual pane supplies its own browser state over the connected
 Files client, with an isolated Local mapping and no additional observer or pane.
 The shared declarative inspector renders its directory and text/hex pages.
+The independent [Agent tree UI](../session-tree-ui/README.md) uses that same
+registry and detail slot for finite child-tree/history/source inspection.

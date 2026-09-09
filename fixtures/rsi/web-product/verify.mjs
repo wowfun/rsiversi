@@ -10,6 +10,7 @@ import { boundedRun, startService } from "./service.mjs";
 import { verifyDom } from "./dom.mjs";
 import { verifyFiles } from "./files.mjs";
 import { verifyImages } from "./images.mjs";
+import { verifyTree } from "./tree.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const report = process.env.RSI_WEB_REPORT ?? await mkdtemp(join(tmpdir(), "rsi-web-report-"));
@@ -117,6 +118,7 @@ try {
       assert.match(await markdown.innerText(), /<script>window.markdownExecuted = true<\/script>/);
       await page.screenshot({ path: join(report, `${name}-markdown.png`) });
       await verifyImages(page, right, service, report, name);
+      await verifyTree(page, right, service, report, name);
       await left.getByRole("textbox", { name: "Left message" }).fill("Please ask a question about the workspace");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".pending button").filter({ hasText: "Answer:" }).click();
@@ -323,6 +325,7 @@ try {
       results.at(-1).cases.push("restricted Markdown with literal HTML, inert images and safe links");
       results.at(-1).cases.push("Settings-backed Enter preference applied after application reconnect");
       results.at(-1).cases.push("binary image import, ordered provider input and shared draft/durable preview");
+      results.at(-1).cases.push("actual subagent tree, breadcrumbs and read-only child history");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

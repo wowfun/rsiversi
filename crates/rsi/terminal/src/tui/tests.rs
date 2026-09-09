@@ -233,7 +233,6 @@ async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() 
 async fn closing_other_details_drops_io_and_fences_errors_without_cancelling_mutations() {
     for action in [
         Action::Output("fixture-output".into(), 0),
-        Action::Child(SessionId::new("fixture-child").unwrap()),
         Action::Message(rsi_agent_store_protocol::StorePendingMessage {
             message_id: MessageId::new("fixture-message").unwrap(),
             delivery: MessageDelivery::NextTurn,
