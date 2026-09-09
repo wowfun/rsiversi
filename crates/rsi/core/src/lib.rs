@@ -11,8 +11,16 @@ mod addon_store;
 pub use addon_store::{
     MAXIMUM_NATIVE_ADDON_MANIFEST_BYTES, MAXIMUM_NATIVE_ADDON_OBJECT_BYTES,
     MAXIMUM_NATIVE_ADDON_OBJECTS, MAXIMUM_NATIVE_ADDON_SERVICES, MAXIMUM_NATIVE_ADDON_STATE_BYTES,
-    MAXIMUM_NATIVE_ADDONS, NativeAddonError, NativeAddonReceipt, NativeAddonRecord,
-    NativeAddonSnapshot, NativeAddonStore, NativeAddonStoreLimits, native_addon_target,
+    MAXIMUM_NATIVE_ADDONS, NativeAddonBuild, NativeAddonError, NativeAddonReceipt,
+    NativeAddonRecord, NativeAddonSnapshot, NativeAddonStore, NativeAddonStoreLimits,
+    native_addon_target,
+};
+#[cfg(unix)]
+mod addon_build;
+#[cfg(unix)]
+pub use addon_build::{
+    NativeAddonBuildError, NativeAddonBuildManager, NativeAddonBuildReport,
+    NativeAddonBuildService, NativeAddonBuildStatus,
 };
 mod agent_preset;
 pub use addon::{

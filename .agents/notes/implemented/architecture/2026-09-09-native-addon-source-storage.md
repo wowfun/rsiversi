@@ -30,7 +30,8 @@ worker and report source publication separately from runtime selection. They
 never start a Host or open the Loader cache. The ordinary
 [native staging plugin](2026-09-09-native-agent-catalog-staging.md) owns live selection.
 The remaining [runtime management proposal](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-still owns unimplemented build/watch actions.
+still owns command-line build/watch actions beyond the managed build service
+described below.
 
 ## Alternatives considered
 
@@ -53,3 +54,24 @@ leave a bounded immutable object. Directory sync failure after rename is reporte
 as a published receipt with uncertain directory durability, not a failed write
 or an automatic rollback. These mechanics currently provide a Unix writer;
 they do not establish a native Windows implementation or a live update result.
+
+## Explicit build ownership
+
+Build execution is a product operation over the ordinary Process and Sandbox
+providers. It never reimplements child supervision or trusts direct-child exit
+as group settlement. Explicit argv and an owned cancellation lifetime follow the
+DSH native-command/effect pattern; RSI additionally retains its managed-group
+settlement and raw bounded output contracts. The source build uses an explicit
+unconfined Sandbox plan because local compiler commands commonly need user
+toolchain caches outside the project. This is a chosen trusted-command policy,
+not a claim of restricted enforcement. `/usr/bin/env` preserves argv-zero aliases
+when the Sandbox canonicalizes its own executable path.
+
+A captured manifest and bounded explicit input fingerprint guard publication;
+no attempt is made to infer a hermetic compiler dependency graph. Source-directory
+locking is cooperative and does not constrain nonparticipating editors or build
+tools. Only successful settled builds install through the existing content store,
+with the final input check before index publication. Failed or cancelled commands
+cannot install a stale artifact. Input races can leave a bounded immutable source
+object without publishing a new index, as ordinary install failures can. Enable
+remains a separate source mutation.

@@ -320,3 +320,33 @@ before another explicit attempt; no client or transport retry is implied.
 API retirement cancels its pending Control waits before draining registration;
 the manager still joins in-flight native work during its own retirement, retaining
 the sole Loader's failure fence.
+
+`NativeAddonBuild` captures one bounded manifest without requiring an existing
+artifact. `NativeAddonBuildManager` owns an ordinary build service with hard
+Process/Sandbox dependencies in an isolated management Profile. Its explicit
+`run` accepts a complete caller-supplied environment and admits one build at a
+time. Owned work remains tracked through caller cancellation and retirement. Build argv executes through the native
+`/usr/bin/env` utility, preserving executable aliases such as cargo/rustup without
+interpreting shell syntax. An executable spelling containing `=` is rejected so
+`env` cannot reinterpret it as an environment assignment. It requests danger-full-access and reports the actual
+unconfined stamp; local builds are trusted user commands, not sandboxed plugins.
+The manifest's 1..600 second deadline covers the running command. Timeout or
+cancellation terminates and joins the managed group with a 100 ms TERM grace.
+Process owns the finite post-KILL settlement limit; filesystem reads/copies have
+byte bounds and are not claimed to obey a hard wall-clock deadline. Dropping a
+run waiter requests termination; the service retains its source lock, process
+and work ownership until actual settlement. Retirement closes admission, cancels
+and joins work before dependency release. An already publishing source transaction
+remains owned even if its caller drops; delivery uncertainty requires reconciliation.
+
+Each build reserves 64 KiB of raw stdout and stderr tail with exact offsets/loss
+markers. A cooperative source-directory lock excludes another participating build.
+The captured manifest and declared watch inputs are checked before execution and
+again before source publication. Input traversal admits at most 1,024 entries,
+32 relative components, 16 MiB per file and 64 MiB of aggregate input bytes. It
+rejects symbolic links and special files, represents missing watched paths explicitly,
+and rejects watches that include the output artifact. These explicit inputs do
+not infer compiler dependencies or make the build hermetic.
+Only an exit-zero, settled, uncancelled build with unchanged captured inputs may
+install the exact opened output through the existing source-store transaction.
+A failed command never installs an old output. Installation does not enable it.

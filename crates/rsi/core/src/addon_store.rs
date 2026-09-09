@@ -1,5 +1,7 @@
 //! Product-owned non-executing storage for explicitly selected native addons.
+mod build_source;
 mod filesystem;
+pub use build_source::NativeAddonBuild;
 mod source;
 use filesystem::StoreDirectory;
 use serde::{Deserialize, Serialize};
@@ -206,6 +208,14 @@ impl NativeAddonStore {
     /// This never enables the record, runs its build command or loads native code.
     pub fn install(&self, manifest_path: &Path) -> Result<NativeAddonReceipt> {
         let (manifest, artifact) = source::read(manifest_path)?;
+        self.install_checked(manifest, artifact, || Ok(()))
+    }
+    fn install_checked(
+        &self,
+        manifest: source::Manifest,
+        artifact: std::fs::File,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<NativeAddonReceipt> {
         let _lock = self.directory.lock()?;
         let before = self.read_state()?;
         before
@@ -219,6 +229,7 @@ impl NativeAddonStore {
         }
         let digest = self.directory.install_object(artifact, self.limits)?;
         let record = manifest.into_record(digest);
+        check()?;
         let mut after = before.clone();
         after.installed.insert(record.id.clone(), record.clone());
         self.publish(&before, after, Some(record))

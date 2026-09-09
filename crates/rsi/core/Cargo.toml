@@ -132,6 +132,7 @@ axum.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+cap-std.workspace = true
 rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 rsi-api-uds-client = { path = "../../rsi-api/uds-client" }

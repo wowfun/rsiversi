@@ -42,26 +42,26 @@ impl TryFrom<RecordWire> for NativeAddonRecord {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     format: u32,
     pub(super) id: String,
     plugin: String,
     target: String,
-    artifact: PathBuf,
+    pub(super) artifact: PathBuf,
     #[serde(default)]
     portable_services: Vec<String>,
-    build: Option<Build>,
+    pub(super) build: Option<Build>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Build {
-    command: Vec<String>,
+pub(super) struct Build {
+    pub(super) command: Vec<String>,
     #[serde(default)]
-    watch: Vec<PathBuf>,
+    pub(super) watch: Vec<PathBuf>,
     #[serde(default = "build_timeout")]
-    timeout_seconds: u64,
+    pub(super) timeout_seconds: u64,
 }
 const fn build_timeout() -> u64 {
     120
@@ -107,7 +107,26 @@ impl Manifest {
     }
 }
 
+pub(super) struct ManifestSource {
+    pub(super) manifest: Manifest,
+    pub(super) bytes: Vec<u8>,
+    pub(super) directory: cap_std::fs::Dir,
+    pub(super) path: PathBuf,
+}
+
 pub(super) fn read(path: &Path) -> Result<(Manifest, File)> {
+    let source = open_manifest(path)?;
+    let artifact = rsi_files_native_fs::open_relative_file_no_follow(
+        &source.directory,
+        &source.manifest.artifact,
+    )?;
+    if !artifact.metadata()?.is_file() {
+        return Err(NativeAddonError::Invalid("regular artifact required"));
+    }
+    Ok((source.manifest, artifact))
+}
+
+pub(super) fn open_manifest(path: &Path) -> Result<ManifestSource> {
     if path.as_os_str().len() > 4096 || path.components().count() > 64 {
         return Err(NativeAddonError::Invalid("manifest path bounds"));
     }
@@ -125,12 +144,12 @@ pub(super) fn read(path: &Path) -> Result<(Manifest, File)> {
     let manifest = toml::from_str::<Manifest>(text)
         .map_err(|_| NativeAddonError::Invalid("manifest syntax"))?
         .validate()?;
-    let artifact =
-        rsi_files_native_fs::open_relative_file_no_follow(&directory, &manifest.artifact)?;
-    if !artifact.metadata()?.is_file() {
-        return Err(NativeAddonError::Invalid("regular artifact required"));
-    }
-    Ok((manifest, artifact))
+    Ok(ManifestSource {
+        manifest,
+        bytes,
+        directory,
+        path: path.to_owned(),
+    })
 }
 
 pub(super) fn bounded_read(file: File, maximum: usize) -> Result<Vec<u8>> {
@@ -166,7 +185,7 @@ pub(super) fn digest(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
-fn relative(path: &Path) -> Result<()> {
+pub(super) fn relative(path: &Path) -> Result<()> {
     let Some(text) = path.to_str() else {
         return Err(NativeAddonError::Invalid("relative path encoding"));
     };

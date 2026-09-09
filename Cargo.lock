@@ -2572,6 +2572,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "cap-std",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
