@@ -104,9 +104,11 @@ A dynamic package catalog and multi-version resolver were rejected because
 linked Rust code is already selected by Cargo. Native code remains an explicit
 trusted-path escape hatch rather than an installation system.
 
-The proposed [product-owned native artifact management](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-records a partial replacement of that product policy. Explicit trusted-path
-loading remains the implemented contract until that proposal ships.
+The [non-executing local native addon store](2026-09-09-native-addon-source-storage.md)
+partially replaces that product policy with explicit installation and separate
+enablement. The remaining [product-owned native artifact management](../../proposed/architecture/2026-09-08-native-artifact-management.md)
+proposal covers build/watch and Runtime integration. Meta's Loader remains an
+explicit trusted-path facility.
 
 An atomic shadow Runtime for Profile reload was rejected because it creates a
 second graph and cannot atomically transfer arbitrary external effects. Replay

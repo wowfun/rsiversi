@@ -178,3 +178,55 @@ Factory metadata uses the public addon byte/depth/platform/count limits; schema
 traversal retains only a depth-bounded iterator stack. A preset manager records
 its declaring composition identity, and attaching or later changing addon inputs
 cannot silently pair an old compiler with a different contribution catalog.
+
+Local native addon storage uses `NativeAddonStore` on Unix. Installation reads an
+explicit bounded TOML manifest and a regular artifact beneath its retained source
+directory, hashes the copied bytes, and publishes a content-addressed object plus
+an installed record. It executes no build command, library constructor, ABI entry
+or plugin. The source manifest requires `format = 1`, `id`, `plugin`, `target` and
+`artifact`; optional `portable_services` declares generation-private keys.
+`artifact` is a normalized relative path. Optional build metadata declares an
+explicit argv, watch paths and deadline for a separate build action; none of that
+command text is retained in installed records.
+Identifiers start with an ASCII letter or digit and contain only ASCII letters,
+digits, `.`, `_` and `-`; ids/targets allow 64 bytes and plugin names 256 bytes.
+Relative artifact/watch paths allow 4096 UTF-8 bytes and 32 normal components.
+Build metadata allows 1–64 argv elements, 4096 bytes per element, 16 KiB total,
+at most 256 watch paths and a 1–600 second deadline. NUL is rejected in paths
+and arguments. Portable keys use the Agent catalog's key byte bound and reject
+duplicates and control characters.
+
+Installation and enablement are separate state changes. Enabling selects the
+exact installed record for the current target; reinstalling an id leaves its
+enabled record unchanged until another enable operation. Disabling stops future
+selection; uninstall requires the id to be disabled. These operations publish
+source intent, not a Runtime apply result. They retain content-addressed source
+objects, and never prune a live Loader's cache. Runtime loading separately checks
+the recorded SHA through `NativeCatalog::load_exact` before code execution.
+
+The store owns at most 128 installed ids, 256 source objects and 2 GiB of source
+object bytes; constructor limits can tighten object count/bytes. Each artifact
+uses the Loader's artifact bound. A manifest is at most 64 KiB, the atomic state
+index at most 1 MiB, and explicit Portable keys at most 64 per manifest. Index
+reads validate format, identities, duplicate ids, cardinalities and selected
+records before use. Writers hold an independent cooperative directory lock;
+all index/object operations use pinned directories and no-follow regular files.
+Store directories and index/object files must belong to the effective user and
+deny group/other writes. Source manifests and build inputs retain their explicit
+caller-selected trust.
+Private staging is bounded and removed on ordinary failure. An immutable object
+may remain if later index publication fails. The consumed source copy determines
+its digest even when the public build output changes during copying.
+Under the writer lock, the store reclaims abandoned regular, user-owned staging
+files in its reserved `.rsi-addon-<32 lowercase hex digits>.tmp` namespace,
+subject to the index or artifact byte bound. Writers reject unmanaged root
+entries; installation also rejects unmanaged object entries. Snapshot reads validate the index rather
+than hashing all retained objects; installation checks object storage quotas and
+verifies any reused digest object, and activation verifies the selected bytes.
+
+A source-state publication uses file sync and atomic rename. Its receipt reports
+whether the containing directory sync succeeded after publication; that later
+failure never becomes an ordinary pre-publication error or triggers a rollback.
+Root and object-directory replacement reject subsequent operations. These are
+local storage mechanics, without a Windows writer, remote marketplace or version
+solver.

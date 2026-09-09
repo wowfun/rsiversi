@@ -5,6 +5,15 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod addon;
+#[cfg(unix)]
+mod addon_store;
+#[cfg(unix)]
+pub use addon_store::{
+    MAXIMUM_NATIVE_ADDON_MANIFEST_BYTES, MAXIMUM_NATIVE_ADDON_OBJECT_BYTES,
+    MAXIMUM_NATIVE_ADDON_OBJECTS, MAXIMUM_NATIVE_ADDON_SERVICES, MAXIMUM_NATIVE_ADDON_STATE_BYTES,
+    MAXIMUM_NATIVE_ADDONS, NativeAddonError, NativeAddonReceipt, NativeAddonRecord,
+    NativeAddonSnapshot, NativeAddonStore, NativeAddonStoreLimits, native_addon_target,
+};
 mod agent_preset;
 pub use addon::{
     AddonFactoryDescription, AddonScope, MAXIMUM_ADDON_DESCRIPTION_BYTES, MAXIMUM_ADDON_PLATFORMS,
