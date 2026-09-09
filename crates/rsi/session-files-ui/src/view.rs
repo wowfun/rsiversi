@@ -127,7 +127,7 @@ pub(crate) fn file(revision: u64, file: &OpenedFile, page: &FilePage, hex: bool)
     });
     view.elements.push(UiElement::Code {
         text: if hex {
-            hex_lines(&page.bytes_hex, page.offset)
+            rsi_conversation::hex_window(&bytes, page.offset).expect("bounded Files page")
         } else {
             rsi_tools_protocol::safe_tool_text(&bytes)
         },
@@ -219,20 +219,6 @@ fn decode(hex: &str) -> Vec<u8> {
         })
         .collect()
 }
-fn hex_lines(hex: &str, offset: u64) -> String {
-    use std::fmt::Write as _;
-    let mut text = String::new();
-    for (index, line) in hex.as_bytes().chunks(32).enumerate() {
-        let _ = write!(text, "{:08x}  ", offset + index as u64 * 16);
-        for pair in line.chunks_exact(2) {
-            text.push(char::from(pair[0]));
-            text.push(char::from(pair[1]));
-            text.push(' ');
-        }
-        text.push('\n');
-    }
-    text
-}
 
 #[cfg(test)]
 mod tests {
@@ -287,6 +273,9 @@ mod tests {
                 hex: true
             }
         ));
-        assert_eq!(hex_lines("00ff1b", 4096), "00001000  00 ff 1b \n");
+        assert_eq!(
+            rsi_conversation::hex_window(&[0, 255, 27], 4096).unwrap(),
+            "00001000  00 ff 1b \n"
+        );
     }
 }

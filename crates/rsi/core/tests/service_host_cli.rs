@@ -601,6 +601,7 @@ struct GatedState {
     requested: Arc<Notify>,
     release: Arc<Notify>,
     tool: &'static str,
+    arguments: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
 }
 async fn gated_chat(
     State(state): State<GatedState>,
@@ -616,12 +617,12 @@ async fn gated_chat(
     }
     state.requested.notify_one();
     state.release.notified().await;
-    let arguments = match state.tool {
+    let arguments = state.arguments.lock().unwrap().clone().unwrap_or_else(|| match state.tool {
         "ask_user" => {
             serde_json::json!({"questions":[{"id":"choice","prompt":"Pick a color","options":["red","blue"]},{"id":"detail","prompt":"Why?","options":[]}]})
         }
         _ => serde_json::json!({"command":"printf first"}),
-    };
+    });
     let body = format!(
         "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
         serde_json::json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"cli-tool","type":"function","function":{"name":state.tool,"arguments":arguments.to_string()}}]},"finish_reason":null}]}),
@@ -641,6 +642,7 @@ async fn gated_provider(tool: &'static str) -> (String, GatedState, tokio::task:
         requested: Arc::new(Notify::new()),
         release: Arc::new(Notify::new()),
         tool,
+        arguments: Arc::default(),
     };
     let service = Router::new()
         .route("/v1/chat/completions", post(gated_chat))

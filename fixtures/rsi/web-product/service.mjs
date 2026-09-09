@@ -55,7 +55,7 @@ async function startProvider() {
       if (!completedTool && prompt.includes("ask a question")) {
         name = "ask_user"; argumentsValue = { questions: [{ id: "color", prompt: "Which accent should the workspace use?", options: ["Teal", "Blue"] }, { id: "reason", prompt: "What matters for this change?", options: [] }] };
       } else if (!completedTool && prompt.includes("run the failing command")) {
-        name = "bash"; argumentsValue = { command: "printf 'fixture stdout\\n'; printf 'fixture stderr\\n' >&2; exit 7\n# <script>window.untrustedExecuted = true</script> " + "界".repeat(23_000) + " SOURCE-END" };
+        name = "bash"; argumentsValue = { command: "printf 'fixture stdout\\n'; printf '%16384s' '' | tr ' ' x; printf 'OUTPUT-NEXT\\000\\377\\n'; printf 'fixture stderr\\000\\377\\n' >&2; exit 7\n# <script>window.untrustedExecuted = true</script> " + "界".repeat(23_000) + " SOURCE-END" };
       }
       if (name) {
         response.end(sse({ tool_calls: [{ index: 0, id: `web-tool-${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(argumentsValue) } }] }, "tool_calls"));

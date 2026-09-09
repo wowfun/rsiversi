@@ -21,6 +21,11 @@ including directory snapshots, byte pagination, text/hex display, Linux non-UTF8
 filenames, no-follow links and Changed followed by explicit refresh. They verify
 that browsing starts no model request and capture its actual generic UI cards.
 
+Completed process output is read through the actual output-cache API. The fixture
+captures stdout beyond 16 KiB and raw NUL/non-UTF8 bytes in both streams, then
+checks separate text/hex cards and pagination. The source/result inspectors still
+preserve the failed process status and literal arguments.
+
 The runner freezes and hashes its native executable before starting either
 service. Concurrent Cargo builds cannot change that owner's executable gate.
 Only explicit non-secret build variables reach the test application, and an

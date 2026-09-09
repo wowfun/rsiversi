@@ -1,12 +1,14 @@
 //! Shared, renderer-independent conversation source semantics.
 #![forbid(unsafe_code)]
 
+mod bytes;
 mod identity;
 mod index;
 mod media;
 mod source;
 mod tool;
 mod window;
+pub use bytes::hex_window;
 pub use identity::BlockIdentity;
 pub use index::{MAXIMUM_BLOCK_SOURCES, SourceAdmission, SourceIndex, SourceIndexError};
 pub use media::MediaSource;

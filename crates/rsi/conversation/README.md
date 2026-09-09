@@ -26,6 +26,11 @@ CPU work; this is a retained-byte bound, not constant-time random JSON access.
 Renderers may impose smaller limits and must preserve the returned source offset
 when sanitizing or mapping display text.
 
+`hex_window` formats an already bounded byte window as 16-byte rows with absolute
+source offsets. It rejects a window above the shared window ceiling or an
+overflowing source range. It performs no byte acquisition or text interpretation;
+each consumer owns its smaller page budget and output retention.
+
 Tool outcome classification preserves Tool-owned errors separately from nonzero
 process exits and signals. These values are presentation semantics over the
 validated result, not a new execution policy or reconstructed process authority.

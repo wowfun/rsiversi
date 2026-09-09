@@ -46,6 +46,55 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
+    let (endpoint, state, provider) = gated_provider("bash").await;
+    *state.arguments.lock().unwrap() = Some(
+        serde_json::json!({"command":"printf 'fixture stdout\\n'; printf '%16384s' '' | tr ' ' x; printf 'OUTPUT-NEXT\\000\\377\\n'; printf 'fixture stderr\\000\\377\\n' >&2; exit 7"}),
+    );
+    let fixture = CliFixture::new(&endpoint);
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-output"]);
+    terminal.until("Ready").await;
+    terminal.send(b"Capture both raw streams\r");
+    tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
+        .await
+        .unwrap();
+    state.release.notify_one();
+    terminal.until("hello from daemon").await;
+    terminal.send(b"\t");
+    terminal.action(13);
+    terminal.until("bash · command failed").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Read stdout").await;
+    terminal.until("Completed stdout").await;
+    terminal.until("fixture stdout").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Next page").await;
+    terminal.until("OUTPUT-NEXT").await;
+    // vt100 0.16 discards U+FFFD in Perform::print; verify those bytes at the PTY.
+    terminal.until_ansi("��").await;
+    terminal.send(b"\r");
+    terminal.select_menu("View exact hex").await;
+    terminal.until("00004000").await;
+    terminal.until("00 ff").await;
+    terminal.send(b"\x1b");
+    terminal.absent("Completed stdout").await;
+    terminal.action(13);
+    terminal.send(b"\r");
+    terminal.select_menu("Read stderr").await;
+    terminal.until("fixture stderr").await;
+    terminal.send(b"\r");
+    terminal.select_menu("View exact hex").await;
+    terminal
+        .until("66 69 78 74 75 72 65 20 73 74 64 65 72 72 00 ff")
+        .await;
+    terminal.send(b"\x1b");
+    terminal.absent("Completed stderr").await;
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_files_pages_exact_bytes_and_explicit_refresh() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
@@ -309,6 +358,23 @@ plugin = "rsi.application.tui"
             );
             self.send(b"\x1b[B");
             tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+    }
+
+    async fn until_ansi(&self, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self
+                .output
+                .lock()
+                .unwrap()
+                .windows(text.len())
+                .any(|bytes| bytes == text.as_bytes())
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "PTY never emitted {text:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

@@ -48,6 +48,7 @@ wasm-bindgen-futures.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rsi-process = { path = "../../rsi-process/core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }

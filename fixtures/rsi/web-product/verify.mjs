@@ -197,6 +197,21 @@ try {
       await left.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
       await page.locator(".ui-contribution").filter({ hasText: "Intent:" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-contributed-tool.png`) });
+      await page.locator(".ui-contribution").getByRole("button", { name: "Read stdout", exact: true }).click();
+      await page.locator(".ui-contribution pre").filter({ hasText: "fixture stdout" }).waitFor();
+      await page.locator(".ui-contribution").getByRole("button", { name: "Next page", exact: true }).click();
+      await page.locator(".ui-contribution pre").filter({ hasText: "OUTPUT-NEXT��" }).waitFor();
+      await page.locator(".ui-contribution").getByRole("button", { name: "View exact hex", exact: true }).click();
+      await page.locator(".ui-contribution pre").filter({ hasText: "00004000" }).waitFor();
+      assert.match(await page.locator(".ui-contribution pre").innerText(), /00 ff/);
+      await page.screenshot({ path: join(report, `${name}-output-hex.png`) });
+      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await left.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
+      await page.locator(".ui-contribution").getByRole("button", { name: "Read stderr", exact: true }).click();
+      await page.locator(".ui-contribution pre").filter({ hasText: "fixture stderr��" }).waitFor();
+      await page.screenshot({ path: join(report, `${name}-output-stderr.png`) });
+      await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await left.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
       await page.locator(".ui-contribution").getByRole("button", { name: "Arguments", exact: true }).click();
       await page.locator(".ui-contribution pre").filter({ hasText: '"command"' }).waitFor();
       const contributedSource = await page.locator(".ui-contribution pre").innerText();
@@ -245,6 +260,7 @@ try {
       assert.deepEqual(errors, []);
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
       results.at(-1).cases.push("Files draft browsing, exact text/hex, raw names and changed snapshots", "contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
+      results.at(-1).cases.push("completed stdout/stderr byte pages and exact hex");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

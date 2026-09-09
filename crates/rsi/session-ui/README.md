@@ -17,8 +17,18 @@ the application source list remains the complete retained reference browser. It 
 intent completeness, phase and exact argument/result/rejection actions. Source
 reads use the existing controller-owned exact Fact reader and closed `SourceRef`.
 The plugin owns a 16 KiB raw UTF-8 page preference within the conversation window
-ceiling; neither the card nor paging payload retains a Fact. Output cache reading
-and Media byte access remain with their existing separate domain contracts.
+ceiling; neither the card nor paging payload retains a Fact.
+
+Tool cards expose independently issued stdout/stderr references when the target
+has the read-only Process output-cache capability. Output actions validate the
+closed cache identity and decimal-string offset before I/O, capture that target's
+reader and cancel on detail/target retirement. They read 16 KiB per page, within
+the Process hard limit, and display safe text or exact hex with source byte
+offsets. Pages never create a process, reopen a file or reconstruct missing
+cache contents. A missing/evicted cache result remains an explicit read failure.
+Text/hex toggling rereads the same immutable cache identity; provider withdrawal
+can make a later page unavailable. Cache admission, retention and remote access
+remain owned by the Process domain. Media byte access remains separate.
 
 Read actions acquire the actual controller before I/O and cancel on detail close
 or either owner retiring. An admitted mutation's ownership is independent of a

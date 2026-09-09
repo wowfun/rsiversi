@@ -3,6 +3,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod output;
+
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use rsi_client::{SessionController, SessionControllerContract};
@@ -21,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Raw source window preference for contributed detail cards.
 pub const SOURCE_PAGE_BYTES: usize = 16 * 1024;
+/// Preferred raw bytes in a completed stdout/stderr card page.
+pub const OUTPUT_PAGE_BYTES: usize = 16 * 1024;
 fn meta(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
 }
@@ -90,11 +94,18 @@ impl PluginFactory for SessionUiFactory {
                         target: TargetKind::Surface,
                         renderer: Arc::new(SessionCard),
                     }],
-                    actions: vec![ActionContribution {
-                        name: "source".into(),
-                        target: TargetKind::Surface,
-                        handler: Arc::new(ReadSource),
-                    }],
+                    actions: vec![
+                        ActionContribution {
+                            name: "source".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(ReadSource),
+                        },
+                        ActionContribution {
+                            name: "output".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(output::ReadOutput),
+                        },
+                    ],
                     renderers: vec![BlockRendererContribution {
                         name: "tool".into(),
                         target: TargetKind::Surface,
@@ -191,6 +202,7 @@ impl BlockRenderer for ToolCard {
                 elements.push(source_button(label, source, 0));
             }
         }
+        output::buttons(target, tool, &mut elements);
         Ok(Some(UiView {
             title: FieldWindow::text(&tool.title(), 0, 256)
                 .expect("valid title bound")

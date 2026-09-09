@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 mod commands;
 #[path = "submission/files.rs"]
 mod files;
+#[path = "submission/output.rs"]
+mod output;
 #[path = "submission/settings.rs"]
 mod settings;
 #[path = "submission/sources.rs"]
