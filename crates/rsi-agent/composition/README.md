@@ -8,6 +8,14 @@ Its default-preset query acquires the current snapshot and delegates to its
 `AgentPresetCatalog` and default-store adapter, exposing only the validated
 effective identity. A later build acquires its own snapshot.
 
+An embedder can provide a frozen snapshot/source directly, or construct
+`AgentCompositionFactory::from_source_contract` to consume an ordinary
+`AgentCompositionSourceContract` service. The latter declares a hard Local
+dependency during prepare and captures the exact supplied source during
+activation. No composition service is published before that source is available.
+The source provider owns staging and update supervision; this builder still
+captures exactly one immutable compiler/catalog pair per admitted Agent build.
+
 `AgentGenerationRootFactory` supplies an explicit process-local Context for
 generation ownership. It is an ordinary plugin in the containing service Profile
 and preserves that service's Local isolation. Composition providers require this

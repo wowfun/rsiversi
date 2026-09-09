@@ -2,6 +2,95 @@ use super::*;
 use rsi_agent_composition::{AgentCompositionSnapshot, AgentCompositionSource};
 
 #[derive(Debug)]
+struct SourceProvider(Arc<dyn AgentCompositionSource>);
+#[async_trait::async_trait]
+impl PluginFactory for SourceProvider {
+    fn prepare(&self, _: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(ConfigValue::Null))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        plan.context()
+            .provide_local::<rsi_agent_composition::AgentCompositionSourceContract>(
+                self.0.clone(),
+            )?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn source_contract_blocks_composition_publication_until_its_provider_is_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let presets = presets(&temp, &profile("managed"));
+    let probe = Arc::new(Probe::default());
+    let selected = snapshot(&presets, "managed", &probe);
+    let runtime = Runtime::default();
+    let root = runtime.root();
+    for (id, factory) in [
+        ("tools", Arc::new(ToolsFactory) as Arc<dyn PluginFactory>),
+        (
+            "root",
+            Arc::new(rsi_agent_composition::AgentGenerationRootFactory),
+        ),
+        ("label", Arc::new(LabelFactory)),
+    ] {
+        root.apply(
+            ResolvedFactory::linked(id, "fixture", UpdateMode::RestartRequired, factory),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    }
+    let composition = root
+        .apply(
+            ResolvedFactory::linked(
+                "composition",
+                "fixture",
+                UpdateMode::RestartRequired,
+                Arc::new(AgentCompositionFactory::from_source_contract(
+                    ScopeRoot::new(128).unwrap(),
+                )),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    assert!(!matches!(composition.snapshot().state, FiberState::Active));
+    assert!(root.lookup_local::<AgentCompositionContract>().is_none());
+    let owner = root
+        .apply(
+            ResolvedFactory::linked(
+                "source",
+                "fixture",
+                UpdateMode::RestartRequired,
+                Arc::new(SourceProvider(selected)),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    let service = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(service) = root.lookup_local::<AgentCompositionContract>() {
+                break service;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let pin = service
+        .pin(&AgentPresetId::new("default").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(probe.active("managed"), 1);
+    drop(pin);
+    assert!(composition.dispose().await.is_clean());
+    drop(service);
+    assert!(owner.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[derive(Debug)]
 struct Source {
     current: Mutex<Option<Arc<AgentCompositionSnapshot>>>,
     reads: AtomicUsize,

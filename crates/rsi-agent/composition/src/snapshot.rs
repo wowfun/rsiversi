@@ -43,6 +43,14 @@ pub trait AgentCompositionSource: fmt::Debug + Send + Sync + 'static {
     fn snapshot(&self) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>>;
 }
 
+/// Ordinary Local supply of the application-owned staged Agent source.
+#[derive(Debug)]
+pub struct AgentCompositionSourceContract;
+impl rsi_meta::LocalContract for AgentCompositionSourceContract {
+    const KEY: &'static str = "rsi.agent.composition-source";
+    type Service = dyn AgentCompositionSource;
+}
+
 impl AgentCompositionSource for AgentCompositionSnapshot {
     fn snapshot(&self) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>> {
         Ok(Arc::new(self.clone()))

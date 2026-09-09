@@ -6,7 +6,9 @@
 mod catalog;
 mod snapshot;
 pub use catalog::AgentContributionCatalog;
-pub use snapshot::{AgentCompositionSnapshot, AgentCompositionSource};
+pub use snapshot::{
+    AgentCompositionSnapshot, AgentCompositionSource, AgentCompositionSourceContract,
+};
 mod contribution;
 mod domain;
 mod root;
@@ -52,7 +54,7 @@ const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.registrars";
 /// Ordinary plugin factory for one standing Agent composition provider.
 #[derive(Clone)]
 pub struct AgentCompositionFactory {
-    source: Arc<dyn AgentCompositionSource>,
+    source: Option<Arc<dyn AgentCompositionSource>>,
     scopes: ScopeRoot,
 }
 
@@ -71,7 +73,18 @@ impl AgentCompositionFactory {
 
     /// Selects an application-owned immutable snapshot once per admitted build.
     pub fn with_source(source: Arc<dyn AgentCompositionSource>, scopes: ScopeRoot) -> Self {
-        Self { source, scopes }
+        Self {
+            source: Some(source),
+            scopes,
+        }
+    }
+
+    /// Requires an ordinary Local staged-source provider before activation.
+    pub fn from_source_contract(scopes: ScopeRoot) -> Self {
+        Self {
+            source: None,
+            scopes,
+        }
     }
 }
 
@@ -92,15 +105,24 @@ impl PluginFactory for AgentCompositionFactory {
                 "Agent composition configuration must be null".to_owned(),
             ));
         }
-        Ok(PreparedActivation::new(ConfigValue::Null)
+        let prepared = PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<ToolCatalogProviderContract>()
-            .requiring_local::<AgentGenerationRootContract>())
+            .requiring_local::<AgentGenerationRootContract>();
+        Ok(if self.source.is_none() {
+            prepared.requiring_local::<AgentCompositionSourceContract>()
+        } else {
+            prepared
+        })
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let tools = plan.local::<ToolCatalogProviderContract>()?;
+        let source = match &self.source {
+            Some(source) => Arc::clone(source),
+            None => plan.local::<AgentCompositionSourceContract>()?,
+        };
         let state = Arc::new(CompositionState {
-            source: Arc::clone(&self.source),
+            source,
             scopes: self.scopes.clone(),
             // Preserve the containing service's isolation while pins can outlive
             // this provider's admission and delay its deferred cleanup.

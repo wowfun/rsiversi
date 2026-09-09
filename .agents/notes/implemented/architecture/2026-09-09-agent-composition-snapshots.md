@@ -17,6 +17,11 @@ snapshot once after build admission and before compilation. Source failure is a
 selection failure even when a previous generation is cached. Resolution and
 activation retain the captured snapshot across concurrent replacement.
 
+An ordinary Local `AgentCompositionSourceContract` can supply that source during
+activation. `AgentCompositionFactory::from_source_contract` declares a hard
+dependency so the composition service cannot precede its staging provider. Direct
+snapshot/source constructors retain their explicit embedder-owned semantics.
+
 The generation cache compares the compiled program with complete factory
 identities, update modes, nominal Local/event bindings and declared Portable
 isolation keys. Its effective source digest includes those inputs. Nominal Rust
