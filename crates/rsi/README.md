@@ -433,3 +433,24 @@ cleanup after host `SIGKILL` or containment of a descendant that calls
 `setsid(2)`. Web, TCP, cloud identity, marketplaces, arbitrary executable
 profile bundles, Media export, and native package management are outside this
 Host contract.
+
+## Local native addon sources
+
+On Unix, `rsi addon list [--root ABSOLUTE] [--output text|json]` reads installed
+and separately enabled artifact identities. `rsi addon install MANIFEST`,
+`enable ID`, `disable ID` and `uninstall ID` accept the same options. The default
+source root is `<config>/native-addons`; an explicit root manages that store only.
+The product resolves its authorized first-component OS alias before no-follow
+root acquisition. Relative manifest paths are resolved from the current directory;
+source acquisition still rejects links and unresolved parent traversal.
+
+Installation copies bounded bytes without executing or enabling them. Enable
+selects the latest installed artifact for the current target; reinstalling an
+enabled ID preserves its prior enabled digest until another explicit enable.
+Uninstall requires disabling first and retains immutable source objects. No command
+opens the Loader cache, starts a Service Host or creates a Session. Source mutation
+receipts describe the atomic index publication and its directory-sync result;
+they do not claim runtime staging or Agent generation application. JSON revisions
+use canonical decimal strings. A running standard Host observes its enabled store
+through the existing native manager; `rsi --profile inspector native` reads that
+manager's separate status and retained resources.

@@ -12,8 +12,10 @@ pub(super) const HELP: &str = "Usage:\n\
       tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
       devices: <register LABEL|list|revoke DEVICE_ID>\n\
+      inspector: <runtime [AFTER_FIBER]|profile [OFFSET]|factories [OFFSET]|native>\n\
   rsi profile <application|host> <COMMAND> [--output text|json]\n\
   rsi host <start|serve|restart|stop|status|reload> [--profile HOST]\n\
+  rsi addon <list|install|enable|disable|uninstall> [ARGUMENT] [--root ABSOLUTE] [--output text|json]\n\
   rsi agent-preset <COMMAND> [--output text|json]\n\
   rsi agent-store verify [--root ABSOLUTE] [--output text|json]\n\n\
 Commands:\n\
@@ -21,7 +23,8 @@ Commands:\n\
   profile         Inspect and manage Application and Host Profiles\n\
   host            Control the explicit local Service Host daemon\n\
   agent-preset    Inspect and manage local Agent presets\n\
-  agent-store     Verify the durable Agent Store\n";
+  agent-store     Verify the durable Agent Store\n\
+  addon           Manage local native source bytes and explicit selection\n";
 pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> list [--output text|json]\n\
   rsi profile <application|host> show ID [--output text|json]\n\
@@ -67,6 +70,10 @@ Commands:\n\
 pub(super) const BOOT_FAILURE_EXIT_CODE: u8 = 2;
 
 pub(super) enum Parse {
+    #[cfg(unix)]
+    Addon(super::addon_cli::Command),
+    #[cfg(not(unix))]
+    AddonUnsupported,
     Help(&'static str),
     Version,
     Application(ApplicationInvocation),
@@ -644,6 +651,18 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
             profile,
             arguments: arguments.collect(),
         }));
+    }
+    if first == "addon" {
+        #[cfg(unix)]
+        return super::addon_cli::parse(arguments);
+        #[cfg(not(unix))]
+        return Ok(
+            if arguments.any(|argument| matches!(argument.to_str(), Some("--help" | "-h"))) {
+                Parse::Help(super::addon_cli::HELP)
+            } else {
+                Parse::AddonUnsupported
+            },
+        );
     }
     if first == "profile" {
         return parse_profile_command(arguments);

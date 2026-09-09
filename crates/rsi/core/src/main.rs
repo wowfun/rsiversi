@@ -63,6 +63,7 @@ fn standard_coding_tools() -> rsi::Result<Option<StandardCodingTools>> {
     StandardCodingTools::new(bash, helper, environment).map(Some)
 }
 
+mod addon_cli;
 mod application;
 mod cli;
 #[cfg(target_os = "linux")]
@@ -118,6 +119,10 @@ async fn run_main() -> u8 {
         )),
         Ok(Parse::AgentPreset(command)) => run_agent_preset(command).await,
         Ok(Parse::AgentStore(command)) => run_agent_store(command).await,
+        #[cfg(unix)]
+        Ok(Parse::Addon(command)) => addon_cli::run(command).await,
+        #[cfg(not(unix))]
+        Ok(Parse::AddonUnsupported) => report_error(&RsiError::Boot("native addon source management requires Unix".into())),
         Err(error) => report_error(&error),
     }
 }

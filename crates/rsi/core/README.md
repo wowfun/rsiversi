@@ -280,3 +280,8 @@ is a privileged local operator operation. The frozen factory holds only redacted
 immutable declaration metadata, finalized before Host build; it owns no Runtime.
 `rsi --profile inspector` connects to an existing local Service Host through the
 operator connection and never starts a service or creates a Session implicitly.
+
+The binary's [native source commands](../README.md#local-native-addon-sources)
+consume this store directly on a joined blocking worker. They expose installation
+and explicit selection receipts independently of runtime staging and retain the
+store's validation, locking and atomic publication boundaries.

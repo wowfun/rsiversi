@@ -22,8 +22,12 @@ This partially supersedes the product installation restriction in the
 Meta and its Loader retain their generic explicit-path contract. Runtime loading
 uses the [exact artifact admission](2026-09-09-native-exact-artifact-admission.md)
 boundary; neither installation nor uninstallation prunes Loader-owned artifacts.
+The binary's explicit source commands use the same store on a joined blocking
+worker and report source publication separately from runtime selection. They
+never start a Host or open the Loader cache. The ordinary
+[native staging plugin](2026-09-09-native-agent-catalog-staging.md) owns live selection.
 The remaining [runtime management proposal](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-still owns the unimplemented build/watch and live selection integration.
+still owns unimplemented build/watch actions.
 
 ## Alternatives considered
 
