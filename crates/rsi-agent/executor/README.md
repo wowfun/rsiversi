@@ -116,7 +116,9 @@ publication crosses a budget, the executor retains that first publication
 failure but still attempts every later already-settled sibling in source order;
 a successful sibling is published and committed before the first failure is
 propagated. The failed result's retained identity is committed only after the
-terminal prefix is durable. After a terminal prefix becomes durable, the
+terminal prefix is durable. Retirement runs in an owned task: observing the
+durable terminal does not join that task or guarantee the retained slot is already
+absent. After a terminal prefix becomes durable, the
 turn driver submits a bounded checkpoint request. A single owned background
 writer coalesces the latest request per Session while preserving FIFO across
 Sessions, incrementally rebuilds from the last

@@ -888,11 +888,15 @@ async fn failed_tool_result_is_retired_after_the_terminal_fact_is_durable() {
             _ => None,
         })
         .expect("durable ToolStarted identity");
-    assert_eq!(
-        stack.tool_runtime().query(&identity).unwrap(),
-        RetainedToolResult::Absent,
-        "terminal durability must release the process-local retained slot"
-    );
+    // The terminal observer can run before the driver's owned retirement task.
+    // Observe actual slot release, without treating durable visibility as a join.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while stack.tool_runtime().query(&identity).unwrap() != RetainedToolResult::Absent {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned retirement must release the failed Tool slot after durability");
 
     drop(tool_lease);
     drop(tools);
