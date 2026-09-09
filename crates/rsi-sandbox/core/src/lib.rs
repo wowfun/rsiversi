@@ -12,6 +12,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod workspace;
+pub use workspace::{SandboxGeneration, WorkspaceReadRequest, WorkspaceReadScope};
+
 /// Maximum argv items in one sandbox process plan.
 pub const MAXIMUM_SANDBOX_ARGUMENTS: usize = 4_096;
 /// Maximum total UTF-8 bytes in program, argv, and paths.
@@ -251,6 +254,8 @@ pub type Result<T> = std::result::Result<T, SandboxError>;
 /// Process-plan confinement service.
 #[async_trait]
 pub trait Sandbox: fmt::Debug + Send + Sync + 'static {
+    /// Issues a workspace-only read scope using the exact requested policy.
+    async fn workspace_read(&self, request: WorkspaceReadRequest) -> Result<WorkspaceReadScope>;
     /// Validates and wraps one process request.
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess>;
 }

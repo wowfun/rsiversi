@@ -25,8 +25,76 @@ struct TestSandbox;
 #[derive(Debug)]
 struct RejectingSandbox;
 
+#[derive(Debug, Default)]
+struct ReadSandbox {
+    generation: rsi_sandbox::SandboxGeneration,
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl Sandbox for ReadSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        rsi_sandbox::WorkspaceReadScope::new(request, self.generation.clone())
+    }
+    async fn confine(&self, _: ProcessRequest) -> rsi_sandbox::Result<ConfinedProcess> {
+        panic!("workspace reads must not produce a process plan")
+    }
+}
+
+#[tokio::test]
+async fn workspace_read_uses_pinned_tool_policy_without_fabricating_process_enforcement() {
+    let sandbox = Arc::new(ReadSandbox::default());
+    let root = if cfg!(windows) {
+        std::path::PathBuf::from(r"C:\workspace")
+    } else {
+        std::path::PathBuf::from("/workspace")
+    };
+    for mode in [
+        SandboxMode::ReadOnly,
+        SandboxMode::WorkspaceWrite,
+        SandboxMode::DangerFullAccess,
+    ] {
+        let mut start = tool_start(CancellationToken::new());
+        start.policy = ToolExecutionPolicy {
+            mode,
+            cwd: root.join("child"),
+            workspace: root.clone(),
+        };
+        start.sandbox = sandbox.clone();
+        let (execution, stamps) = ToolExecution::from_start("read".into(), start).unwrap();
+        let scope = execution.workspace_read().await.unwrap();
+        assert_eq!(scope.mode(), mode);
+        assert_eq!(scope.cwd(), root.join("child"));
+        assert_eq!(scope.workspace(), root);
+        assert_eq!(scope.generation(), &sandbox.generation);
+        assert!(
+            stamps
+                .attach(ToolResult::new(json!({}), Vec::new(), false).unwrap())
+                .unwrap()
+                .enforcement
+                .is_empty()
+        );
+        let calls = sandbox.calls.load(Ordering::SeqCst);
+        execution.cancellation.cancel();
+        assert!(matches!(
+            execution.workspace_read().await,
+            Err(ToolError::Cancelled)
+        ));
+        assert_eq!(sandbox.calls.load(Ordering::SeqCst), calls);
+    }
+}
+
 #[async_trait]
 impl Sandbox for TestSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        Err(rsi_sandbox::SandboxError::Unsupported(request.mode))
+    }
     async fn confine(&self, request: ProcessRequest) -> rsi_sandbox::Result<ConfinedProcess> {
         Ok(ConfinedProcess {
             program: request.program,
@@ -46,6 +114,12 @@ impl Sandbox for TestSandbox {
 
 #[async_trait]
 impl Sandbox for RejectingSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        Err(rsi_sandbox::SandboxError::Unsupported(request.mode))
+    }
     async fn confine(&self, request: ProcessRequest) -> rsi_sandbox::Result<ConfinedProcess> {
         Err(rsi_sandbox::SandboxError::Unsupported(request.mode))
     }

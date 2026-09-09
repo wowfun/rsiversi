@@ -18,6 +18,10 @@ It contains no registry implementation, policy, approval, durable logging,
 provider wire, or plugin lifecycle. Tool start carries the exact sandbox
 planner and an optional typed Jobs scope supplied by the orchestrator; these
 are invocation authorities, not registry-owned services or ambient lookups.
+`ToolExecution::workspace_read()` asks that same pinned Sandbox generation for
+an immutable workspace read scope using the resolved policy. It accepts no model
+paths or mode overrides, rejects already-cancelled execution, and adds no process
+stamp to the enforcement collector. It changes neither Tool admission nor approval.
 Its opaque typed extension map may also carry a Tool-layer lane-parking
 authority. A blocking orchestration Tool explicitly parks before waiting and
 must reacquire the same bounded executor admission before returning a result.

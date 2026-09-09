@@ -12,6 +12,58 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[tokio::test]
+async fn workspace_scopes_preserve_each_mode_and_exact_provider_generation() {
+    let runtime = Runtime::default();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let mut previous = None;
+    for _ in 0..2 {
+        let fiber = runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "sandbox",
+                    "test",
+                    UpdateMode::Replayable,
+                    Arc::new(SandboxLocalFactory::default()),
+                ),
+                json!({"bubblewrap": [], "landlock": []}),
+            )
+            .await
+            .unwrap();
+        let service = runtime.root().lookup_local::<SandboxContract>().unwrap();
+        let mut generation = None;
+        for mode in [
+            SandboxMode::ReadOnly,
+            SandboxMode::WorkspaceWrite,
+            SandboxMode::DangerFullAccess,
+        ] {
+            let scope = service
+                .workspace_read(rsi_sandbox::WorkspaceReadRequest {
+                    mode,
+                    cwd: root.join("not-opened-child"),
+                    workspace: root.clone(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(scope.mode(), mode);
+            assert_eq!(scope.cwd(), root.join("not-opened-child"));
+            assert_eq!(scope.workspace(), root);
+            if let Some(generation) = &generation {
+                assert_eq!(scope.generation(), generation);
+            }
+            if let Some(previous) = &previous {
+                assert_ne!(scope.generation(), previous);
+            }
+            generation = Some(scope.generation().clone());
+        }
+        previous = generation;
+        assert!(fiber.dispose().await.is_clean());
+    }
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn foreign_policy_paths_are_rejected_before_native_resolution() {

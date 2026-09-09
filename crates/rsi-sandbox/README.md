@@ -13,11 +13,20 @@ restricted backend passes its behavior probe. The standard product selects the
 required policy whenever it links effect-bearing coding Tools, so those Tools
 cannot become ready with enforcement deferred until their first call.
 
-Restricted calls fail closed without a selected backend. The
+Restricted process calls fail closed without a selected backend. The
 `danger-full-access` mode is an explicit holder bypass and is stamped as
 unconfined. This family builds process plans; the process owner remains
 responsible for spawning, cancellation, output bounds, and recording the stamp
 in Agent facts.
+
+Workspace reads use a separate, process-local `WorkspaceReadScope`. The Sandbox
+provider binds the exact mode, cwd, workspace and its opaque generation. All
+three existing modes allow read-only access inside that workspace; the file
+provider enforces relative directory-handle reads without following symlinks.
+Issuing this scope neither opens files nor emits a process enforcement stamp.
+Tool policy and approval still precede execution. Paths are preserved exactly
+after native, bounded lexical validation, so a later filesystem symlink cannot
+silently retarget the pinned workspace through canonicalization.
 
 Explicit backend candidates are opened without following a final symlink,
 must be regular files, and are copied from the pinned handle through a fixed

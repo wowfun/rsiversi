@@ -122,6 +122,7 @@ impl SandboxLocalConfig {
 
 #[derive(Debug)]
 struct Service {
+    generation: rsi_sandbox::SandboxGeneration,
     backend: Option<SelectedBackend>,
     _staged: Option<tempfile::TempDir>,
 }
@@ -180,6 +181,12 @@ impl ProbeBudget {
 
 #[async_trait]
 impl Sandbox for Service {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> Result<rsi_sandbox::WorkspaceReadScope> {
+        rsi_sandbox::WorkspaceReadScope::new(request, self.generation.clone())
+    }
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
         let (program, cwd, workspace) = validate_request(&request)?;
         if request.mode == SandboxMode::DangerFullAccess {
@@ -400,6 +407,7 @@ impl PluginFactory for SandboxLocalFactory {
             None => (None, None),
         };
         let sandbox: Arc<dyn Sandbox> = Arc::new(Service {
+            generation: rsi_sandbox::SandboxGeneration::default(),
             backend,
             _staged: staged,
         });

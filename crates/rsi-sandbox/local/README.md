@@ -20,13 +20,19 @@ briefly inherit a staging writer until exec closes it. Only this transient spawn
 error is retried; an unsuccessful probe exit never establishes enforcement.
 
 Optional factory activation publishes a service even when no backend passes;
-restricted calls then fail closed while `danger-full-access` remains an explicit
+restricted process calls then fail closed while `danger-full-access` remains an explicit
 unconfined holder bypass. A factory constructed with required restricted
 support instead fails activation before publishing the service. This
 construction policy is deliberately outside serializable Profile configuration,
 so a Profile replacement cannot disable a composition-owned readiness
 requirement. A required activation distinguishes exhaustion of the shared
 behavior-probe budget from ordinary candidate rejection in its failure.
+
+Workspace read scopes use one fresh opaque identity per activated service and
+preserve the request's exact native paths. All existing modes support this
+workspace-only read capability even when an optional service has no process
+backend. Actual file opens and symlink confinement belong to the file provider;
+the read scope never claims a process backend or its enforcement stamp.
 
 The selected wrapper is frozen for the generation. Restricted requests produce
 wrapper argv and a matching stamp; absence fails closed. The durable stamp

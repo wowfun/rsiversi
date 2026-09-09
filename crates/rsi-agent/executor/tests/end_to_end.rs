@@ -111,6 +111,12 @@ struct TestSandbox;
 
 #[async_trait]
 impl Sandbox for TestSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        Err(rsi_sandbox::SandboxError::Unsupported(request.mode))
+    }
     async fn confine(&self, request: ProcessRequest) -> rsi_sandbox::Result<ConfinedProcess> {
         let (backend, filesystem, scratch) = match request.mode {
             SandboxMode::ReadOnly => (

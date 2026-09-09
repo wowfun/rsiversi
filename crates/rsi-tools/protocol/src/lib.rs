@@ -425,6 +425,20 @@ pub struct ToolExecution {
 }
 
 impl ToolExecution {
+    /// Plans a workspace-only read through the exact pinned policy and Sandbox generation.
+    pub async fn workspace_read(&self) -> Result<rsi_sandbox::WorkspaceReadScope> {
+        if self.cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        self.sandbox
+            .workspace_read(rsi_sandbox::WorkspaceReadRequest {
+                mode: self.policy.mode,
+                cwd: self.policy.cwd.clone(),
+                workspace: self.policy.workspace.clone(),
+            })
+            .await
+            .map_err(ToolError::Sandbox)
+    }
     /// Returns the exact orchestrator-pinned process policy.
     pub const fn policy(&self) -> &ToolExecutionPolicy {
         &self.policy
