@@ -15,6 +15,11 @@ reopening an unchanged question or approval rebuilds its actionable controls.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
 
+The composer retains its complete input and action rows when expanded extension
+state or attachments consume vertical space. Its border does not become a clipping
+viewport through flex shrink. Narrow workbenches scroll when their content needs
+more height; transcript and extension content retain their own scrolling regions.
+
 Run `node plugins/rsi/web/build.mjs /absolute/output/directory` from the repository.
 The build uses the installed `wasm32-unknown-unknown` Rust target and a matching
 `wasm-bindgen` executable (`RSI_WASM_BINDGEN` overrides its path). It copies only

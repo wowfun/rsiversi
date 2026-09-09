@@ -297,7 +297,20 @@ try {
       await page.screenshot({ path: join(report, `${name}-source-result.png`) });
       await page.getByRole("button", { name: "Close details", exact: true }).click();
       await page.setViewportSize({ width: 390, height: 844 });
+      const composerBounds = await left.locator(".composer").evaluate(composer => {
+        const bounds = composer.getBoundingClientRect();
+        const actions = composer.querySelector(".composer-bar").getBoundingClientRect();
+        return { height: bounds.height, content: composer.scrollHeight, actionsBottom: actions.bottom, bottom: bounds.bottom };
+      });
+      assert.ok(composerBounds.actionsBottom <= composerBounds.bottom, `composer cropped its actions: ${JSON.stringify(composerBounds)}`);
       await page.screenshot({ path: join(report, `${name}-narrow.png`), fullPage: true });
+      const narrowSend = left.getByRole("button", { name: "Send ↗", exact: true });
+      await narrowSend.scrollIntoViewIfNeeded();
+      assert.equal(await narrowSend.evaluate(button => {
+        const bounds = button.getBoundingClientRect();
+        return document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2) === button;
+      }), true, "narrow composer actions must be reachable by scrolling the workbench");
+      await page.screenshot({ path: join(report, `${name}-narrow-actions.png`) });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.locator("#pane-tab-1").click();
       assert.match(await right.locator(".transcript").innerText(), /Review the right workspace/);
