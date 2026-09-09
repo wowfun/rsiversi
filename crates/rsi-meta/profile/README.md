@@ -176,3 +176,24 @@ source encoding used by the compiler, under a fixed path-free identity domain.
 It evaluates no expressions or patch targets. It is suitable for catalog source
 identity before assembly; it does not replace whole-program preflight or prove
 that any plugin configuration will activate.
+
+For native authoring, `ProfileCompiler::preview_file_edit` compiles replacement
+bytes for the selected root file without writing it. The existing regular-file
+reader still verifies that root's identity; includes retain their own source
+bytes and ordinary path, depth and aggregate bounds. Linked fragments and launch
+patches keep their original order. The prospective source digest is identical to
+a normal compile after those exact bytes are written at that source, provided
+all other sources and the environment are unchanged. Memory and bundle programs
+have no writable root and are rejected by this entry point. Preview does not
+prepare factories or confer write authority. Product authoring owns source
+selection, optimistic conflict checks, cooperative locks and atomic publication.
+
+Compiled candidates expose the same redacted tree shape as Profile control, with
+revision zero to distinguish pure compilation from observed Runtime revisions.
+Candidate comparison reports added/removed nodes and changed kind, plugin,
+parent, sibling order, enabled state, configuration or isolation. It compares
+typed values in-process and emits only aspect names, never configurations or
+expression text. Changes are ordered by stable node ID and bounded by the union
+of the two already-bounded trees. Per-source fingerprints remain available for
+an authoring owner to recheck the complete prospective include set before write;
+reading those identities grants no write or activation authority.

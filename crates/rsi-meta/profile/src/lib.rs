@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod bundle;
 mod control;
+mod preview;
+pub use preview::{NodeChange, NodeChangeAspect, NodeChangeKind};
 #[cfg(test)]
 mod isolation_tests;
 pub use bundle::ProfileBundle;
@@ -659,9 +661,39 @@ impl ProfileCompiler {
 
     /// Rebuilds one candidate from empty state.
     pub fn compile(&self, program: &ProfileProgram) -> Result<ProfileCandidate> {
+        self.compile_with_root_source(program, None)
+    }
+
+    /// Previews one native root document edit without writing or preparing factories.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn preview_file_edit(
+        &self,
+        program: &ProfileProgram,
+        contents: &[u8],
+    ) -> Result<ProfileCandidate> {
+        if !matches!(program.root, ProgramRoot::File(_)) {
+            return Err(ProfileError::InvalidProgram(
+                "edit preview requires an explicit native root file".into(),
+            ));
+        }
+        if contents.len() > self.limits.maximum_document_bytes {
+            return Err(ProfileError::CapacityExceeded {
+                resource: "document bytes",
+                maximum: self.limits.maximum_document_bytes,
+            });
+        }
+        self.compile_with_root_source(program, Some(contents))
+    }
+
+    fn compile_with_root_source(
+        &self,
+        program: &ProfileProgram,
+        root_source: Option<&[u8]>,
+    ) -> Result<ProfileCandidate> {
         validate_limits(&self.limits)?;
         self.validate_environment()?;
         let mut state = CompileState::new(self);
+        state.root_source = root_source;
         if let ProgramRoot::Bundle(bundle) = &program.root {
             bundle.validate(&self.limits)?;
             state.bundle = Some(bundle);
@@ -887,6 +919,7 @@ struct PluginNode {
 struct CompileState<'a> {
     compiler: &'a ProfileCompiler,
     bundle: Option<&'a ProfileBundle>,
+    root_source: Option<&'a [u8]>,
     seen_sources: BTreeSet<PathBuf>,
     tree: Vec<TreeNode>,
     instance_ids: HashSet<String>,
@@ -933,6 +966,7 @@ impl<'a> CompileState<'a> {
         Self {
             compiler,
             bundle: None,
+            root_source: None,
             seen_sources: BTreeSet::new(),
             tree: Vec::new(),
             instance_ids: HashSet::new(),
@@ -1118,6 +1152,13 @@ impl<'a> CompileState<'a> {
             return Err(ProfileError::Source {
                 message: "native Profile sources are unavailable".into(),
             });
+        };
+        // Only the root is substituted; recursive includes retain their real
+        // sources and still hit cycle detection against this canonical path.
+        let bytes = if self.include_stack.is_empty() {
+            self.root_source.map_or(bytes, Arc::from)
+        } else {
+            bytes
         };
         Ok((canonical, bytes))
     }

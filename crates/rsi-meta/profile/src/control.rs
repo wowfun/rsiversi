@@ -258,6 +258,14 @@ pub struct ProfileSnapshot {
 }
 
 impl ProfileSnapshot {
+    pub(super) fn from_candidate(candidate: &ProfileCandidate) -> Self {
+        Self {
+            revision: 0,
+            source_digest: candidate.source_digest.clone(),
+            nodes: snapshot_nodes(&candidate.tree),
+        }
+    }
+
     /// Revision associated with this desired tree.
     pub const fn revision(&self) -> u64 {
         self.revision
