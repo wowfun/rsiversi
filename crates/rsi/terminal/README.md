@@ -130,3 +130,17 @@ and joins its nonblocking reader after child exit. It never relies on the host
 PTY delivering EOF to complete fixture cleanup. Failure teardown starts draining
 before terminating the child, bounds its wait, and preserves a separate stage
 file even when terminal output is blocked.
+
+TUI body layout has a private cache owned by the current presentation State.
+Keys include the block's opaque content/source-mapping revision, width and
+collapse state. A cloned historical projection retains its revision until changed;
+attachment replacement creates a fresh cache. Insertions, source-window eviction,
+and backfill create a new revision. Titles and selection are projected from current
+state; source anchors and hit maps always resolve through the current pieces.
+The cache retains at most 512 entries and 32 MiB of owned text, compact row ends,
+Markdown style ranges and keys. Least recently used entries are evicted under
+pressure; the currently calculated block is a separate transient bounded by the
+existing 256 KiB source-window limit. Eviction affects recomputation cost, not
+visible content or selection semantics. Each redraw retains only two screens of
+visible row metadata; the writer's complete-frame acknowledgement remains the
+sole publication boundary for hit maps.

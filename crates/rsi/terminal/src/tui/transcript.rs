@@ -132,6 +132,7 @@ pub(super) enum Role {
 #[derive(Clone, Debug)]
 pub(super) struct Block {
     pub(super) key: String,
+    pub(super) layout_revision: std::sync::Arc<()>,
     pub(super) title: String,
     pub(super) role: Role,
     pub(super) pieces: VecDeque<Piece>,
@@ -164,6 +165,7 @@ impl Block {
             return false;
         };
         let position = if back { last } else { 0 };
+        self.layout_revision = std::sync::Arc::new(());
         let piece = self.pieces.remove(position).expect("retained piece");
         assert_eq!(self.sources.remove(position), Some(piece.source));
         self.text_bytes -= piece.text.capacity();
@@ -542,6 +544,7 @@ impl Transcript {
         position.unwrap_or_else(|| {
             self.blocks.push(Block {
                 key,
+                layout_revision: std::sync::Arc::new(()),
                 title: super::super::terminal_text(title),
                 role,
                 pieces: VecDeque::new(),
@@ -584,6 +587,7 @@ impl Transcript {
         else {
             unreachable!("duplicate checked before admission")
         };
+        block.layout_revision = std::sync::Arc::new(());
         block.pieces.insert(position, piece);
     }
 

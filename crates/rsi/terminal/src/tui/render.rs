@@ -1,8 +1,11 @@
 //! Bounded visible rows with source positions; wrapping and editing share graphemes.
+#[path = "layout.rs"]
+mod layout;
 use super::{
     state::State,
     transcript::{Anchor, Role, Transcript},
 };
+pub(super) use layout::LayoutCache;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -91,8 +94,9 @@ fn each_row(text: &str, width: usize, mut emit: impl FnMut(usize, usize) -> bool
 }
 
 // Only two screens of row metadata are retained, even for a large source window.
-pub(super) fn rows(
+fn rows(
     transcript: &Transcript,
+    cache: &mut LayoutCache,
     top: Option<Anchor>,
     width: u16,
     height: u16,
@@ -116,15 +120,24 @@ pub(super) fn rows(
                 title: true,
             });
         }
-        let text = block.text();
-        let mut count = 0;
-        each_row(&text, usize::from(width).max(1), |offset, end| {
-            if location.is_some_and(|(i, from)| i == index && end < from) {
-                return true;
-            }
+        let layout = cache.get(block, width);
+        let from = location
+            .filter(|(i, _)| *i == index)
+            .map_or(0, |(_, from)| layout.first_row(from));
+        let end = if block.collapsed {
+            (from + 2).min(layout.rows().len())
+        } else {
+            layout.rows().len()
+        };
+        let from = if top.is_none() {
+            from.max(end.saturating_sub(limit))
+        } else {
+            from
+        };
+        for (offset, end) in layout.rows().skip(from).take(end - from) {
             if rows.len() == limit {
                 if top.is_some() {
-                    return false;
+                    break;
                 }
                 rows.pop_front();
             }
@@ -134,9 +147,10 @@ pub(super) fn rows(
                 end,
                 title: false,
             });
-            count += 1;
-            !(block.collapsed && count >= 2 || top.is_some() && rows.len() >= limit)
-        });
+            if top.is_some() && rows.len() >= limit {
+                break;
+            }
+        }
         if top.is_some() && rows.len() >= limit {
             break;
         }
@@ -238,8 +252,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
             .style(Style::default().fg(Color::DarkGray)),
         Rect::new(0, 2, area.width, 1),
     );
+    let mut cache = state.layout.borrow_mut();
+    cache.retain(&state.transcript);
     let rows = rows(
         &state.transcript,
+        &mut cache,
         state.top,
         body.width.saturating_sub(2),
         body.height,
@@ -271,8 +288,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
         .map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
     let mut text_cache: Option<(
         usize,
-        String,
-        MarkdownStyles,
+        std::sync::Arc<layout::Layout>,
         super::transcript::AnchorIndex<'_>,
     )> = None;
     for (row_index, row) in view.rows.iter().take(usize::from(body.height)).enumerate() {
@@ -306,15 +322,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
             .as_ref()
             .is_none_or(|(index, ..)| *index != row.block)
         {
-            let text = block.text();
-            let styles = if block.role == Role::Assistant {
-                markdown_styles(&text)
-            } else {
-                Vec::new()
-            };
-            text_cache = Some((row.block, text, styles, block.anchor_index()));
+            text_cache = Some((
+                row.block,
+                cache.get(block, body.width.saturating_sub(2)),
+                block.anchor_index(),
+            ));
         }
-        let text = &text_cache.as_ref().expect("cached block").1;
+        let layout = &text_cache.as_ref().expect("cached block").1;
+        let text = &layout.text;
         let mut x = body.x + 2;
         for (offset, grapheme) in text[row.offset..row.end].grapheme_indices(true) {
             let offset = row.offset + offset;
@@ -329,7 +344,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
             if width == 0 {
                 break;
             }
-            let anchors = &text_cache.as_ref().expect("cached block").3;
+            let anchors = &text_cache.as_ref().expect("cached block").2;
             let a = anchors.anchor(offset).expect("projected text has a source");
             let b = anchors
                 .anchor(offset + grapheme.len())
@@ -340,7 +355,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
             let style = if highlight {
                 Style::default().bg(Color::Cyan).fg(Color::Black)
             } else {
-                let styles = &text_cache.as_ref().expect("cached block").2;
+                let styles = &layout.styles;
                 styles
                     .get(
                         styles
@@ -647,6 +662,199 @@ mod tests {
         )
         .unwrap();
         state.transcript.apply(&fact);
+    }
+
+    #[test]
+    fn cached_layout_reuses_unchanged_bodies_and_isolates_one_changed_block() {
+        let mut state = state();
+        state.transcript.apply(
+            &SessionFact::new(
+                1,
+                1,
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new("input").unwrap(),
+                    text: "first body".into(),
+                    model: None,
+                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap(),
+        );
+        delta(&mut state, 2, "## Header\n\nUnicode e");
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 2);
+        let original = terminal.backend().buffer().clone();
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(
+            state.layout.borrow().builds,
+            2,
+            "unchanged bodies perform zero layout"
+        );
+        assert_eq!(*terminal.backend().buffer(), original);
+        state.notice("only status changed");
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 2);
+        delta(&mut state, 3, "\u{301} 界 👩🏽‍💻");
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(
+            state.layout.borrow().builds,
+            3,
+            "one block update relayouts only that block"
+        );
+        state.transcript.blocks[0].collapsed = true;
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 4);
+        resize(&mut terminal, 42, 24).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(
+            state.layout.borrow().builds,
+            6,
+            "width invalidates both blocks"
+        );
+        state.transcript.blocks.remove(0);
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(
+            state.layout.borrow().builds,
+            6,
+            "stable block identity survives index changes"
+        );
+        let retained = state.transcript.clone();
+        state = State::new(state.header.clone(), false);
+        state.transcript = retained;
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(
+            state.layout.borrow().builds,
+            1,
+            "new attachment starts a fresh cache"
+        );
+    }
+
+    #[test]
+    fn historical_mapping_and_eviction_invalidate_only_their_owned_layout() {
+        let mut state = state();
+        delta(&mut state, 2, "\u{301}界");
+        let live = state.transcript.clone();
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        delta(&mut state, 1, "e");
+        let block = &state.transcript.blocks[0];
+        let first = block.anchor(0).unwrap();
+        let last = block.anchor(block.text().len()).unwrap();
+        state.selection = Some((first, last));
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 2);
+        assert_eq!(
+            state.transcript.selected(first, last).unwrap(),
+            "e\u{301}界"
+        );
+        assert_eq!(first.source.seq, 1);
+        assert_eq!(last.source.seq, 2);
+        state.transcript = live;
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 3);
+        assert!(state.transcript.locate(first).is_none());
+        delta(&mut state, 3, &"a".repeat(200 * 1024));
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        delta(&mut state, 4, &"b".repeat(200 * 1024));
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 5);
+        assert!(
+            state.transcript.locate(last).is_none(),
+            "evicted source cannot retain a hit mapping"
+        );
+        assert!(state.transcript.blocks[0].discarded);
+        assert!(state.transcript.blocks[0].text().starts_with('b'));
+        terminal
+            .draw(|frame| {
+                draw(frame, &state);
+            })
+            .unwrap();
+        assert_eq!(state.layout.borrow().builds, 5);
+    }
+
+    #[test]
+    fn collapsed_anchor_beyond_initial_rows_keeps_current_source_mapping() {
+        let mut state = state();
+        delta(&mut state, 1, "one\ntwo\nthree\nfour\nfive");
+        let block = &mut state.transcript.blocks[0];
+        block.collapsed = true;
+        state.top = block.anchor(8);
+        let mut cache = LayoutCache::default();
+        let visible = rows(&state.transcript, &mut cache, state.top, 30, 5);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|row| (row.offset, row.end))
+                .collect::<Vec<_>>(),
+            vec![(8, 13), (14, 18)]
+        );
+        let before = cache.builds;
+        delta(&mut state, 2, "\nnext");
+        let visible = rows(&state.transcript, &mut cache, state.top, 30, 5);
+        assert_eq!(visible[0].offset, 8);
+        assert_eq!(cache.builds, before + 1);
+        let block = &state.transcript.blocks[0];
+        assert_eq!(
+            state
+                .transcript
+                .selected(block.anchor(8).unwrap(), block.anchor(18).unwrap())
+                .unwrap(),
+            "three\nfour"
+        );
     }
 
     #[test]
