@@ -2632,6 +2632,7 @@ dependencies = [
  "rsi-media-local",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-meta-native-loader",
  "rsi-meta-profile",
  "rsi-meta-scope",
  "rsi-permission-presets",

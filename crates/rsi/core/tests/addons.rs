@@ -661,3 +661,35 @@ async fn missing_export_rolls_back_the_embedded_connection_and_releases_its_owne
     )
     .unwrap();
 }
+
+#[test]
+fn resolved_addon_provenance_and_portable_declarations_are_prepare_free() {
+    let factory = Arc::new(CounterFactory::default());
+    let resolved = rsi_meta::ResolvedFactory::linked(
+        "fixture.counter",
+        "exact",
+        UpdateMode::Replayable,
+        factory.clone(),
+    );
+    let mut addon = StandardAddonBuilder::new("fixture.resolved");
+    addon
+        .register_resolved(AddonScope::Agent, resolved.clone())
+        .unwrap();
+    addon.isolate_agent_portable("fixture.portable").unwrap();
+    addon.isolate_agent_portable("fixture.portable").unwrap();
+    assert!(addon.isolate_agent_portable("").is_err());
+    assert!(
+        addon
+            .register_resolved(AddonScope::Agent, resolved.clone())
+            .is_err()
+    );
+    let set = StandardAddonSet::new([addon.build().unwrap()]).unwrap();
+    assert_eq!(
+        set.descriptions().next().unwrap().identity,
+        *resolved.identity()
+    );
+    assert_eq!(factory.prepared.load(Ordering::SeqCst), 0);
+}
+
+#[path = "addons/native.rs"]
+mod native;

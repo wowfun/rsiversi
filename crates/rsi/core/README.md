@@ -130,10 +130,19 @@ owner-writable cache, but the catalog grants System authority only to that
 exact verified `standard` identity and directory. Other cache siblings are not
 discovered as presets and cannot inherit System source or trust.
 
-Linked addons use `StandardAddonBuilder`, immutable `StandardAddon`, and
-`StandardAddonSet`. A declaration owns its linked factories, exact Local/Event
+Addons use `StandardAddonBuilder`, immutable `StandardAddon`, and
+`StandardAddonSet`. A declaration owns its exact resolved factories, Local/Event
 markers, explicit Profile fragments, target platforms and descriptive factory
-metadata. Factories have explicit Service, Agent, Application or Client scope;
+metadata. `register_resolved` preserves an embedder-supplied `ResolvedFactory`,
+including NativeCatalog provenance; linked registration uses the same path.
+Descriptions carry the complete `FactoryIdentity`, and frozen Host/Agent catalogs
+and product digests retain it without substituting a linked revision. Native
+values must come from the embedder's existing NativeCatalog; this declaration API
+does not load artifacts. `isolate_agent_portable` declares generation-private
+Portable service keys for native providers and their linked bridges, using the
+Agent composition catalog's bounds. Declaration order does not affect their
+identity. Installation and dynamic source selection remain separate product work.
+Factories have explicit Service, Agent, Application or Client scope;
 registering a factory does not instantiate it. A Profile entry or declared
 fragment selects activation. Domain endpoint and client factories are declared
 by their addon in their respective scopes; an endpoint is remotely exposed only

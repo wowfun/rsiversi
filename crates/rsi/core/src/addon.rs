@@ -1,7 +1,8 @@
 use rsi_agent_composition::AgentContributionCatalog;
 use rsi_host::{HostBuilder, HostError, HostLimits, ProfileFragment};
 use rsi_meta::{
-    ActivationPlan, LocalContract, LocalEvent, PluginFactory, ResolvedFactory, UpdateMode,
+    ActivationPlan, FactoryIdentity, LocalContract, LocalEvent, PluginFactory, ResolvedFactory,
+    UpdateMode,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -39,12 +40,12 @@ pub enum AddonScope {
 pub struct AddonFactoryDescription {
     /// Owning addon identity.
     pub addon: String,
-    /// Exact linked factory identity.
+    /// Exact catalog plugin identity.
     pub plugin: String,
     /// Selected composition role.
     pub scope: AddonScope,
-    /// Explicit linked build revision.
-    pub revision: String,
+    /// Exact linked revision or native artifact provenance.
+    pub identity: FactoryIdentity,
     /// Meta update behavior.
     pub update_mode: String,
     /// Bounded human-readable description.
@@ -56,8 +57,7 @@ pub struct AddonFactoryDescription {
 #[derive(Clone, Debug)]
 struct Factory {
     description: AddonFactoryDescription,
-    mode: UpdateMode,
-    implementation: Arc<dyn PluginFactory>,
+    resolved: ResolvedFactory,
 }
 
 type RegisterMarker = fn(&mut HostBuilder) -> rsi_host::Result<()>;
@@ -102,7 +102,7 @@ pub struct StandardAddonBuilder {
     addon: StandardAddon,
 }
 
-/// Immutable linked addon declaration. A Profile separately chooses activation.
+/// Immutable addon declaration. A Profile separately chooses activation.
 #[derive(Clone, Debug)]
 pub struct StandardAddon {
     id: String,
@@ -111,6 +111,7 @@ pub struct StandardAddon {
     markers: Vec<Marker>,
     fragments: Vec<(AddonScope, ProfileFragment)>,
     exports: Vec<DomainExport>,
+    portable_isolations: BTreeSet<String>,
 }
 
 impl StandardAddonBuilder {
@@ -124,6 +125,7 @@ impl StandardAddonBuilder {
                 markers: Vec::new(),
                 fragments: Vec::new(),
                 exports: Vec::new(),
+                portable_isolations: BTreeSet::new(),
             },
         }
     }
@@ -166,7 +168,26 @@ impl StandardAddonBuilder {
         mode: UpdateMode,
         implementation: Arc<dyn PluginFactory>,
     ) -> rsi_host::Result<&mut Self> {
-        let plugin = plugin.into();
+        self.register_resolved(
+            scope,
+            ResolvedFactory::linked(plugin.into(), revision, mode, implementation),
+        )
+    }
+
+    /// Declares exact trusted resolver provenance without enabling or executing it.
+    /// Native factories come from the embedder's existing `NativeCatalog`.
+    pub fn register_resolved(
+        &mut self,
+        scope: AddonScope,
+        resolved: ResolvedFactory,
+    ) -> rsi_host::Result<&mut Self> {
+        let mut validation = HostBuilder::without_paths("addon-validation");
+        validation.register_factory(resolved.clone())?;
+        let plugin = match resolved.identity() {
+            FactoryIdentity::Linked { plugin, .. } | FactoryIdentity::Native { plugin, .. } => {
+                plugin.as_str().to_owned()
+            }
+        };
         if self.addon.factories.contains_key(&plugin) {
             return Err(HostError::DuplicatePlugin {
                 plugin: plugin.into(),
@@ -178,9 +199,6 @@ impl StandardAddonBuilder {
                 HostLimits::default().maximum_factories,
             ));
         }
-        let revision = revision.into();
-        identifier("addon factory", &plugin)?;
-        identifier("addon revision", &revision)?;
         self.addon.factories.insert(
             plugin.clone(),
             Factory {
@@ -188,8 +206,8 @@ impl StandardAddonBuilder {
                     addon: self.addon.id.clone(),
                     plugin,
                     scope,
-                    revision,
-                    update_mode: match mode {
+                    identity: resolved.identity().clone(),
+                    update_mode: match resolved.update_mode() {
                         UpdateMode::Replayable => "replayable",
                         UpdateMode::RestartRequired => "restart_required",
                     }
@@ -197,10 +215,33 @@ impl StandardAddonBuilder {
                     summary: String::new(),
                     configuration_schema: None,
                 },
-                mode,
-                implementation,
+                resolved,
             },
         );
+        Ok(self)
+    }
+
+    /// Gives each Agent generation a fresh mapping for an explicit Portable key.
+    pub fn isolate_agent_portable(
+        &mut self,
+        key: impl Into<String>,
+    ) -> rsi_host::Result<&mut Self> {
+        let key = key.into();
+        let mut validation =
+            AgentContributionCatalog::new([]).map_err(|error| profile_error(&error))?;
+        validation
+            .isolate_portable(key.clone())
+            .map_err(|error| profile_error(&error))?;
+        if !self.addon.portable_isolations.contains(&key)
+            && self.addon.portable_isolations.len()
+                >= rsi_agent_composition::MAXIMUM_CATALOG_MARKERS
+        {
+            return Err(capacity(
+                "Agent Portable isolation keys",
+                rsi_agent_composition::MAXIMUM_CATALOG_MARKERS,
+            ));
+        }
+        self.addon.portable_isolations.insert(key);
         Ok(self)
     }
 
@@ -438,6 +479,7 @@ impl StandardAddonSet {
             set.register_into(&mut builder, scope)?;
             builder.build()?;
         }
+        let _catalog = set.agent_catalog()?;
         Ok(set)
     }
 
@@ -463,12 +505,7 @@ impl StandardAddonSet {
                 .values()
                 .filter(|factory| factory.description.scope == scope)
             {
-                builder.register_linked(
-                    factory.description.plugin.as_str(),
-                    factory.description.revision.clone(),
-                    factory.mode,
-                    factory.implementation.clone(),
-                )?;
+                builder.register_factory(factory.resolved.clone())?;
             }
             for (_, fragment) in addon.fragments.iter().filter(|(role, _)| *role == scope) {
                 builder.register_fragment(fragment.clone())?;
@@ -512,14 +549,7 @@ impl StandardAddonSet {
                 .iter()
                 .flat_map(|addon| addon.factories.values())
                 .filter(|factory| factory.description.scope == AddonScope::Agent)
-                .map(|factory| {
-                    ResolvedFactory::linked(
-                        factory.description.plugin.as_str(),
-                        factory.description.revision.clone(),
-                        factory.mode,
-                        factory.implementation.clone(),
-                    )
-                }),
+                .map(|factory| factory.resolved.clone()),
         )
         .map_err(|error| HostError::Bootstrap(error.to_string()))?;
         for marker in self
@@ -531,12 +561,21 @@ impl StandardAddonSet {
             (marker.register_agent)(&mut catalog)
                 .map_err(|error| HostError::Bootstrap(error.to_string()))?;
         }
+        for key in self
+            .addons
+            .iter()
+            .flat_map(|addon| &addon.portable_isolations)
+        {
+            catalog
+                .isolate_portable(key.clone())
+                .map_err(|error| profile_error(&error))?;
+        }
         Ok(catalog)
     }
 
     pub(crate) fn digest(&self) -> rsi_host::Result<String> {
         let mut digest = Sha256::new();
-        digest.update(b"rsi.standard.addons.v1");
+        digest.update(b"rsi.standard.addons.v2");
         for addon in self.addons.iter() {
             component(&mut digest, b"addon-id");
             component(&mut digest, addon.id.as_bytes());
@@ -559,6 +598,14 @@ impl StandardAddonSet {
                 component(&mut digest, b"fragment");
                 component(&mut digest, &bounded_json(scope)?);
                 component(&mut digest, fragment.source_digest().as_bytes());
+            }
+            component(&mut digest, b"agent-portable-isolations");
+            component(
+                &mut digest,
+                &(addon.portable_isolations.len() as u64).to_le_bytes(),
+            );
+            for key in &addon.portable_isolations {
+                component(&mut digest, key.as_bytes());
             }
             for export in &addon.exports {
                 component(&mut digest, b"export-domain");
@@ -635,4 +682,8 @@ fn bounded_json(value: &impl Serialize) -> rsi_host::Result<Vec<u8>> {
     serde_json::to_writer(&mut output, value)
         .map_err(|error| HostError::Bootstrap(error.to_string()))?;
     Ok(output.0)
+}
+
+fn profile_error(error: &rsi_meta_profile::ProfileError) -> HostError {
+    HostError::Bootstrap(error.to_string())
 }
