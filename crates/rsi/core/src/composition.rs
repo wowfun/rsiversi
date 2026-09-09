@@ -1183,6 +1183,12 @@ fn register_factories(
     )?;
     register(
         builder,
+        "rsi.client.preferences",
+        UpdateMode::Replayable,
+        rsi_client_preferences::ClientPreferencesFactory,
+    )?;
+    register(
+        builder,
         CREDENTIALS_FACTORY,
         UpdateMode::RestartRequired,
         CredentialsLocalFactory::with_store(credential_store, captured_environment),
@@ -1450,6 +1456,11 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ),
         ProfileEntry::new("rsi-settings", SETTINGS_CORE_FACTORY, Value::Null),
         ProfileEntry::new("rsi-agent-defaults", SETTINGS_FACTORY, Value::Null),
+        ProfileEntry::new(
+            "rsi-client-preferences",
+            "rsi.client.preferences",
+            Value::Null,
+        ),
         ProfileEntry::new(
             "rsi-credentials",
             CREDENTIALS_FACTORY,

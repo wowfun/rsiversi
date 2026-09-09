@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-client-preferences = { path = "../client-preferences" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
 rsi-session-files = { path = "../session-files" }
 rsi-session-files-ui = { path = "../session-files-ui" }
 rsi-ui = { path = "../ui" }

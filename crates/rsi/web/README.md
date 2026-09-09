@@ -11,6 +11,8 @@ fetching a URL. Tool/file/source contents keep their plain-text presentations.
 The document constructs only the closed element set with text nodes, and links
 open with no opener or referrer. Markdown does not grant script or media access.
 Input composition suppresses keyboard submission until composition has ended.
+Composer Enter behavior comes from the ordinary [client preferences](../client-preferences/README.md)
+Settings contribution and is captured when the application connects.
 
 Each pane displays the latest complete extension-state snapshot, including fresh
 drafts and idle control changes without a model request. Producer values and

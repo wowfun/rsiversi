@@ -2613,6 +2613,7 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-client",
  "rsi-client-composition",
+ "rsi-client-preferences",
  "rsi-commands",
  "rsi-commands-protocol",
  "rsi-credentials-local",
@@ -3506,6 +3507,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-client-preferences"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-settings",
+ "rsi-settings-protocol",
+ "rsi-settings-testkit",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-commands"
 version = "0.0.1"
 dependencies = [
@@ -4354,6 +4369,7 @@ dependencies = [
  "rsi-application",
  "rsi-approval-protocol",
  "rsi-client",
+ "rsi-client-preferences",
  "rsi-conversation",
  "rsi-host",
  "rsi-media-protocol",
@@ -4364,6 +4380,7 @@ dependencies = [
  "rsi-session-files-ui",
  "rsi-session-protocol",
  "rsi-session-ui",
+ "rsi-settings-protocol",
  "rsi-tools-protocol",
  "rsi-ui",
  "rsi-user-questions-protocol",
@@ -4464,6 +4481,7 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-client",
  "rsi-client-composition",
+ "rsi-client-preferences",
  "rsi-conversation",
  "rsi-credentials-protocol",
  "rsi-files-protocol",

@@ -139,6 +139,7 @@ class Pane {
     this.unsent = false;
     this.draftWork = undefined;
     this.draftError = undefined;
+    this.enterSubmit = false;
     this.node = element("section", "pane");
     this.node.setAttribute("aria-label", `${index ? "Right" : "Left"} conversation`);
     this.node.addEventListener("focusin", () => select(index));
@@ -174,7 +175,7 @@ class Pane {
     });
     this.input.addEventListener("keydown", event => {
       if (event.isComposing || event.keyCode === 229) return;
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); perform(() => this.submit(false)); }
+      if (event.key === "Enter" && !event.shiftKey && (event.metaKey || event.ctrlKey || this.enterSubmit)) { event.preventDefault(); perform(() => this.submit(false)); }
     });
     this.composer.addEventListener("submit", event => { event.preventDefault(); perform(() => this.submit(false)); });
     const bar = element("div", "composer-bar");
@@ -185,7 +186,8 @@ class Pane {
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
     actions.append(this.cancel, this.steer, this.send); bar.append(this.model, actions);
-    this.composer.append(this.input, bar, element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line"));
+    this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
+    this.composer.append(this.input, bar, this.hint);
     this.node.append(header, tools, this.commandView, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
@@ -407,7 +409,11 @@ function render(next) {
     catalogKey = key;
     renderNavigation(next.catalog);
   }
-  next.panes.forEach((data, i) => panes[i].render(data, next.catalog.models));
+  next.panes.forEach((data, i) => {
+    panes[i].enterSubmit = next.preferences?.enter_submit ?? false;
+    panes[i].hint.textContent = panes[i].enterSubmit ? "Enter to send · Shift Enter for a new line" : "Ctrl / ⌘ Enter to send · Enter for a new line";
+    panes[i].render(data, next.catalog.models);
+  });
   renderDetail(next);
 }
 function navItem(name, subtitle, run) {

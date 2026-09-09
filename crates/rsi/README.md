@@ -25,6 +25,10 @@ and discards through its terminator before accepting keys again. Drafts are
 limited to 1 MiB UTF-8 each; draft and undo/redo text buffers share a 4 MiB
 aggregate budget across saved Sessions. Rejected insertion preserves
 the previous draft. Real SIGINT invokes cancellation; SIGTERM and SIGHUP exit.
+Ctrl+S always submits NextTurn. The ordinary [client preferences](client-preferences/README.md)
+Settings contribution can change plain Enter to insert a newline; TUI captures
+that setting at application startup. Form fields and question answers still
+accept with Enter.
 Ctrl+Z undoes an edit and Alt+Z (or enhanced Ctrl+Shift+Z) redoes it. A bracketed
 paste is one edit. Editing after undo discards the redo branch. Each editor keeps
 at most 128 changes and 1 MiB of removed/inserted text; the oldest changes are

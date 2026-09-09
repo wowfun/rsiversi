@@ -260,6 +260,16 @@ impl RunningRsi {
         )
     }
 
+    /// Clones the registered Settings inspection and versioned edit capability.
+    pub fn settings_access(
+        &self,
+    ) -> Result<std::sync::Arc<dyn rsi_settings_protocol::SettingsAccess>> {
+        required_local::<rsi_settings_protocol::SettingsAccessContract>(
+            &self.host,
+            "Settings access",
+        )
+    }
+
     pub(crate) fn approval_broker(
         &self,
     ) -> Result<std::sync::Arc<rsi_service_host::ApprovalBroker>> {

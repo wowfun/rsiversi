@@ -1152,6 +1152,16 @@ async fn run_inner(
         workspace,
         lifetime: mode,
     } = services;
+    let preferences = if let Some(settings) =
+        context.lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
+    {
+        tokio::select! { biased;
+            () = application_work.stop.cancelled() => return Ok(()),
+            result = rsi_client_preferences::Preferences::load(settings.as_ref()) => result.map_err(error)?,
+        }
+    } else {
+        rsi_client_preferences::Preferences::default()
+    };
     let resumed = command.resume.is_some();
     let selection = match command.resume {
         Some(session_id) => SessionSelection::Resume {
@@ -1222,6 +1232,7 @@ async fn run_inner(
             .ok_or_else(|| error("TUI surface target is unavailable"))?,
     );
     let mut ui_changes = client.ui.registry.changes();
+    client.state.input_preferences = preferences.tui;
     let (width, height) = terminal::size();
     let mut screen =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).map_err(error)?;
@@ -1295,7 +1306,10 @@ async fn run_inner(
                             else if key.code == KeyCode::Tab && client.state.detail.is_none() && client.state.answer.is_none() && client.complete_command() {}
                             else if key.code == KeyCode::Tab { client.state.focused = (client.state.focused+1) % client.state.transcript.blocks.len().max(1); if let Some(block) = client.state.transcript.blocks.get_mut(client.state.focused) { block.collapsed = !block.collapsed; client.state.top = block.anchor(0); } }
                             else if key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT) {
-                                if client.state.answer.is_some() { client.answer(); } else { client.submit(MessageDelivery::NextTurn, false); }
+                                if client.state.answer.is_some() { client.answer(); }
+                                else if client.state.input_preferences.enter_submit || control { client.submit(MessageDelivery::NextTurn, false); }
+                                else if let Err(message) = client.state.editor.insert("\n") { client.state.notice(message); }
+                            } else if control && key.code == KeyCode::Char('s') && client.state.answer.is_none() { client.submit(MessageDelivery::NextTurn, false);
                             } else if control && key.code == KeyCode::Char('o') { client.submit(MessageDelivery::Steer, false); }
                             else if let Err(message) = client.state.answer.as_mut().map_or(&mut client.state.editor, |answer| &mut answer.editor).key(key) { client.state.notice(message); }
                         },
@@ -1427,6 +1441,7 @@ async fn run_inner(
                             let command = std::mem::take(&mut client.command);
                             if !draft.text.is_empty() || draft.has_edits() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
                             client.handle = attached.handle; client.state = State::new(attached.header, client.state.remote);
+                            client.state.input_preferences = preferences.tui;
                             if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.owned = saved.owned; client.command = saved.command; }
                             client.cancelling = false; client.cancellation_queued = false; client.interactions = None; client.inspection = attached.inspection; client.durability = if client.inspection.is_some() { Durability::Durable } else { Durability::Draft }; client.history.before = None; client.live_transcript = None;
                             client.state.active = client.inspection.as_ref().is_some_and(|snapshot| snapshot.active_turn_id.is_some());

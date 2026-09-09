@@ -46,6 +46,68 @@ async fn fullscreen_contributed_session_card_and_exact_source_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_enter_preference_survives_session_switch_and_ctrl_s_submits() {
+    for remote in [false, true] {
+        verify_enter_preference(remote).await;
+    }
+}
+
+async fn verify_enter_preference(remote: bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let router = Router::new()
+        .route("/v1/chat/completions", post(super::commands::capture))
+        .with_state(requests.clone());
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let fixture = CliFixture::new(&endpoint);
+    let path = fixture.temporary.path().join("config/rsi/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    settings["rsi.client"] = serde_json::json!({"tui":{"enter_submit":false}});
+    std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    if remote {
+        fixture.assert_success(&["host", "start", "--profile", "fixture"]);
+    }
+    let name = if remote {
+        "tui-enter-remote"
+    } else {
+        "tui-enter-local"
+    };
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", name]);
+    terminal.until("Enter adds a line · Ctrl+S submits").await;
+    for (index, text) in ["first\rsecond", "after switch\rnext line"]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            terminal.action(0);
+            terminal.until("Enter adds a line · Ctrl+S submits").await;
+        }
+        terminal.send(text.as_bytes());
+        terminal.until(text.split('\r').next_back().unwrap()).await;
+        assert_eq!(requests.lock().unwrap().len(), index);
+        terminal.send(b"\x13");
+        terminal.until("hello from daemon").await;
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), index + 1);
+        assert!(
+            requests[index]
+                .to_string()
+                .contains(&text.replace('\r', "\\n"))
+        );
+    }
+    terminal.send(b"\x04");
+    terminal.finish().await;
+    if remote {
+        fixture.assert_success(&["host", "stop"]);
+    }
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
     let (endpoint, state, provider) = gated_provider("bash").await;
     *state.arguments.lock().unwrap() = Some(

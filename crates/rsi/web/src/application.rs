@@ -177,6 +177,7 @@ pub struct WebApplication {
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     pub(crate) models: Arc<dyn rsi_ai_protocol::LanguageModels>,
     pub(crate) settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
+    pub(crate) preferences: rsi_client_preferences::Composer,
     pub(crate) panes: [Arc<crate::panes::Pane>; 2],
     pub(crate) shell: Arc<Shell>,
     pub(crate) has_files: bool,
@@ -256,6 +257,7 @@ impl WebApplication {
         let details = self.details.lock().expect("Web details poisoned");
         reservation.encode(&serde_json::json!({
             "panes": panes, "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
+            "preferences": self.preferences,
             "ui_detail": details.ui,
             "settings": details.editor,
             "settings_catalog": details.settings_catalog,
@@ -337,6 +339,10 @@ impl PluginFactory for WebApplicationFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (changed, _) = watch::channel(0_u64);
+        let settings = plan.local::<rsi_settings_protocol::SettingsAccessContract>()?;
+        let preferences = rsi_client_preferences::Preferences::load(settings.as_ref())
+            .await
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let has_files = plan
             .context()
             .lookup_local::<rsi_session_files::SessionFilesContract>()
@@ -347,7 +353,8 @@ impl PluginFactory for WebApplicationFactory {
             session: plan.local::<rsi_session_protocol::SessionContract>()?,
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
-            settings: plan.local::<rsi_settings_protocol::SettingsAccessContract>()?,
+            settings,
+            preferences: preferences.web,
             panes: std::array::from_fn(|_| Arc::new(crate::panes::Pane::default())),
             shell,
             has_files,

@@ -363,7 +363,18 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
         }
     }
     if state.transcript.blocks.is_empty() {
-        frame.render_widget(Paragraph::new("Describe a change, investigate a failure, or continue a session.\n\nEnter submits · Ctrl+J adds a line · Ctrl+P opens actions").style(Style::default().fg(Color::DarkGray)), body);
+        let keys = if state.input_preferences.enter_submit {
+            "Enter submits · Ctrl+J adds a line · Ctrl+P opens actions"
+        } else {
+            "Enter adds a line · Ctrl+S submits · Ctrl+P opens actions"
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Describe a change, investigate a failure, or continue a session.\n\n{keys}"
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+            body,
+        );
     }
     let edit_area = Rect::new(
         0,
@@ -374,7 +385,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &State) -> View {
     let title = state.ui_edit.as_ref().map_or_else(
         || {
             state.answer.as_ref().map_or_else(
-                || " Input · Enter send · Ctrl+O steer ".into(),
+                || {
+                    if state.input_preferences.enter_submit {
+                        " Input · Enter send · Ctrl+S send · Ctrl+O steer ".into()
+                    } else {
+                        " Input · Enter line · Ctrl+S send · Ctrl+O steer ".into()
+                    }
+                },
                 |answer| {
                     format!(
                         " Answer {}/{} · Enter accepts option number or text ",

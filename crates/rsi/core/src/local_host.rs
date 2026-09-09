@@ -33,6 +33,7 @@ pub struct ServiceHostConnection {
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     media: Arc<dyn rsi_media_protocol::Media>,
     files: Arc<dyn rsi_session_files::SessionFiles>,
+    settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
     embedded: Option<EmbeddedServiceHost>,
     remote: Option<crate::ProfileOwner>,
 }
@@ -52,6 +53,10 @@ impl ServiceHostConnection {
         let result = (|| {
             Ok(Self {
                 mode: ServiceHostConnectionMode::Remote,
+                settings: crate::required_local::<rsi_settings_protocol::SettingsAccessContract>(
+                    &host,
+                    "remote Settings",
+                )?,
                 application: crate::required_local::<rsi_session_protocol::SessionContract>(
                     &host,
                     "remote Session",
@@ -110,6 +115,11 @@ impl ServiceHostConnection {
     /// Clones the connected finite Session workspace browser.
     pub fn session_files(&self) -> Arc<dyn rsi_session_files::SessionFiles> {
         self.files.clone()
+    }
+
+    /// Clones the connected Settings inspection and versioned edit capability.
+    pub fn settings_access(&self) -> Arc<dyn rsi_settings_protocol::SettingsAccess> {
+        self.settings.clone()
     }
 
     /// Clones the connected independent canonical Media service.
@@ -310,6 +320,7 @@ async fn boot_embedded(
         workspace: booted.workspace.clone(),
         media: booted.media.clone(),
         files: booted.files.clone(),
+        settings: booted.settings.clone(),
         remote: None,
         embedded: Some(EmbeddedServiceHost {
             running: booted.running,
@@ -320,6 +331,7 @@ async fn boot_embedded(
 }
 
 struct BootedServiceHost {
+    settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
     description: Arc<rsi_api_protocol::ConnectionDescription>,
     running: Arc<RunningRsi>,
     broker: Arc<ApprovalBroker>,
@@ -362,6 +374,7 @@ impl BootedServiceHost {
                 workspace: running.workspace_registry()?,
                 media: running.media_service()?,
                 files: running.session_files()?,
+                settings: running.settings_access()?,
                 running: running.clone(),
             })
         })();

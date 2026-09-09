@@ -83,7 +83,10 @@ impl SettingsAccess for Fixture {
             },
         })
     }
-    async fn read(&self, _: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+    async fn read(&self, namespace: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        if namespace == rsi_client_preferences::NAMESPACE {
+            return Err(SettingsError::UnknownNamespace(namespace.into()));
+        }
         self.reading().await;
         let mut snapshot = self.snapshot.lock().unwrap().clone();
         if self.changed_scope.load(Ordering::SeqCst) {

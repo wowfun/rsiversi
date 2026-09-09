@@ -32,6 +32,11 @@ without image elements. Separate document tests simulate composing and key-code
 229 Enter events and verify that keyboard submission stays suppressed; they do
 not establish native IME platform behavior.
 
+Client preferences are edited through the generic Settings UI. The current
+application retains its input mode; signing out and reconnecting applies the
+saved Enter behavior while restoring contributed Session and Files actions.
+The fixture checks Shift+Enter and a real plain-Enter submission in that mode.
+
 The runner freezes and hashes its native executable before starting either
 service. Concurrent Cargo builds cannot change that owner's executable gate.
 Only explicit non-secret build variables reach the test application, and an

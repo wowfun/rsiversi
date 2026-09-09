@@ -87,6 +87,7 @@ pub(super) struct Answer {
 }
 
 pub(super) struct State {
+    pub(super) input_preferences: rsi_client_preferences::Composer,
     pub(super) ui_form: Option<super::ui::Form>,
     pub(super) ui_edit: Option<super::ui::Edit>,
     pub(super) view_revision: u64,
@@ -132,6 +133,7 @@ impl State {
     }
     pub(super) fn new(header: SessionHeader, remote: bool) -> Self {
         Self {
+            input_preferences: rsi_client_preferences::Preferences::default().tui,
             ui_form: None,
             ui_edit: None,
             view_revision: 0,
