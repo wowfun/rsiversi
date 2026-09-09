@@ -71,7 +71,7 @@ pub enum Response {
     Confine {
         /// Native program path.
         program: PathBuf,
-        /// UTF-8 argv, excluding argv[0].
+        /// UTF-8 argv, excluding `argv[0]`.
         arguments: Vec<String>,
     },
     /// Complete typed result; enforcement is supplied only by the host.
