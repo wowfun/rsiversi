@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 mod commands;
 #[path = "submission/files.rs"]
 mod files;
+#[path = "submission/images.rs"]
+mod images;
 #[path = "submission/output.rs"]
 mod output;
 #[path = "submission/settings.rs"]
@@ -24,6 +26,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    media: Arc<images::Reader>,
     settings: Arc<settings::Fixture>,
     block_source: std::sync::atomic::AtomicBool,
     active_source: std::sync::atomic::AtomicUsize,
@@ -365,11 +368,15 @@ impl PluginFactory for Providers {
             .context()
             .provide_local::<rsi_settings_protocol::SettingsAccessContract>(self.0.settings.clone())
             .unwrap();
+        let _media = plan
+            .context()
+            .provide_local::<rsi_media_protocol::MediaContract>(self.0.media.clone())
+            .unwrap();
         plan.defer(
             "withdraw fake domains",
             Box::new(move || {
                 Box::pin(async move {
-                    drop((_s, _w, _m, _se));
+                    drop((_s, _w, _m, _se, _media));
                     Ok(())
                 })
             }),

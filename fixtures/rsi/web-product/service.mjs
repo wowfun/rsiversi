@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
@@ -40,7 +41,13 @@ async function startProvider() {
       const lastUser = messages.findLastIndex(message => message.role === "user");
       const prompt = text(messages[lastUser]?.content).slice(0, 2048);
       const completedTool = messages.slice(lastUser + 1).some(message => message.role === "tool");
-      requests.push({ prompt, completedTool, model: body.model });
+      const images = (Array.isArray(messages[lastUser]?.content) ? messages[lastUser].content : []).filter(part => part.type === "image_url").map(part => {
+        assert.match(part.image_url.url, /^data:image\/png;base64,/);
+        const bytes = Buffer.from(part.image_url.url.split(",")[1], "base64");
+        assert.equal(bytes.subarray(1, 4).toString(), "PNG");
+        return { sha256: createHash("sha256").update(bytes).digest("hex"), width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+      });
+      requests.push({ prompt, completedTool, model: body.model, images });
       response.writeHead(200, { "content-type": "text/event-stream" });
       if (prompt.includes("hold this turn") && !completedTool) {
         response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "Waiting for cancellation." }, finish_reason: null }] })}\n\n`);
@@ -102,7 +109,7 @@ export async function startService({ binary, assets, report }) {
     const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/web");
     await mkdir(host, { recursive: true }); await mkdir(application, { recursive: true });
     await writeFile(join(config, "settings.json"), JSON.stringify({ "rsi.agent": { default_model: { deployment: "fixture", model: "fixture-model" } } }));
-    await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = false\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n`);
+    await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n`);
     await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "assets"\nplugin = "rsi.web.assets"\nconfig = { directory = ${JSON.stringify(assets)} }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve-web"\n`);
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
     boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);

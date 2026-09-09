@@ -300,6 +300,37 @@ pub async fn command(source: String) -> Result<(), JsValue> {
     app.command(&source).await.map_err(failure)
 }
 
+/// Imports bounded binary source bytes without encoding them into a JSON command.
+#[wasm_bindgen]
+pub async fn import_image(
+    pane: u8,
+    generation: String,
+    source: js_sys::Uint8Array,
+) -> Result<(), JsValue> {
+    let app = application()?;
+    if source.length() as usize > crate::panes::images::MAXIMUM_UPLOAD_BYTES || source.length() == 0
+    {
+        return Err(failure("Image source must contain 1 byte to 16 MiB"));
+    }
+    if app.image_work.available_permits() == 0 {
+        return Err(failure("An image operation is still in progress"));
+    }
+    app.import_image(pane, &generation, source.to_vec().into())
+        .await
+        .map_err(failure)?;
+    Ok(())
+}
+
+/// Copies a validated canonical object into the transferable document response.
+#[wasm_bindgen]
+pub async fn read_image(selection: String) -> Result<js_sys::Uint8Array, JsValue> {
+    let object = application()?
+        .read_image(&selection)
+        .await
+        .map_err(failure)?;
+    Ok(js_sys::Uint8Array::from(object.bytes.as_ref()))
+}
+
 struct Waiting;
 impl Drop for Waiting {
     fn drop(&mut self) {

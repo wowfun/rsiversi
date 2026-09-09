@@ -138,3 +138,9 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .ui-contribution > p { margin: 0; }
 .ui-contribution > button { align-self: flex-start; }
 .ui-input { display: flex; flex-direction: column; gap: 6px; }
+.draft-images { max-height: 9rem; overflow: auto; }
+.draft-image { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 5px 12px; font-size: .75rem; }
+.draft-image > span { width: 100%; }
+.draft-image button { font-size: .7rem; padding: 3px 6px; }
+.frozen-images:not(:empty) { padding: 0 12px; }
+.image-preview { display: block; max-width: 100%; max-height: 55dvh; object-fit: contain; margin: 12px auto; }

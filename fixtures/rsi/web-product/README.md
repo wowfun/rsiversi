@@ -37,6 +37,16 @@ application retains its input mode; signing out and reconnecting applies the
 saved Enter behavior while restoring contributed Session and Files actions.
 The fixture checks Shift+Enter and a real plain-Enter submission in that mode.
 
+Image cases import generated PNGs as separate binary bodies through authenticated
+HTTP, reorder their references, inspect the actual provider request's image hashes
+and dimensions, and reopen an exact durable source using the same object URL as
+the draft preview. Removal starts no model call. Both sign-outs verify that every
+document-created URL was revoked. Synthetic document cases separately exercise
+object-count/byte retention, LRU reuse/eviction, late-read fencing and edited
+attachment preservation during unresolved submission; they do not validate Media
+bytes. Rust public-application tests cover import ownership, limits, image-only
+unknown retries, stale ordering revisions, and detail/application cancellation.
+
 The runner freezes and hashes its native executable before starting either
 service. Concurrent Cargo builds cannot change that owner's executable gate.
 Only explicit non-secret build variables reach the test application, and an

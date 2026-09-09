@@ -8,6 +8,45 @@ let connected = false;
 let catalogKey;
 let dialogKey;
 let lastNotice;
+const imageCache = new Map();
+let imageEpoch = 0;
+let imageReading = false;
+function clearImages() {
+  imageEpoch++;
+  for (const entry of imageCache.values()) URL.revokeObjectURL(entry.url);
+  imageCache.clear();
+}
+async function previewImage(body, media, ticket) {
+  const key = JSON.stringify(media);
+  const epoch = imageEpoch;
+  const status = element("p", "hint", "Loading image…");
+  body.append(status);
+  try {
+    let entry = imageCache.get(key);
+    if (!entry) {
+      if (imageReading) throw new Error("An image preview is still loading; reopen this preview to retry");
+      imageReading = true;
+      let bytes;
+      try { bytes = await call("read_image", JSON.stringify({ kind: "source", ticket })); }
+      finally { imageReading = false; }
+      if (epoch !== imageEpoch || !body.isConnected) return;
+      const limits = view.media_limits;
+      if (bytes.byteLength !== media.bytes || bytes.byteLength > limits.preview_bytes) throw new Error("Image exceeds the preview budget");
+      while (imageCache.size >= limits.preview_objects || [...imageCache.values()].reduce((sum, entry) => sum + entry.bytes, 0) + bytes.byteLength > limits.preview_bytes) {
+        const oldest = imageCache.keys().next().value;
+        URL.revokeObjectURL(imageCache.get(oldest).url); imageCache.delete(oldest);
+      }
+      entry = { url: URL.createObjectURL(new Blob([bytes], { type: "image/png" })), bytes: bytes.byteLength };
+    }
+    if (epoch !== imageEpoch || !body.isConnected) return;
+    imageCache.delete(key); imageCache.set(key, entry);
+    const img = element("img", "image-preview"); img.alt = `Image ${media.width} × ${media.height}`;
+    img.src = entry.url;
+    img.onerror = () => { if (body.isConnected) status.textContent = "Image could not be displayed"; };
+    img.onload = () => { if (body.isConnected) status.remove(); };
+    body.append(img);
+  } catch (error) { if (epoch === imageEpoch && body.isConnected) status.textContent = `Image unavailable: ${error.message}`; }
+}
 let endpoint;
 try { endpoint = localStorage.getItem("rsi.endpoint"); } catch { /* Storage is optional. */ }
 
@@ -49,6 +88,7 @@ async function perform(run) {
   try { await run(); } catch (error) { notify(String(error.message ?? error)); }
 }
 function failWorker(error) {
+  clearImages();
   connected = false;
   for (const waiter of pending.values()) waiter.reject(new Error(error));
   pending.clear();
@@ -76,13 +116,13 @@ function makeWorker() {
   current.onerror = event => { event.preventDefault(); if (worker === current) failWorker("Browser Worker stopped"); };
   return current;
 }
-function call(method, payload) {
+function call(method, payload, transfer = []) {
   if (!worker) return Promise.reject(new Error("Connect to your service first"));
   if (pending.size >= 8) return Promise.reject(new Error("Input is busy; wait for the current action"));
   const id = ++requestId;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    worker.postMessage({ kind: "call", id, method, payload });
+    worker.postMessage({ kind: "call", id, method, payload }, transfer);
   });
 }
 function command(value) { return call("command", JSON.stringify(value)); }
@@ -123,6 +163,7 @@ $("sign-out").addEventListener("click", () => perform(async () => {
     connected = false;
     worker.terminate(); worker = undefined;
     view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
+    clearImages();
     for (const pane of panes) pane.reset();
     $("connection-state").textContent = "Disconnected";
     $("connection-state").classList.remove("connected");
@@ -140,6 +181,8 @@ class Pane {
     this.draftWork = undefined;
     this.draftError = undefined;
     this.enterSubmit = false;
+    this.images = [];
+    this.imageEdits = 0;
     this.node = element("section", "pane");
     this.node.setAttribute("aria-label", `${index ? "Right" : "Left"} conversation`);
     this.node.addEventListener("focusin", () => select(index));
@@ -182,12 +225,21 @@ class Pane {
     this.model = element("select"); this.model.setAttribute("aria-label", `${index ? "Right" : "Left"} model`);
     this.model.addEventListener("change", () => perform(() => this.action("model", { model: JSON.parse(this.model.value) })));
     const actions = element("div", "actions");
+    this.imageInput = element("input"); this.imageInput.type = "file"; this.imageInput.accept = "image/*"; this.imageInput.multiple = true;
+    this.imageInput.hidden = true; this.imageInput.setAttribute("aria-label", `${index ? "Right" : "Left"} image files`);
+    this.imageInput.addEventListener("change", () => {
+      const files = [...this.imageInput.files]; this.imageInput.value = "";
+      perform(() => this.upload(files));
+    });
+    this.attach = button("Add images", () => this.imageInput.click(), "quiet");
+    this.imageList = element("div", "draft-images");
+    this.frozenImages = element("p", "hint frozen-images");
     this.cancel = button("Cancel", () => this.action("cancel"), "quiet");
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
-    actions.append(this.cancel, this.steer, this.send); bar.append(this.model, actions);
+    actions.append(this.attach, this.cancel, this.steer, this.send); bar.append(this.model, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
-    this.composer.append(this.input, bar, this.hint);
+    this.composer.append(this.input, this.imageInput, this.imageList, this.frozenImages, bar, this.hint);
     this.node.append(header, tools, this.commandView, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
@@ -213,16 +265,59 @@ class Pane {
     if (this.unsent) throw this.draftError ?? new Error("Draft has not reached the application");
   }
   async submit(steer) {
-    if (this.submitting) return;
+    if (this.submitting || this.uploading) return;
     this.submitting = true; this.send.disabled = true; this.steer.disabled = true;
     try {
       await this.flush();
       const generation = this.generation;
       const text = this.input.value;
       const submittedText = this.retryText ?? text;
+      const images = JSON.stringify(this.images);
+      const imageEdits = this.imageEdits;
+      const submittedImages = JSON.stringify(this.retryImages ?? this.images);
       await this.action("submit", { text, steer });
-      if (this.generation === generation && this.input.value === text && text === submittedText) this.input.value = "";
+      if (this.generation === generation && this.input.value === text && text === submittedText && images === submittedImages && imageEdits === this.imageEdits) this.input.value = "";
     } finally { this.submitting = false; this.send.disabled = !this.generation; this.steer.disabled = !this.generation || this.retryText != null; }
+  }
+  async upload(files) {
+    if (!files.length) return;
+    if (this.uploading || !this.generation) throw new Error("Image import is unavailable while this pane is busy");
+    const limits = view.media_limits;
+    if (this.images.length + files.length > limits.images) throw new Error(`A draft can hold at most ${limits.images} images`);
+    if (files.some(file => !file.size || file.size > limits.upload_bytes)) throw new Error("Each image source must contain 1 byte to 16 MiB");
+    const generation = this.generation;
+    this.imageEdits++;
+    this.uploading = true; this.attach.disabled = true; this.send.disabled = true; this.steer.disabled = true;
+    try {
+      await this.flush();
+      for (const file of files) {
+        const bytes = await file.arrayBuffer();
+        if (this.generation !== generation) throw new Error("Pane changed; remaining images were not imported");
+        await call("import_image", { pane: this.index, generation, bytes }, [bytes]);
+      }
+    } finally {
+      this.uploading = false;
+      this.render(view?.panes[this.index], view?.catalog.models ?? []);
+    }
+  }
+  renderImages(data) {
+    this.images = data?.images ?? [];
+    this.retryImages = data?.unresolved_images;
+    this.attach.hidden = !view?.has_media;
+    this.attach.disabled = !data || this.uploading || this.submitting || this.switching;
+    this.frozenImages.textContent = this.retryImages?.length ? `Previous submission retains ${this.retryImages.length} image(s) in its original order. Draft changes apply to the next submission.` : "";
+    const key = JSON.stringify([data?.generation, data?.images_revision, this.images]);
+    if (key === this.imagesKey) return;
+    this.imagesKey = key;
+    this.imageList.replaceChildren(...this.images.map((media, index) => {
+      const row = element("div", "draft-image");
+      row.append(element("span", "", `${index + 1}. ${media.width} × ${media.height} · ${media.bytes} bytes`));
+      const edit = to => { this.imageEdits++; return this.action("image_edit", { revision: data.images_revision, from: index, to }); };
+      const earlier = button("Move image earlier", () => edit(index - 1), "quiet"); earlier.disabled = index === 0;
+      const later = button("Move image later", () => edit(index + 1), "quiet"); later.disabled = index + 1 === this.images.length;
+      row.append(button("Preview image", () => this.action("inspect_image", { index, media }), "quiet"), earlier, later, button("Remove image", () => edit(null), "quiet"));
+      return row;
+    }));
   }
   reset() { this.generation = undefined; this.unsent = false; this.draftError = undefined; this.input.value = ""; this.render(null, []); }
   renderCommands(data) {
@@ -293,12 +388,13 @@ class Pane {
     this.history.disabled = !data || (!data.history_more && data.historical);
     this.live.hidden = !data?.historical;
     this.input.disabled = !data || this.switching; this.model.disabled = !data || this.switching;
-    this.send.disabled = !data || this.submitting || this.switching; this.steer.disabled = !data || this.submitting || this.switching;
+    this.send.disabled = !data || this.submitting || this.uploading || this.switching; this.steer.disabled = !data || this.submitting || this.uploading || this.switching;
     this.retryText = data?.unresolved_text;
     this.send.textContent = this.retryText != null ? "Retry previous" : "Send ↗";
     this.steer.disabled ||= this.retryText != null;
     this.cancel.disabled = !data;
     this.renderCommands(data);
+    this.renderImages(data);
     this.renderExtensions(data);
     if (!data) {
       if (!this.transcript.querySelector(".empty-pane")) {
@@ -448,6 +544,15 @@ $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
 $("settings-open").addEventListener("click", () => perform(() => command({ action: "settings_list" })));
 function renderDetail(next) {
+  if (next.image_detail) {
+    const detail = next.image_detail;
+    const key = `image:${detail.ticket}`;
+    if (dialogKey === key) return;
+    const body = element("div", "image-detail");
+    body.append(element("p", "hint", `${detail.media.width} × ${detail.media.height} · ${detail.media.bytes} bytes`));
+    showDialog(key, "Image preview", body);
+    previewImage(body, detail.media, detail.ticket); return;
+  }
   if (next.ui_detail) { renderUiDetail(next.ui_detail); return; }
   if (next.settings_catalog) {
     const catalog = next.settings_catalog;
@@ -502,6 +607,15 @@ function renderDetail(next) {
       const nextPage = button("Next source page", () => command({ action: "source_page", ticket: detail.ticket, forward: true }));
       previous.disabled = window.start === 0; nextPage.disabled = !window.more;
       actions.append(previous, nextPage); body.append(actions);
+      if (next.source_media && next.has_media) {
+        const preview = element("div", "image-detail");
+        const open = button("Preview source image", async () => {
+          open.disabled = true; preview.replaceChildren();
+          await previewImage(preview, next.source_media, detail.ticket);
+          open.disabled = false;
+        }, "quiet");
+        body.append(open, preview);
+      }
     }
     showDialog(key, "Exact source", body); return;
   }

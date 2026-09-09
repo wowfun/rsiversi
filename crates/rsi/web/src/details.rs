@@ -58,6 +58,22 @@ pub(crate) struct SourceDetail {
     pub window: Option<FieldWindow>,
     pub error: Option<String>,
 }
+impl SourceDetail {
+    pub fn media(&self) -> Option<rsi_media_protocol::MediaRef> {
+        use rsi_conversation::FactField;
+        if !matches!(
+            self.source.field,
+            FactField::InputImage { .. } | FactField::ToolImage { .. } | FactField::ImageOutput
+        ) {
+            return None;
+        }
+        let window = self
+            .window
+            .as_ref()
+            .filter(|window| window.start == 0 && !window.more)?;
+        serde_json::from_str(&window.text).ok()
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SettingsCatalog {
@@ -82,6 +98,7 @@ pub(crate) struct Details {
     pub(crate) revision: u64,
     pub stop: CancellationToken,
     pub ui: Option<UiDetail>,
+    pub image: Option<ImageDetail>,
     pub source: Option<SourceDetail>,
     pub block_sources: Option<BlockSources>,
     pub editor: Option<SettingsEditor>,
@@ -97,6 +114,7 @@ impl Details {
         self.stop.cancel();
         self.stop = CancellationToken::new();
         self.ui = None;
+        self.image = None;
         self.source = None;
         self.block_sources = None;
         self.editor = None;
@@ -117,9 +135,13 @@ impl Details {
     }
     pub fn detach(&mut self, pane: u8, generation: &str) -> Result<()> {
         if self
-            .ui
+            .image
             .as_ref()
             .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
+            || self
+                .ui
+                .as_ref()
+                .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
             || self
                 .source
                 .as_ref()
@@ -181,6 +203,14 @@ impl Drop for Details {
     fn drop(&mut self) {
         self.stop.cancel();
     }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ImageDetail {
+    pub pane: u8,
+    pub generation: String,
+    pub ticket: String,
+    pub media: rsi_media_protocol::MediaRef,
 }
 
 #[cfg(test)]

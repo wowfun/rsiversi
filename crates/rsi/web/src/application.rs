@@ -58,6 +58,19 @@ pub(crate) enum Command {
         generation: String,
         text: String,
     },
+    ImageEdit {
+        pane: u8,
+        generation: String,
+        revision: String,
+        from: u8,
+        to: Option<u8>,
+    },
+    InspectImage {
+        pane: u8,
+        generation: String,
+        index: u8,
+        media: rsi_media_protocol::MediaRef,
+    },
     Model {
         pane: u8,
         generation: String,
@@ -178,6 +191,8 @@ pub struct WebApplication {
     pub(crate) models: Arc<dyn rsi_ai_protocol::LanguageModels>,
     pub(crate) settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
     pub(crate) preferences: rsi_client_preferences::Composer,
+    pub(crate) media: Option<Arc<dyn rsi_media_protocol::Media>>,
+    pub(crate) image_work: Arc<Semaphore>,
     pub(crate) panes: [Arc<crate::panes::Pane>; 2],
     pub(crate) shell: Arc<Shell>,
     pub(crate) has_files: bool,
@@ -207,6 +222,18 @@ impl WebApplication {
             Ok(command) => command,
             Err(_) => return Box::pin(async { Err("Invalid Web command".into()) }),
         };
+        self.admit(true, move |app| async move { app.execute(command).await })
+    }
+    pub(crate) fn admit<T, F, Fut>(
+        self: &Arc<Self>,
+        report_error: bool,
+        operation: F,
+    ) -> BoxFuture<'static, Result<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
         let admission = self.admission.lock().expect("Web admission poisoned");
         if self.stop.is_cancelled() {
             return Box::pin(async { Err("Web application is closed".into()) });
@@ -219,9 +246,9 @@ impl WebApplication {
             let _permit = permit;
             let result = tokio::select! { biased;
                 () = app.stop.cancelled() => Err("Application closed; an admitted remote operation may still complete".into()),
-                result = app.execute(command) => result,
+                result = operation(app.clone()) => result,
             };
-            if let Err(error) = &result { app.notice.lock().expect("Web notice poisoned").clone_from(error); }
+            if report_error && let Err(error) = &result { app.notice.lock().expect("Web notice poisoned").clone_from(error); }
             app.changed();
             result
         }));
@@ -259,6 +286,10 @@ impl WebApplication {
             "panes": panes, "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "preferences": self.preferences,
             "ui_detail": details.ui,
+            "image_detail": details.image,
+            "source_media": details.source.as_ref().and_then(crate::details::SourceDetail::media),
+            "media_limits": crate::panes::images::limits(),
+            "has_media": self.media.is_some(),
             "settings": details.editor,
             "settings_catalog": details.settings_catalog,
             "detail": details.interaction,
@@ -355,6 +386,10 @@ impl PluginFactory for WebApplicationFactory {
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
             settings,
             preferences: preferences.web,
+            media: plan
+                .context()
+                .lookup_local::<rsi_media_protocol::MediaContract>(),
+            image_work: Arc::new(Semaphore::new(1)),
             panes: std::array::from_fn(|_| Arc::new(crate::panes::Pane::default())),
             shell,
             has_files,

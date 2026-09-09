@@ -1,3 +1,5 @@
+#[path = "images.rs"]
+pub(crate) mod images;
 #[path = "source_details.rs"]
 mod source_details;
 #[path = "ui_details.rs"]
@@ -29,7 +31,7 @@ pub(crate) struct Pane {
 #[derive(Debug)]
 struct SavedDraft {
     command: rsi_client::CommandSubmission,
-    text: Mutex<String>,
+    input: Mutex<images::DraftInput>,
     unresolved: Mutex<Option<SubmitInput>>,
     owned: Mutex<BTreeSet<MessageId>>,
     submissions: Arc<tokio::sync::Semaphore>,
@@ -38,7 +40,7 @@ impl SavedDraft {
     fn new() -> Self {
         Self {
             command: rsi_client::CommandSubmission::default(),
-            text: Mutex::new(String::new()),
+            input: Mutex::new(images::DraftInput::default()),
             unresolved: Mutex::new(None),
             owned: Mutex::new(BTreeSet::new()),
             submissions: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -89,9 +91,9 @@ impl Attachment {
                 .map_err(error)?
                 .is_some()
             {
-                let mut draft = self.draft.text.lock().expect("Web draft poisoned");
-                if draft.as_str() == text {
-                    draft.clear();
+                let mut draft = self.draft.input.lock().expect("Web draft poisoned");
+                if draft.text.as_str() == text && draft.images.is_empty() {
+                    draft.text.clear();
                 }
                 return Ok(true);
             }
@@ -121,7 +123,7 @@ impl Pane {
                 current
                     .as_ref()
                     .is_some_and(|attachment| Arc::ptr_eq(&attachment.draft, draft))
-                    || !draft.text.lock().expect("Web draft poisoned").is_empty()
+                    || !draft.input.lock().expect("Web draft poisoned").is_empty()
                     || draft.submissions.available_permits() == 0
                     || draft.command.view().pending.is_some()
                     || draft
@@ -151,13 +153,13 @@ impl Pane {
         }
         let total = drafts
             .values()
-            .map(|draft| draft.text.lock().expect("Web draft poisoned").len())
+            .map(|draft| draft.input.lock().expect("Web draft poisoned").text.len())
             .sum::<usize>();
-        let mut current = draft.text.lock().expect("Web draft poisoned");
-        if total - current.len() + text.len() > 2 * 1024 * 1024 {
+        let mut current = draft.input.lock().expect("Web draft poisoned");
+        if total - current.text.len() + text.len() > 2 * 1024 * 1024 {
             return Err("Saved drafts exceed this pane's 2 MiB limit".into());
         }
-        *current = text;
+        current.text = text;
         Ok(())
     }
     fn submit_request(
@@ -177,6 +179,7 @@ impl Pane {
         let request = if let Some(request) = retained {
             request
         } else {
+            rsi_session_protocol::validate_session_input(&content).map_err(error)?;
             let drafts = self.drafts.lock().expect("Web drafts poisoned");
             let retained_bytes: usize = drafts
                 .values()
@@ -252,6 +255,12 @@ impl Pane {
             .state
             .lock()
             .expect("Web renderer poisoned");
+        let input = current.draft.input.lock().expect("Web draft poisoned");
+        let unresolved = current
+            .draft
+            .unresolved
+            .lock()
+            .expect("Web submission poisoned");
         serde_json::json!({
             "generation": current.generation.to_string(), "session":current.id, "path":current.path,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
@@ -259,8 +268,10 @@ impl Pane {
             "commands":*current.commands.lock().expect("Web commands poisoned"),
             "command_submission":current.draft.command.view(),
             "projections":state.projections, "projection_notice":state.projection_notice,
-            "unresolved_text":current.draft.unresolved.lock().expect("Web submission poisoned").as_ref().and_then(|request| request.content.first()).and_then(|input| match input { SessionInput::Text { text } => Some(text.clone()), SessionInput::Image { .. } => None }),
-            "draft":*current.draft.text.lock().expect("Web draft poisoned"), "model":*current.model.lock().expect("Web model poisoned"),
+            "unresolved_text":unresolved.as_ref().map(|request| request.content.iter().find_map(|input| match input { SessionInput::Text { text } => Some(text.clone()), SessionInput::Image { .. } => None }).unwrap_or_default()),
+            "unresolved_images":unresolved.as_ref().map(|request| request.content.iter().filter_map(|item| match item { SessionInput::Image { media } => Some(media), SessionInput::Text { .. } => None }).collect::<Vec<_>>()),
+            "draft":input.text, "images_revision":input.revision.to_string(), "images":input.images,
+            "model":*current.model.lock().expect("Web model poisoned"),
             "transcript":state.history.as_ref().unwrap_or(&state.transcript), "historical":state.history.is_some(),
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
         })
@@ -340,6 +351,19 @@ impl WebApplication {
                 let pane = self.pane(pane)?;
                 pane.set_draft(&pane.attachment(&generation)?.draft, text)
             }
+            Command::ImageEdit {
+                pane,
+                generation,
+                revision,
+                from,
+                to,
+            } => self.edit_image(pane, &generation, &revision, from, to),
+            Command::InspectImage {
+                pane,
+                generation,
+                index,
+                media,
+            } => self.inspect_image(pane, &generation, index, media),
             Command::Model {
                 pane,
                 generation,
@@ -572,11 +596,22 @@ impl WebApplication {
             .map_err(|_| "A submission is still awaiting its receipt")?;
         self.pane(index)?
             .set_draft(&attachment.draft, text.clone())?;
-        if attachment.slash(&text).await? {
+        let text_only = attachment
+            .draft
+            .input
+            .lock()
+            .expect("Web draft poisoned")
+            .images
+            .is_empty();
+        if text_only && attachment.slash(&text).await? {
             return Ok(());
         }
-        let content = vec![SessionInput::Text { text: text.clone() }];
-        rsi_session_protocol::validate_session_input(&content).map_err(error)?;
+        let content = attachment
+            .draft
+            .input
+            .lock()
+            .expect("Web draft poisoned")
+            .content();
         if attachment
             .durable
             .load(std::sync::atomic::Ordering::Acquire)
@@ -615,22 +650,6 @@ impl WebApplication {
         } else {
             attachment.controller.submit(request.clone()).await
         };
-        if let Err(error) = &result
-            && !matches!(
-                error,
-                rsi_session_protocol::SessionError::MessageOutcomeUnknown { .. }
-                    | rsi_session_protocol::SessionError::Api(
-                        rsi_api_protocol::ApiError::OutcomeUnknown
-                    )
-            )
-        {
-            attachment
-                .draft
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned")
-                .remove(&id);
-        }
         let unknown = matches!(
             &result,
             Err(
@@ -640,6 +659,14 @@ impl WebApplication {
                     )
             )
         );
+        if result.is_err() && !unknown {
+            attachment
+                .draft
+                .owned
+                .lock()
+                .expect("Web pending identities poisoned")
+                .remove(&id);
+        }
         if !unknown {
             *attachment
                 .draft
@@ -648,15 +675,12 @@ impl WebApplication {
                 .expect("Web submission poisoned") = None;
         }
         result.map_err(error)?;
-        let mut draft = attachment.draft.text.lock().expect("Web draft poisoned");
-        if request.content
-            == vec![SessionInput::Text {
-                text: draft.clone(),
-            }]
-        {
-            draft.clear();
-        }
-        Ok(())
+        attachment
+            .draft
+            .input
+            .lock()
+            .expect("Web draft poisoned")
+            .clear_submitted(&request.content)
     }
     async fn cancel(&self, index: u8, generation: &str) -> Result<()> {
         let attachment = self.pane(index)?.attachment(generation)?;
@@ -796,11 +820,11 @@ mod tests {
         pane.set_draft(&second, "y".repeat(1024 * 1024)).unwrap();
         let third = pane.draft(&SessionId::new("three").unwrap()).unwrap();
         assert!(pane.set_draft(&third, "excess".into()).is_err());
-        assert!(third.text.lock().unwrap().is_empty());
+        assert!(third.input.lock().unwrap().is_empty());
         assert!(Arc::ptr_eq(&draft, &pane.draft(&id).unwrap()));
-        assert!(other.draft(&id).unwrap().text.lock().unwrap().is_empty());
+        assert!(other.draft(&id).unwrap().input.lock().unwrap().is_empty());
         assert!(pane.set_draft(&draft, "z".repeat(1024 * 1024 + 1)).is_err());
-        assert_eq!(draft.text.lock().unwrap().as_bytes()[0], b'x');
+        assert_eq!(draft.input.lock().unwrap().text.as_bytes()[0], b'x');
         assert!(pane.attachment("999").is_err());
     }
     #[test]

@@ -9,6 +9,7 @@ import { chromium, firefox } from "playwright";
 import { boundedRun, startService } from "./service.mjs";
 import { verifyDom } from "./dom.mjs";
 import { verifyFiles } from "./files.mjs";
+import { verifyImages } from "./images.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const report = process.env.RSI_WEB_REPORT ?? await mkdtemp(join(tmpdir(), "rsi-web-report-"));
@@ -39,6 +40,12 @@ try {
     try {
       await verifyDom(browser, root, report, name);
       const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
+      await context.addInitScript(() => {
+        const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+        window.previewUrls = new Map();
+        URL.createObjectURL = blob => { const url = create(blob); window.previewUrls.set(url, blob.size); return url; };
+        URL.revokeObjectURL = url => { window.previewUrls.delete(url); revoke(url); };
+      });
       context.on("response", async response => {
         if (!response.url().includes("/api/v1/")) return;
         const headers = await response.allHeaders();
@@ -109,6 +116,7 @@ try {
       assert.equal(await page.evaluate(() => window.markdownExecuted), undefined);
       assert.match(await markdown.innerText(), /<script>window.markdownExecuted = true<\/script>/);
       await page.screenshot({ path: join(report, `${name}-markdown.png`) });
+      await verifyImages(page, right, service, report, name);
       await left.getByRole("textbox", { name: "Left message" }).fill("Please ask a question about the workspace");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".pending button").filter({ hasText: "Answer:" }).click();
@@ -283,6 +291,7 @@ try {
       await page.locator("#login").waitFor({ state: "visible" });
       assert.deepEqual(await page.evaluate(() => window.closedResources), { pending_timers: 0, active_alarms: 0, active_requests: 0 });
       assert.equal((await context.cookies()).length, 0);
+      assert.equal(await page.evaluate(() => window.previewUrls.size), 0);
       assert.deepEqual(errors, []);
       await page.locator("#receipt").fill(JSON.stringify(receipt));
       await page.locator("#connect").click();
@@ -306,12 +315,14 @@ try {
       await page.locator("#login").waitFor({ state: "visible" });
       assert.deepEqual(await page.evaluate(() => window.closedResources), { pending_timers: 0, active_alarms: 0, active_requests: 0 });
       assert.equal((await context.cookies()).length, 0);
+      assert.equal(await page.evaluate(() => window.previewUrls.size), 0);
       assert.deepEqual(errors, []);
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
       results.at(-1).cases.push("Files draft browsing, exact text/hex, raw names and changed snapshots", "contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
       results.at(-1).cases.push("completed stdout/stderr byte pages and exact hex");
       results.at(-1).cases.push("restricted Markdown with literal HTML, inert images and safe links");
       results.at(-1).cases.push("Settings-backed Enter preference applied after application reconnect");
+      results.at(-1).cases.push("binary image import, ordered provider input and shared draft/durable preview");
       console.log(JSON.stringify(results.at(-1)));
       await context.close();
     } catch (error) {

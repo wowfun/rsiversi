@@ -1,4 +1,4 @@
-import init, { connect, command, next_view, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { connect, command, import_image, read_image, next_view, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const initialized = init();
 let connected = false;
@@ -29,6 +29,10 @@ self.onmessage = async ({ data }) => {
       pumping = views().catch(error => { connected = false; postMessage({ kind: "failed", error: String(error) }); });
     } else if (data.method === "command") {
       await command(data.payload);
+    } else if (data.method === "import_image") {
+      await import_image(data.payload.pane, data.payload.generation, new Uint8Array(data.payload.bytes));
+    } else if (data.method === "read_image") {
+      result = await read_image(data.payload);
     } else if (data.method === "disconnect") {
       connected = false;
       acknowledgement?.();
@@ -37,7 +41,7 @@ self.onmessage = async ({ data }) => {
     } else if (data.method === "resources") {
       result = JSON.parse(resource_snapshot());
     } else { throw new Error("Unknown browser input"); }
-    postMessage({ kind: "reply", id: data.id, result });
+    postMessage({ kind: "reply", id: data.id, result }, result instanceof Uint8Array ? [result.buffer] : []);
   } catch (error) {
     postMessage({ kind: "reply", id: data.id, error: String(error) });
   } finally { calls--; }

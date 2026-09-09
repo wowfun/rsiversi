@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { verifyImageDom } from "./images-dom.mjs";
 
 // DOM projection only: no Worker, provider, device or network lifecycle claims.
 export async function verifyDom(browser, root, report, name) {
@@ -68,6 +69,7 @@ export async function verifyDom(browser, root, report, name) {
       ],
       resolvedLabel: "Send ↗", resolvedSteerDisabled: false,
     });
+    await verifyImageDom(page);
     const ime = await page.evaluate(() => {
       let submitted = 0;
       panes[0].submit = async () => { submitted++; };

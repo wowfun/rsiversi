@@ -10,6 +10,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bytes.workspace = true
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-client-preferences = { path = "../client-preferences" }
 rsi-session-files = { path = "../session-files" }
 rsi-session-files-ui = { path = "../session-files-ui" }
@@ -44,6 +46,7 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys.workspace = true
 rsi-api-browser-client = { path = "../../rsi-api/browser-client" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 wasm-bindgen.workspace = true
@@ -51,6 +54,8 @@ wasm-bindgen-futures.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+image.workspace = true
+sha2.workspace = true
 rsi-process = { path = "../../rsi-process/core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }

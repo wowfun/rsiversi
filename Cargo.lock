@@ -4469,7 +4469,10 @@ name = "rsi-web"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures-util",
+ "image",
+ "js-sys",
  "pulldown-cmark",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -4486,6 +4489,7 @@ dependencies = [
  "rsi-credentials-protocol",
  "rsi-files-protocol",
  "rsi-host",
+ "rsi-media-protocol",
  "rsi-meta",
  "rsi-meta-execution",
  "rsi-process",
@@ -4501,6 +4505,7 @@ dependencies = [
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",

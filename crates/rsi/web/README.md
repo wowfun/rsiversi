@@ -14,6 +14,30 @@ Input composition suppresses keyboard submission until composition has ended.
 Composer Enter behavior comes from the ordinary [client preferences](../client-preferences/README.md)
 Settings contribution and is captured when the application connects.
 
+The application imports browser-selected raster files through its composed Media
+capability. One non-queued image operation is admitted per application, at most
+16 MiB source bytes per import. Each saved draft retains at most eight ordered
+Media references, separately from its text budget. Imports captured before a pane
+switch finish against that saved draft; they never attach to the replacement.
+Removing or reordering references edits only the draft. A submitted request freezes
+text followed by its ordered images, including image-only input. Unknown outcomes
+retain those exact references and identity; edited drafts survive reconciliation.
+An empty edited draft does not block resolving an already frozen valid request.
+Slash-command dispatch applies only to text-only drafts. Image import is durable
+independently of Session submission and is never rolled back or automatically
+replayed after reply loss.
+
+Preview reads select either a current draft reference or a current exact-source
+detail ticket. Media owns canonical PNG validation and byte identity; arbitrary
+URLs and filenames are never read capabilities. Binary input and output travel
+separately from JSON views. Source bytes are bounded before copying into WASM;
+canonical response receive leases remain owned until the document transfer is
+created. The document retains at most eight object URLs / 32 MiB of canonical
+bytes, evicts least-recently-used previews and revokes all URLs on disconnect.
+Only a requested preview is decoded for display. Closing/replacing that display
+fences late responses; application retirement cancels and drains image work.
+These are presentation retention limits, not total browser decoder or RSS limits.
+
 Each pane displays the latest complete extension-state snapshot, including fresh
 drafts and idle control changes without a model request. Producer values and
 failures are rendered as text. Snapshot replacement releases the prior retention;
