@@ -1110,6 +1110,13 @@ impl StandardComposition {
         let agent_composition =
             AgentCompositionFactory::new(presets, agent_addons.agent_catalog()?, scopes);
         let mut builder = StandardAddonBuilder::new("rsi.standard.service");
+        let inspector = Arc::new(crate::inspector::InspectorFactory::default());
+        builder.register_linked(
+            "rsi.inspector.api",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            inspector.clone(),
+        )?;
         register_contracts(&mut builder)?;
         #[cfg(unix)]
         {
@@ -1184,7 +1191,8 @@ impl StandardComposition {
             ))?;
         }
         let addons = agent_addons.merged(builder.build()?)?;
-        let factories = addons.descriptions().cloned().collect();
+        let factories: Vec<_> = addons.descriptions().cloned().collect();
+        inspector.freeze(&factories)?;
         let mut host = HostBuilder::new(paths);
         addons.register_into(&mut host, AddonScope::Service)?;
         host.define("rsi_standard_addons", json!(addons.digest()?))?;
@@ -1611,6 +1619,7 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ),
         ProfileEntry::new("rsi-ai-language", LANGUAGE_FACTORY, Value::Null),
         ProfileEntry::new("rsi-ai-image", IMAGE_FACTORY, Value::Null),
+        ProfileEntry::new("rsi-inspector-api", "rsi.inspector.api", Value::Null),
     ];
     #[cfg(unix)]
     entries.push(ProfileEntry::new(

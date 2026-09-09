@@ -34,7 +34,7 @@ impl OperatorFactory {
             .read_metadata()
             .map_err(|error| convert(error.to_string()))?
             .ok_or_else(|| {
-                convert("device administration requires a running local Service Host".into())
+                convert("local operator application requires a running local Service Host".into())
             })?;
         if !rsi_service_host::owner_process_is_current(&owner)
             .map_err(|error| convert(error.to_string()))?

@@ -13,10 +13,11 @@ pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {
         .any(|argument| matches!(argument.to_str(), Some("-h" | "--help")))
     {
         print!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             rsi_terminal::HELP,
             rsi_serve::HELP,
-            rsi_terminal::DEVICES_HELP
+            rsi_terminal::DEVICES_HELP,
+            rsi_terminal::INSPECTOR_HELP
         );
         return 0;
     }

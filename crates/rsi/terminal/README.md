@@ -144,3 +144,8 @@ existing 256 KiB source-window limit. Eviction affects recomputation cost, not
 visible content or selection semantics. Each redraw retains only two screens of
 visible row metadata; the writer's complete-frame acknowledgement remains the
 sole publication boundary for hit maps.
+
+InspectorFactory owns the finite `runtime [AFTER_FIBER]`, `profile [OFFSET]`,
+`factories [OFFSET]` and `native` grammar. It prints a bounded JSON page through
+the same cancellable output owner as device administration and retains no live
+Session. The response carries the next cursor; each invocation reads one page.

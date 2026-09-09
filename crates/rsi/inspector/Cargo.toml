@@ -1,0 +1,21 @@
+[package]
+name = "rsi-inspector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-meta-profile = { path = "../../rsi-meta/profile" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

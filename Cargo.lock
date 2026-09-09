@@ -2624,6 +2624,7 @@ dependencies = [
  "rsi-files-protocol",
  "rsi-files-tools",
  "rsi-host",
+ "rsi-inspector",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-jobs-tools",
@@ -3706,6 +3707,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-inspector"
+version = "0.0.1"
+dependencies = [
+ "rsi-api",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "rsi-meta-profile",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-jobs"
 version = "0.0.1"
 dependencies = [
@@ -4427,6 +4441,7 @@ dependencies = [
  "rsi-client-preferences",
  "rsi-conversation",
  "rsi-host",
+ "rsi-inspector",
  "rsi-media-protocol",
  "rsi-meta",
  "rsi-process",

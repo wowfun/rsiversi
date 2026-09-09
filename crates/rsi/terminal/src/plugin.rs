@@ -44,6 +44,7 @@ impl Drop for TerminalLease {
 
 #[derive(Clone, Copy, Debug)]
 enum Kind {
+    Inspector,
     Devices,
     Cli,
     Headless,
@@ -51,6 +52,7 @@ enum Kind {
 }
 #[derive(Debug)]
 enum Prepared {
+    Inspector(crate::inspector::Command),
     Devices(crate::devices::Command),
     Cli(SessionCommand),
     Headless(Command),
@@ -99,6 +101,9 @@ impl Factory {
             ));
         }
         let state = match self.kind {
+            Kind::Inspector => {
+                crate::inspector::Command::parse(&self.arguments).map(Prepared::Inspector)
+            }
             Kind::Devices => crate::devices::Command::parse(&self.arguments).map(Prepared::Devices),
             Kind::Cli => SessionCommand::parse(self.arguments.clone()).map(Prepared::Cli),
             Kind::Headless => Command::parse(self.arguments.clone()).map(Prepared::Headless),
@@ -112,7 +117,9 @@ impl Factory {
                 .requiring_local::<WorkspaceRegistryContract>()
         };
         Ok(match self.kind {
-            Kind::Devices => prepared.requiring_local::<rsi_api_protocol::ApiClientContract>(),
+            Kind::Inspector | Kind::Devices => {
+                prepared.requiring_local::<rsi_api_protocol::ApiClientContract>()
+            }
             Kind::Headless => {
                 session(prepared).requiring_local::<rsi_media_protocol::MediaContract>()
             }
@@ -137,6 +144,11 @@ impl Factory {
             tasks: tasks.clone(),
         };
         let run: BoxFuture<'static, u8> = match state {
+            Prepared::Inspector(command) => Box::pin(crate::inspector::run(
+                plan.local::<rsi_api_protocol::ApiClientContract>()?,
+                command,
+                retiring,
+            )),
             Prepared::Devices(command) => Box::pin(crate::devices::run(
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
                 command,
@@ -300,4 +312,10 @@ factory!(
     TuiFactory,
     Tui,
     "Ordinary fullscreen terminal application factory."
+);
+
+factory!(
+    InspectorFactory,
+    Inspector,
+    "Ordinary Session-independent local Inspector application."
 );

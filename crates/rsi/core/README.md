@@ -271,3 +271,12 @@ does not abandon native work. Retirement closes admission, cancels the polling
 loop and joins any in-flight blocking staging before completing its owned effect.
 A clean later activation can reopen the same fixed cache. Failure-retained Loader
 leases keep that cache locked and prevent activation from bypassing the failure.
+
+The standard Host includes an ordinary `rsi.inspector.api` plugin for the local
+[Inspector](../inspector/README.md). It requires only the API registrar during
+activation, then looks up Profile control and native management at each read;
+this avoids a parent Profile activation dependency cycle. Whole-Runtime inspection
+is a privileged local operator operation. The frozen factory holds only redacted
+immutable declaration metadata, finalized before Host build; it owns no Runtime.
+`rsi --profile inspector` connects to an existing local Service Host through the
+operator connection and never starts a service or creates a Session implicitly.

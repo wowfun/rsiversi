@@ -38,6 +38,17 @@ that observation with its existing Profile control status and desired snapshot.
 Two embedded Hosts therefore retain separate inspection membership and neither
 receives the shared Runtime's global resource counters through this product API.
 
+The product [Inspector API](../../../../crates/rsi/inspector/README.md) exposes
+those observations through ordinary local-only registrations. The terminal
+Inspector application uses the existing operator connection and bounded output
+lifetime. Data admission carries finite pages without consuming the small Control
+reserve. Revisions, Runtime identities and byte counters use decimal strings to
+preserve exact values in JSON consumers. The frozen factory retains declaration
+metadata only; point-of-use Profile lookup avoids depending on a parent Profile
+that cannot publish control until its children activate. Native queries consume
+the existing manager Local and never stage code. Remote discovery and invocation
+remain excluded independently of the client's presented credentials.
+
 ## Alternatives considered
 
 Serializing the existing RuntimeSnapshot would expose arbitrary diagnostic strings

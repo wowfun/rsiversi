@@ -201,7 +201,7 @@ complete executor configuration to select another value from `1..=256`.
 
 `rsi --profile NAME [application arguments]` selects one Application Profile.
 The built-in, non-shadowable `cli`, `headless`, `tui`, and `serve` profiles select the
-built-in `standard` Host Profile. The `devices` profile connects only to the
+built-in `standard` Host Profile. The `devices` and `inspector` profiles connect only to the
 already running local owner and does not start a backend. There is no implicit
 Application Profile.
 Application Profiles are ordinary ordered Profile programs below
@@ -226,6 +226,14 @@ with the HTTP application to serve the [Web application](web/README.md).
 The [Web build and launch reference](../../plugins/rsi/web/README.md) provides
 the application Profile and bundle command. Its Rust Worker owns shared client
 controllers and two independent panes; the document renders views and forwards input.
+
+`rsi --profile inspector runtime [AFTER_FIBER]`, `profile [OFFSET]`,
+`factories [OFFSET]` and `native` read one finite local operator JSON page from
+an existing Linux Service Host. The response includes its next cursor and total;
+Inspector does not create a Session or start a missing service. It shows actual
+runtime ownership, redacted Profile nodes, frozen factory provenance, and native
+selection/retention. [Inspector](inspector/README.md) owns its wire and paging
+contract; authoring remains under the explicit Profile management commands.
 
 `rsi --profile devices register LABEL` returns one JSON receipt with EndpointId,
 device id, label and its one-time token. `list` returns non-secret records;

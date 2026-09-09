@@ -300,7 +300,15 @@ async fn check_device_management(fixture: &CliFixture, address: &str, origin: &s
             .iter()
             .all(|spec| spec.access == rsi_api_protocol::OperationAccess::Authenticated)
     );
-    for operation in ["devices/register", "devices/list", "devices/revoke"] {
+    for operation in [
+        "devices/register",
+        "devices/list",
+        "devices/revoke",
+        "inspector/runtime",
+        "inspector/profile",
+        "inspector/factories",
+        "inspector/native",
+    ] {
         assert_eq!(
             request(address, operation, token, Some(epoch), "{}")
                 .await

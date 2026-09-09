@@ -297,6 +297,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             "connection",
             "devices",
             "files",
+            "inspector",
             "media",
             "models",
             "output",
@@ -311,7 +312,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         dispatch
             .operations()
             .iter()
-            .filter(|spec| spec.id.domain() == "devices")
+            .filter(|spec| matches!(spec.id.domain(), "devices" | "inspector"))
             .all(|spec| spec.access == rsi_api_protocol::OperationAccess::Local)
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
