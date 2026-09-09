@@ -129,14 +129,13 @@ fn source_links_special_files_and_oversize_are_rejected_without_blocking() {
     symlink(&target, &path).unwrap();
     assert!(catalog.preview_host_edit(&host, &id, proposed).is_err());
     fs::remove_file(&path).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        &path,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
     assert!(matches!(
         catalog.preview_host_edit(&host, &id, proposed),
         Err(ProfileEditError::InvalidSource)
