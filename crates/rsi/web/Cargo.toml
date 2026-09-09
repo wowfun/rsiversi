@@ -10,9 +10,10 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rsi-ui = { path = "../ui" }
+rsi-session-ui = { path = "../session-ui" }
 async-trait.workspace = true
 futures-util.workspace = true
-hex.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-application = { path = "../application" }
 rsi-client = { path = "../client" }
@@ -37,16 +38,11 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-getrandom.workspace = true
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rsi-api-browser-client = { path = "../../rsi-api/browser-client" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
-js-sys.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
-web-sys = { workspace = true, features = ["WorkerGlobalScope", "Crypto"] }
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -47,3 +47,11 @@ async fn independent_registry_and_reactivated_bundle_never_reuse_old_references(
     )
     .await;
 }
+
+#[tokio::test]
+async fn presentation_close_signals_reads_and_preserves_admitted_mutations() {
+    support::presentation_close_signals_reads_and_preserves_admitted_mutations(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+    )
+    .await;
+}

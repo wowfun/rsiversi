@@ -14,6 +14,8 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
             "providers",
             Arc::new(Providers(backend.clone())) as Arc<dyn PluginFactory>,
         ),
+        ("ui", Arc::new(rsi_ui::UiFactory)),
+        ("session-ui", Arc::new(rsi_session_ui::SessionUiFactory)),
         ("web", Arc::new(rsi_web::WebApplicationFactory)),
     ] {
         let fiber = root

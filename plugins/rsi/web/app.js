@@ -132,7 +132,8 @@ class Pane {
     this.history = button("Earlier history", () => this.action("history"), "quiet");
     this.live = button("Back to live", () => this.action("live"), "quiet");
     this.commands = button("Session commands", () => this.action("commands"), "quiet");
-    tools.append(this.history, this.live, this.commands);
+    this.uiMenu = element("span", "ui-menu");
+    tools.append(this.history, this.live, this.commands, this.uiMenu);
     this.commandView = element("div", "session-commands");
     this.extensionView = element("details", "session-extensions");
     this.extensionView.setAttribute("aria-label", "Extension state");
@@ -254,6 +255,13 @@ class Pane {
       this.blocks.clear(); this.transcript.replaceChildren();
       this.pendingKey = undefined;
     }
+    this.uiCards = !!data?.ui_cards;
+    const uiKey = JSON.stringify([data?.generation, data?.ui_surfaces]);
+    if (uiKey !== this.uiKey) {
+      this.uiKey = uiKey;
+      this.uiMenu.replaceChildren(...(data?.ui_surfaces ?? []).map(surface => button(surface.title,
+        () => this.action("ui_surface", { reference: surface.reference }), "quiet")));
+    }
     this.name.textContent = data ? basename(data.path) : "New conversation";
     this.session.textContent = data ? `${data.path} · ${data.session}` : "Select a workspace to begin";
     this.session.title = this.session.textContent;
@@ -314,10 +322,11 @@ class Pane {
       if (entry.title.textContent !== block.title) entry.title.textContent = block.title;
       if (entry.text.textContent !== block.text) entry.text.textContent = block.text;
       entry.clipped.hidden = !block.clipped;
-      const sourceKey = JSON.stringify([block.tool, block.sources]);
+      const sourceKey = JSON.stringify([block.tool, block.sources, this.uiCards]);
       if (sourceKey !== entry.sourceKey) {
         entry.sourceKey = sourceKey;
         entry.sources.replaceChildren();
+        if (this.uiCards) entry.sources.append(button("Card details", () => this.action("ui_block", { key: block.key }), "quiet"));
         if (block.sources > 0) entry.sources.append(button("Inspect sources", () => this.action("inspect_block", { key: block.key }), "quiet"));
         if (block.tool) {
           for (const [field, label] of [["arguments", "Inspect arguments"], ["result", "Inspect result"], ["rejection", "Inspect rejection"]]) {
@@ -406,6 +415,7 @@ $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
 $("settings-open").addEventListener("click", () => perform(() => command({ action: "settings_list" })));
 function renderDetail(next) {
+  if (next.ui_detail) { renderUiDetail(next.ui_detail); return; }
   if (next.settings_catalog) {
     const catalog = next.settings_catalog;
     const key = JSON.stringify(catalog);
@@ -510,4 +520,40 @@ function renderDetail(next) {
     return;
   }
   if (dialogKey && dialogKey !== "settings-prompt") { dialogKey = undefined; $("detail").close(); }
+}
+
+
+function renderUiDetail(detail) {
+  const key = JSON.stringify(detail);
+  if (dialogKey === key) return;
+  const bound = detail.view;
+  const formKey = JSON.stringify(bound);
+  const previous = document.querySelector(".ui-contribution");
+  const saved = new Map();
+  if (previous?.dataset.formKey === formKey) {
+    for (const input of previous.querySelectorAll("[data-ui-field]")) saved.set(input.dataset.uiField, input.value);
+  }
+  const body = element("div", "ui-contribution"); body.dataset.formKey = formKey;
+  const fields = new Map();
+  if (detail.error) body.append(element("p", "source-error", detail.error));
+  for (const item of bound?.view.elements ?? []) {
+    if (item.kind === "text" || item.kind === "code") {
+      body.append(element(item.kind === "code" ? "pre" : "p", "ui-text", item.text));
+    } else if (item.kind === "field") {
+      const row = element("p", "ui-field"); row.append(element("strong", "", `${item.label}: `), document.createTextNode(item.value)); body.append(row);
+    } else if (item.kind === "input") {
+      const label = element("label", "ui-input", item.label);
+      const input = element(item.multiline ? "textarea" : "input");
+      input.setAttribute("aria-label", item.label); input.dataset.uiField = item.name;
+      input.value = saved.get(item.name) ?? item.value; input.disabled = detail.busy;
+      fields.set(item.name, input); label.append(input); body.append(label);
+    } else if (item.kind === "button") {
+      const action = button(item.label, () => command({ action: "ui_invoke", ticket: detail.ticket,
+        reference: bound.actions[item.action], input: { value: item.value,
+          fields: Object.fromEntries([...fields].map(([name, input]) => [name, input.value])) } }));
+      action.disabled = detail.busy; body.append(action);
+    }
+  }
+  if (detail.busy) body.append(element("p", "hint", "Working…"));
+  showDialog(key, bound?.view.title ?? "Card details", body);
 }

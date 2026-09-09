@@ -47,6 +47,7 @@ struct Addon {
     gate: Semaphore,
     lease: Mutex<Option<Arc<ContributionLease>>>,
     bad_view: bool,
+    read: bool,
     fail: bool,
 }
 impl Addon {
@@ -57,6 +58,7 @@ impl Addon {
             gate: Semaphore::new(0),
             lease: Mutex::new(None),
             bad_view: false,
+            read: false,
             fail: false,
         })
     }
@@ -107,7 +109,15 @@ impl UiAction for Action {
             addon.calls.fetch_add(1, Ordering::SeqCst);
             // A deliberately blocked admitted mutation does not abandon its side effect
             // merely because its contribution/target or response waiter goes away.
-            let permit = addon.gate.acquire().await.unwrap();
+            let permit = if addon.read {
+                tokio::select! { biased;
+                    () = target.view_closed() => return Err(UiError::Retired),
+                    () = target.cancelled() => return Err(UiError::Retired),
+                    permit = addon.gate.acquire() => permit.unwrap(),
+                }
+            } else {
+                addon.gate.acquire().await.unwrap()
+            };
             permit.forget();
             Ok(view)
         })
@@ -523,5 +533,62 @@ pub async fn independent_registry_and_reactivated_bundle_never_reuse_old_referen
         Err(UiError::Retired)
     ));
     assert_eq!(addon.calls.load(Ordering::SeqCst), 0);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+pub async fn presentation_close_signals_reads_and_preserves_admitted_mutations(
+    execution: rsi_meta::Execution,
+) {
+    let (runtime, ui) = fixture(execution.clone()).await;
+    let mutation = Addon::new("mutation");
+    let fiber = apply(
+        &runtime.root(),
+        "mutation",
+        Arc::new(AddonFactory(mutation.clone())),
+        ConfigValue::Null,
+    )
+    .await;
+    let (_, target) = target(&runtime.root(), "one").await;
+    let reference = action(&ui, &target);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let mut pending = ui.invoke_in_view(&reference, ActionInput::default(), stop.clone());
+    entered(&execution, &mutation, 1).await;
+    stop.cancel();
+    assert!(
+        execution
+            .deadline_after(Duration::from_millis(30))
+            .timeout(&mut pending)
+            .await
+            .is_err()
+    );
+    mutation.gate.add_permits(1);
+    pending.await.unwrap();
+    assert!(fiber.dispose().await.is_clean());
+    let mut read = Addon::new("read");
+    Arc::get_mut(&mut read).unwrap().read = true;
+    apply(
+        &runtime.root(),
+        "read",
+        Arc::new(AddonFactory(read.clone())),
+        ConfigValue::Null,
+    )
+    .await;
+    let reference = action(&ui, &target);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let pending = ui.invoke_in_view(&reference, ActionInput::default(), stop.clone());
+    entered(&execution, &read, 1).await;
+    stop.cancel();
+    assert!(matches!(
+        execution
+            .deadline_after(Duration::from_secs(2))
+            .timeout(pending)
+            .await
+            .unwrap(),
+        Err(UiError::Retired)
+    ));
+    assert!(ui.is_current(&reference));
+    read.gate.add_permits(1);
+    ui.invoke(&reference, ActionInput::default()).await.unwrap();
+    assert_eq!(read.calls.load(Ordering::SeqCst), 2);
     assert!(runtime.shutdown().await.is_clean());
 }

@@ -3,11 +3,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // DOM projection only: no Worker, provider, device or network lifecycle claims.
-export async function verifyDom(browser, root) {
+export async function verifyDom(browser, root, report, name) {
   const page = await browser.newPage();
   try {
     const document = await readFile(join(root, "plugins/rsi/web/index.html"), "utf8");
     await page.setContent(document.replace(/<script[^>]*>[\s\S]*?<\/script>/g, ""));
+    await page.addStyleTag({ path: join(root, "plugins/rsi/web/styles.css") });
     await page.addScriptTag({ path: join(root, "plugins/rsi/web/app.js") });
     const results = await page.evaluate(() => {
       return ["approval", "question"].map(kind => {
@@ -67,6 +68,34 @@ export async function verifyDom(browser, root) {
       ],
       resolvedLabel: "Send ↗", resolvedSteerDisabled: false,
     });
+    const contributed = await page.evaluate(() => {
+      const sent = [];
+      command = async input => { sent.push(input); };
+      const reference = { application: "ui-nonce", target: "3", contribution: "4", name: "echo" };
+      const bound = { reference, actions: { echo: reference }, view: { title: "Addon", elements: [
+        { kind: "text", text: "<script>window.addonExecuted = true</script>" },
+        { kind: "input", name: "message", label: "Addon text", value: "initial", multiline: true },
+        { kind: "button", action: "echo", label: "Apply addon", value: { expected: "original" } },
+      ] } };
+      const detail = { pane: 0, generation: "one", ticket: "100", view: bound, error: null, busy: false };
+      renderDetail({ ui_detail: detail });
+      document.querySelector("[data-ui-field]").value = "edited 界";
+      renderDetail({ ui_detail: { ...detail, ticket: "101", busy: true } });
+      const busy = document.querySelector("[data-ui-field]").disabled;
+      renderDetail({ ui_detail: { ...detail, ticket: "101", error: "Validation rejected", busy: false } });
+      document.querySelector(".ui-contribution > button").click();
+      return { sent, busy, remaining: document.querySelector("[data-ui-field]").value,
+        scripts: document.querySelectorAll(".ui-contribution script").length,
+        executed: !!window.addonExecuted, text: document.querySelector(".ui-contribution").textContent };
+    });
+    assert.equal(contributed.busy, true);
+    assert.equal(contributed.remaining, "edited 界");
+    assert.equal(contributed.scripts, 0); assert.equal(contributed.executed, false);
+    assert.match(contributed.text, /<script>/);
+    assert.deepEqual(contributed.sent, [{ action: "ui_invoke", ticket: "101",
+      reference: { application: "ui-nonce", target: "3", contribution: "4", name: "echo" },
+      input: { value: { expected: "original" }, fields: { message: "edited 界" } } }]);
+    await page.screenshot({ path: join(report, `${name}-contributed-form-dom.png`) });
     const disconnects = await page.evaluate(async () => {
       const results = [];
       for (const phase of ["draft", "disconnect"]) {

@@ -33,8 +33,9 @@ It captures declaration-order snapshots and binds actions to a fresh application
 nonce, exact contribution registration and actual target Context. Views contain
 closed text/form/button primitives; domain-specific target factories declare the
 Local dependencies whose replacement must retire their target. Native and Worker
-public-seam tests exercise an independent addon. Production Web/TUI adapters and
-first-party contribution migration remain required before completing this decision.
+public-seam tests exercise an independent addon. The Web adapter and first-party Session/Tool inspection contributions are
+implemented with exact-source paging and detail cancellation. The TUI adapter
+and the remaining workbench acceptance criteria still need implementation.
 
 Linked renderers are trusted application code under the existing CSP. Data uses
 text nodes, closed Markdown AST, and validated URLs. Settings schema describes

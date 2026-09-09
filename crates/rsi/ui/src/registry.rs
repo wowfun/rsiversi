@@ -128,7 +128,7 @@ impl Ui {
     pub(crate) fn new(context: &Context) -> Result<Self> {
         let (changed, _) = watch::channel(0);
         Ok(Self {
-            application: crate::identity::allocate("ui").map_err(UiError::Action)?,
+            application: crate::fresh_identity("ui").map_err(UiError::Action)?,
             runtime: context.runtime_identity(),
             execution: context.runtime().execution().clone(),
             state: Mutex::new(State::default()),
@@ -377,6 +377,30 @@ impl Ui {
         self.capture(reference).is_ok()
     }
 
+    /// Tests whether this reference belongs to the supplied exact live target.
+    pub fn matches_target(&self, handle: &UiTarget, reference: &UiReference) -> bool {
+        std::ptr::eq(handle.ui.as_ptr(), self)
+            && handle.id == reference.target
+            && self.is_current(reference)
+    }
+    /// Whether the target has any currently admitting block renderer.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned registry state.
+    pub fn has_block_renderers(&self, handle: &UiTarget) -> bool {
+        let state = self.state.lock().expect("UI state poisoned");
+        self.target(&state, handle).is_ok()
+            && state.entries.values().any(|entry| {
+                entry.position.is_admitting()
+                    && !entry.owner.stop.is_cancelled()
+                    && entry
+                        .value
+                        .renderers
+                        .iter()
+                        .any(|renderer| renderer.target == handle.kind)
+            })
+    }
+
     fn capture(&self, reference: &UiReference) -> Result<Capture> {
         let state = self.state.lock().expect("UI state poisoned");
         if reference.application != self.application || !crate::view::name_valid(&reference.name) {
@@ -474,6 +498,16 @@ impl Ui {
         reference: &UiReference,
         input: ActionInput,
     ) -> BoxFuture<'static, Result<BoundView>> {
+        self.invoke_in_view(reference, input, CancellationToken::new())
+    }
+    /// Admits owned work with a separate presentation-close signal for read handlers.
+    /// Closing the view never automatically drops an admitted mutation.
+    pub fn invoke_in_view(
+        self: &Arc<Self>,
+        reference: &UiReference,
+        input: ActionInput,
+        presentation_stop: CancellationToken,
+    ) -> BoxFuture<'static, Result<BoundView>> {
         let admitted = (|| {
             input.validate()?;
             let capture = self.capture(reference)?;
@@ -507,6 +541,7 @@ impl Ui {
                 context: capture.target.context.clone(),
                 contribution_stop: capture.entry.owner.stop.clone(),
                 target_stop: capture.target.owner.stop.clone(),
+                presentation_stop,
             };
             let result = handler.invoke(target, input).await;
             ui.invalidate();

@@ -22,6 +22,21 @@ pub(crate) fn error(value: impl std::fmt::Display) -> String {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
+    UiSurface {
+        pane: u8,
+        generation: String,
+        reference: rsi_ui::UiReference,
+    },
+    UiBlock {
+        pane: u8,
+        generation: String,
+        key: String,
+    },
+    UiInvoke {
+        ticket: String,
+        reference: rsi_ui::UiReference,
+        input: rsi_ui::ActionInput,
+    },
     Refresh,
     WorkspacesNext,
     SessionsNext,
@@ -157,6 +172,7 @@ pub(crate) struct SettingsEditor {
 /// Ordinary Web application handle; its plugin retains all admitted command work.
 #[derive(Debug)]
 pub struct WebApplication {
+    pub(crate) ui: Arc<rsi_ui::Ui>,
     pub(crate) session: Arc<dyn rsi_session_protocol::SessionService>,
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     pub(crate) models: Arc<dyn rsi_ai_protocol::LanguageModels>,
@@ -234,11 +250,12 @@ impl WebApplication {
         let panes = self
             .panes
             .iter()
-            .map(|pane| pane.view())
+            .map(|pane| pane.view(&self.ui))
             .collect::<Vec<_>>();
         let details = self.details.lock().expect("Web details poisoned");
         reservation.encode(&serde_json::json!({
             "panes": panes, "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
+            "ui_detail": details.ui,
             "settings": details.editor,
             "settings_catalog": details.settings_catalog,
             "detail": details.interaction,
@@ -249,6 +266,21 @@ impl WebApplication {
     }
     async fn execute(&self, command: Command) -> Result<()> {
         match command {
+            Command::UiSurface {
+                pane,
+                generation,
+                reference,
+            } => self.ui_surface(pane, &generation, &reference),
+            Command::UiBlock {
+                pane,
+                generation,
+                key,
+            } => self.ui_block(pane, &generation, &key),
+            Command::UiInvoke {
+                ticket,
+                reference,
+                input,
+            } => self.ui_invoke(&ticket, reference, input).await,
             Command::Refresh
             | Command::WorkspacesNext
             | Command::SessionsNext
@@ -296,6 +328,7 @@ impl PluginFactory for WebApplicationFactory {
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<rsi_ui::UiContract>()
             .requiring_local::<rsi_session_protocol::SessionContract>()
             .requiring_local::<rsi_workspace_protocol::WorkspaceRegistryContract>()
             .requiring_local::<rsi_ai_protocol::LanguageModelsContract>()
@@ -305,6 +338,7 @@ impl PluginFactory for WebApplicationFactory {
         let (changed, _) = watch::channel(0_u64);
         let shell = start_shell(plan.context(), changed.clone()).await?;
         let app = Arc::new(WebApplication {
+            ui: plan.local::<rsi_ui::UiContract>()?,
             session: plan.local::<rsi_session_protocol::SessionContract>()?,
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
@@ -324,6 +358,20 @@ impl PluginFactory for WebApplicationFactory {
                 .map_err(|error| MetaError::Activation(error.to_string()))?,
             admission: Mutex::new(()),
         });
+        let mut ui_changes = app.ui.changes();
+        let watching = app.clone();
+        drop(app.execution.spawn(app.tasks.track_future(async move {
+            loop {
+                tokio::select! { biased;
+                    () = watching.stop.cancelled() => break,
+                    result = ui_changes.changed() => {
+                        if result.is_err() { break; }
+                        watching.prune_ui();
+                        watching.changed();
+                    }
+                }
+            }
+        })));
         let supply = plan
             .context()
             .provide_local::<WebApplicationContract>(app.clone())?;
@@ -381,6 +429,17 @@ async fn start_shell(
             Arc::new(SessionControllerFactory),
         )
         .map_err(meta)?;
+    catalog
+        .register_local_contract::<rsi_ui::UiTargetContract>()
+        .map_err(meta)?;
+    catalog
+        .register_linked(
+            "rsi.session.ui-target",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_session_ui::SessionUiTargetFactory),
+        )
+        .map_err(meta)?;
     let parent = parent.clone().isolate_local_fresh::<ShellContract>()?.0;
     let fiber = parent
         .apply(
@@ -425,5 +484,6 @@ pub(crate) fn surface_program(
             "rsi.client.session-controller",
             serde_json::json!({"session_id":session,"cursor":cursor}),
         ),
+        ProfileEntry::new("ui-target", "rsi.session.ui-target", ConfigValue::Null),
     ]))
 }

@@ -15,6 +15,8 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplica
             "providers",
             Arc::new(Providers(backend.clone())) as Arc<dyn PluginFactory>,
         ),
+        ("ui", Arc::new(rsi_ui::UiFactory)),
+        ("session-ui", Arc::new(rsi_session_ui::SessionUiFactory)),
         ("web", Arc::new(rsi_web::WebApplicationFactory)),
     ] {
         let fiber = root

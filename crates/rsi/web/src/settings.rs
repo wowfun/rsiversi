@@ -67,7 +67,7 @@ impl WebApplication {
             Ok(SettingsEditor {
                 namespace: namespace.into(),
                 text,
-                ticket: crate::identity::allocate("settings")?,
+                ticket: rsi_ui::fresh_identity("settings")?,
                 version: snapshot.version(),
                 description,
             })
@@ -116,7 +116,7 @@ impl WebApplication {
             details.editor = Some(SettingsEditor {
                 namespace,
                 text: settings_text(&snapshot.value)?,
-                ticket: crate::identity::allocate("settings")?,
+                ticket: rsi_ui::fresh_identity("settings")?,
                 version: snapshot.version(),
                 description,
             });

@@ -212,6 +212,31 @@ fn prepare_profile(
         rsi_client_composition::domain_clients("browser").map_err(failure)?;
     builder = builder.execution(execution);
     builder
+        .register_local_contract::<rsi_ui::UiContract>()
+        .map_err(failure)?;
+    builder
+        .register_linked(
+            "rsi.ui",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_ui::UiFactory),
+        )
+        .map_err(failure)?;
+    builder
+        .register_linked(
+            "rsi.session.ui",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_session_ui::SessionUiFactory),
+        )
+        .map_err(failure)?;
+    entries.push(ProfileEntry::new("ui", "rsi.ui", ConfigValue::Null));
+    entries.push(ProfileEntry::new(
+        "session-ui",
+        "rsi.session.ui",
+        ConfigValue::Null,
+    ));
+    builder
         .register_local_contract::<WebApplicationContract>()
         .map_err(failure)?;
     builder

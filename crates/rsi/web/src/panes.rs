@@ -1,5 +1,7 @@
 #[path = "source_details.rs"]
 mod source_details;
+#[path = "ui_details.rs"]
+mod ui_details;
 
 use crate::{
     application::{Command, Result, WebApplication, error, surface_program},
@@ -53,6 +55,7 @@ struct Attachment {
     surface: Mutex<Option<Surface>>,
     handle: Arc<dyn SessionHandle>,
     controller: Arc<SessionController>,
+    ui_target: Arc<rsi_ui::UiTarget>,
     renderer: Arc<Renderer>,
     draft: Arc<SavedDraft>,
     model: Mutex<rsi_ai_protocol::ModelRef>,
@@ -74,7 +77,7 @@ impl Attachment {
             .expect("Web submission poisoned")
             .is_some();
         if !retry_message && rsi_client::slash_command(text).is_some() {
-            let id = rsi_agent_session_protocol::DomainRequestId::new(crate::identity::allocate(
+            let id = rsi_agent_session_protocol::DomainRequestId::new(rsi_ui::fresh_identity(
                 "command",
             )?)
             .map_err(error)?;
@@ -198,7 +201,7 @@ impl Pane {
             if retained_bytes + text.len() > 2 * 1024 * 1024 {
                 return Err("Unresolved submissions exceed this pane's 2 MiB limit".into());
             }
-            let id = MessageId::new(crate::identity::allocate("message")?).map_err(error)?;
+            let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
             let mut owned = attachment
                 .draft
                 .owned
@@ -238,7 +241,7 @@ impl Pane {
             .cloned()
             .ok_or_else(|| "This pane changed; retry the action in the current conversation".into())
     }
-    pub fn view(&self) -> serde_json::Value {
+    pub fn view(&self, ui: &rsi_ui::Ui) -> serde_json::Value {
         let current = self.current.lock().expect("Web pane poisoned").clone();
         let Some(current) = current else {
             return serde_json::json!(null);
@@ -251,6 +254,8 @@ impl Pane {
             .expect("Web renderer poisoned");
         serde_json::json!({
             "generation": current.generation.to_string(), "session":current.id, "path":current.path,
+            "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
+            "ui_cards": ui.has_block_renderers(&current.ui_target),
             "commands":*current.commands.lock().expect("Web commands poisoned"),
             "command_submission":current.draft.command.view(),
             "projections":state.projections, "projection_notice":state.projection_notice,
@@ -310,7 +315,7 @@ impl WebApplication {
                 workspace,
                 trust,
             } => {
-                let id = SessionId::new(crate::identity::allocate("web")?).map_err(error)?;
+                let id = SessionId::new(rsi_ui::fresh_identity("web")?).map_err(error)?;
                 self.open(
                     pane,
                     id.clone(),
@@ -441,6 +446,7 @@ impl WebApplication {
             _ => Err("Command does not belong to a pane".into()),
         }
     }
+    #[allow(clippy::too_many_lines)] // Keep surface acquisition, generation publication and old-owner retirement together.
     async fn open(
         &self,
         index: u8,
@@ -515,8 +521,12 @@ impl WebApplication {
         let renderer = surface
             .lookup_local::<RendererContract>()
             .ok_or("Surface renderer is unavailable")?;
+        let ui_target = surface
+            .lookup_local::<rsi_ui::UiTargetContract>()
+            .ok_or("Surface UI target is unavailable")?;
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            ui_target,
             commands: Mutex::new(None),
             generation,
             id,

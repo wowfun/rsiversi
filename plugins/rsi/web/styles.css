@@ -123,3 +123,9 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .source-list, .settings-list { max-height: min(50dvh, 30rem); overflow: auto; overscroll-behavior: contain; margin-block: 1rem; }
 
 .settings-namespace { display: block; margin-block: 0.4rem; }
+
+.ui-menu { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.ui-contribution { display: flex; flex-direction: column; gap: 12px; }
+.ui-contribution > p { margin: 0; }
+.ui-contribution > button { align-self: flex-start; }
+.ui-input { display: flex; flex-direction: column; gap: 6px; }

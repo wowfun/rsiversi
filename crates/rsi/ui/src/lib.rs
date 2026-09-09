@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod identity;
+pub use identity::fresh_identity;
 mod plugin;
 mod registry;
 mod view;
@@ -60,6 +61,7 @@ pub struct ActionTarget {
     pub(crate) context: Context,
     pub(crate) contribution_stop: CancellationToken,
     pub(crate) target_stop: CancellationToken,
+    pub(crate) presentation_stop: CancellationToken,
 }
 impl ActionTarget {
     /// Exact target Context; its Local mappings select capabilities.
@@ -69,6 +71,11 @@ impl ActionTarget {
     /// Whether either exact owner has started retiring.
     pub fn is_cancelled(&self) -> bool {
         self.contribution_stop.is_cancelled() || self.target_stop.is_cancelled()
+    }
+    /// Waits for the presenting detail to close. Read handlers can stop their local
+    /// I/O; mutation handlers must preserve already dispatched work ownership.
+    pub async fn view_closed(&self) {
+        self.presentation_stop.cancelled().await;
     }
     /// Waits for either owner to request cooperative cleanup.
     pub async fn cancelled(&self) {

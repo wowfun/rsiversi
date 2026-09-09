@@ -6,7 +6,6 @@
 mod application;
 mod catalog;
 mod details;
-mod identity;
 mod panes;
 mod projection;
 mod renderer;

@@ -1,0 +1,25 @@
+[package]
+name = "rsi-session-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-ui = { path = "../ui" }
+rsi-client = { path = "../client" }
+rsi-conversation = { path = "../conversation" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

@@ -10,6 +10,8 @@ mod commands;
 mod settings;
 #[path = "submission/sources.rs"]
 mod sources;
+#[path = "submission/ui.rs"]
+mod ui;
 
 fn missing<T>() -> rsi_session_protocol::Result<T> {
     Err(rsi_session_protocol::SessionError::Backend(
@@ -398,6 +400,7 @@ async fn verify_retry(resolution: usize) {
         .await
         .unwrap();
     assert_eq!(providers.snapshot().state, FiberState::Active);
+    start_ui(&root).await;
     let fiber = root
         .apply(
             ResolvedFactory::linked(
@@ -497,6 +500,7 @@ async fn failed_navigation_at_draft_capacity_keeps_current_draft_editable() {
         .await
         .unwrap();
     assert_eq!(providers.snapshot().state, FiberState::Active);
+    start_ui(&root).await;
     let fiber = root
         .apply(
             ResolvedFactory::linked(
@@ -559,6 +563,7 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
         .await
         .unwrap();
     assert_eq!(providers.snapshot().state, FiberState::Active);
+    start_ui(&root).await;
     let fiber = root
         .apply(
             ResolvedFactory::linked(
@@ -614,4 +619,20 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
         [Some(301), Some(173), Some(45), Some(173)]
     );
     assert!(rt.shutdown().await.is_clean());
+}
+
+async fn start_ui(root: &Context) {
+    for (id, factory) in [
+        ("ui", Arc::new(rsi_ui::UiFactory) as Arc<dyn PluginFactory>),
+        ("session-ui", Arc::new(rsi_session_ui::SessionUiFactory)),
+    ] {
+        let fiber = root
+            .apply(
+                ResolvedFactory::linked(id, "test", UpdateMode::RestartRequired, factory),
+                ConfigValue::Null,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fiber.snapshot().state, FiberState::Active);
+    }
 }

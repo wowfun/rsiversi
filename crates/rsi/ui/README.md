@@ -27,7 +27,9 @@ These staleness identities are not authentication credentials.
 Admission is nonqueued and occurs before returning a waiter. Dropping a waiter
 never drops admitted work. Both the contribution and target own tracking for
 that work. Withdrawal closes new admission and signals cooperative cancellation;
-cleanup drains admitted actions before releasing their owner. Handlers retain
+cleanup drains admitted actions before releasing their owner. A separately supplied
+presentation cancellation token lets read actions cancel on detail close; it never
+automatically drops an admitted mutation. Handlers retain
 responsibility for mutations already dispatched and must cooperate with owner
 retirement. Meta's existing cleanup deadline and failure reporting remain
 applicable. Explicit lease disposal joins the same work; dropping a lease

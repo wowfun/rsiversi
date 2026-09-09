@@ -119,3 +119,11 @@ storage. Closing an application drains Worker-owned requests and surfaces and
 does not stop the remote service. A WASM trap is a failed Worker, not proof of
 clean Rust shutdown. Production uses TLS/H2; loopback HTTP is explicitly for
 development transport debugging.
+
+
+UI contributions use the independently composed `rsi-ui` registry. Each actual
+pane Profile has a `rsi-session-ui` target depending on its exact controller.
+The document renders generic contributed menus, cards, fields, forms and buttons;
+Rust validates target and detail generations plus bundle-local action references.
+Registry changes request a new view. Closing a contributed detail cancels its
+read presentation; admitted actions stay tracked by their original owners.

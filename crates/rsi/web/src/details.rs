@@ -67,10 +67,21 @@ pub(crate) struct SettingsCatalog {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct UiDetail {
+    pub pane: u8,
+    pub generation: String,
+    pub ticket: String,
+    pub view: Option<rsi_ui::BoundView>,
+    pub error: Option<String>,
+    pub busy: bool,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Details {
-    revision: u64,
+    pub(crate) revision: u64,
     pub stop: CancellationToken,
+    pub ui: Option<UiDetail>,
     pub source: Option<SourceDetail>,
     pub block_sources: Option<BlockSources>,
     pub editor: Option<SettingsEditor>,
@@ -85,6 +96,7 @@ impl Details {
             .ok_or("Detail generation exhausted")?;
         self.stop.cancel();
         self.stop = CancellationToken::new();
+        self.ui = None;
         self.source = None;
         self.block_sources = None;
         self.editor = None;
@@ -105,9 +117,13 @@ impl Details {
     }
     pub fn detach(&mut self, pane: u8, generation: &str) -> Result<()> {
         if self
-            .source
+            .ui
             .as_ref()
-            .is_some_and(|source| source.pane == pane && source.generation == generation)
+            .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
+            || self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.pane == pane && source.generation == generation)
             || self
                 .block_sources
                 .as_ref()
