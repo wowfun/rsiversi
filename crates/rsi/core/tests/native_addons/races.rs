@@ -1,7 +1,7 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-fn blocking(root: &Path) -> std::path::PathBuf {
+pub(super) fn blocking(root: &Path) -> std::path::PathBuf {
     let repository = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let library = root.join(format!("blocking{}", std::env::consts::DLL_SUFFIX));
     let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());

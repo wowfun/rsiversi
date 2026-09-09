@@ -23,7 +23,7 @@ static uint32_t exchange(void *state, uint32_t opcode, const void *input,
   (void)input_size;
   if (opcode == RSI_META_PLUGIN_IDENTITY) {
 #ifdef RSI_FIXTURE_IDENTITY_ENTERED
-    FILE *entered = fopen(RSI_FIXTURE_IDENTITY_ENTERED, "wb");
+    FILE *entered = fopen(RSI_FIXTURE_IDENTITY_ENTERED, "ab");
     if (entered != NULL) {
       fputs("entered", entered);
       fclose(entered);

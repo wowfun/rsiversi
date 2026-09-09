@@ -1,6 +1,11 @@
 //! Explicit native staging; source publication is independent of Runtime apply.
+mod plugin;
 use crate::{
     AddonScope, NativeAddonRecord, NativeAddonStore, StandardAddonBuilder, StandardAddonSet,
+};
+pub(crate) use plugin::NativeAddonFactory;
+pub use plugin::{
+    MAXIMUM_NATIVE_ADDON_REFRESH_REQUESTS, NativeAddonControl, NativeAddonControlContract,
 };
 use rsi_agent_composition::{AgentCompositionSnapshot, AgentCompositionSource};
 use rsi_agent_presets::AgentPresetCatalog;
@@ -105,6 +110,7 @@ struct Staged {
 struct State {
     current: Option<Staged>,
     failed: bool,
+    attempted: Option<Vec<NativeAddonRecord>>,
 }
 
 /// One explicit Agent staging owner. Blocking refresh must be supervised by its caller.
@@ -155,6 +161,7 @@ impl NativeAddonManager {
                     snapshot: Arc::new(snapshot),
                 }),
                 failed: false,
+                attempted: None,
             }),
             closed: AtomicBool::new(false),
             retained: AtomicBool::new(false),
@@ -164,21 +171,42 @@ impl NativeAddonManager {
     /// Stages the complete current selection synchronously. This may execute trusted
     /// native code on the supplied Loader's bounded callback lanes, but no build command.
     pub fn refresh(&self) -> Result<NativeAddonRefresh> {
+        self.refresh_selection(false)?
+            .ok_or(NativeAddonUpdateError::Selection(
+                "explicit refresh did not run",
+            ))
+    }
+
+    fn refresh_changed(&self) -> Result<Option<NativeAddonRefresh>> {
+        self.refresh_selection(true)
+    }
+
+    fn refresh_selection(&self, only_changed: bool) -> Result<Option<NativeAddonRefresh>> {
         let _refresh = match self.refresh.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => return Err(NativeAddonUpdateError::Busy),
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
         };
         self.check_admission()?;
-        let result = self.stage();
+        // Invalid metadata is rejected by every source capture while unreadable.
+        // Keep the last native attempt intact: repairing metadata must not
+        // implicitly re-execute an unchanged, previously failed native candidate.
+        let before = self.store.snapshot()?;
+        {
+            let mut state = self.state();
+            if only_changed && state.attempted.as_ref() == Some(&before.enabled) {
+                return Ok(None);
+            }
+            state.attempted = Some(before.enabled.clone());
+        }
+        let result = self.stage(&before);
         if result.is_err() {
             self.state().failed = true;
         }
-        result
+        result.map(Some)
     }
 
-    fn stage(&self) -> Result<NativeAddonRefresh> {
-        let before = self.store.snapshot()?;
+    fn stage(&self, before: &crate::NativeAddonSnapshot) -> Result<NativeAddonRefresh> {
         {
             let mut state = self.state();
             if !state.failed

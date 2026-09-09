@@ -5,7 +5,9 @@ use rsi_agent_presets::AgentPresetId;
 use rsi_meta::{FactoryIdentity, PluginFactory, ResolvedFactory, Runtime, UpdateMode};
 use rsi_meta_scope::ScopeRoot;
 
-fn artifacts(destination: &Path) -> [std::path::PathBuf; 2] {
+pub(super) fn artifacts(destination: &Path) -> [std::path::PathBuf; 2] {
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _build = BUILD.lock().unwrap();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let target = root.join("target/native-addon-manager-fixture-test");
     let mut copies = Vec::new();
@@ -33,6 +35,8 @@ fn artifacts(destination: &Path) -> [std::path::PathBuf; 2] {
     }
     copies.try_into().unwrap()
 }
+
+pub(super) const PROFILE: &str = "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'context'\nplugin = 'rsi.agent.context.default'\n[[steps]]\nkind = 'plugin'\nid = 'native'\nplugin = 'fixture.native-addon'\nconfig = { label = 'same-profile' }\n[[steps]]\nkind = 'plugin'\nid = 'bridge'\nplugin = 'rsi.tools.portable'\nconfig = { service = 'fixture.native.tools' }\n";
 
 async fn apply(runtime: &Runtime, id: &str, factory: impl PluginFactory) -> rsi_meta::FiberHandle {
     runtime
@@ -68,7 +72,7 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
     store.enable("fixture.addon").unwrap();
     let preset = root.join("config/agent-presets/native");
     fs::create_dir_all(&preset).unwrap();
-    let profile = "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'context'\nplugin = 'rsi.agent.context.default'\n[[steps]]\nkind = 'plugin'\nid = 'native'\nplugin = 'fixture.native-addon'\nconfig = { label = 'same-profile' }\n[[steps]]\nkind = 'plugin'\nid = 'bridge'\nplugin = 'rsi.tools.portable'\nconfig = { service = 'fixture.native.tools' }\n";
+    let profile = PROFILE;
     fs::write(preset.join("agent.profile.toml"), profile).unwrap();
     let catalog = NativeCatalog::new(CatalogOptions::new(root.join("loader"))).unwrap();
     let manager = composition(&root)

@@ -1102,15 +1102,33 @@ impl StandardComposition {
         let agent_addons = self.agent_addons()?;
         let presets = self.preset_catalog(materialize_assets, &agent_addons)?;
         let preset_identity = presets.launch_identity();
-        let contributions = agent_addons.agent_catalog()?;
-        let agent_composition = AgentCompositionFactory::new(
-            presets,
-            contributions,
-            ScopeRoot::new(ScopeRoot::MAXIMUM_ANCESTRY_DEPTH)
-                .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?,
-        );
+        let scopes = ScopeRoot::new(ScopeRoot::MAXIMUM_ANCESTRY_DEPTH)
+            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
+        #[cfg(unix)]
+        let agent_composition = AgentCompositionFactory::from_source_contract(scopes);
+        #[cfg(not(unix))]
+        let agent_composition =
+            AgentCompositionFactory::new(presets, agent_addons.agent_catalog()?, scopes);
         let mut builder = StandardAddonBuilder::new("rsi.standard.service");
         register_contracts(&mut builder)?;
+        #[cfg(unix)]
+        {
+            builder
+                .register_local_contract::<rsi_agent_composition::AgentCompositionSourceContract>(
+                )?;
+            builder.register_local_contract::<crate::NativeAddonControlContract>()?;
+            register(
+                &mut builder,
+                "rsi.native-addons",
+                UpdateMode::RestartRequired,
+                crate::native_addons::NativeAddonFactory {
+                    paths: paths.clone(),
+                    linux_tools: linux_tools_enabled,
+                    presets,
+                    base: agent_addons.clone(),
+                },
+            )?;
+        }
         register_factories(
             &mut builder,
             Arc::clone(&self.credential_store),
@@ -1594,6 +1612,12 @@ fn base_fragment(paths: &HostPaths, coding_tools: bool) -> ProfileFragment {
         ProfileEntry::new("rsi-ai-language", LANGUAGE_FACTORY, Value::Null),
         ProfileEntry::new("rsi-ai-image", IMAGE_FACTORY, Value::Null),
     ];
+    #[cfg(unix)]
+    entries.push(ProfileEntry::new(
+        "rsi-native-addons",
+        "rsi.native-addons",
+        Value::Null,
+    ));
     if coding_tools {
         entries.push(ProfileEntry::new(
             "rsi-shell-bash-producer",

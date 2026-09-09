@@ -248,5 +248,26 @@ revoke existing pins or claim that native cleanup has finished. The manager
 retains its single Loader, exposes path-free selection/retention metadata, and
 permanently rejects refresh and new snapshots after a retained native finalization
 failure. It never rotates the Loader or its cache to bypass admission closure.
-These explicit library operations do not start a watcher or install a Runtime
-plugin; callers supervise blocking refresh work and retain its owner to completion.
+These explicit library operations do not start background work; callers supervise
+blocking refresh and retain its owner to completion.
+
+The standard Unix Host supplies that source through the ordinary
+`rsi.native-addons` plugin. Its frozen inputs derive storage at
+`<config>/native-addons` and Loader cache at `<cache>/native-addons`; activation
+explicitly resolves a trusted first-component OS alias before acquiring either
+root. It requires the Service Owner before acquiring these roots and retains that
+dependency through worker retirement. Pure Host preview never opens the store or creates a Loader. Mutable enabled
+records do not enter the Host launch key. Agent composition requires the Local
+source supply, so activation and recovery cannot precede initial staging.
+
+The manager Fiber owns one worker and one Loader for its activation. The worker
+polls desired metadata once per second and attempts each enabled selection once;
+an unchanged failed native candidate is retried only through explicit refresh.
+Malformed source metadata can recover when valid metadata becomes readable again.
+`NativeAddonControlContract` supplies bounded inspection and explicit asynchronous
+refresh; at most 16 refresh requests queue behind the single staging worker.
+Dropping a queued request skips it before staging; dropping an in-flight waiter
+does not abandon native work. Retirement closes admission, cancels the polling
+loop and joins any in-flight blocking staging before completing its owned effect.
+A clean later activation can reopen the same fixed cache. Failure-retained Loader
+leases keep that cache locked and prevent activation from bypassing the failure.

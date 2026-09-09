@@ -33,8 +33,19 @@ categorical, path-free selection and actual Loader resource observations, keeps
 the same Loader, and never deletes its cache. Closing new selection does not
 revoke old pins or imply native cleanup. This explicit library seam does not
 start background work; its caller must supervise blocking staging to completion.
+
+The standard Unix Host supplies that supervision through an ordinary linked
+manager plugin. Activation owns one Loader at its fixed cache path, requires the
+Service Owner Local, and publishes the Agent source and management Locals. Its
+single worker stages an initial selection and polls changed selections. Explicit
+refresh has a bounded queue; cancelled queued requests are skipped, while an
+in-flight native callback remains joined. Retirement closes admission and drains
+the worker before releasing the Service Owner dependency. The frozen factory
+retains only construction inputs, so pure preview never opens the source store
+or Loader, and a clean shutdown can release its cache lease. Unchanged failed
+candidates require explicit retry rather than repeated native execution.
 The [remaining management proposal](../../proposed/architecture/2026-09-08-native-artifact-management.md)
-still covers automatic Runtime integration and build/watch actions.
+still covers build/watch actions.
 
 ## Alternatives considered
 
@@ -55,4 +66,6 @@ child-process fixture deliberately fails FINALIZE: staging and its catalog lease
 remain retained, manager admission closes, and the cache stays locked after
 ordinary owners drop. Process exit bounds that intentional failed-cleanup test.
 These checks distinguish successful release from expected failure retention;
-they do not simulate a library-close failure or establish automatic update wiring.
+they do not simulate a library-close failure. Standard Host probes additionally
+verify automatic selection updates, cancelled bounded refresh waiters, and actual
+Service Owner lock exclusion until the blocked native callback has drained.

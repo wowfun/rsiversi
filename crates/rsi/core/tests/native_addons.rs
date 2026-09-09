@@ -9,6 +9,8 @@ use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
 mod generations;
 #[path = "native_addons/races.rs"]
 mod races;
+#[path = "native_addons/runtime.rs"]
+mod runtime;
 
 fn report(name: &str, bytes: &[u8]) {
     if let Some(directory) = std::env::var_os("RSI_NATIVE_ADDON_REPORT") {

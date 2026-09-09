@@ -33,6 +33,7 @@ mod local_host;
 mod native_addons;
 #[cfg(unix)]
 pub use native_addons::{
+    MAXIMUM_NATIVE_ADDON_REFRESH_REQUESTS, NativeAddonControl, NativeAddonControlContract,
     NativeAddonHealth, NativeAddonInspection, NativeAddonManager, NativeAddonRefresh,
     NativeAddonUpdateError,
 };
