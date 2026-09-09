@@ -694,3 +694,7 @@ fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
         assert!(error.contains("unavailable"), "error: {error}");
     }
 }
+
+#[cfg(unix)]
+#[path = "agent_preset/native.rs"]
+mod native;

@@ -257,3 +257,31 @@ fn fifo(path: &std::path::Path) {
     let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
     assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
 }
+
+#[test]
+fn readonly_snapshot_does_not_initialize_missing_or_incomplete_stores() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let path = root.join("missing/store");
+    assert!(NativeAddonStore::read_snapshot(&path).unwrap().is_none());
+    assert!(!root.join("missing").exists());
+    fs::create_dir_all(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(NativeAddonStore::read_snapshot(&path).is_err());
+    assert!(fs::read_dir(&path).unwrap().next().is_none());
+    let store = NativeAddonStore::open(&path).unwrap();
+    let manifest = source(&root.join("source"), b"not a library");
+    store.install(&manifest).unwrap();
+    store.enable("fixture.addon").unwrap();
+    assert_eq!(
+        NativeAddonStore::read_snapshot(&path).unwrap(),
+        Some(store.snapshot().unwrap())
+    );
+    let index = path.join("state.json");
+    fs::remove_file(&index).unwrap();
+    symlink(root.join("source/artifact.bin"), &index).unwrap();
+    assert!(NativeAddonStore::read_snapshot(&path).is_err());
+    fs::remove_file(&index).unwrap();
+    fifo(&index);
+    assert!(NativeAddonStore::read_snapshot(&path).is_err());
+}

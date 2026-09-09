@@ -186,9 +186,27 @@ impl AgentPresetManager {
         &self.composition_identity
     }
 
-    /// Returns the live catalog backed by this manager's Settings scope.
+    /// Returns the frozen base-declaration catalog backed by this manager's live Settings scope.
     pub fn catalog(&self) -> &AgentPresetCatalog {
         &self.catalog
+    }
+
+    /// Captures current declared native selection for one non-executing authoring operation.
+    /// Host construction keeps using the base catalog; source health is not ABI admission.
+    pub fn authoring_catalog(
+        &self,
+        composition: &crate::StandardComposition,
+    ) -> Result<AgentPresetCatalog> {
+        if self.composition_identity != composition.agent_compiler_identity()? {
+            return Err(RsiError::Boot(
+                "Agent-preset manager uses different addon declarations".into(),
+            ));
+        }
+        Ok(self
+            .catalog
+            .as_ref()
+            .clone()
+            .with_compiler(composition.agent_authoring_compiler()?))
     }
 
     /// Disposes the management Profile and its ordinary catalog/Settings owners.
@@ -211,6 +229,33 @@ pub(crate) fn standard_agent_profile_compiler(
     ))
 }
 
+#[cfg(unix)]
+pub(crate) fn native_agent_profile_compiler(
+    paths: &HostPaths,
+    linux_tools_enabled: bool,
+    base: &crate::StandardAddonSet,
+    selected: &[crate::NativeAddonRecord],
+) -> Result<AgentPresetProfileCompiler> {
+    use sha2::{Digest as _, Sha256};
+    if selected.is_empty() {
+        return standard_agent_profile_compiler(paths, linux_tools_enabled, base);
+    }
+    // Callers have checked the complete selection against this frozen base.
+    // ABI metadata belongs to the independently frozen executable catalog.
+    let mut digest = Sha256::new();
+    digest.update(b"rsi.native-agent-declarations/v1\0");
+    digest.update(base.digest().map_err(host_boot)?.as_bytes());
+    digest.update(serde_json::to_vec(selected).map_err(host_boot)?);
+    let compiler = agent_compiler(paths, linux_tools_enabled, hex::encode(digest.finalize()))?;
+    Ok(AgentPresetProfileCompiler::new(
+        compiler,
+        base.descriptions()
+            .filter(|entry| entry.scope == crate::AddonScope::Agent)
+            .map(|entry| entry.plugin.clone())
+            .chain(selected.iter().map(|entry| entry.plugin().to_owned())),
+    ))
+}
+
 pub(crate) fn standard_agent_compiler_identity(
     paths: &HostPaths,
     linux_tools_enabled: bool,
@@ -227,6 +272,17 @@ fn standard_agent_compiler(
     linux_tools_enabled: bool,
     addons: &crate::StandardAddonSet,
 ) -> Result<ProfileCompiler> {
+    agent_compiler(
+        paths,
+        linux_tools_enabled,
+        addons.digest().map_err(host_boot)?,
+    )
+}
+fn agent_compiler(
+    paths: &HostPaths,
+    linux_tools_enabled: bool,
+    declaration_digest: String,
+) -> Result<ProfileCompiler> {
     let environment = ProfileEnvironment::new(
         paths.config(),
         paths.state(),
@@ -240,7 +296,7 @@ fn standard_agent_compiler(
             ),
             (
                 "rsi_standard_addons".to_owned(),
-                Value::String(addons.digest().map_err(host_boot)?),
+                Value::String(declaration_digest),
             ),
         ]),
     )

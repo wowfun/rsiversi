@@ -11,12 +11,22 @@ async fn source_cli_default_root_drives_only_the_running_managers_explicit_selec
     )
     .unwrap();
     std::fs::write(&manifest, format!("format = 1\nid = 'fixture.cli'\nplugin = 'fixture.native-cli'\ntarget = '{}'\nartifact = 'artifact.bin'\n", rsi::native_addon_target())).unwrap();
+    let config = fixture.temporary.path().join("config/rsi");
+    let preset = config.join("agent-presets/native");
+    std::fs::create_dir_all(&preset).unwrap();
+    std::fs::write(
+        preset.join("agent.profile.toml"),
+        "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'native'\nplugin = 'fixture.native-cli'\n",
+    )
+    .unwrap();
     fixture.assert_success(&["addon", "install", "native.toml", "--output", "json"]);
+    assert_preset_health(&fixture, "broken");
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);
     let initial = status(&fixture);
     assert_eq!(initial["health"], "ready");
     assert!(initial["desired"].as_array().unwrap().is_empty());
     fixture.assert_success(&["addon", "enable", "fixture.cli"]);
+    assert_preset_health(&fixture, "healthy");
     let failed = wait_health(&fixture, "failed").await;
     assert_eq!(failed["desired"][0]["id"], "fixture.cli");
     assert_eq!(failed["source_revision"], "2");
@@ -25,7 +35,16 @@ async fn source_cli_default_root_drives_only_the_running_managers_explicit_selec
     let ready = wait_health(&fixture, "ready").await;
     assert!(ready["desired"].as_array().unwrap().is_empty());
     assert_eq!(ready["source_revision"], "3");
+    assert_preset_health(&fixture, "broken");
     fixture.assert_success(&["host", "stop"]);
+    std::fs::write(
+        config.join("native-addons/state.json"),
+        b"invalid native index",
+    )
+    .unwrap();
+    assert!(!fixture.run(&["agent-preset", "list"]).status.success());
+    fixture.assert_success(&["agent-preset", "default", "get"]);
+    fixture.assert_success(&["agent-preset", "default", "clear"]);
     provider.abort();
 }
 fn status(fixture: &CliFixture) -> serde_json::Value {
@@ -45,4 +64,16 @@ async fn wait_health(fixture: &CliFixture, health: &str) -> serde_json::Value {
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+fn assert_preset_health(fixture: &CliFixture, expected: &str) {
+    let output = fixture.assert_success(&["agent-preset", "list", "--output", "json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let row = value["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "native")
+        .unwrap();
+    assert_eq!(row["status"], expected);
 }

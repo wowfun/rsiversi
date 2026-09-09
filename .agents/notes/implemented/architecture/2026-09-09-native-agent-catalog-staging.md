@@ -28,6 +28,18 @@ pins keep their own catalog and native leases. The manager only admits Agent
 factories and explicit generation-private Portable keys; fixed linked declarations
 remain the base of each snapshot.
 
+Native source compilation derives its allowlist and environment identity from the
+frozen base declarations and exact enabled records. Runtime staging and explicit
+preset authoring share that pure derivation. ABI update modes and resolved factory
+identities remain independently hashed by the executable generation catalog.
+This lets authoring validate declared source without executing native code or
+inventing placeholder factories. One authoring request captures one immutable
+selection; later requests see enable/disable changes. Healthy source remains
+separate from artifact availability, ABI checks, prepare and activation. Base
+catalogs and Host launch identity remain frozen, and pure Host preview does not
+read or initialize native storage. Default and deletion commands do not depend
+on native source health, preserving their existing repair semantics.
+
 Retained finalization closes manager admission permanently. The manager exposes
 categorical, path-free selection and actual Loader resource observations, keeps
 the same Loader, and never deletes its cache. Closing new selection does not

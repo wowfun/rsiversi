@@ -285,3 +285,24 @@ The binary's [native source commands](../README.md#local-native-addon-sources)
 consume this store directly on a joined blocking worker. They expose installation
 and explicit selection receipts independently of runtime staging and retain the
 store's validation, locking and atomic publication boundaries.
+
+`NativeAddonStore::read_snapshot` observes an existing store without creating roots,
+objects, locks or index files. A missing root returns no store; an existing but
+incomplete or invalid store is an error. It uses the same ownership, identity and
+bounded index validation as ordinary snapshot reads.
+
+`AgentPresetManager::authoring_catalog` takes the matching frozen composition and
+captures one current native enabled-selection snapshot for pure preset preflight.
+It reads existing source metadata without initialization or native execution. The
+base `catalog` remains suitable for Host construction and pure Host preview.
+Native declared identities extend the preflight allowlist; healthy source does
+not attest artifact availability, ABI validity, prepare or activation.
+
+Native-enabled preset compilation salts `rsi_standard_addons` with the frozen
+base declaration digest and exact enabled records. Both authoring and the staging
+manager use that same declared input. Actual resolved factory identities and
+update modes remain independently included in the executable generation's catalog
+identity. Installed-only changes do not affect either selected input. Host launch
+identity continues to use frozen base declarations. CLI list/show/copy use one
+such authoring snapshot; path/delete/default operations remain usable independently
+of native source health.

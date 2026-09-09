@@ -177,6 +177,19 @@ impl NativeAddonStore {
             limits,
         })
     }
+    /// Reads existing source intent without creating or repairing any filesystem state.
+    /// An absent root returns None; invalid or incomplete existing stores remain errors.
+    pub fn read_snapshot(path: &Path) -> Result<Option<NativeAddonSnapshot>> {
+        let Some(directory) = StoreDirectory::open_existing(path.to_owned())? else {
+            return Ok(None);
+        };
+        Self {
+            directory,
+            limits: NativeAddonStoreLimits::default(),
+        }
+        .snapshot()
+        .map(Some)
+    }
     /// Returns validated source intent without loading artifacts or executing builds.
     pub fn snapshot(&self) -> Result<NativeAddonSnapshot> {
         let state = self.read_state()?;

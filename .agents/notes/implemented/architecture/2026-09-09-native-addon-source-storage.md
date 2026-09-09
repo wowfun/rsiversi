@@ -16,6 +16,9 @@ atomically publishes a bounded index. Installed and enabled records are separate
 reinstallation does not change the enabled artifact. Source receipts describe
 publication, independently of Runtime convergence. Index reads and mutations are
 non-executing, including when the source manifest declares a build command.
+Read-only snapshot acquisition never initializes a missing root or repairs an
+incomplete existing store. It permits pure declared-selection authoring while
+preserving the same ownership and bounded index validation.
 
 This partially supersedes the product installation restriction in the
 [foundation decision](2026-08-27-foundation-first-plugin-composition.md).

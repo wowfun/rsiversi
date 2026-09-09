@@ -19,14 +19,26 @@ pub(super) struct StoreDirectory {
 }
 impl StoreDirectory {
     pub(super) fn open(path: PathBuf) -> Result<Self> {
-        if path.as_os_str().len() > 4096 || path.components().count() > 64 {
-            return Err(NativeAddonError::Invalid("store path bounds"));
-        }
+        validate_root_path(&path)?;
         let root = rsi_files_native_fs::create_absolute_directory_no_follow(&path)?.into_std_file();
-        owned(&root)?;
-        match rustix::fs::mkdirat(&root, "objects", Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Self::from_root(path, root, true)
+    }
+    pub(super) fn open_existing(path: PathBuf) -> Result<Option<Self>> {
+        validate_root_path(&path)?;
+        let root = match rsi_files_native_fs::open_absolute_directory_no_follow(&path) {
+            Ok(root) => root.into_std_file(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
+        };
+        Self::from_root(path, root, false).map(Some)
+    }
+    fn from_root(path: PathBuf, root: File, create: bool) -> Result<Self> {
+        owned(&root)?;
+        if create {
+            match rustix::fs::mkdirat(&root, "objects", Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         let objects = directory_at(&root, "objects")?;
         owned(&objects)?;
@@ -348,4 +360,11 @@ pub(super) fn encode_index(state: &State) -> Result<Vec<u8>> {
     serde_json::to_writer(&mut encoded, state)
         .map_err(|_| NativeAddonError::Capacity("state bytes"))?;
     Ok(encoded.0)
+}
+
+fn validate_root_path(path: &std::path::Path) -> Result<()> {
+    if path.as_os_str().len() > 4096 || path.components().count() > 64 {
+        return Err(NativeAddonError::Invalid("store path bounds"));
+    }
+    Ok(())
 }

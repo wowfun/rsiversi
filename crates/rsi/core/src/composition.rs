@@ -943,6 +943,34 @@ impl StandardComposition {
         standard_agent_profile_compiler(&self.paths, self.coding_tools.is_some(), &addons)
     }
 
+    pub(crate) fn agent_authoring_compiler(
+        &self,
+    ) -> crate::Result<rsi_agent_presets::AgentPresetProfileCompiler> {
+        #[cfg(unix)]
+        {
+            let boot = |error: &dyn std::fmt::Display| crate::RsiError::Boot(error.to_string());
+            let root = rsi_files_native_fs::resolve_absolute_root_alias(
+                &self.paths.config().join("native-addons"),
+                true,
+            )
+            .map_err(|error| boot(&error))?;
+            let selected = crate::NativeAddonStore::read_snapshot(&root)
+                .map_err(|error| boot(&error))?
+                .map_or_else(Vec::new, |snapshot| snapshot.enabled);
+            let base = self.agent_addons().map_err(|error| boot(&error))?;
+            crate::native_addons::validate_selection(&base, &selected)
+                .map_err(|error| boot(&error))?;
+            crate::agent_preset::native_agent_profile_compiler(
+                &self.paths,
+                self.coding_tools.is_some(),
+                &base,
+                &selected,
+            )
+        }
+        #[cfg(not(unix))]
+        self.agent_profile_compiler()
+    }
+
     /// Replaces the credential store implementation for an explicit embedder.
     #[must_use]
     pub fn with_credential_store(mut self, store: Arc<dyn SecretStore>) -> Self {

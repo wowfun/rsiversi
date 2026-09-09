@@ -221,7 +221,7 @@ impl NativeAddonManager {
                 });
             }
         }
-        self.preflight(&before.enabled)?;
+        validate_selection(&self.base, &before.enabled)?;
         let mut builder = StandardAddonBuilder::new("rsi.native.local");
         for record in &before.enabled {
             self.check_admission()?;
@@ -254,10 +254,11 @@ impl NativeAddonManager {
                 .merged(addon)
                 .map_err(|_| NativeAddonUpdateError::Selection("combined addon catalog"))?
         };
-        let compiler = crate::agent_preset::standard_agent_profile_compiler(
+        let compiler = crate::agent_preset::native_agent_profile_compiler(
             &self.paths,
             self.linux_tools,
-            &addons,
+            &self.base,
+            &before.enabled,
         )
         .map_err(|_| NativeAddonUpdateError::Selection("Agent compiler declaration"))?;
         let contributions = addons
@@ -289,42 +290,6 @@ impl NativeAddonManager {
             changed: true,
             selected: before.enabled.len(),
         })
-    }
-
-    fn preflight(&self, selected: &[NativeAddonRecord]) -> Result<()> {
-        let mut plugins: BTreeSet<_> = self
-            .base
-            .descriptions()
-            .map(|entry| entry.plugin.clone())
-            .collect();
-        if selected.len()
-            > rsi_host::HostLimits::default()
-                .maximum_factories
-                .saturating_sub(plugins.len())
-        {
-            return Err(NativeAddonUpdateError::Selection("factory capacity"));
-        }
-        if !selected.is_empty() {
-            let reservation = StandardAddonBuilder::new("rsi.native.local")
-                .build()
-                .map_err(|_| NativeAddonUpdateError::Selection("native addon reservation"))?;
-            self.base.merged(reservation).map_err(|_| {
-                NativeAddonUpdateError::Selection("native addon identity or capacity")
-            })?;
-        }
-        for record in selected {
-            if record.target() != crate::native_addon_target() {
-                return Err(NativeAddonUpdateError::Selection(
-                    "unsupported native target",
-                ));
-            }
-            if !plugins.insert(record.plugin().to_owned()) {
-                return Err(NativeAddonUpdateError::Selection(
-                    "duplicate Agent plugin identity",
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Closes new selection without revoking existing pins or claiming finalization.
@@ -414,4 +379,41 @@ impl AgentCompositionSource for NativeAddonManager {
             message: "native Agent catalog is unavailable; inspect the local addon manager".into(),
         })
     }
+}
+
+pub(crate) fn validate_selection(
+    base: &StandardAddonSet,
+    selected: &[NativeAddonRecord],
+) -> Result<()> {
+    let mut plugins: BTreeSet<_> = base
+        .descriptions()
+        .map(|entry| entry.plugin.clone())
+        .collect();
+    if selected.len()
+        > rsi_host::HostLimits::default()
+            .maximum_factories
+            .saturating_sub(plugins.len())
+    {
+        return Err(NativeAddonUpdateError::Selection("factory capacity"));
+    }
+    if !selected.is_empty() {
+        let reservation = StandardAddonBuilder::new("rsi.native.local")
+            .build()
+            .map_err(|_| NativeAddonUpdateError::Selection("native addon reservation"))?;
+        base.merged(reservation)
+            .map_err(|_| NativeAddonUpdateError::Selection("native addon identity or capacity"))?;
+    }
+    for record in selected {
+        if record.target() != crate::native_addon_target() {
+            return Err(NativeAddonUpdateError::Selection(
+                "unsupported native target",
+            ));
+        }
+        if !plugins.insert(record.plugin().to_owned()) {
+            return Err(NativeAddonUpdateError::Selection(
+                "duplicate Agent plugin identity",
+            ));
+        }
+    }
+    Ok(())
 }

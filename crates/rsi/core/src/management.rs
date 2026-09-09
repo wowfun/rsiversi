@@ -377,7 +377,20 @@ pub(super) async fn run_agent_preset(command: AgentPresetCommand) -> u8 {
         Ok(manager) => manager,
         Err(error) => return report_error(&error),
     };
-    let result = execute_agent_preset(&manager, command).await;
+    let catalog = if matches!(
+        &command.operation,
+        AgentPresetOperation::List
+            | AgentPresetOperation::Show(_)
+            | AgentPresetOperation::Copy { .. }
+    ) {
+        manager.authoring_catalog(&composition)
+    } else {
+        Ok(manager.catalog().clone())
+    };
+    let result = match catalog {
+        Ok(catalog) => execute_agent_preset(&catalog, command).await,
+        Err(error) => Err(error),
+    };
     let exit = match result {
         Ok(()) => 0,
         Err(error) => report_error(&error),
@@ -405,57 +418,48 @@ pub(super) async fn shutdown_agent_preset_manager(
 }
 
 pub(super) async fn execute_agent_preset(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     command: AgentPresetCommand,
 ) -> rsi::Result<()> {
     match command.operation {
-        AgentPresetOperation::List => list_agent_presets(manager, command.output).await,
-        AgentPresetOperation::Show(id) => show_agent_preset(manager, command.output, id).await,
-        AgentPresetOperation::Path(id) => path_agent_preset(manager, command.output, &id),
+        AgentPresetOperation::List => list_agent_presets(catalog, command.output).await,
+        AgentPresetOperation::Show(id) => show_agent_preset(catalog, command.output, id).await,
+        AgentPresetOperation::Path(id) => path_agent_preset(catalog, command.output, &id),
         AgentPresetOperation::Copy {
             source,
             target,
             name,
         } => {
-            manager
-                .catalog()
+            catalog
                 .copy(&source, target.clone(), name)
                 .await
                 .map_err(preset_management_error)?;
             write_action(command.output, "copied", &target)
         }
         AgentPresetOperation::Delete(id) => {
-            manager
-                .catalog()
-                .delete(&id)
-                .await
-                .map_err(preset_management_error)?;
+            catalog.delete(&id).await.map_err(preset_management_error)?;
             write_action(command.output, "deleted", &id)
         }
         AgentPresetOperation::DefaultGet => {
-            let id = manager
-                .catalog()
+            let id = catalog
                 .default_id()
                 .await
                 .map_err(preset_management_error)?;
             write_default(command.output, "get", &id)
         }
         AgentPresetOperation::DefaultSet(id) => {
-            manager
-                .catalog()
+            catalog
                 .set_default(&id)
                 .await
                 .map_err(preset_management_error)?;
             write_default(command.output, "set", &id)
         }
         AgentPresetOperation::DefaultClear => {
-            manager
-                .catalog()
+            catalog
                 .clear_default()
                 .await
                 .map_err(preset_management_error)?;
-            let id = manager
-                .catalog()
+            let id = catalog
                 .default_id()
                 .await
                 .map_err(preset_management_error)?;
@@ -465,14 +469,10 @@ pub(super) async fn execute_agent_preset(
 }
 
 pub(super) async fn list_agent_presets(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     output: ManagementOutput,
 ) -> rsi::Result<()> {
-    let roster = manager
-        .catalog()
-        .roster()
-        .await
-        .map_err(preset_management_error)?;
+    let roster = catalog.roster().await.map_err(preset_management_error)?;
     let presets = roster
         .presets
         .into_iter()
@@ -490,15 +490,11 @@ pub(super) async fn list_agent_presets(
 }
 
 pub(super) async fn show_agent_preset(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     output: ManagementOutput,
     id: AgentPresetId,
 ) -> rsi::Result<()> {
-    let roster = manager
-        .catalog()
-        .roster()
-        .await
-        .map_err(preset_management_error)?;
+    let roster = catalog.roster().await.map_err(preset_management_error)?;
     let available = roster
         .presets
         .iter()
@@ -516,8 +512,7 @@ pub(super) async fn show_agent_preset(
         })?;
     let composition = if row.health == AgentPresetHealth::Healthy {
         Some(
-            manager
-                .catalog()
+            catalog
                 .document(&id)
                 .map_err(preset_management_error)?
                 .content,
@@ -538,14 +533,11 @@ pub(super) async fn show_agent_preset(
 }
 
 pub(super) fn path_agent_preset(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     output: ManagementOutput,
     id: &AgentPresetId,
 ) -> rsi::Result<()> {
-    let path = manager
-        .catalog()
-        .location(id)
-        .map_err(preset_management_error)?;
+    let path = catalog.location(id).map_err(preset_management_error)?;
     let path = path
         .to_str()
         .ok_or_else(|| RsiError::Boot("Agent preset path cannot be represented as UTF-8".into()))?;
