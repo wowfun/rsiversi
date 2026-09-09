@@ -9,6 +9,7 @@ use rsi_files_protocol::{
     MAXIMUM_DIRECTORY_ENTRIES, MAXIMUM_DIRECTORY_NAME_BYTES, MAXIMUM_DIRECTORY_PAGE_BYTES,
     RelativePath, Result,
 };
+use rsi_files_protocol::{FileToken, OpenedFile};
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
@@ -141,6 +142,17 @@ pub(super) fn open(
     Ok(resource)
 }
 impl Resource {
+    pub(super) fn describe(&self, token: FileToken) -> OpenedFile {
+        OpenedFile {
+            path: self.path.clone(),
+            token,
+            kind: match self.object {
+                Object::File(_) => FileKind::File,
+                Object::Directory(..) => FileKind::Directory,
+            },
+            length: self.length(),
+        }
+    }
     pub(super) fn length(&self) -> u64 {
         match &self.object {
             Object::File(_) => self.version.length,

@@ -4056,6 +4056,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-session-files"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "reqwest",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-api",
+ "rsi-api-http",
+ "rsi-api-http-client",
+ "rsi-api-protocol",
+ "rsi-credentials-protocol",
+ "rsi-files",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-sandbox",
+ "rsi-session-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-session-protocol"
 version = "0.0.1"
 dependencies = [

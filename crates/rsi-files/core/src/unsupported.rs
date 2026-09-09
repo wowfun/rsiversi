@@ -1,6 +1,7 @@
 use rsi_files_protocol::{
     DirectoryPage, FileKind, FilePage, FilesBinding, FilesError, RelativePath, Result,
 };
+use rsi_files_protocol::{FileToken, OpenedFile};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub(super) struct Resource;
@@ -13,6 +14,14 @@ pub(super) fn open(
     Err(FilesError::Unsupported)
 }
 impl Resource {
+    pub(super) fn describe(&self, token: FileToken) -> OpenedFile {
+        OpenedFile {
+            path: RelativePath::default(),
+            token,
+            kind: FileKind::File,
+            length: 0,
+        }
+    }
     pub(super) fn length(&self) -> u64 {
         0
     }

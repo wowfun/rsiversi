@@ -1380,6 +1380,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<AgentSettingsContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionIngressContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionReadContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionApprovalControlContract>()?;
     builder.register_local_contract::<rsi_service_host::ApprovalBrokerContract>()?;
     builder.register_local_contract::<CredentialsResolveContract>()?;

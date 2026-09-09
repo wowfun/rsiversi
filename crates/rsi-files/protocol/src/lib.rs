@@ -32,7 +32,8 @@ pub const MAXIMUM_FILE_PATH_BYTES: usize = 16 * 1024;
 pub const FILE_TOKEN_LIFETIME: Duration = Duration::from_mins(5);
 
 /// Read failure without exposing native absolute paths or credentials.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FilesError {
     /// Malformed request.
     #[error("invalid Files request")]
@@ -107,6 +108,11 @@ impl FilesBinding {
             workspace,
         })
     }
+    /// Owning caller generation for lifecycle cleanup.
+    pub fn caller(&self) -> &FilesCaller {
+        &self.caller
+    }
+
     /// Exact native root selected by the trusted caller.
     pub fn workspace(&self) -> &std::path::Path {
         &self.workspace
@@ -212,6 +218,8 @@ pub enum FileKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenedFile {
+    /// Exact path opened from the retained root.
+    pub path: RelativePath,
     /// Correlation handle required on continuation.
     pub token: FileToken,
     /// Regular file or directory.
@@ -256,6 +264,10 @@ pub struct DirectoryPage {
 /// Shared reader. Entrypoints must establish current authority before every call.
 #[async_trait]
 pub trait Files: fmt::Debug + Send + Sync + 'static {
+    /// Release a caller generation after its owner has stopped and drained admission.
+    fn release_caller(&self, caller: &FilesCaller);
+    /// Inspect admitted metadata under a currently authorized binding.
+    fn describe(&self, binding: &FilesBinding, token: &FileToken) -> Result<OpenedFile>;
     /// Acquire a new bounded token and capture its object version.
     async fn open(
         &self,

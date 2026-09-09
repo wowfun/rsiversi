@@ -19,6 +19,11 @@ They contribute surfaces, actions and block renderers, and verify declaration
 reorder, exact target mappings, stale references, dropped waiters, bounded action
 admission, withdrawal drain and failed activation rollback.
 
+The public Session Files client scenarios reject foreign request echoes, wrong
+file offsets/lengths/bytes, directory path/name mismatches and non-progressing
+pages without replay. They exercise the real shared client with a deterministic
+API peer, separately from native filesystem and HTTP authentication tests.
+
 The Session service and renderer are deterministic Rust fixtures. This establishes
 portable controller and plugin ownership, not product Web rendering, HTTP domain
 integration or a live provider result. CI and application-foundation work consume

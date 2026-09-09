@@ -535,11 +535,13 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-client",
  "rsi-conversation",
+ "rsi-files-protocol",
  "rsi-host",
  "rsi-meta",
  "rsi-meta-execution",
  "rsi-meta-scope",
  "rsi-sandbox",
+ "rsi-session-files",
  "rsi-session-protocol",
  "rsi-tools-protocol",
  "rsi-ui",
@@ -574,6 +576,19 @@ dependencies = [
  "serde",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "rsi-files-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-meta-contract",
+ "rsi-workspace-path",
+ "serde",
+ "thiserror",
+ "tokio-util",
 ]
 
 [[package]]
@@ -707,6 +722,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-session-files"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-session-protocol",
+ "rsi-api-protocol",
+ "rsi-files-protocol",
+ "rsi-meta",
+ "rsi-session-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-session-protocol"
 version = "0.0.1"
 dependencies = [
@@ -726,6 +759,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio-util",
 ]
 
 [[package]]

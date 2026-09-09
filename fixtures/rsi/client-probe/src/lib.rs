@@ -7,6 +7,9 @@ mod shells;
 #[path = "../../../../crates/rsi/ui/tests/support/mod.rs"]
 mod ui;
 
+#[path = "../../../../crates/rsi/session-files/tests/support/mod.rs"]
+mod files;
+
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -64,12 +67,14 @@ pub async fn run_probe() -> Result<String, JsValue> {
     ui::duplicate_and_failed_activation_preserve_existing_bundle_and_reject_foreign_buttons(execution.clone()).await;
     ui::independent_registry_and_reactivated_bundle_never_reuse_old_references(execution.clone()).await;
     ui::presentation_close_signals_reads_and_preserves_admitted_mutations(execution.clone()).await;
+    files::malformed_open_binding_and_file_pages_never_escape_or_replay().await;
+    files::directory_client_checks_parent_exact_names_order_and_forward_progress().await;
     let resources = rsi_meta_execution::browser_resource_snapshot();
     assert_eq!(resources.pending_timers, 0);
     assert_eq!(resources.active_alarms, 0);
     Ok(serde_json::json!({
         "status":"passed", "command_reconciliation":"passed", "pending_timers":resources.pending_timers,
         "active_alarms":resources.active_alarms,
-        "cases":["UI presentation read cancellation preserves admitted mutations","UI independent application and contribution generations","UI declaration reorder drives surfaces and renderers with actual target mappings","UI dropped waiter and contribution retirement drain admitted mutation once","UI replacement target foreign application and business payload are fenced","UI action capacity is not released when response waiters are dropped","UI duplicate and failed activation preserve existing bundle and reject foreign buttons","owned exact-source reads and cancellation", "independent fresh projection baselines and failure", "command identity and query-only reconciliation", "durable header decoding", "message claim cancellation and terminal delivery", "isolated controller scopes with shared domain", "owned submission drain and bounded admission", "explicit reconciliation cancellation and retained identity", "acknowledged cursor without watermark skip", "bounded read capacity recovery and cancellation", "Session-free Shell profiles and dropped opens", "partial surface activation retirement", "child cleanup failure propagation"]
+        "cases":["Files response binding and exact byte validation", "Files directory path ordering and progress validation", "UI presentation read cancellation preserves admitted mutations","UI independent application and contribution generations","UI declaration reorder drives surfaces and renderers with actual target mappings","UI dropped waiter and contribution retirement drain admitted mutation once","UI replacement target foreign application and business payload are fenced","UI action capacity is not released when response waiters are dropped","UI duplicate and failed activation preserve existing bundle and reject foreign buttons","owned exact-source reads and cancellation", "independent fresh projection baselines and failure", "command identity and query-only reconciliation", "durable header decoding", "message claim cancellation and terminal delivery", "isolated controller scopes with shared domain", "owned submission drain and bounded admission", "explicit reconciliation cancellation and retained identity", "acknowledged cursor without watermark skip", "bounded read capacity recovery and cancellation", "Session-free Shell profiles and dropped opens", "partial surface activation retirement", "child cleanup failure propagation"]
     }).to_string())
 }

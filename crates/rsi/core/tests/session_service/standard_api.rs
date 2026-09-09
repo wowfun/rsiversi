@@ -127,6 +127,12 @@ async fn real_service_profiles_share_an_application_runtime_with_isolated_lifeti
             .lookup_local::<ConnectionDescriptionContract>()
             .is_none()
     );
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_session_protocol::SessionReadContract>()
+            .is_none()
+    );
     let service_instances = || {
         runtime.snapshot().fibers.into_iter().filter(|fiber| {
         fiber.state == rsi_meta::FiberState::Active &&

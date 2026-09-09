@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use rsi_files_protocol::FilesCaller;
 use rsi_files_protocol::{
     DirectoryPage, FILE_TOKEN_LIFETIME, FileKind, FilePage, FileToken, Files, FilesBinding,
     FilesError, MAXIMUM_DIRECTORY_PAGE_ENTRIES, MAXIMUM_FILE_JOBS, MAXIMUM_FILE_PAGE_BYTES,
@@ -195,6 +196,21 @@ fn check(cancellation: &CancellationToken) -> Result<()> {
 }
 #[async_trait]
 impl Files for LocalFiles {
+    fn release_caller(&self, caller: &FilesCaller) {
+        let mut state = self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .tokens
+            .retain(|_, resource| resource.binding.caller() != caller);
+        prune(&mut state);
+    }
+    fn describe(&self, binding: &FilesBinding, token: &FileToken) -> Result<OpenedFile> {
+        let resource = self.resource(binding, token)?;
+        Ok(resource.data.describe(token.clone()))
+    }
     async fn open(
         &self,
         binding: FilesBinding,
@@ -202,6 +218,7 @@ impl Files for LocalFiles {
         kind: FileKind,
         cancellation: CancellationToken,
     ) -> Result<OpenedFile> {
+        let opened_path = path.clone();
         let resource = self
             .run(cancellation.clone(), move |stopped| {
                 let permit = Arc::clone(&TOKENS)
@@ -232,6 +249,7 @@ impl Files for LocalFiles {
         let length = resource.data.length();
         state.tokens.insert(token.clone(), Arc::new(resource));
         Ok(OpenedFile {
+            path: opened_path,
             token,
             kind,
             length,
@@ -294,8 +312,6 @@ impl Files for LocalFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use rsi_files_protocol::FilesCaller;
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]

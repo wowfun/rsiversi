@@ -8,6 +8,11 @@ Session identity), revision (the product uses Header fingerprint), and native
 absolute workspace root. The binding is not serializable. Every operation must
 receive the currently authorized binding, including continuation and release.
 A token is only a correlation handle, never an authorization credential.
+`describe` returns its admitted path/kind/length after current binding and expiry
+checks. Adapters compare a client-supplied descriptor before returning its body.
+After stopping and draining its own admission, a caller uses `release_caller` to
+release that generation's remaining tokens, including lost open responses.
+Already running native jobs retain their resource permits until actual exit.
 
 Relative paths preserve native Unix filename bytes through bounded hex wire
 encoding. Empty paths select the root directory. Absolute paths, empty interior
@@ -16,7 +21,8 @@ filename bytes; this protocol does not interpret Windows relative paths. Directo
 entry names have both a display string and exact relative path; display text is
 untrusted content and never instruction material.
 
-Open retains a root directory handle and a regular file or bounded directory
+Open returns its exact relative path alongside the token and captured length.
+It retains a root directory handle and a regular file or bounded directory
 snapshot. File pages are exact hex bytes, with byte offsets and the captured
 size; text decoding belongs to clients. Refresh means opening a new snapshot
 and releasing the previous token. A continuation rechecks the retained object

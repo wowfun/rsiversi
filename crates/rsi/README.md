@@ -165,6 +165,9 @@ Workspace, Models, Media and completed Process output capabilities. Its
 terminal application package owns its argument grammar, interaction and signals;
 the binary owns launcher/management parsing, process control,
 and construction of the Tokio runtime.
+The standard Host catalog maps Session, ingress and finite-read Local contracts
+into the same Host Profile isolation scope. Multiple Hosts inside one Runtime
+therefore share no raw Session read mapping.
 
 The standard catalog links OpenAI, OpenAI-compatible, and DeepSeek factories
 without implicitly enabling a deployment. A persistent Profile instantiates

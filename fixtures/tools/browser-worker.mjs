@@ -23,7 +23,7 @@ export function buildWorkerProbe({ fixture, stem }) {
   assert.equal(tree.status, 0, tree.stderr);
   const dependencies = new Set(tree.stdout.split("\n").map((line) => line.split(" ")[0]));
   for (const forbidden of ["rsi-agent-kernel", "rsi-agent-store-sqlite", "rsi-storage-sqlite",
-    "rsi-workspace", "rsi-service-host", "rsi-api-uds-client", "rsi-meta-native", "rsi-meta-native-loader",
+    "rsi-workspace", "rsi-files", "rsi-files-native-fs", "rsi-service-host", "rsi-api-uds-client", "rsi-meta-native", "rsi-meta-native-loader",
     "crossterm", "ratatui", "mio", "socket2"]) {
     assert(!dependencies.has(forbidden), `browser closure includes ${forbidden}`);
   }

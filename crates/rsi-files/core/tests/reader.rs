@@ -1,11 +1,7 @@
 #![cfg(unix)]
 use rsi_files::LocalFiles;
 use rsi_files_protocol::*;
-use std::{
-    fs,
-    os::unix::{ffi::OsStrExt as _, fs::symlink},
-    path::Path,
-};
+use std::{fs, os::unix::fs::symlink, path::Path};
 use tokio_util::sync::CancellationToken;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -218,7 +214,7 @@ async fn directory_pages_preserve_raw_names_sort_without_following_links_and_bou
     for i in 0..300 {
         fs::write(root.join(format!("{i:03}-\"\n\\")), "").unwrap();
     }
-    fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff")), "raw-name").unwrap();
+    fs::write(root.join("终"), "raw-name").unwrap();
     symlink("missing", root.join("link")).unwrap();
     let service = LocalFiles::new().unwrap();
     let binding = binding(&root);
@@ -266,7 +262,7 @@ async fn directory_pages_preserve_raw_names_sort_without_following_links_and_bou
         None
     );
     let raw = entries.last().unwrap();
-    assert_eq!(raw.path.as_bytes(), b"\xff");
+    assert_eq!(raw.path.as_bytes(), "终".as_bytes());
     let raw = service
         .open(binding.clone(), raw.path.clone(), FileKind::File, cancel())
         .await
@@ -499,14 +495,15 @@ async fn long_directory_paths_reduce_each_page_before_encoded_byte_budget() {
         .map(|_| "a".repeat(200))
         .collect::<Vec<_>>()
         .join("/");
-    let directory = root.join(&relative);
-    fs::create_dir_all(&directory).unwrap();
+    let mut directory = rsi_files_native_fs::open_absolute_directory_no_follow(&root).unwrap();
+    for component in relative.split('/') {
+        directory.create_dir(component).unwrap();
+        directory = directory.open_dir(component).unwrap();
+    }
     for index in 0..30 {
-        fs::write(
-            directory.join(format!("{index:03}{}", "\"".repeat(197))),
-            "",
-        )
-        .unwrap();
+        directory
+            .write(format!("{index:03}{}", "\"".repeat(197)), "")
+            .unwrap();
     }
     let service = LocalFiles::new().unwrap();
     let binding = binding(&root);
@@ -537,5 +534,86 @@ async fn long_directory_paths_reduce_each_page_before_encoded_byte_budget() {
         offset += page.entries.len();
     }
     assert_eq!(offset, 30);
+    service.close().await;
+}
+
+// APFS rejects invalid UTF-8 names at file creation. Linux exercises their native
+// round trip; the platform-independent protocol still verifies exact byte paths.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_non_utf8_filename_round_trips_without_lossy_path_resolution() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let _serial = SERIAL.lock().await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff")), "raw-name").unwrap();
+    let service = LocalFiles::new().unwrap();
+    let binding = binding(&root);
+    let directory = service
+        .open(
+            binding.clone(),
+            RelativePath::default(),
+            FileKind::Directory,
+            cancel(),
+        )
+        .await
+        .unwrap();
+    let page = service
+        .list(binding.clone(), directory.token, 0, 1, cancel())
+        .await
+        .unwrap();
+    assert_eq!(page.entries[0].path.as_bytes(), b"\xff");
+    let file = service
+        .open(
+            binding.clone(),
+            page.entries[0].path.clone(),
+            FileKind::File,
+            cancel(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(service.describe(&binding, &file.token).unwrap(), file);
+    assert_eq!(
+        service
+            .read(binding, file.token, 0, 16, cancel())
+            .await
+            .unwrap()
+            .bytes_hex,
+        hex::encode("raw-name")
+    );
+    service.close().await;
+}
+
+#[tokio::test]
+async fn retiring_one_caller_releases_only_its_tokens_and_preserves_peer_reads() {
+    let _serial = SERIAL.lock().await;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    fs::write(root.join("file"), "body").unwrap();
+    let service = LocalFiles::new().unwrap();
+    let one = binding(&root);
+    let two = binding(&root);
+    let first = service
+        .open(one.clone(), path("file"), FileKind::File, cancel())
+        .await
+        .unwrap();
+    let second = service
+        .open(two.clone(), path("file"), FileKind::File, cancel())
+        .await
+        .unwrap();
+    service.release_caller(one.caller());
+    assert_eq!(
+        service.describe(&one, &first.token),
+        Err(FilesError::Unavailable)
+    );
+    assert_eq!(service.describe(&two, &second.token).unwrap(), second);
+    assert_eq!(
+        service
+            .read(two, second.token, 0, 4, cancel())
+            .await
+            .unwrap()
+            .bytes_hex,
+        hex::encode("body")
+    );
     service.close().await;
 }
