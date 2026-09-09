@@ -348,7 +348,11 @@ The standard Agent preset also selects workspace and time context as ordinary
 contributions. Workspace refresh and its last-good domain state commit together;
 time context commits one UTC clock reading before each new provider retry series.
 Both belong to the immutable Agent generation. Custom presets select their own
-contributions through the Agent-only addon catalog.
+contributions through the Agent-only addon catalog. `rsi.tools.portable` is an
+available Agent contributor that imports an explicitly configured Portable Tool
+service into the same stage. It is enabled only by an explicit Profile leaf;
+the default preset has no native dependency. Its wire and confinement rules
+belong to [Tools](../rsi-tools/protocol/README.md#portable-contributions).
 
 The standard preset selects [plan policy](../rsi-agent/plan-policy/README.md)
 through that same catalog. Planning starts disabled and can change through the

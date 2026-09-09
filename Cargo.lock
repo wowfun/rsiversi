@@ -4430,11 +4430,13 @@ dependencies = [
  "futures-util",
  "hex",
  "rsi-meta",
+ "rsi-meta-native-loader",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

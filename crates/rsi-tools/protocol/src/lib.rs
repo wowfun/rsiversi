@@ -21,6 +21,9 @@ use std::sync::Mutex;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+/// Closed byte protocol for explicitly injected Portable tool contributions.
+pub mod portable;
+
 /// Maximum tool name or call identity bytes.
 pub const MAXIMUM_TOOL_IDENTIFIER_BYTES: usize = 256;
 /// Maximum encoded schema, arguments, or canonical result bytes.
@@ -542,7 +545,7 @@ impl ToolEnforcement {
 
 /// Model-facing ordered content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolContent {
     /// UTF-8 text.
     Text {

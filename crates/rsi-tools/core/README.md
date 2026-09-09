@@ -70,3 +70,16 @@ Prepared request identity is lowercase hex SHA-256 of UTF-8
 are recursively sorted lexically, arrays retain order, and scalar JSON values
 retain their serde_json representation. The call ID, cwd, sandbox policy, and
 approval outcome are separate execution metadata, outside this digest.
+
+
+`PortableToolsFactory` is an ordinary contributor configured with one explicit
+Portable service key. It imports the [Portable Tool protocol](../protocol/README.md#portable-contributions)
+into an injected unpublished Local registrar. Its effect owns the batch lease;
+failed activation withdraws an open batch, and sealing pins its exact Portable
+executors. The bridge adds no provider catalog, policy or result store.
+
+A sealed catalog retains its exact executor but does not override Meta generation
+fences. Retiring the bridge or its Portable provider closes that capability's
+admission. Standard product generation pins must therefore retain the native
+provider and bridge together with their catalog; replacement must not retire a
+scope still pinned by an old Session.

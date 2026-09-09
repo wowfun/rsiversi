@@ -197,6 +197,10 @@ fn standard_agent_addon(
     )?;
     register(JOBS_TOOLS_FACTORY, Arc::new(JobsToolsFactory))?;
     register(
+        "rsi.tools.portable",
+        Arc::new(rsi_tools::PortableToolsFactory),
+    )?;
+    register(
         FILES_TOOLS_FACTORY,
         Arc::new(rsi_files_tools::FilesToolsFactory),
     )?;
@@ -229,6 +233,15 @@ fn standard_agent_addon(
         register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
         register(APPLY_PATCH_FACTORY, Arc::new(coding.apply_patch.clone()))?;
     }
+    builder.describe_factory(
+        "rsi.tools.portable",
+        "Import an explicitly injected Portable Tool service into this Agent catalog",
+        Some(serde_json::json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["service"],
+            "properties": {"service": {"type": "string", "minLength": 1}}
+        })),
+    )?;
     builder.register_local_contract_at::<rsi_agent_context::ModelContextBuilderContract>(
         AddonScope::Agent,
     )?;
@@ -1802,6 +1815,11 @@ mod tests {
             .unwrap();
         let jobs = rsi_meta::PluginId::from(JOBS_TOOLS_FACTORY);
         assert!(portable.resolve(&jobs).is_ok());
+        assert!(
+            portable
+                .resolve(&rsi_meta::PluginId::from("rsi.tools.portable"))
+                .is_ok()
+        );
         for linux_only in [BASH_TOOL_FACTORY, APPLY_PATCH_FACTORY] {
             assert!(
                 portable
