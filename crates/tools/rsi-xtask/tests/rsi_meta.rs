@@ -364,6 +364,34 @@ fn ci_required_aggregates_every_independent_job_result() {
 }
 
 #[test]
+fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi"]["steps"].as_sequence().unwrap();
+    let step = steps
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo xtask dev tui --smoke"))
+        })
+        .expect("product CI exercises the actual development launcher");
+    assert_eq!(step["if"].as_str(), Some("runner.os == 'Linux'"));
+    let run = step["run"].as_str().unwrap();
+    let smoke = run.find("cargo xtask dev tui --smoke").unwrap();
+    for setup in [
+        "trap restore_policy EXIT",
+        "kernel.unprivileged_userns_clone=1",
+        "kernel.apparmor_restrict_unprivileged_userns=0",
+    ] {
+        assert!(
+            run.find(setup).is_some_and(|index| index < smoke),
+            "development smoke needs scoped backend policy: {setup}"
+        );
+    }
+}
+
+#[test]
 fn ci_job_deadlines_cover_their_explicit_step_budgets_with_headroom() {
     #[derive(Deserialize)]
     struct Workflow {

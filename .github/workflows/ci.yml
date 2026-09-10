@@ -338,11 +338,12 @@ jobs:
             done
           fi
           cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets
-        timeout-minutes: 20
-      - name: Exercise isolated frontend development launcher
-        if: runner.os == 'Linux'
-        run: cargo xtask dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke"
-        timeout-minutes: 15
+          cargo xtask dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
+            smoke_status=$?
+            tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
+            exit "$smoke_status"
+          }
+        timeout-minutes: 35
       - name: Exercise standard rsi on macOS
         if: runner.os == 'macOS'
         run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- --nocapture

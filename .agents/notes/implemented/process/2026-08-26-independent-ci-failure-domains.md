@@ -31,7 +31,9 @@ run in CI.
 Linux user-namespace policy is relaxed only for native Sandbox enforcement and
 standard-product tests that activate the required backend. Compilation and
 linting run first under the runner policy; each test step restores every
-changed sysctl on exit. The deterministic required-backend failure test also
+changed sysctl on exit. The isolated frontend smoke activates the same backend
+and runs within the standard-product test step's policy lifetime, with its own
+failure log emitted before restoration. The deterministic required-backend failure test also
 runs without relaxing policy.
 
 The always-running `ci-required` job depends on every independent contract and
