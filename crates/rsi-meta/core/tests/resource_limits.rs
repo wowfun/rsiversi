@@ -1079,6 +1079,7 @@ struct CountingReconfigurationFactory {
 struct BlockingReactivationFactory {
     spec: FactorySpec,
     activations: AtomicUsize,
+    activation_entered: CancellationToken,
     drop_entered: mpsc::SyncSender<()>,
     drop_release: Arc<Mutex<mpsc::Receiver<()>>>,
     retained: Arc<Mutex<Option<std::sync::Weak<Value>>>>,
@@ -1114,6 +1115,7 @@ impl PluginFactory for BlockingReactivationFactory {
                 entered: self.drop_entered.clone(),
                 release: Arc::clone(&self.drop_release),
             };
+            self.activation_entered.cancel();
             futures_util::future::pending::<()>().await;
         }
         Ok(())
@@ -1262,12 +1264,14 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
     let (drop_entered_sender, drop_entered) = mpsc::sync_channel(1);
     let (drop_release, drop_release_receiver) = mpsc::sync_channel(1);
     let retained = Arc::new(Mutex::new(None));
+    let activation_entered = CancellationToken::new();
     let consumer = runtime
         .root()
         .apply(
             crate::resolved(Arc::new(BlockingReactivationFactory {
                 spec: consumer_spec,
                 activations: AtomicUsize::new(0),
+                activation_entered: activation_entered.clone(),
                 drop_entered: drop_entered_sender,
                 drop_release: Arc::new(Mutex::new(drop_release_receiver)),
                 retained: Arc::clone(&retained),
@@ -1283,6 +1287,9 @@ async fn reconfiguration_retains_old_config_capacity_while_activation_owns_it() 
         .apply(resolved(provider_factory()), Value::Null)
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), activation_entered.cancelled())
+        .await
+        .expect("consumer did not enter its blocking reactivation");
     let retained_before = runtime.resource_snapshot().retained_plugin_bytes.current;
 
     let reconfiguration = tokio::spawn({
