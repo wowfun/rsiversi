@@ -55,9 +55,10 @@ impl Runtime {
             .ok_or(MetaError::StaleCapability)?;
         Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
         let runtime_admission = self.begin_admission(false)?;
-        let deadline = tokio::time::Instant::now()
-            .checked_add(self.inner.limits.deadlines.service_call)
-            .expect("validated service-call deadline fits Tokio Instant");
+        let deadline = self
+            .inner
+            .execution
+            .deadline_after(self.inner.limits.deadlines.service_call);
         let admission = Arc::clone(&self.inner.service_call_admission)
             .try_acquire_owned()
             .map_err(|_| {
@@ -154,7 +155,7 @@ impl Runtime {
             byte_resources: Arc::clone(&self.inner.resources.buffered_message_bytes),
             capability_resources: Arc::clone(&self.inner.resources.queued_capability_references),
             cancellation: cancellation.clone(),
-            deadline,
+            deadline: deadline.clone(),
             maximum_message_bytes,
             maximum_capabilities_per_message,
             call_lease: Arc::clone(&call_lease),

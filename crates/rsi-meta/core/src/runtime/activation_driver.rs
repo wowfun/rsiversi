@@ -27,7 +27,7 @@ pub(super) struct ActivationDriver<'activation> {
     pub(super) plan: ActivationPlan,
     pub(super) apply_cancellation: &'activation CancellationToken,
     pub(super) generation_cancellation: &'activation CancellationToken,
-    pub(super) deadline: tokio::time::Instant,
+    pub(super) deadline: crate::Deadline,
 }
 
 impl ActivationDriver<'_> {
@@ -61,7 +61,7 @@ impl ActivationDriver<'_> {
             biased;
             () = apply_cancellation.cancelled() => (Err(MetaError::Cancelled), None),
             () = generation_cancellation.cancelled() => (Err(MetaError::Cancelled), None),
-            () = tokio::time::sleep_until(deadline) => (
+            () = deadline.wait() => (
                 Err(MetaError::Timeout("plugin activation")),
                 None,
             ),
@@ -173,7 +173,9 @@ mod tests {
             plan,
             apply_cancellation: &apply_cancellation,
             generation_cancellation: &generation_cancellation,
-            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline: runtime
+                .execution()
+                .deadline_after(std::time::Duration::from_secs(5)),
         };
 
         let (result, ()) = tokio::join!(driver.run(), cancelling);

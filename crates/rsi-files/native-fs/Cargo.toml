@@ -1,0 +1,18 @@
+[package]
+name = "rsi-files-native-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[target.'cfg(unix)'.dependencies]
+cap-std.workspace = true
+libc.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,9 +1,9 @@
 use super::super::{EffectHandle, EffectRetention};
-use super::{EventEffect, EventOwnership, EventRemoval};
+use super::{RegistrationEffect, RegistrationOwnership, RegistrationRemoval};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-impl EventOwnership {
+impl RegistrationOwnership {
     pub(in crate::runtime) fn begin_once_claim(&self) -> Option<OnceClaim> {
         if self
             .once_claimed
@@ -13,7 +13,7 @@ impl EventOwnership {
             return None;
         }
         match &self.effect {
-            EventEffect::Setup(effect) => {
+            RegistrationEffect::Setup(effect) => {
                 let retention = effect.detach()?;
                 self.removal.claim_detached_report();
                 self.removal.start();
@@ -22,14 +22,14 @@ impl EventOwnership {
                     retention,
                 })
             }
-            EventEffect::Dynamic(effect) => {
+            RegistrationEffect::Dynamic(effect) => {
                 self.removal.start();
                 Some(OnceClaim::Dynamic {
                     removal: Arc::clone(&self.removal),
                     effect: effect.clone(),
                 })
             }
-            EventEffect::RegistryDynamic(effect) => {
+            RegistrationEffect::RegistryDynamic(effect) => {
                 let effect = effect.upgrade()?;
                 self.removal.start();
                 Some(OnceClaim::Dynamic {
@@ -43,11 +43,11 @@ impl EventOwnership {
 
 pub(in crate::runtime) enum OnceClaim {
     Setup {
-        removal: Arc<EventRemoval>,
+        removal: Arc<RegistrationRemoval>,
         retention: EffectRetention,
     },
     Dynamic {
-        removal: Arc<EventRemoval>,
+        removal: Arc<RegistrationRemoval>,
         effect: EffectHandle,
     },
 }

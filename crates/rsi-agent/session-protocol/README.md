@@ -1,8 +1,68 @@
 # rsi-agent-session-protocol
 
+## Derived extension snapshots
+
+Session projection DTOs are disposable read values, outside the durable record
+format. A snapshot binds the exact Session, Header fingerprint, composition digest
+and either draft revision or a simultaneous durable Fact/control horizon. Each
+registered producer contributes one complete value or one bounded failure. There
+are at most 64 unique producers, each value fits 64 KiB of canonical JSON, each
+failure fits 4 KiB of diagnostic text, and the complete envelope fits 5 MiB.
+Decode validates all of those bounds and identities. Consumers advance both
+durable cursors monotonically; a durable view never regresses to a draft.
+
+## Session commands
+
+Command invocations bind a ContributionId, DomainRequestId, typed draft or
+durable control revision, and at most 16 KiB of structurally validated JSON
+arguments. A durable command control retains that complete invocation alongside
+its domain replacements; the canonical request digest therefore binds command,
+arguments and expected revision. Its request identity must equal the control's
+request identity, and a draft revision cannot appear in a durable command.
+Command controls contain no execution Facts and cannot claim a Turn's free
+mutation lane. Their consumers obtain Session authority through the owning
+Kernel service; serialized identities alone confer no authority. Header format
+11 and SQLite schema 16 make this command invocation cutover explicit; earlier
+authoritative formats are rejected without rewriting their files.
+
+Client command receipts are compact validated projections of canonical command
+controls or lease-local draft mutations. DraftChanged binds the successor draft
+revision and complete baseline digest; Committed binds the exact control cursor
+and canonical domain request digest. Both retain command/request identities and
+the original invocation digest. They do not copy complete domain states into
+transport receipts or create another durable receipt store.
+
+## Execution records
+
+`PluginContext` attributes actual model-visible text to one validated
+ContributionId. It is text-only, uses the entered-message byte/block bounds,
+and carries the exact open Step identity. Kernel accepts it only at a boundary
+without an active external effect. Context builders replay it as developer
+content; they do not resample or rerun its producer.
+
+`ToolRejected` records an exact prepared Tool call denied before intent/start.
+It preserves name, arguments and identity plus either a denied live approval
+outcome or a bounded contribution-attributed policy reason. It counts as one
+Tool call and one generated record. A rejection is not a retained Tool result,
+never creates a started effect, and cannot replace an already admitted intent.
+Context replay emits the corresponding error Tool response. Approval denial
+retains the executor's existing failed-Turn behavior.
+
+Complete domain values use a bounded JSON envelope (256 KiB, the shared JSON
+depth/node limits), an exact identity/version and a checked revision. JSON null
+is an ordinary explicit state, distinct from absent revision zero. A frozen
+baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
+mechanical bounds do not replace the owning domain's typed semantic validator.
+
 This package owns the exact pre-release durable Session format: immutable
-headers, bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 9), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
+
+Canonical workspace paths in Headers and Facts describe their originating host.
+They use the [Workspace host-path grammar](../../rsi-workspace/path/README.md).
+Decoding never asks the reader's native filesystem whether that foreign path is
+absolute. This lexical validation grants no filesystem authority; the native
+Workspace, context and process owners validate the actual directory they use.
 
 Agent control records form a second append-only digest chain beside Facts.
 They own mailbox acceptance/claim/discard, activation and wait transitions,
@@ -20,10 +80,13 @@ have separate named 64-entry bounds. They currently share a value but are
 independent contracts and may evolve without accidental semantic coupling.
 
 Fork lineage records the parent Header fingerprint, tree path, invoking Turn,
-resolved balanced completed-turn interval, and terminal-prefix digest. Fork
+resolved balanced completed-turn interval, and exact terminal Fact/control
+sequences and prefix digests. The [Store contract](../store-protocol/README.md)
+owns their atomic correlation. Fork
 seeds retain provider replay events. The child has a new Session identity and
 never mutates or truncates its parent's log. An effective-turn count of zero is
-valid only for the exact empty interval whose cursors are both zero; every
+valid only for the exact empty interval whose Fact/control cursors and prefix
+digests are all empty; every
 nonempty resolved interval retains at least one complete Turn.
 
 Every header carries one required `AgentPresetId`. Its lowercase
@@ -33,10 +96,14 @@ The durable
 value records which preset a session selected; process-local composition
 generation handles are deliberately outside this format.
 
-Each immutable settings value carries a `TurnBudget`. The first protocol generation
-uses repository hard maxima of 30 elapsed minutes, 64 provider attempts, 256
-Tool calls, 65,536 generated Facts, and 64 MiB of generated Fact bytes; a
-settings may only tighten them. Budget exhaustion is itself a nonterminal Fact
+Each immutable settings value carries a `TurnBudget`, with repository hard maxima
+of 30 elapsed minutes, 64 provider attempts, 256
+Tool calls, 65,536 generated records, and 64 MiB of generated record bytes.
+Generated records include ordinary generated Facts and Turn-attributed domain
+controls, charged by their complete canonical envelope. Baselines and external
+commands use separate bounded admission; necessary atomic ending records retain
+the Kernel-owned ending channel. Settings may only tighten these limits.
+Budget exhaustion is itself a nonterminal Fact
 followed by the sole `budget_exceeded` terminal outcome, so interrupted
 observers and recovery can classify the stop from durable history.
 Both records validate that their frozen limit is positive and no greater than

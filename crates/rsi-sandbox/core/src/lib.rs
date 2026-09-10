@@ -9,8 +9,11 @@ use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+mod workspace;
+pub use workspace::{SandboxGeneration, WorkspaceReadRequest, WorkspaceReadScope};
 
 /// Maximum argv items in one sandbox process plan.
 pub const MAXIMUM_SANDBOX_ARGUMENTS: usize = 4_096;
@@ -215,19 +218,7 @@ impl EnforcementStamp {
 }
 
 fn is_lexically_normal_absolute(path: &Path) -> bool {
-    if !path.is_absolute() || path.as_os_str().is_empty() {
-        return false;
-    }
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir | Component::ParentDir => return false,
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    normalized.as_os_str() == path.as_os_str()
+    rsi_workspace_path::is_normalized_absolute_path(path)
 }
 
 /// Exact process invocation after sandbox wrapping.
@@ -263,6 +254,8 @@ pub type Result<T> = std::result::Result<T, SandboxError>;
 /// Process-plan confinement service.
 #[async_trait]
 pub trait Sandbox: fmt::Debug + Send + Sync + 'static {
+    /// Issues a workspace-only read scope using the exact requested policy.
+    async fn workspace_read(&self, request: WorkspaceReadRequest) -> Result<WorkspaceReadScope>;
     /// Validates and wraps one process request.
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess>;
 }

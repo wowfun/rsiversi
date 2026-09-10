@@ -1,6 +1,7 @@
 //! Fair, bounded scheduling for optional per-Session context checkpoints.
 
-use rsi_agent_context::{ContextFold, ContextLimits};
+use rsi_agent_composition_protocol::AgentCompositionPin;
+use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_session_protocol::SessionId;
 use rsi_agent_turn_protocol::{ContextCheckpoint, TurnClaim, TurnExecution};
 use std::collections::{BTreeMap, VecDeque};
@@ -15,11 +16,20 @@ const CHECKPOINT_MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) struct CheckpointRequest {
     claim: TurnClaim,
     limits: ContextLimits,
+    composition: AgentCompositionPin,
 }
 
 impl CheckpointRequest {
-    pub(super) const fn new(claim: TurnClaim, limits: ContextLimits) -> Self {
-        Self { claim, limits }
+    pub(super) const fn new(
+        claim: TurnClaim,
+        limits: ContextLimits,
+        composition: AgentCompositionPin,
+    ) -> Self {
+        Self {
+            claim,
+            limits,
+            composition,
+        }
     }
 
     fn session_id(&self) -> &SessionId {
@@ -181,19 +191,20 @@ async fn rebuild_context_checkpoint(
     turns: &Arc<dyn TurnExecution>,
     request: &CheckpointRequest,
 ) -> Option<ContextCheckpoint> {
-    let mut fold = ContextFold::with_limits(request.claim.header().clone(), request.limits).ok()?;
+    let mut fold = ModelContextState::open(
+        request.composition.context_builder(),
+        request.claim.header().clone(),
+        request.limits,
+    )
+    .ok()?;
     let mut cursor = 0;
     let mut restored_checkpoint = false;
     if let Ok(Some(checkpoint)) = turns
         .read_context_checkpoint(request.claim.session_id())
         .await
-        && let Ok(restored) = ContextFold::from_checkpoint(
-            request.claim.header().clone(),
-            request.limits,
-            &checkpoint.bytes,
-        )
-        && restored.through_seq() == checkpoint.through_seq
-        && restored.fact_prefix_sha256() == checkpoint.fact_prefix_sha256
+        && let Ok(restored) = fold.restored(&checkpoint.bytes)
+        && restored.position().through_seq == checkpoint.through_seq
+        && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
         && request
             .claim
             .header()
@@ -223,10 +234,10 @@ async fn rebuild_context_checkpoint(
                     }
                     break;
                 }
-                fold.apply_seed_page(&page.facts).ok()?;
+                fold.ingest(ContextPage::ForkSeed(&page.facts)).ok()?;
                 parent_cursor = page.through_parent_seq;
             }
-            fold.finish_seed().ok()?;
+            fold.ingest(ContextPage::FinishSeed).ok()?;
         }
     }
     loop {
@@ -244,14 +255,14 @@ async fn rebuild_context_checkpoint(
             }
             break;
         }
-        fold.apply(&page.facts).ok()?;
+        fold.ingest(ContextPage::Canonical(&page.facts)).ok()?;
         cursor = page.through_seq;
     }
     Some(ContextCheckpoint {
         header_fingerprint: request.claim.header().fingerprint().ok()?,
-        through_seq: fold.through_seq(),
-        fact_prefix_sha256: fold.fact_prefix_sha256(),
-        bytes: fold.checkpoint_bytes().ok()?,
+        through_seq: fold.position().through_seq,
+        fact_prefix_sha256: fold.position().fact_prefix_sha256(),
+        bytes: fold.checkpoint().ok()?,
     })
 }
 
@@ -293,6 +304,7 @@ mod tests {
                 1,
             ),
             ContextLimits::default(),
+            crate::tests::context_pin(),
         )
     }
 

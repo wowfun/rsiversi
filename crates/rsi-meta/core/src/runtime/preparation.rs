@@ -684,6 +684,8 @@ mod tests {
 
     #[test]
     fn resolved_identity_attempt_and_state_have_exact_independent_accounting() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let runtime = Runtime::default();
         let (factory, prepare_calls, state_drops) = counting_factory(5);
         let proof = runtime
@@ -715,6 +717,8 @@ mod tests {
 
     #[test]
     fn oversized_declared_state_releases_every_preparation_resource() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         let mut limits = RuntimeLimits::default();
         limits.payloads.maximum_prepared_state_bytes = 1;
         let runtime = Runtime::new(limits).unwrap();

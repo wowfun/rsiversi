@@ -31,7 +31,9 @@ run in CI.
 Linux user-namespace policy is relaxed only for native Sandbox enforcement and
 standard-product tests that activate the required backend. Compilation and
 linting run first under the runner policy; each test step restores every
-changed sysctl on exit. The deterministic required-backend failure test also
+changed sysctl on exit. The isolated frontend smoke activates the same backend
+and runs within the standard-product test step's policy lifetime, with its own
+failure log emitted before restoration. The deterministic required-backend failure test also
 runs without relaxing policy.
 
 The always-running `ci-required` job depends on every independent contract and
@@ -57,3 +59,7 @@ measured closely enough to call it small or bounded; job consolidation requires
 CI timing evidence and must preserve product failure ownership. `ci-required`
 remains a stable protection seam, and its topology test prevents silent
 weakening when the workflow grows.
+Job deadlines cover the sum of explicit step deadlines plus ten minutes of setup
+headroom, including conditionally selected platform steps. Every browser job
+command has an explicit step deadline; setup actions share the headroom. The repository budget
+test enforces this conservative ceiling when steps are added.

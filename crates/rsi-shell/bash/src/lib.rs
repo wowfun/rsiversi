@@ -621,8 +621,8 @@ mod linux {
 
     fn render_stream_text(stdout: &ProcessRead, stderr: &ProcessRead, fallback: &str) -> String {
         use std::fmt::Write as _;
-        let mut stdout_text = safe_model_text(&stdout.bytes);
-        let mut stderr_text = safe_model_text(&stderr.bytes);
+        let mut stdout_text = rsi_tools_protocol::safe_tool_text(&stdout.bytes);
+        let mut stderr_text = rsi_tools_protocol::safe_tool_text(&stderr.bytes);
         if stdout.lossy {
             stdout_text.insert_str(0, "[stdout truncated; showing retained tail]\n");
             let _ = write!(
@@ -649,21 +649,6 @@ mod linux {
         }
     }
 
-    fn safe_model_text(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes)
-            .chars()
-            .map(|character| {
-                if (character.is_ascii_control() && !matches!(character, '\t' | '\n' | '\r'))
-                    || character == '\u{7f}'
-                {
-                    '\u{fffd}'
-                } else {
-                    character
-                }
-            })
-            .collect()
-    }
-
     fn jobs_error_result(error: &JobsError) -> rsi_tools_protocol::Result<ToolResult> {
         let code = match error {
             JobsError::Capacity => "job_capacity",
@@ -686,9 +671,10 @@ mod linux {
             ProcessError::Unsupported => "process_unsupported",
             ProcessError::SettlementTimeout => "process_settlement_timeout",
             ProcessError::ShutdownTimeout => "process_shutdown_timeout",
-            ProcessError::InvalidInput(_) | ProcessError::Spawn(_) | ProcessError::Io(_) => {
-                "process_error"
-            }
+            ProcessError::InvalidInput(_)
+            | ProcessError::Spawn(_)
+            | ProcessError::Io(_)
+            | ProcessError::Api(_) => "process_error",
         };
         error_result(code, error.to_string())
     }

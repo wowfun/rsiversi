@@ -4,24 +4,46 @@ SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
 exact current schema is accepted; this pre-release implementation does not
-migrate old layouts. Open validates root ownership and the exact schema without
+migrate old layouts. For an existing nonempty database, the retained read-only
+foreground connection validates the exact schema before opening a writer or
+cleaning CAS staging. Rejected-version database bytes and staging contents stay
+unchanged. A current WAL is read in that preflight snapshot before ordinary
+writer recovery. Open validates root ownership and the exact schema without
 scanning dormant session history. Header and recent-session reads validate only bounded immutable metadata.
 Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
 validate the selected session's mechanical durable invariants in one snapshot.
-A bounded 256-session recency cache and per-session single-flight gate avoid
+A bounded 256-session recency cache and one serialized validation lane avoid
 repeating that work; metadata reads neither fill nor touch the cache. The
 cache is an optional hint: a poisoned cache disables proof reuse and marking,
 so it cannot turn a successful durable commit into an error. Cold validation
 still runs before any indexed execution/history read.
+Every canonical terminal Fact must have the matching non-NULL terminal index
+Fact and control sequences and prefix digests. The final control of each
+terminal commit is its exact `TurnBoundaryRecorded` marker. Missing terminal metadata is corruption in both
+online indexed reads and offline verification; it never describes an open Turn.
 The lazy
 check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
-It also streams the Session's canonical Agent controls to prove mailbox, ready,
-and active-activation indexes. Activation guards require this proof even when
+It streams, decodes and hashes each canonical Agent control once, checking terminal
+control prefixes and feeding separate
+mailbox, ready, active-activation and bounded domain-head projections. Domain
+version/request membership and exact canonical update positions are verified in
+that same pass. Domain indexes retain positions and derived capacity metadata;
+only controls contain the authoritative complete state. Completed pending payloads
+are released during that pass. All projections borrow the same immutable Header
+already decoded in that validation transaction; control history length does not
+multiply Header reads. Activation guards require this proof even when
 the guarded Session is outside the write set.
 Subtree reads and transactional quiescence guards require that same proof for
-every previously unvalidated member, within the snapshot used to read its
-activity flags. Successful typed writes preserve the proof; external writes
+every previously unvalidated member. A foreground subtree snapshot with a
+missing proof is discarded and collected again on the validation connection;
+validation and the returned activity flags share that new snapshot. A guarded
+writer transaction discovers missing proofs before applying writes, releases
+the writer, validates those members, and retries the original compare-and-append
+request. Its operation-local proof set is bounded by the tree limit, and each
+validation retry adds a distinct immutable member. The final activity check
+runs inside the write transaction, including children created by that commit.
+Successful typed writes preserve the proof; external writes
 while this Store holds its exclusive lease are outside that ownership contract.
 Proofs obtained after applying a transaction enter the cache only after commit,
 so rollback cannot publish validation of discarded state.
@@ -62,8 +84,13 @@ Network or shared filesystems that weaken those operations are outside this
 backend's durability and single-writer contract; the Store does not infer their
 behavior from a path string.
 
-SQLite owns one serialized writer connection and one serialized read-only,
-no-create reader connection. Multi-statement reads, including fork selection,
+SQLite owns one serialized writer, one foreground reader, and one validation
+reader. Both readers are read-only and no-create. Each lane admits at most one
+blocking job; queued async callers do not occupy blocking threads. Validation
+rechecks the proof cache after admission and publishes a successful proof from
+the admitted worker even if its waiter has been cancelled. Long cold scans
+therefore do not hold the foreground reader or writer.
+Multi-statement reads, including fork selection,
 use a deferred transaction so watermarks and rows come from one WAL snapshot.
 Descendant control snapshots drive lookups from the bounded recursive result
 rather than scanning the complete sessions table. Cursor-paged ready-message,
@@ -75,8 +102,8 @@ immutable file publication do not hold a SQLite connection mutex; metadata is
 checked or inserted only after the file phase completes.
 
 Every admitted blocking database or CAS job retains the complete Store owner,
-including its writer lease, even after its async waiter is cancelled. The two
-connections share that lifetime: clean shutdown closes the reader first
+including its writer lease, even after its async waiter is cancelled. The three
+connections share that lifetime: clean shutdown closes both readers first
 and the writer last, checkpointing the WAL into `sessions.sqlite3`, then explicitly
 unlocks and closes the persistent writer-lock file. The lock path is never removed.
 The main
@@ -94,7 +121,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 12 admits only the current mandatory Agent-preset
+The exact schema version 16 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

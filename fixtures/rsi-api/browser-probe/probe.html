@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>API Worker conformance</title>
+<script type="module">
+window.runProbe = (mode) => new Promise((resolve, reject) => {
+  const worker = new Worker("/worker.mjs", { type: "module" });
+  let started = false;
+  const timer = setTimeout(() => finish(new Error(`${mode} Worker probe timed out; started=${started}`)), 30_000);
+  function finish(error, result) {
+    clearTimeout(timer);
+    worker.terminate();
+    if (error) reject(error); else resolve(result);
+  }
+  worker.onmessage = ({ data }) => {
+    if (data.state === "started") { started = true; return; }
+    if (mode === "trap") { finish(new Error("trapped Worker claimed completion")); return; }
+    finish(null, data.result);
+  };
+  worker.onerror = (event) => {
+    event.preventDefault();
+    if (mode === "trap" && started) {
+      finish(null, { state: "failed", cleanup_acknowledged: false });
+    } else {
+      finish(new Error(event.message));
+    }
+  };
+  worker.postMessage(mode);
+});
+</script>

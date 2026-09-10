@@ -1,12 +1,11 @@
 use super::{
     ActivationId, AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AgentMessage,
     AgentMessageSource, AppendBatch, AtomicAgentCommit, AtomicSessionAppend, Connection,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, InputMessageSource,
-    MAXIMUM_INDEXED_MESSAGE_STATE_BYTES, MAXIMUM_SESSION_FACT_BYTES,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId, MessageTarget,
-    OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
-    StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
-    StoreFactTurnRole, StoreInner, StoreReadyMessage, Transaction, TurnId,
+    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
+    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId,
+    MessageTarget, OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader,
+    SessionId, StepId, StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot,
+    StoreError, StoreFactTurnRole, StoreReadyMessage, Transaction, TurnId,
     advance_control_prefix_digest, advance_fact_prefix_digest, decode_projected_json,
     decode_sha256, decode_u64, encode_json, fact_index_kind, params, read_session_header_row,
     sql_error, sqlite_u64, validate_message_claim_fact,
@@ -39,10 +38,9 @@ pub(super) fn validate_sqlite_activation_guards(
 pub(super) fn validate_sqlite_quiescence_guard(
     transaction: &Transaction<'_>,
     root: Option<&SessionId>,
-    owner: &StoreInner,
 ) -> Result<Option<StoreAgentSubtreeSnapshot>> {
     if let Some(root) = root {
-        let snapshot = owner.read_validated_agent_subtree(transaction, root)?;
+        let snapshot = super::session_store::read_agent_subtree(transaction, root)?;
         for descendant in &snapshot.descendants {
             let status = &descendant.status;
             if status.has_active_activation || status.has_open_turn || status.has_waking_message {
@@ -151,7 +149,7 @@ pub(super) fn apply_atomic_sqlite_append(
             }
         }
     }
-    let durable_fact_seq = append.facts.last().map_or(actual_fact, SessionFact::seq);
+    let durable_fact_seq = append.facts.last().map_or(actual_fact, |fact| fact.seq());
     let minimum_entered_fact_seq = append
         .expected_fact_seq
         .checked_add(1)
@@ -174,6 +172,24 @@ pub(super) fn apply_atomic_sqlite_append(
         )?;
         control_digest = advance_control_prefix_digest(control_digest, record)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if let AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id,
+            terminal_fact_seq,
+        } = record.body()
+        {
+            let changed = transaction.execute(
+                "UPDATE turns SET terminal_control_seq = ?1, terminal_control_prefix_sha256 = ?2
+                 WHERE session_id = ?3 AND turn_id = ?4 AND terminal_seq = ?5
+                   AND terminal_control_seq IS NULL",
+                params![sqlite_u64("terminal control sequence", record.seq())?, hex::encode(control_digest),
+                    append.session_id.as_str(), turn_id.as_str(), sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?],
+            ).map_err(sql_error)?;
+            if changed != 1 {
+                return Err(StoreError::Corrupt(
+                    "SQLite lost the terminal Fact/control correlation".into(),
+                ));
+            }
+        }
     }
     let durable_control_seq = append
         .controls
@@ -243,6 +259,15 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            AgentControlRecordBody::DomainStateCommitted { commit } => super::domain::insert(
+                self.transaction,
+                self.session_id,
+                self.minimum_entered_fact_seq,
+                self.record,
+                commit,
+            ),
+            // The enclosing atomic append derives the correlated digest after inserting this row.
+            AgentControlRecordBody::TurnBoundaryRecorded { .. } => Ok(()),
             AgentControlRecordBody::MessageAccepted {
                 message,
                 delivery,
@@ -1055,40 +1080,7 @@ pub(super) fn insert_fact(
             ],
         )
         .map_err(sql_error)?;
-    update_turn_index(transaction, session_id, fact)?;
-    update_workspace_context_index(transaction, session_id, fact)
-}
-
-pub(super) fn update_workspace_context_index(
-    transaction: &Transaction<'_>,
-    session_id: &SessionId,
-    fact: &SessionFact,
-) -> Result<()> {
-    let SessionFactBody::InputMessageEntered { source, .. } = fact.body() else {
-        return Ok(());
-    };
-    let (column, digest) = match source {
-        InputMessageSource::AgentInstructions { sha256, .. } => {
-            ("workspace_instructions_sha256", sha256)
-        }
-        InputMessageSource::SkillCatalog { sha256 } => ("workspace_skill_catalog_sha256", sha256),
-        InputMessageSource::Human { .. }
-        | InputMessageSource::Agent { .. }
-        | InputMessageSource::Completion { .. }
-        | InputMessageSource::UserSkillInvocation { .. } => return Ok(()),
-    };
-    let changed = transaction
-        .execute(
-            &format!("UPDATE sessions SET {column} = ?1 WHERE session_id = ?2"),
-            params![digest, session_id.as_str()],
-        )
-        .map_err(sql_error)?;
-    if changed != 1 {
-        return Err(StoreError::Corrupt(
-            "workspace-context index lost its owning Session".into(),
-        ));
-    }
-    Ok(())
+    update_turn_index(transaction, session_id, fact)
 }
 
 pub(super) fn update_turn_index(
@@ -1156,25 +1148,6 @@ pub(super) fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBat
     for fact in &batch.facts {
         fact_prefix_digest = advance_fact_prefix_digest(fact_prefix_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
-            let changed = transaction
-                .execute(
-                    "UPDATE turns SET terminal_prefix_sha256 = ?1
-                     WHERE session_id = ?2 AND turn_id = ?3 AND terminal_seq = ?4",
-                    params![
-                        hex::encode(fact_prefix_digest),
-                        batch.session_id.as_str(),
-                        fact.body().turn_id().as_str(),
-                        sqlite_u64("turn terminal sequence", fact.seq())?,
-                    ],
-                )
-                .map_err(sql_error)?;
-            if changed != 1 {
-                return Err(StoreError::Corrupt(
-                    "SQLite lost a terminal-prefix update predicate".into(),
-                ));
-            }
-        }
     }
     let changed = transaction
         .execute(

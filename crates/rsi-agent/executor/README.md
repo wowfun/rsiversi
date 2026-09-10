@@ -1,9 +1,25 @@
 # rsi-agent-executor
 
+Execution contributions use the claim's frozen composition. Before a new
+provider retry series, one stage captures durable Fact/control watermarks and
+domain states, invokes callbacks in catalog order, validates the complete
+output, and commits it before provider preparation. A proven undispatched
+provider retry reuses those entered inputs. A post-tool stage receives one
+source-ordered settled batch after every successful result publication is
+durable. Tool policy stages inspect the exact prepared identity before approval:
+Abstain preserves constraints, RequireApproval adds one, and Deny wins before
+any Tool intent/start and persists a charged ToolRejected.
+
+Each stage has one 30-second deadline, including snapshot capture and all its
+callbacks. Cancellation, timeout, panic or invalid output fails the stage with
+producer/stage diagnostics and leaves its proposed business mutations unapplied.
+Captured readers expire when the stage ends. Callbacks run without framework
+locks, and the framework never reruns them to reconcile an uncertain commit.
+
 Ordinary executor plugin over exact Turn execution/finalization, Language,
 Image, Media, Approval, Sandbox, and Jobs Local contracts. Tool authority is
 not a standing executor dependency: each exact claim supplies its resident
-Agent-composition pin and immutable Tool catalog. Definitions, prepare,
+Agent-composition pin, immutable Tool catalog and unique ModelContextBuilder. Definitions, prepare,
 retained-result recovery, and commit all use that one catalog. Any admitted
 Tool retained past the main driver future carries a clone of the generation
 pin, so teardown cannot destroy the catalog or its hidden Scope while delayed
@@ -11,6 +27,16 @@ work is settling. Every provider or Tool attempt is
 prepared, recorded, flushed, marked started, flushed again, and only then
 invoked. Image outputs enter Media and each ref is durably flushed before the
 stream advances; later failure preserves those refs in `partial_failed`.
+
+The claim's selected builder opens the execution cursor. Checkpoint requests
+retain that exact pin before terminal settlement and release it after queued or
+in-flight maintenance completes. Maintenance opens the same builder against
+canonical pages; execution uses claim-visible pages and their scan horizons.
+Both preserve fork seed boundaries. The Context module owns cache identity,
+payload validation and encoding; Executor also compares the resulting position
+with independent Store metadata and enforces the claim's acceptance fence.
+An incompatible cache is optional and triggers replay. There is no default
+builder fallback or independent latest-generation lookup in the executor.
 For one parallel-safe run, the executor publishes the complete source-ordered
 intent batch and crosses one durability barrier, then publishes the matching
 source-ordered start batch and crosses one durability barrier before invoking
@@ -90,7 +116,9 @@ publication crosses a budget, the executor retains that first publication
 failure but still attempts every later already-settled sibling in source order;
 a successful sibling is published and committed before the first failure is
 propagated. The failed result's retained identity is committed only after the
-terminal prefix is durable. After a terminal prefix becomes durable, the
+terminal prefix is durable. Retirement runs in an owned task: observing the
+durable terminal does not join that task or guarantee the retained slot is already
+absent. After a terminal prefix becomes durable, the
 turn driver submits a bounded checkpoint request. A single owned background
 writer coalesces the latest request per Session while preserving FIFO across
 Sessions, incrementally rebuilds from the last

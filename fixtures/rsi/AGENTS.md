@@ -1,0 +1,3 @@
+- These fixtures validate standard-product application contracts through public plugin and client interfaces.
+- Keep fixture providers deterministic and isolated. Label controller/runtime evidence separately from product rendering, real transport and live-provider evidence.
+- Follow each fixture README for its manifest-scoped native or browser command and required tools.

@@ -15,12 +15,16 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
+tempfile.workspace = true
 
 [lints]
 workspace = true

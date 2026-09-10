@@ -1,4 +1,4 @@
-//! Runtime-independent approval contracts.
+//! Approval values and generation-owned Local registration contracts.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -109,7 +109,7 @@ pub struct ApprovalReview {
 impl ApprovalReview {
     /// Bounds the review before admission or after external decoding.
     pub fn validate(&self) -> Result<()> {
-        if !std::path::Path::new(&self.cwd).is_absolute()
+        if !rsi_workspace_path::is_absolute(&self.cwd)
             || self.cwd.len() > MAXIMUM_APPROVAL_FIELD_BYTES
             || self.cwd.chars().any(char::is_control)
             || !matches!(
@@ -304,10 +304,17 @@ pub trait ApprovalAnswerer: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<ApprovalOutcome>>;
 }
 
+/// Maximum simultaneously registered live approval answerers.
+pub const MAXIMUM_APPROVAL_ANSWERERS: usize = 64;
+
 /// Answerer registration surface.
 pub trait ApprovalAnswerers: fmt::Debug + Send + Sync + 'static {
-    /// Appends one answerer until the lease drops.
-    fn register(&self, answerer: Arc<dyn ApprovalAnswerer>) -> Result<ApprovalLease>;
+    /// Registers one answerer at its exact caller generation's composition position.
+    fn register(
+        &self,
+        context: &rsi_meta::RegistrationContext,
+        answerer: Arc<dyn ApprovalAnswerer>,
+    ) -> Result<ApprovalLease>;
 }
 
 /// Live approval resolver.
@@ -356,30 +363,17 @@ pub enum ApprovalError {
 /// Approval result.
 pub type Result<T> = std::result::Result<T, ApprovalError>;
 
-/// Opaque answerer registration lease.
-pub struct ApprovalLease {
-    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
-}
+/// Exact generation-owned answerer registration lease.
+#[derive(Debug)]
+pub struct ApprovalLease(rsi_meta::RegistrationLease);
 
 impl ApprovalLease {
-    /// Creates a lease from one unregister action.
-    pub fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self {
-            cleanup: Some(Box::new(cleanup)),
-        }
+    /// Wraps the registrar's exact Meta-owned contribution.
+    pub fn from_registration(lease: rsi_meta::RegistrationLease) -> Self {
+        Self(lease)
     }
-}
-
-impl fmt::Debug for ApprovalLease {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ApprovalLease(..)")
-    }
-}
-
-impl Drop for ApprovalLease {
-    fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
+    /// Withdraws this answerer and joins the exact effect cleanup.
+    pub async fn dispose(&self) -> rsi_meta::CleanupReport {
+        self.0.dispose().await
     }
 }

@@ -97,7 +97,7 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
                 UpdateMode::Replayable,
                 Arc::new(ProcessLocalFactory),
             ),
-            json!({"output_cache":{"directory":temporary.path().join("output")}}),
+            json!({"output_cache":{"directory":temporary.path().canonicalize().unwrap().join("output")}}),
         )
         .await
         .unwrap();
@@ -120,10 +120,13 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
     let page = cache.read(&id, 0, 16).await.unwrap();
     assert_eq!(&page.bytes[..6], b"prefix");
     assert_eq!(page.total_bytes, 100_012);
-    assert_eq!(cache.read(&id, 100_006, 16).await.unwrap().bytes, b"suffix");
+    assert_eq!(
+        cache.read(&id, 100_006, 16).await.unwrap().bytes.as_ref(),
+        b"suffix"
+    );
     let stderr_id = managed.stderr().read_from(0).unwrap().full_output.unwrap();
     assert_eq!(
-        cache.read(&stderr_id, 0, 16).await.unwrap().bytes,
+        cache.read(&stderr_id, 0, 16).await.unwrap().bytes.as_ref(),
         b"warning"
     );
     assert!(fiber.dispose().await.is_clean());
@@ -297,7 +300,7 @@ async fn escaped_stdin_reader_cannot_block_settlement_forever() {
 async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     let temporary = tempfile::tempdir().unwrap();
     let (fiber, process) = activated(json!({"output_cache": {
-        "directory": temporary.path().join("output"),
+        "directory": temporary.path().canonicalize().unwrap().join("output"),
         "maximum_stream_bytes": 64,
         "maximum_total_bytes": 128,
         "maximum_files": 2
@@ -424,7 +427,7 @@ async fn provider_retirement_escalates_term_to_kill_and_waits_for_reaping() {
 async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping() {
     let temporary = tempfile::tempdir().unwrap();
     let config = json!({"shutdown_timeout_ms":1, "output_cache": {
-        "directory": temporary.path().join("output")
+        "directory": temporary.path().canonicalize().unwrap().join("output")
     }});
     let (fiber, process) = activated(config.clone()).await;
     let mut request = spec(
@@ -522,7 +525,11 @@ async fn provider_retirement_joins_every_spawn_racing_admission_publication() {
 #[tokio::test]
 async fn unavailable_cache_directory_preserves_command_execution_and_read_capability() {
     let temporary = tempfile::tempdir().unwrap();
-    let directory = temporary.path().join("not-a-directory");
+    let directory = temporary
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("not-a-directory");
     std::fs::write(&directory, b"keep this file").unwrap();
     let runtime = Runtime::default();
     let fiber = runtime

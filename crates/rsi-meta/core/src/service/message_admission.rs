@@ -1,10 +1,10 @@
 use super::message_scheduler::AdmissionState;
 use super::message_waiter::{MessageChannel, WaitRegistration, Waiter};
+use crate::Deadline;
 use crate::runtime::ResourceLedger;
 use crate::{MetaError, Result};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -46,7 +46,7 @@ impl BufferedMessageAdmission {
         byte_resources: &ResourceLedger,
         capability_resources: &ResourceLedger,
         cancellation: &CancellationToken,
-        deadline: Instant,
+        deadline: Deadline,
     ) -> Result<BufferedMessagePermit> {
         debug_assert!(bytes <= self.byte_limit && capabilities <= self.capability_limit);
         if let Some(permit) = self.try_acquire(channel, bytes, capabilities) {
@@ -63,7 +63,7 @@ impl BufferedMessageAdmission {
             }
             tokio::select! {
                 biased;
-                () = tokio::time::sleep_until(deadline) => {
+                () = deadline.wait() => {
                     registration.record_rejection(byte_resources, capability_resources);
                     cancellation.cancel();
                     return Err(MetaError::Timeout("service call"));

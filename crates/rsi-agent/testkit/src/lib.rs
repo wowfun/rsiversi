@@ -15,8 +15,8 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_store_protocol::{
     AgentActivationGuard, AgentCommitWatermark, AppendBatch, AppendCommit, AtomicAgentCommit,
-    AtomicAgentCommitResult, AtomicSessionAppend, CasObjectRef, MAXIMUM_STORE_CAS_BYTES,
-    MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
+    AtomicAgentCommitResult, AtomicSessionAppend, CasObjectRef, MAXIMUM_STORE_BATCH_FACTS,
+    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
     StoreActivationPhase, StoreActiveActivation, StoreAgentChild, StoreAgentChildPage,
     StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage,
@@ -25,9 +25,8 @@ use rsi_agent_store_protocol::{
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
-    StoreTurnFactPage, StoreWaitingActivationPage, StoreWorkspaceContextState,
-    StoredContextCheckpoint, WriteContextCheckpoint, validate_message_claim_fact,
-    validate_read_limit, validate_session_read_limit,
+    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde_json::Value;
@@ -61,13 +60,15 @@ struct MemoryState {
 #[derive(Clone, Debug)]
 struct MemorySession {
     header: SessionHeader,
-    facts: Vec<SessionFact>,
+    facts: Vec<Arc<SessionFact>>,
     turns: BTreeMap<TurnId, MemoryTurnBoundary>,
     fact_prefix_digest: [u8; 32],
     checkpoint: Option<StoredContextCheckpoint>,
     controls: Vec<AgentControlRecord>,
     control_prefix_digest: [u8; 32],
-    workspace_context: StoreWorkspaceContextState,
+    domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
+    domain_requests: BTreeMap<rsi_agent_session_protocol::DomainRequestId, u64>,
+    domain_usage: BTreeMap<TurnId, (u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +76,7 @@ struct MemoryTurnBoundary {
     accepted_seq: u64,
     terminal_seq: Option<u64>,
     terminal_prefix_sha256: Option<String>,
+    terminal_control: Option<(u64, String)>,
 }
 
 impl MemoryStore {
@@ -134,9 +136,13 @@ impl MemoryStore {
     }
 }
 
+mod contribution;
+mod domain_contract;
 mod memory_store;
 mod store_contract;
 
+pub use contribution::activate_contribution_owner;
+pub use domain_contract::assert_domain_store_contract;
 pub use store_contract::assert_mechanical_store_contract;
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.
@@ -178,4 +184,73 @@ impl PluginFactory for MemoryStoreFactory {
             }),
         )
     }
+}
+
+/// Seeds explicit test history through the current canonical terminal commit contract.
+/// Each terminal closes its own transaction; this helper is not an atomic batch API.
+pub async fn append_history_fixture(
+    store: &dyn SessionStore,
+    batch: AppendBatch,
+) -> Result<AppendCommit> {
+    let mut expected_seq = batch.expected_seq;
+    let mut header = batch.header;
+    let mut pending = Vec::new();
+    let mut facts = batch.facts.into_iter().peekable();
+    while let Some(fact) = facts.next() {
+        let terminal = matches!(fact.body(), SessionFactBody::TurnTerminal { .. });
+        pending.push(Arc::clone(&fact));
+        if !terminal && facts.peek().is_some() && pending.len() < MAXIMUM_STORE_BATCH_FACTS {
+            continue;
+        }
+        let through_seq = fact.seq();
+        if terminal {
+            let expected_control_seq = if header.is_some() {
+                0
+            } else {
+                store
+                    .read_controls(&batch.session_id, 0, 1)
+                    .await?
+                    .durable_seq
+            };
+            let terminal = &fact;
+            let marker = AgentControlRecord::new(
+                expected_control_seq.checked_add(1).ok_or_else(|| {
+                    StoreError::Invalid("fixture control sequence exhausted".into())
+                })?,
+                terminal.timestamp_ms(),
+                AgentControlRecordBody::TurnBoundaryRecorded {
+                    turn_id: terminal.body().turn_id().clone(),
+                    terminal_fact_seq: terminal.seq(),
+                },
+            )
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+            store
+                .commit_agent(AtomicAgentCommit {
+                    sessions: vec![AtomicSessionAppend {
+                        session_id: batch.session_id.clone(),
+                        expected_fact_seq: expected_seq,
+                        expected_control_seq,
+                        header: header.take(),
+                        facts: std::mem::take(&mut pending),
+                        controls: vec![marker],
+                    }],
+                    required_active_activations: Vec::new(),
+                    quiescent_descendants_of: None,
+                })
+                .await?;
+        } else {
+            store
+                .append(AppendBatch {
+                    session_id: batch.session_id.clone(),
+                    expected_seq,
+                    header: header.take(),
+                    facts: std::mem::take(&mut pending),
+                })
+                .await?;
+        }
+        expected_seq = through_seq;
+    }
+    Ok(AppendCommit {
+        durable_seq: expected_seq,
+    })
 }

@@ -19,8 +19,14 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod domain;
+pub use domain::{
+    StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
+    domain_heads_after,
+};
+
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 12;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 16;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -226,7 +232,7 @@ pub struct AppendBatch {
     /// Header supplied only when creating the durable session.
     pub header: Option<SessionHeader>,
     /// Nonempty exact contiguous suffix.
-    pub facts: Vec<SessionFact>,
+    pub facts: Vec<Arc<SessionFact>>,
 }
 
 impl AppendBatch {
@@ -236,6 +242,15 @@ impl AppendBatch {
             return Err(StoreError::Invalid(format!(
                 "Store append must contain 1..={MAXIMUM_STORE_BATCH_FACTS} Facts"
             )));
+        }
+        if self
+            .facts
+            .iter()
+            .any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }))
+        {
+            return Err(StoreError::Invalid(
+                "terminal Facts require a correlated atomic Agent commit".into(),
+            ));
         }
         if let Some(header) = &self.header {
             header
@@ -247,7 +262,7 @@ impl AppendBatch {
                 ));
             }
         }
-        validate_fact_sequence(self.expected_seq, &self.facts)
+        validate_fact_sequence(self.expected_seq, self.facts.iter().map(AsRef::as_ref))
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         let bytes = self.facts.iter().try_fold(0_usize, |total, fact| {
             total
@@ -282,7 +297,7 @@ pub struct AtomicSessionAppend {
     /// Header supplied only for the single newly durable session.
     pub header: Option<SessionHeader>,
     /// Optional exact contiguous Fact suffix.
-    pub facts: Vec<SessionFact>,
+    pub facts: Vec<Arc<SessionFact>>,
     /// Optional exact contiguous Agent-control suffix.
     pub controls: Vec<AgentControlRecord>,
 }
@@ -314,19 +329,112 @@ impl AtomicSessionAppend {
                 ));
             }
         }
-        validate_fact_sequence(self.expected_fact_seq, &self.facts)
+        validate_fact_sequence(self.expected_fact_seq, self.facts.iter().map(AsRef::as_ref))
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        self.validate_terminal_boundary()?;
+        self.validate_domain_commits()?;
         self.facts
             .iter()
-            .map(SessionFact::encoded_len)
+            .map(|fact| fact.encoded_len())
             .chain(self.controls.iter().map(AgentControlRecord::encoded_len))
             .try_fold(0_usize, |total, bytes| {
                 total
                     .checked_add(bytes)
                     .ok_or_else(|| StoreError::Invalid("atomic Agent commit size overflow".into()))
             })
+    }
+
+    fn validate_terminal_boundary(&self) -> Result<()> {
+        use rsi_agent_session_protocol::AgentControlRecordBody;
+        let mut terminals = self
+            .facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }));
+        let terminal = terminals.next();
+        if terminals.next().is_some() {
+            return Err(StoreError::Invalid(
+                "one Session append may contain at most one terminal Fact".into(),
+            ));
+        }
+        let mut markers = self
+            .controls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, control)| match control.body() {
+                AgentControlRecordBody::TurnBoundaryRecorded {
+                    turn_id,
+                    terminal_fact_seq,
+                } => Some((index, turn_id, terminal_fact_seq)),
+                _ => None,
+            });
+        let marker = markers.next();
+        if markers.next().is_some() {
+            return Err(StoreError::Invalid(
+                "a terminal boundary marker must occur exactly once".into(),
+            ));
+        }
+        match (terminal, marker) {
+            (None, None) => Ok(()),
+            (Some(fact), Some((index, turn_id, fact_seq)))
+                if index + 1 == self.controls.len()
+                    && turn_id == fact.body().turn_id()
+                    && *fact_seq == fact.seq() =>
+            {
+                Ok(())
+            }
+            _ => Err(StoreError::Invalid(
+                "terminal Fact requires its exact same-append boundary as the final control".into(),
+            )),
+        }
+    }
+
+    fn validate_domain_commits(&self) -> Result<()> {
+        use rsi_agent_session_protocol::{AgentControlRecordBody, DomainMutationSource};
+        let mut requests = BTreeSet::new();
+        for record in &self.controls {
+            if let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() {
+                if matches!(commit.source(), DomainMutationSource::Turn { .. }) {
+                    let bound = commit
+                        .clone()
+                        .with_facts(self.facts.iter().map(AsRef::as_ref))
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+                    if &bound != commit {
+                        return Err(StoreError::Invalid(
+                            "domain request does not bind its complete same-append Fact span"
+                                .into(),
+                        ));
+                    }
+                }
+                if matches!(commit.source(), DomainMutationSource::Baseline) {
+                    let acceptance = self.facts.iter().any(|fact| {
+                        matches!(
+                            fact.body(),
+                            SessionFactBody::TurnAccepted { .. }
+                                | SessionFactBody::MessageTurnAccepted { .. }
+                                | SessionFactBody::ImageRequested { .. }
+                        )
+                    }) || self.controls.iter().any(|control| {
+                        matches!(
+                            control.body(),
+                            AgentControlRecordBody::MessageAccepted { .. }
+                        )
+                    });
+                    if self.header.is_none() || record.seq() != 1 || !acceptance {
+                        return Err(StoreError::Invalid("domain baseline requires the fresh Header and first acceptance at control one".into()));
+                    }
+                }
+                if let Some(request) = commit.request_id()
+                    && !requests.insert(request)
+                {
+                    return Err(StoreError::DomainRequestConflict {
+                        request_id: request.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -824,39 +932,6 @@ pub struct StoreAgentMailboxSummary {
     pub durable_fact_seq: u64,
 }
 
-/// Latest workspace-context digests derived from canonical durable Facts.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct StoreWorkspaceContextState {
-    /// Latest complete instruction-baseline digest, when one was published.
-    pub instructions_sha256: Option<String>,
-    /// Latest complete skill-catalog digest, when one was published.
-    pub skill_catalog_sha256: Option<String>,
-    /// Exact durable Fact tail captured in the same Store snapshot.
-    pub durable_fact_seq: u64,
-}
-
-impl StoreWorkspaceContextState {
-    /// Revalidates optional lowercase SHA-256 values returned by a Store.
-    pub fn validate(&self) -> Result<()> {
-        for (name, digest) in [
-            ("workspace instruction", &self.instructions_sha256),
-            ("workspace skill catalog", &self.skill_catalog_sha256),
-        ] {
-            if digest.as_ref().is_some_and(|digest| {
-                digest.len() != 64
-                    || !digest
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-            }) {
-                return Err(StoreError::Corrupt(format!(
-                    "{name} digest is not lowercase SHA-256"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 impl StoreAgentMailboxSummary {
     /// Revalidates the protocol-owned pending-message bound.
     pub fn validate(&self) -> Result<()> {
@@ -1289,6 +1364,10 @@ pub struct StoreForkBoundary {
     pub resolved_terminal_seq: u64,
     /// Fact-prefix digest at `resolved_terminal_seq`.
     pub terminal_prefix_sha256: String,
+    /// Exact canonical control horizon recorded with the selected terminal, or zero.
+    pub resolved_terminal_control_seq: u64,
+    /// Canonical control-prefix digest at that horizon.
+    pub terminal_control_prefix_sha256: String,
     /// Completed turns selected by the request.
     pub effective_turns: u64,
 }
@@ -1575,7 +1654,8 @@ impl CasObjectRef {
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
-    /// Atomically creates a session if needed and appends one exact suffix.
+    /// Atomically creates a session if needed and appends one nonterminal Fact suffix.
+    /// Terminals require `commit_agent` with their exact control boundary.
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit>;
     /// Applies one closed Agent-control commit across up to three sessions.
     async fn commit_agent(&self, commit: AtomicAgentCommit) -> Result<AtomicAgentCommitResult> {
@@ -1588,6 +1668,40 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     async fn validate_session(&self, session_id: &SessionId) -> Result<()>;
     /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads the complete bounded domain set at the current or explicit control horizon.
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        at_control_seq: Option<u64>,
+    ) -> Result<StoreDomainStatePage> {
+        let _ = (session_id, at_control_seq);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support domain state reads".into(),
+        ))
+    }
+    /// Resolves one request identity to its exact canonical `DomainStateCommitted` control.
+    /// None denotes an uncommitted request; absence never licenses replay of external effects.
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<AgentControlRecord>> {
+        let _ = (session_id, request_id);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support domain request lookup".into(),
+        ))
+    }
+    /// Reads exact Turn-attributed canonical domain-control usage from derived indexes.
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<StoreTurnDomainUsage> {
+        let _ = (session_id, turn_id);
+        Err(StoreError::Invalid(
+            "this Agent Store does not support Turn domain usage".into(),
+        ))
+    }
     /// Reads at most `limit` contiguous Facts after one cursor.
     async fn read_facts(
         &self,
@@ -1711,16 +1825,6 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support mailbox summaries".into(),
         ))
     }
-    /// Reads the latest workspace-context digests derived from canonical Facts.
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<StoreWorkspaceContextState> {
-        let _ = session_id;
-        Err(StoreError::Invalid(
-            "this Agent Store does not support workspace-context state".into(),
-        ))
-    }
     /// Lists distinct Agent-tree roots which currently contain waking input.
     async fn list_ready_roots(
         &self,
@@ -1818,6 +1922,22 @@ impl LocalContract for SessionStoreContract {
 /// Closed Store failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StoreError {
+    /// A complete domain replacement observed another predecessor revision.
+    #[error("domain `{domain}` revision conflict: expected {expected}, actual {actual}")]
+    DomainRevisionConflict {
+        /// Exact durable domain name.
+        domain: String,
+        /// Caller-observed predecessor.
+        expected: u64,
+        /// Current committed predecessor, or zero for absence.
+        actual: u64,
+    },
+    /// A request identity already belongs to a canonical domain commit.
+    #[error("domain request identity already committed: {request_id}")]
+    DomainRequestConflict {
+        /// Exact existing request identity.
+        request_id: String,
+    },
     /// Malformed or out-of-bounds input.
     #[error("invalid Agent Store input: {0}")]
     Invalid(String),
@@ -1963,6 +2083,133 @@ mod tests {
             impossible_empty_page.validate(),
             Err(StoreError::Corrupt(message)) if message.contains("cursor")
         ));
+    }
+
+    fn terminal_fact() -> Arc<SessionFact> {
+        Arc::new(
+            SessionFact::new(
+                2,
+                2,
+                SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new("terminal-correlation").unwrap(),
+                    outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn fact_only_terminal_append_is_rejected_before_store_mutation() {
+        let append = AppendBatch {
+            session_id: SessionId::new("terminal-correlation").unwrap(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![terminal_fact()],
+        };
+        assert!(
+            append.validate().is_err(),
+            "Fact-only terminal has no canonical control horizon"
+        );
+    }
+
+    #[test]
+    fn atomic_terminal_without_its_boundary_marker_is_rejected() {
+        let commit = AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: SessionId::new("terminal-correlation").unwrap(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![terminal_fact()],
+                controls: Vec::new(),
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        };
+        assert!(
+            commit.validate().is_err(),
+            "terminal commit has no canonical control horizon"
+        );
+    }
+
+    #[test]
+    fn terminal_correlation_requires_one_exact_final_control_in_the_same_session() {
+        use rsi_agent_session_protocol::AgentControlRecordBody;
+        let marker = |seq, turn: &str, terminal_fact_seq| {
+            AgentControlRecord::new(
+                seq,
+                2,
+                AgentControlRecordBody::TurnBoundaryRecorded {
+                    turn_id: TurnId::new(turn).unwrap(),
+                    terminal_fact_seq,
+                },
+            )
+            .unwrap()
+        };
+        let valid = AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: SessionId::new("terminal-correlation").unwrap(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![terminal_fact()],
+                controls: vec![marker(1, "terminal-correlation", 2)],
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        };
+        valid.validate().unwrap();
+        for controls in [
+            vec![marker(1, "wrong-turn", 2)],
+            vec![marker(1, "terminal-correlation", 1)],
+            vec![
+                marker(1, "terminal-correlation", 2),
+                marker(2, "terminal-correlation", 2),
+            ],
+            vec![
+                marker(1, "terminal-correlation", 2),
+                AgentControlRecord::new(
+                    2,
+                    2,
+                    AgentControlRecordBody::MessagePromoted {
+                        message_id: MessageId::new("later").unwrap(),
+                    },
+                )
+                .unwrap(),
+            ],
+        ] {
+            let mut invalid = valid.clone();
+            invalid.sessions[0].controls = controls;
+            assert!(matches!(invalid.validate(), Err(StoreError::Invalid(_))));
+        }
+        let mut orphan = valid.clone();
+        orphan.sessions[0].facts.clear();
+        assert!(orphan.validate().is_err());
+        let mut other_session = valid.clone();
+        other_session.sessions[0].controls.clear();
+        other_session.sessions.push(AtomicSessionAppend {
+            session_id: SessionId::new("other").unwrap(),
+            expected_fact_seq: 0,
+            expected_control_seq: 0,
+            header: None,
+            facts: Vec::new(),
+            controls: valid.sessions[0].controls.clone(),
+        });
+        assert!(other_session.validate().is_err());
+        let mut two_terminals = valid;
+        two_terminals.sessions[0].facts.push(Arc::new(
+            SessionFact::new(
+                3,
+                3,
+                SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new("second").unwrap(),
+                    outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                },
+            )
+            .unwrap(),
+        ));
+        assert!(two_terminals.validate().is_err());
     }
 
     #[test]

@@ -1,0 +1,21 @@
+[package]
+name = "rsi-agent-time-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-agent-composition-protocol = { path = "../composition-protocol" }
+rsi-agent-session-protocol = { path = "../session-protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+time.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -465,8 +465,14 @@ async fn hanging_finalizer_becomes_a_durable_bounded_failure() {
         .lookup_local::<TurnFinalizationContract>()
         .unwrap();
     let entered = Arc::new(Notify::new());
+    let (finalizer_owner, finalizer_context) =
+        rsi_agent_testkit::activate_contribution_owner(&stack.runtime.root())
+            .await
+            .unwrap();
+    let credential = finalizer_context.registration_context().unwrap();
     let finalizer_lease = finalization
         .register(
+            &credential,
             "hanging-test-finalizer".into(),
             Arc::new(HangingFinalizer {
                 entered: Arc::clone(&entered),
@@ -488,6 +494,7 @@ async fn hanging_finalizer_becomes_a_durable_bounded_failure() {
     ));
 
     drop(finalizer_lease);
+    assert!(finalizer_owner.dispose().await.is_clean());
     drop(finalization);
     stack.dispose(language_fiber, executor_fiber).await;
 }
@@ -544,6 +551,10 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .unwrap()
         .unwrap();
     assert_eq!(first_claim.turn_id(), &first.turn_id);
+    let context_builder = execution
+        .composition(&first_claim)
+        .unwrap()
+        .context_builder();
     let terminal = match execution
         .publish(
             &first_claim,
@@ -563,10 +574,14 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .await
         .unwrap();
 
-    let mut fold =
-        ContextFold::with_limits(first_claim.header().clone(), ContextLimits::default()).unwrap();
+    let mut fold = ModelContextState::open(
+        context_builder,
+        first_claim.header().clone(),
+        ContextLimits::default(),
+    )
+    .unwrap();
     loop {
-        let after_seq = fold.through_seq();
+        let after_seq = fold.position().through_seq;
         let page = execution
             .read_checkpoint_facts(
                 &first_claim,
@@ -579,18 +594,18 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         if page.through_seq == after_seq {
             break;
         }
-        fold.apply_page(&page.facts, page.through_seq).unwrap();
+        fold.ingest(ContextPage::Canonical(&page.facts)).unwrap();
     }
-    assert!(fold.through_seq() >= third.accepted_seq);
+    assert!(fold.position().through_seq >= third.accepted_seq);
     assert!(
         execution
             .write_context_checkpoint(
                 &first_claim,
                 ContextCheckpoint {
                     header_fingerprint: first_claim.header().fingerprint().unwrap(),
-                    through_seq: fold.through_seq(),
-                    fact_prefix_sha256: fold.fact_prefix_sha256(),
-                    bytes: fold.checkpoint_bytes().unwrap(),
+                    through_seq: fold.position().through_seq,
+                    fact_prefix_sha256: fold.position().fact_prefix_sha256(),
+                    bytes: fold.checkpoint().unwrap(),
                 },
             )
             .await

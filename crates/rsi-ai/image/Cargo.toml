@@ -21,7 +21,7 @@ tokio-util.workspace = true
 [dev-dependencies]
 futures-util.workspace = true
 rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [lints]
 workspace = true

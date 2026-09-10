@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-meta-contract = { path = "../contract" }
+rsi-meta-execution = { path = "../execution" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -17,7 +18,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

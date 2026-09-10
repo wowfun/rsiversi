@@ -20,7 +20,7 @@ SQLite Store --Local--> Kernel --Local Turn service--> callers
                             |
                     executor registration and claims
                             |
-            Agent composition pin -> immutable Tool catalog
+            Agent composition pin -> immutable Tools and context builder
                             |
           Preset Profile contributions over global providers
 ```
@@ -61,7 +61,11 @@ latched permanent failure also rejects later submissions to that session with
 the same flush error instead of admitting unreachable work. The Kernel retries
 with bounded backoff; it never drops, reorders, or reports the failed suffix as
 durable.
-Terminal completion performs a bounded final flush.
+Terminal completion performs a bounded final flush. Every terminal crosses the
+[correlated Fact/control Store commit](../store-protocol/README.md). The flusher
+ends each Session batch at its first terminal. Control mutations fence a queued
+terminal under submission admission before sampling their control cursor; the
+flusher remains independent of that admission so the fence cannot deadlock.
 
 Ordinary draft creation remains process-local. Its immutable Header becomes
 durable with the first accepted Turn or mailbox message. A spawned child is
@@ -71,7 +75,9 @@ must treat the Header and the Fact/control watermarks as independent durable
 dimensions; outcome reads still require an exact Turn identity. Once durable,
 the Header's preset identity, canonical workspace path, frozen settings,
 default model, and creation-time permission facts never follow later
-configuration drift.
+configuration drift. A nonempty fresh domain baseline is control one in the same
+commit as the Header and first Turn or message acceptance. The draft's actual
+payload crosses that boundary; omission denotes the frozen empty domain set.
 
 Before first submission, an `AgentSessionDraft` owns the candidate header and
 one exact composition pin without creating Store state, reserving Kernel
@@ -84,15 +90,20 @@ draft leaves no durable session.
 Agent composition resolves one preset source digest into a standing child Scope
 inside the existing Runtime. It starts an unpublished Tool catalog stage,
 activates the preset's allowlisted contribution Profile, requires every child
-Fiber to become Active, seals the exact catalog, and only then publishes the
+Fiber to become Active, requires one explicitly selected context builder, seals
+the exact Tool and typed domain catalogs, and only then publishes the
 generation. Candidate failure disposes the complete stage and never replaces a
-healthy current generation. Construction is single-flight per preset identity
-and source digest. A superseded generation remains alive while a draft,
+healthy current generation. Construction is single-flight per preset identity; reuse requires the compiled
+source and the exact factory/marker/isolation catalog identity. Each build obtains
+one application-owned immutable snapshot of the preset compiler and contributions
+before compilation. Existing pins retain their old generation across publication. A superseded generation remains alive while a draft,
 resident session, or admitted Tool result holds its pin, then tears down after
-the final pin releases.
+the final pin releases. Domain registrations use exact Meta registration credentials
+and leases. Rollback and sealing close the unpublished registrar; frozen pins
+retain the validated definitions and bounded initial states.
 
-The preset catalog and generation builder share one application-supplied frozen
-Profile compiler. Fresh roster discovery compiles each winning source, including
+Within each selected snapshot, the preset catalog and generation builder share
+one application-supplied frozen Profile compiler. Fresh roster discovery compiles each winning source, including
 required includes and pure expressions, checks enabled contribution identities
 against the frozen Agent-only allowlist, and keeps failed rows visible with a
 bounded categorical diagnostic. The roster receives neither concrete factories
@@ -108,7 +119,8 @@ lazily when an executor claim asks for work. Recovery reads only open per-turn
 Fact streams into compact live control state and does not materialize all
 mailboxes or dormant tree history. A ready message is claimed only when an
 executor lane requests work, subject to resident-session and per-tree running
-bounds. Recovery repairs every accepted nonterminal turn. A
+bounds. Recovery repairs every accepted nonterminal turn in a separate correlated commit;
+a later startup continues after any already committed repairs. A
 durable cancellation becomes `Cancelled`; every other unfinished turn becomes
 deterministically `Interrupted`. Terminal turn controls and idle sessions are
 not retained: historical headers, observations, and outcomes use indexed Store
@@ -134,7 +146,8 @@ It returns the authoritative Header together with either the resident session's
 exact pin or the current healthy generation for a cold session. Applications
 must complete this preparation before creating any durable workspace
 registration or other run-local side effect, and submission consumes the token.
-A missing or broken cold preset therefore fails before workspace mutation,
+A missing or broken cold preset, unsupported domain codec, missing frozen domain
+state or invalid typed payload therefore fails before workspace mutation,
 resident capacity, Fact materialization, or external effects. A resident
 session continues using its existing pin across source changes; after idle
 eviction or process restart, preparation deliberately acquires the latest
@@ -165,7 +178,7 @@ durable. Within an Agent tree, ready messages retain their durable timestamp,
 Session, and control-sequence order. A bounded root scan skips trees already at
 the three-running-Turn cap, so the standard four-lane product retains progress
 for an independent Session. This admission is process-local; the standard
-Session Host's exclusive owner keeps the scheduler singular, and the Store does
+Service Host's exclusive owner keeps the scheduler singular, and the Store does
 not advertise a distributed multi-Kernel lane lease. Parked activations hold no
 executor lane and count only against the 256-node durable tree bound. One activation coordinator owns
 lane shutdown and shared retained-effect cleanup; there is no second scheduler
@@ -203,6 +216,8 @@ next output is accepted. A tail failure records `partial_failed` with every
 already-durable ref; retries are separate turns and never overwrite refs.
 
 The Kernel also owns an ordered effect-owned pre-terminal finalizer registry.
+Its hooks use Meta's exact-generation Local registration credential and stable
+composition positions, following the [finalization contract](../turn-protocol/README.md).
 The executor runs its snapshot before the sole terminal Fact and applies its
 validated finalization deadline to the complete call. Deadline expiry becomes
 the turn's durable finalization failure; it releases the executor waiter but
@@ -318,20 +333,12 @@ source order before the first failure is propagated. An `exclusive_final` Tool
 also requires the last source-order position in its model response;
 `wait_agent` declares this scheduling class.
 
-Workspace instructions and skills enter a Step only through the process-local
-Workspace Context service; the Kernel remains the sole writer of their durable
-`InputMessageEntered` Facts. A Session Header freezes `untrusted` or `trusted`
-workspace trust at creation and a fork preserves it. User-owned instruction and
-skill roots are always eligible, but an untrusted workspace contributes neither
-project `AGENTS.md` files nor project skills. A trusted workspace discovers the
-nearest `.git` ancestor, reads `AGENTS.md` from that root down to the Session cwd,
-and scans only the root-level `.agents/skills` directory. Reads, files, entries,
-individual sources, rendered messages, and total batches are bounded. Complete
-instruction and skill-catalog digests suppress unchanged refreshes; a later
-empty snapshot durably tombstones or replaces an earlier nonempty view. Skill
-names resolve in trust order: a project skill never shadows an identically named
-user skill. Only direct Human messages may invoke a skill, and invocation loads
-the exact already-selected skill body as the final context input for that Step.
-The Kernel refreshes the complete snapshot before every provider request, so a
-successful Tool round cannot hide an instruction or catalog change even when a
-general shell command cannot enumerate its filesystem touches precisely.
+Workspace instructions and skills are ordinary Agent execution contributions over
+[a bounded filesystem source](../workspace-context/README.md). The plugin owns
+invocation interpretation, complete digests, last-good state and Session-bound
+history cursors in its typed domain. The Kernel owns only generic role/source
+validation, budgets and atomic Fact/control submission. A Session Header freezes
+workspace trust at creation and a fork preserves it. The contributor runs before
+each new provider retry series, while provider retries reuse the already entered
+inputs. A successful Tool round therefore cannot hide workspace changes before
+the next model request; no Tool-specific filesystem-touch enumeration is needed.

@@ -2,6 +2,31 @@ format = 1
 
 [[steps]]
 kind = "plugin"
+id = "context"
+plugin = "rsi.agent.context.default"
+
+[[steps]]
+kind = "plugin"
+id = "workspace-context"
+plugin = "rsi.agent.workspace-context.contributor"
+
+[[steps]]
+kind = "plugin"
+id = "time-context"
+plugin = "rsi.agent.time-context"
+
+[[steps]]
+kind = "plugin"
+id = "plan-policy"
+plugin = "rsi.agent.plan-policy"
+
+[[steps]]
+kind = "plugin"
+id = "repeat-tool-reminder"
+plugin = "rsi.agent.repeat-tool-reminder"
+
+[[steps]]
+kind = "plugin"
 id = "output-read"
 plugin = "rsi.output.read"
 enabled_rhai = "defines.standard_linux_coding_tools"
@@ -32,3 +57,9 @@ enabled_rhai = "defines.standard_linux_coding_tools"
 kind = "plugin"
 id = "questions"
 plugin = "rsi.agent.questions"
+
+[[steps]]
+kind = "plugin"
+id = "files"
+plugin = "rsi.files.tools"
+enabled_rhai = "defines.standard_unix_files"

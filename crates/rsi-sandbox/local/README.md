@@ -1,7 +1,9 @@
 # rsi-sandbox-local
 
-This ordinary plugin probes only explicit absolute candidate paths. A
-bubblewrap candidate must create the same namespace and read-only-root shape
+This ordinary plugin probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
+filesystem canonicalization. Portable host-path DTOs may describe another
+platform; those spellings do not grant this native effect boundary a relative path.
+A bubblewrap candidate must create the same namespace and read-only-root shape
 used by restricted plans and propagate a reserved child exit code; an
 executable that merely exits successfully is not enforcement evidence.
 Landlock runners implement `--rsi-landlock-probe 23` and return exit code 23
@@ -12,14 +14,25 @@ consume that behavior budget; copying from a pinned regular-file handle is
 blocking filesystem work and is not falsely described as having a hard
 wall-clock deadline.
 
+A probe spawn reporting an executable still open for writing is retried within
+that same absolute two-second deadline. Concurrent native process creation can
+briefly inherit a staging writer until exec closes it. Only this transient spawn
+error is retried; an unsuccessful probe exit never establishes enforcement.
+
 Optional factory activation publishes a service even when no backend passes;
-restricted calls then fail closed while `danger-full-access` remains an explicit
+restricted process calls then fail closed while `danger-full-access` remains an explicit
 unconfined holder bypass. A factory constructed with required restricted
 support instead fails activation before publishing the service. This
 construction policy is deliberately outside serializable Profile configuration,
 so a Profile replacement cannot disable a composition-owned readiness
 requirement. A required activation distinguishes exhaustion of the shared
 behavior-probe budget from ordinary candidate rejection in its failure.
+
+Workspace read scopes use one fresh opaque identity per activated service and
+preserve the request's exact native paths. All existing modes support this
+workspace-only read capability even when an optional service has no process
+backend. Actual file opens and symlink confinement belong to the file provider;
+the read scope never claims a process backend or its enforcement stamp.
 
 The selected wrapper is frozen for the generation. Restricted requests produce
 wrapper argv and a matching stamp; absence fails closed. The durable stamp

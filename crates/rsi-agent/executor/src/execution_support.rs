@@ -120,96 +120,15 @@ pub(super) async fn publish_terminal(
     claim: &TurnClaim,
     outcome: TurnOutcome,
 ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
-    if let Some(terminal) = turns
-        .finish_activation_turn(claim, &outcome)
+    tokio::time::timeout(config.durability_wait(), turns.finish_turn(claim, &outcome))
         .await
-        .map_err(turn_failure)?
-    {
-        return Ok(terminal);
-    }
-    turns
-        .close_current_step(claim, &outcome)
-        .await
-        .map_err(turn_failure)?;
-    let mut last_capacity_flush = None;
-    let mut bodies = vec![SessionFactBody::TurnTerminal {
-        turn_id: claim.turn_id().clone(),
-        outcome,
-    }];
-    let facts = loop {
-        match turns.publish(claim, bodies).await {
-            Ok(PublishAttempt::Published(facts)) => break facts,
-            Ok(PublishAttempt::FlushRequired { unpublished }) => {
-                let tail = live_tail(turns, claim).await?;
-                if tail == 0 || last_capacity_flush.is_some_and(|flushed| flushed >= tail) {
-                    return Err(fatal(
-                        "terminal publication remained full without new flushable Facts",
-                    ));
-                }
-                flush_execution_prefix(turns, config, claim, tail).await?;
-                last_capacity_flush = Some(tail);
-                bodies = unpublished;
-            }
-            Err(error) => return Err(turn_failure(error)),
-        }
-    };
-    let fact = facts
-        .last()
-        .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
-        .clone();
-    flush_execution_prefix(turns, config, claim, fact.seq()).await?;
-    Ok(fact)
-}
-
-pub(super) async fn publish_budget_exhaustion(
-    turns: &dyn TurnExecution,
-    config: &ExecutorConfig,
-    claim: &TurnClaim,
-    dimension: BudgetDimension,
-    consumed: u64,
-    limit: u64,
-) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
-    turns
-        .close_current_step(
-            claim,
-            &TurnOutcome::BudgetExceeded {
-                dimension,
-                consumed,
-                limit,
-            },
-        )
-        .await
-        .map_err(turn_failure)?;
-    let mut bodies = vec![SessionFactBody::BudgetExhausted {
-        turn_id: claim.turn_id().clone(),
-        dimension,
-        consumed,
-        limit,
-    }];
-    let mut last_capacity_flush = None;
-    let facts = loop {
-        match turns.publish(claim, bodies).await {
-            Ok(PublishAttempt::Published(facts)) => break facts,
-            Ok(PublishAttempt::FlushRequired { unpublished }) => {
-                let tail = live_tail(turns, claim).await?;
-                if tail == 0 || last_capacity_flush.is_some_and(|flushed| flushed >= tail) {
-                    return Err(fatal(
-                        "budget publication remained full without new flushable Facts",
-                    ));
-                }
-                flush_execution_prefix(turns, config, claim, tail).await?;
-                last_capacity_flush = Some(tail);
-                bodies = unpublished;
-            }
-            Err(error) => return Err(turn_failure(error)),
-        }
-    };
-    let fact = facts
-        .last()
-        .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
-        .clone();
-    flush_execution_prefix(turns, config, claim, fact.seq()).await?;
-    Ok(fact)
+        .map_err(|_| {
+            fatal(format!(
+                "Turn ending wait exceeded {} ms",
+                config.durability_wait_ms
+            ))
+        })?
+        .map_err(turn_failure)
 }
 
 pub(super) async fn live_tail(

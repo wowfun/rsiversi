@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shared controller Worker conformance</title>
+<script type="module">
+window.runProbe = () => new Promise((resolve, reject) => {
+  const worker = new Worker("/worker.mjs", { type: "module" });
+  const timer = setTimeout(() => finish(new Error("Controller Worker timed out")), 30_000);
+  function finish(error, result) {
+    clearTimeout(timer);
+    worker.terminate();
+    if (error) reject(error); else resolve(result);
+  }
+  worker.onmessage = ({ data }) => finish(null, data);
+  worker.onerror = (event) => {
+    event.preventDefault();
+    finish(new Error(event.message));
+  };
+  worker.postMessage("run");
+});
+</script>

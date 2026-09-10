@@ -32,7 +32,8 @@ pub trait LocalEvent: 'static + Sized {
 /// Listener insertion and one-shot policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalEventOptions {
-    /// Inserts this listener before existing listeners in the exact slot.
+    /// Uses the prepend lane before append listeners in the exact slot.
+    /// Prepend follows reverse declaration order; append follows forward order.
     pub prepend: bool,
     /// Claims this listener for at most one callback invocation.
     pub once: bool,
@@ -175,34 +176,39 @@ impl fmt::Debug for LocalEventBinding {
 #[doc(hidden)]
 pub struct LocalEventSnapshot {
     runtime: Runtime,
-    bindings: Vec<Arc<LocalEventBinding>>,
+    bindings: Arc<LocalEventBindings>,
 }
 
 impl fmt::Debug for LocalEventSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LocalEventSnapshot")
-            .field("listeners", &self.bindings.len())
+            .field("listeners", &self.bindings.bindings.len())
+            .field("runtime", &self.runtime)
             .finish_non_exhaustive()
     }
 }
 
 impl LocalEventSnapshot {
-    pub(crate) fn new(runtime: Runtime, bindings: Vec<Arc<LocalEventBinding>>) -> Self {
+    pub(crate) fn new(runtime: Runtime, bindings: Arc<LocalEventBindings>) -> Self {
         Self { runtime, bindings }
     }
 
     fn bindings(&self) -> &[Arc<LocalEventBinding>] {
-        &self.bindings
+        &self.bindings.bindings
     }
 }
 
-impl Drop for LocalEventSnapshot {
+pub(crate) struct LocalEventBindings {
+    pub(crate) bindings: Vec<Arc<LocalEventBinding>>,
+    pub(crate) on_drop_panic: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Drop for LocalEventBindings {
     fn drop(&mut self) {
         while let Some(binding) = self.bindings.pop() {
             if drop_catching_unwind(binding) {
-                self.runtime
-                    .mark_terminal_owned("Local event listener destructor panicked");
+                (self.on_drop_panic)();
             }
         }
     }
@@ -220,17 +226,18 @@ fn claim_parallel_callback<E: LocalEvent<Mode = Parallel>>(
 }
 
 fn parallel_callbacks<E: LocalEvent<Mode = Parallel>>(
-    bindings: Vec<Arc<LocalEventBinding>>,
+    bindings: Arc<LocalEventBindings>,
     value: E::Value,
 ) -> impl futures_util::Stream<Item = BoxFuture<'static, std::result::Result<(), E::Error>>> + Send
 {
     stream::unfold(
-        (bindings.into_iter(), value),
-        |(mut bindings, value)| async move {
+        (bindings, 0, value),
+        |(bindings, mut index, value)| async move {
             loop {
-                let binding = bindings.next()?;
-                if let Some(callback) = claim_parallel_callback::<E>(&binding, value.clone()) {
-                    return Some((callback, (bindings, value)));
+                let binding = bindings.bindings.get(index)?;
+                index += 1;
+                if let Some(callback) = claim_parallel_callback::<E>(binding, value.clone()) {
+                    return Some((callback, (bindings, index, value)));
                 }
             }
         },
@@ -256,7 +263,7 @@ impl<E: LocalEvent<Mode = Parallel>> LocalEventMode<E> for Parallel {
 
     fn dispatch(snapshot: LocalEventSnapshot, value: E::Value) -> Self::Dispatch {
         Box::pin(async move {
-            let bindings = snapshot.bindings().to_vec();
+            let bindings = Arc::clone(&snapshot.bindings);
             let errors = parallel_callbacks::<E>(bindings, value)
                 .buffered(MAXIMUM_PARALLEL_EVENT_CALLBACKS)
                 .collect::<Vec<_>>()

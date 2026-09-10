@@ -68,14 +68,12 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
     );
 
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     drop((child_lease, root_lease));
     kernel.shutdown(worker).await.unwrap();
@@ -137,14 +135,12 @@ async fn a_busy_session_message_does_not_block_an_idle_child_in_the_same_tree() 
     assert_eq!(child_claim.session_id(), &child_id);
 
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
 }
@@ -197,9 +193,8 @@ async fn concurrent_executor_lanes_contend_for_one_ready_message_without_failure
     );
 
     kernel
-        .finish_activation_turn(&first, &TurnOutcome::Completed)
+        .finish_turn(&first, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
 }
@@ -330,11 +325,7 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
                 .unwrap();
             TurnOutcome::Cancelled
         };
-        kernel
-            .finish_activation_turn(&root_claim, &outcome)
-            .await
-            .unwrap()
-            .unwrap();
+        kernel.finish_turn(&root_claim, &outcome).await.unwrap();
         assert!(
             child_cancellation.is_cancelled(),
             "{label} must durably cascade to a live child"
@@ -358,9 +349,8 @@ async fn cancelled_or_budget_exhausted_parent_cascades_without_erasing_child_inb
         ));
 
         kernel
-            .finish_activation_turn(&child_claim, &TurnOutcome::Cancelled)
+            .finish_turn(&child_claim, &TurnOutcome::Cancelled)
             .await
-            .unwrap()
             .unwrap();
         let queued_claim = kernel
             .claim(
@@ -544,28 +534,9 @@ async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activati
 }
 
 #[tokio::test]
-async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_background_context() {
+async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_after_cold_recovery() {
     let store = Arc::new(MemoryStore::new());
-    let context = Arc::new(QueuedWorkspaceContext {
-        snapshots: Mutex::new(VecDeque::from([WorkspaceContextSnapshot {
-            complete: true,
-            instructions_sha256: "a".repeat(64),
-            instructions: Some("workspace instructions".into()),
-            skill_catalog_sha256: "b".repeat(64),
-            skill_catalog: Some("<available_skills>test</available_skills>".into()),
-            invocations: Vec::new(),
-        }])),
-        calls: AtomicUsize::new(0),
-    });
-    let initial = SessionKernel::recover_with_context_clock_and_limits(
-        store.clone(),
-        composition(),
-        context,
-        Arc::new(FixedClock),
-        KernelLimits::default(),
-    )
-    .await
-    .unwrap();
+    let initial = kernel(store.clone()).await;
     let worker = initial.start_workers();
     let session_id = SessionId::new("session-claim-retry-boundary").unwrap();
     let message_id = MessageId::new("message-claim-retry-boundary").unwrap();
@@ -602,7 +573,7 @@ async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_with_backgr
             activation_id: activation_id.clone(),
             turn_id: turn_id.clone(),
             step_id: step_id.clone(),
-            entered_fact_seq: 5,
+            entered_fact_seq: 3,
         }
     );
     initial.shutdown(worker).await.unwrap();
@@ -665,9 +636,8 @@ async fn activation_terminal_requeues_the_next_oldest_turn() {
     );
 
     kernel
-        .finish_activation_turn(&activation_claim, &TurnOutcome::Completed)
+        .finish_turn(&activation_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let next = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -705,9 +675,8 @@ async fn completed_activation_sessions_release_resident_capacity() {
             .unwrap()
             .unwrap();
         kernel
-            .finish_activation_turn(&claim, &TurnOutcome::Completed)
+            .finish_turn(&claim, &TurnOutcome::Completed)
             .await
-            .unwrap()
             .unwrap();
     }
     kernel.shutdown(worker).await.unwrap();
@@ -741,7 +710,7 @@ async fn fresh_message_cannot_publish_over_an_unflushed_fresh_turn_header() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -783,7 +752,7 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -851,7 +820,7 @@ async fn cancellation_cannot_diverge_resident_state_from_an_applied_activation_t
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -877,11 +846,7 @@ async fn cancellation_cannot_diverge_resident_state_from_an_applied_activation_t
     let finish = tokio::spawn({
         let kernel = kernel.clone();
         let claim = claim.clone();
-        async move {
-            kernel
-                .finish_activation_turn(&claim, &TurnOutcome::Completed)
-                .await
-        }
+        async move { kernel.finish_turn(&claim, &TurnOutcome::Completed).await }
     });
     store.wait_until_agent_commit_is_applied().await;
     let cancel = tokio::spawn({

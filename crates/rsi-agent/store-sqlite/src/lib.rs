@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageSource,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, InputMessageSource,
+    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
     MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
     MessageDiscardReason, MessageId, MessageTarget, SessionFact, SessionFactBody, SessionHeader,
     SessionId, StepId, TurnId, advance_control_prefix_digest, advance_fact_prefix_digest,
@@ -24,9 +24,8 @@ use rsi_agent_store_protocol::{
     StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreTurnBoundary, StoreTurnFactPage,
-    StoreWaitingActivationPage, StoreWorkspaceContextState, StoredContextCheckpoint,
-    WriteContextCheckpoint, validate_message_claim_fact, validate_read_limit,
-    validate_session_read_limit,
+    StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rusqlite::{
@@ -40,15 +39,57 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Semaphore;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 10] = [
+const EXPECTED_TABLES: [(&str, &str); 13] = [
+    (
+        "domain_versions",
+        "CREATE TABLE domain_versions (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            domain_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            update_index INTEGER NOT NULL CHECK (update_index >= 0 AND update_index < 64),
+            codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
+            PRIMARY KEY (session_id, domain_id, control_seq),
+            UNIQUE (session_id, domain_id, revision),
+            FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
+    (
+        "domain_heads",
+        "CREATE TABLE domain_heads (
+            session_id TEXT NOT NULL,
+            domain_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            update_index INTEGER NOT NULL CHECK (update_index >= 0 AND update_index < 64),
+            codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
+            PRIMARY KEY (session_id, domain_id),
+            FOREIGN KEY (session_id, domain_id, control_seq) REFERENCES domain_versions(session_id, domain_id, control_seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
+    (
+        "domain_requests",
+        "CREATE TABLE domain_requests (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
+            request_id TEXT NOT NULL,
+            control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+            source_turn_id TEXT,
+            control_bytes INTEGER NOT NULL CHECK (control_bytes > 0),
+            PRIMARY KEY (session_id, request_id),
+            UNIQUE (session_id, control_seq),
+            FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+         ) STRICT",
+    ),
     (
         "sessions",
         "CREATE TABLE sessions (
@@ -58,9 +99,7 @@ const EXPECTED_TABLES: [(&str, &str); 10] = [
             durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
             fact_prefix_sha256 TEXT NOT NULL,
             control_seq INTEGER NOT NULL CHECK (control_seq >= 0),
-            control_prefix_sha256 TEXT NOT NULL,
-            workspace_instructions_sha256 TEXT,
-            workspace_skill_catalog_sha256 TEXT
+            control_prefix_sha256 TEXT NOT NULL
          ) STRICT",
     ),
     (
@@ -109,13 +148,18 @@ const EXPECTED_TABLES: [(&str, &str); 10] = [
             accepted_seq INTEGER NOT NULL CHECK (accepted_seq > 0),
             terminal_seq INTEGER CHECK (terminal_seq > accepted_seq),
             terminal_prefix_sha256 TEXT,
+            terminal_control_seq INTEGER CHECK (terminal_control_seq > 0),
+            terminal_control_prefix_sha256 TEXT,
             PRIMARY KEY (session_id, turn_id),
             UNIQUE (session_id, accepted_seq),
             UNIQUE (session_id, terminal_seq),
+            UNIQUE (session_id, terminal_control_seq),
             FOREIGN KEY (session_id, accepted_seq)
                 REFERENCES facts(session_id, seq) ON DELETE RESTRICT,
             FOREIGN KEY (session_id, terminal_seq)
-                REFERENCES facts(session_id, seq) ON DELETE RESTRICT
+                REFERENCES facts(session_id, seq) ON DELETE RESTRICT,
+            FOREIGN KEY (session_id, terminal_control_seq)
+                REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
          ) STRICT",
     ),
     (
@@ -183,7 +227,11 @@ const EXPECTED_TABLES: [(&str, &str); 10] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 8] = [
+const EXPECTED_INDEXES: [(&str, &str); 9] = [
+    (
+        "domain_requests_by_turn",
+        "CREATE INDEX domain_requests_by_turn ON domain_requests (session_id, source_turn_id, control_seq)",
+    ),
     (
         "facts_by_turn",
         "CREATE INDEX facts_by_turn ON facts (session_id, turn_id, seq)",
@@ -257,11 +305,20 @@ struct StoreInner {
     writer_admission: Arc<Semaphore>,
     reader_admission: Arc<Semaphore>,
     validated_sessions: Arc<Mutex<ValidatedSessionCache>>,
-    validation_gates: Arc<Mutex<BTreeMap<SessionId, Weak<AsyncMutex<()>>>>>,
+    validation_admission: Arc<Semaphore>,
     #[cfg(test)]
     validation_runs: Arc<AtomicU64>,
     #[cfg(test)]
     fact_materializations: Arc<AtomicU64>,
+    #[cfg(test)]
+    control_decodes: AtomicU64,
+    #[cfg(test)]
+    validation_barrier: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     cas_admission: Arc<Semaphore>,
     root: Arc<PathBuf>,
     cas_dir: Arc<PathBuf>,
@@ -270,10 +327,9 @@ struct StoreInner {
 }
 
 struct DatabaseConnections {
-    // Rust drops fields in declaration order. Keeping the reader first makes
-    // the writer SQLite's last connection on clean shutdown, which checkpoints
-    // and removes the WAL after all Store operations release this shared pair.
+    // Readers close before the final writer, which checkpoints the WAL.
     reader: Mutex<Connection>,
+    validation_reader: Mutex<Connection>,
     writer: Mutex<Connection>,
 }
 
@@ -327,15 +383,13 @@ impl SqliteStore {
     /// First access validates the selected session's bounded Header, mechanical
     /// watermark, stored digest shape, Fact/turn relationships, and canonical
     /// Agent-control index projections, then caches that proof with bounded recency. It does not decode every Fact or
-    /// recompute the canonical prefix digest; use [`Self::verify`] for that
+    /// recompute the canonical Fact-prefix digest; use [`Self::verify`] for that
     /// explicit full audit.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = prepare_root(root.as_ref())?;
         let writer_lock = acquire_writer_lock(&root)?;
         let cas_dir = root.join("cas");
-        prepare_owned_directory(&cas_dir, "CAS directory")?;
         let cas_staging_dir = cas_dir.join("staging");
-        prepare_cas_staging_directory(&cas_staging_dir)?;
         let database_path = root.join("sessions.sqlite3");
         reject_symlink_if_present(&database_path, "SQLite database")?;
         let may_initialize = match fs::metadata(&database_path) {
@@ -343,33 +397,67 @@ impl SqliteStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => return Err(io_error(error)),
         };
+        // Preserve rejected durable formats before any writer PRAGMA, WAL recovery, or staging cleanup.
+        // The process-wide writer lease keeps this proof valid through writer construction.
+        let validated_reader = if may_initialize {
+            None
+        } else {
+            let mut reader = Connection::open_with_flags(
+                &database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(sql_error)?;
+            configure_reader(&reader)?;
+            initialize_or_validate_schema(&mut reader, false)?;
+            Some(reader)
+        };
+        prepare_owned_directory(&cas_dir, "CAS directory")?;
+        prepare_cas_staging_directory(&cas_staging_dir)?;
         let mut writer_connection = Connection::open_with_flags(
             &database_path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(sql_error)?;
         configure_writer(&writer_connection)?;
-        initialize_or_validate_schema(&mut writer_connection, may_initialize)?;
-        let reader_connection = Connection::open_with_flags(
+        if may_initialize {
+            initialize_or_validate_schema(&mut writer_connection, true)?;
+        }
+        let reader_connection = if let Some(reader) = validated_reader {
+            reader
+        } else {
+            let reader = Connection::open_with_flags(
+                &database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(sql_error)?;
+            configure_reader(&reader)?;
+            reader
+        };
+        let validation_connection = Connection::open_with_flags(
             &database_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(sql_error)?;
-        configure_reader(&reader_connection)?;
+        configure_reader(&validation_connection)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 connections: DatabaseConnections {
                     reader: Mutex::new(reader_connection),
+                    validation_reader: Mutex::new(validation_connection),
                     writer: Mutex::new(writer_connection),
                 },
                 writer_admission: Arc::new(Semaphore::new(1)),
                 reader_admission: Arc::new(Semaphore::new(1)),
                 validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
-                validation_gates: Arc::new(Mutex::new(BTreeMap::new())),
+                validation_admission: Arc::new(Semaphore::new(1)),
                 #[cfg(test)]
                 validation_runs: Arc::new(AtomicU64::new(0)),
                 #[cfg(test)]
                 fact_materializations: Arc::new(AtomicU64::new(0)),
+                #[cfg(test)]
+                control_decodes: AtomicU64::new(0),
+                #[cfg(test)]
+                validation_barrier: Mutex::new(None),
                 cas_admission: Arc::new(Semaphore::new(1)),
                 root: Arc::new(root),
                 cas_dir: Arc::new(cas_dir),
@@ -484,43 +572,101 @@ impl SqliteStore {
         self.inner.touch_validated_session(session_id)
     }
 
-    fn validation_gate(&self, session_id: &SessionId) -> Result<Arc<AsyncMutex<()>>> {
-        let mut gates = self
-            .inner
-            .validation_gates
-            .lock()
-            .map_err(|_| StoreError::Io("session-validation gate mutex was poisoned".into()))?;
-        gates.retain(|_, gate| gate.strong_count() != 0);
-        if let Some(gate) = gates.get(session_id).and_then(Weak::upgrade) {
-            return Ok(gate);
-        }
-        let gate = Arc::new(AsyncMutex::new(()));
-        gates.insert(session_id.clone(), Arc::downgrade(&gate));
-        Ok(gate)
+    async fn with_validation<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let owner = Arc::clone(&self.inner);
+        Self::with_database(
+            Arc::clone(&self.inner.validation_admission),
+            "SQLite validation admission closed",
+            move || {
+                let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
+                    StoreError::Io("SQLite validation connection mutex was poisoned".into())
+                })?;
+                operation(&mut connection)
+            },
+        )
+        .await
     }
 
     async fn ensure_session_validated(&self, session_id: &SessionId) -> Result<()> {
         if self.touch_validated_session(session_id) {
             return Ok(());
         }
-        let gate = self.validation_gate(session_id)?;
-        let _gate = gate.lock().await;
+        let permit = Arc::clone(&self.inner.validation_admission)
+            .acquire_owned()
+            .await
+            .map_err(|_| StoreError::Io("SQLite validation admission closed".into()))?;
         if self.touch_validated_session(session_id) {
             return Ok(());
         }
         let candidate = session_id.clone();
-        #[cfg(test)]
-        self.inner.validation_runs.fetch_add(1, Ordering::Relaxed);
-        self.with_reader(move |connection| {
+        let owner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
+                StoreError::Io("SQLite validation connection mutex was poisoned".into())
+            })?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            validate_session(&transaction, &candidate)?;
-            transaction.commit().map_err(sql_error)
+            owner.validate_selected(&transaction, &candidate)?;
+            transaction.commit().map_err(sql_error)?;
+            if let Ok(mut cache) = owner.validated_sessions.lock() {
+                cache.insert(candidate);
+            }
+            Ok(())
         })
-        .await?;
-        self.mark_session_validated(session_id.clone());
-        Ok(())
+        .await
+        .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
+    }
+
+    async fn with_subtree_reader<T, F>(&self, root: &SessionId, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Transaction<'_>, StoreAgentSubtreeSnapshot) -> Result<T> + Send + 'static,
+    {
+        let candidate = root.clone();
+        let owner = Arc::clone(&self.inner);
+        let attempt = self
+            .with_reader(move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .map_err(sql_error)?;
+                let snapshot = session_store::read_agent_subtree(&transaction, &candidate)?;
+                if !owner
+                    .missing_subtree_proofs(&snapshot, &BTreeSet::new())
+                    .is_empty()
+                {
+                    return Ok(Err(operation));
+                }
+                let result = operation(&transaction, snapshot)?;
+                transaction.commit().map_err(sql_error)?;
+                Ok(Ok(result))
+            })
+            .await?;
+        match attempt {
+            Ok(result) => Ok(result),
+            Err(operation) => {
+                let candidate = root.clone();
+                let owner = Arc::clone(&self.inner);
+                self.with_validation(move |connection| {
+                    let transaction = connection
+                        .transaction_with_behavior(TransactionBehavior::Deferred)
+                        .map_err(sql_error)?;
+                    let snapshot = owner.read_validated_agent_subtree(&transaction, &candidate)?;
+                    // Publish only after the complete snapshot operation succeeds.
+                    let validated = snapshot.clone();
+                    let result = operation(&transaction, snapshot)?;
+                    transaction.commit().map_err(sql_error)?;
+                    owner.mark_subtree_validated(&validated);
+                    Ok(result)
+                })
+                .await
+            }
+        }
     }
 
     async fn session_exists(&self, session_id: &SessionId) -> Result<bool> {
@@ -559,6 +705,7 @@ impl SqliteStore {
 
 mod append;
 mod cas;
+mod domain;
 mod filesystem;
 mod session_store;
 mod validation;

@@ -37,6 +37,12 @@ instead causes both stream tails to be read again before the same record is
 reported. Per-scope
 retention cannot exceed the 256-record list contract; global retention may span
 many scopes. Dead weak scope lookups are pruned during later acquisition.
+Admission uses maintained per-scope retained counts and sequence-ordered
+eviction indexes. Only terminal, reported records with no admitted readers
+enter those indexes. Publication, settlement, reporting, and the final read
+release update them under the registry lock; revoking a scope leaves its
+retained records charged until compaction removes them. Admission therefore
+examines only eviction candidates, independently of unrelated retained work.
 Producer start, wait, read, and cancel callbacks are panic-contained. No work
 or output is recovered after process exit. Producer wait failures are projected
 to a bounded failed terminal after NUL removal, so containment never creates a

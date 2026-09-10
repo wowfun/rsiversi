@@ -258,6 +258,17 @@ async fn concurrent_cold_same_digest_loads_share_one_staging_artifact() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
+    changed_source_behind_a_waiter(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn exact_digest_load_rejects_source_replacement_behind_an_admitted_waiter() {
+    changed_source_behind_a_waiter(true).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn changed_source_behind_a_waiter(exact: bool) {
     let markers = tempfile::tempdir().unwrap();
     let identity_entered = markers.path().join("identity-entered");
     let identity_release = markers.path().join("identity-release");
@@ -284,7 +295,14 @@ async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
     let second = tokio::task::spawn_blocking({
         let catalog = catalog.clone();
         let source = source.clone();
-        move || catalog.load(source)
+        let expected = first_digest.clone();
+        move || {
+            if exact {
+                catalog.load_exact(source, &expected)
+            } else {
+                catalog.load(source)
+            }
+        }
     });
     let second_admitted = std::time::Instant::now() + Duration::from_secs(1);
     while catalog.snapshot().active_loads < 2 && std::time::Instant::now() < second_admitted {
@@ -298,7 +316,7 @@ async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
     std::fs::write(&identity_release, b"release").unwrap();
 
     let first = first.await.unwrap().unwrap();
-    let second = second.await.unwrap().unwrap();
+    let second = second.await.unwrap();
     let digest = |factory: &rsi_meta::ResolvedFactory| match factory.identity() {
         FactoryIdentity::Native { sha256, .. } => sha256.clone(),
         identity @ FactoryIdentity::Linked { .. } => {
@@ -306,7 +324,16 @@ async fn a_source_changed_behind_a_digest_waiter_rekeys_its_stable_copy() {
         }
     };
     assert_eq!(digest(&first), first_digest);
-    assert_eq!(digest(&second), second_digest);
+    if exact {
+        assert!(matches!(second, Err(LoaderError::ArtifactDigestMismatch)));
+        assert_eq!(catalog.snapshot().cache_artifacts, 1);
+    } else {
+        let second = second.unwrap();
+        assert_eq!(digest(&second), second_digest);
+        drop(second);
+    }
+    drop(first);
+    wait_for_staging_release_async(&catalog).await;
 }
 
 #[test]
@@ -743,4 +770,50 @@ async fn timed_out_artifact_entry_fences_reentry_until_the_worker_returns() {
         .unwrap()
         .expect("cache ownership was released before failed staging cleanup");
     assert_eq!(reopened.snapshot().staging_bytes, 0);
+}
+
+#[test]
+fn exact_digest_load_rejects_before_source_io_and_mapping_and_reuses_the_catalog() {
+    let (_directory, catalog) = catalog_with_timeout(Duration::from_secs(2));
+    let missing = Path::new("/missing-native-artifact");
+    for invalid in [
+        String::new(),
+        "A".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+    ] {
+        assert!(matches!(
+            catalog.load_exact(missing, &invalid),
+            Err(LoaderError::InvalidInput(_))
+        ));
+    }
+    assert_eq!(catalog.snapshot().peak_loads, 0);
+    let artifact = native_fixture();
+    let digest = hex::encode(Sha256::digest(std::fs::read(artifact).unwrap()));
+    let wrong = if digest == "0".repeat(64) {
+        "1".repeat(64)
+    } else {
+        "0".repeat(64)
+    };
+    assert!(matches!(
+        catalog.load_exact(artifact, &wrong),
+        Err(LoaderError::ArtifactDigestMismatch)
+    ));
+    let before = catalog.snapshot();
+    assert_eq!(before.cache_artifacts, 0);
+    assert_eq!(before.staging_bytes, 0);
+    assert_eq!(before.peak_callbacks, 0);
+    let exact = catalog.load_exact(artifact, &digest).unwrap();
+    let ordinary = catalog.load(artifact).unwrap();
+    let again = catalog.load_exact(artifact, &digest).unwrap();
+    assert_eq!(exact.identity(), ordinary.identity());
+    assert_eq!(exact.identity(), again.identity());
+    assert_eq!(catalog.snapshot().cache_artifacts, 1);
+    assert!(matches!(
+        catalog.load_exact(artifact, &wrong),
+        Err(LoaderError::ArtifactDigestMismatch)
+    ));
+    assert_eq!(catalog.snapshot().cache_artifacts, 1);
+    drop((exact, ordinary, again));
+    wait_for_staging_release(&catalog);
 }

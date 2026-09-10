@@ -10,8 +10,9 @@ The durable Agent preset identity uses the same lowercase alphanumeric-and-dash
 grammar as its eventual directory segment. It cannot contain separators,
 dot-segments, absolute-path syntax, or an unbounded name; resolving that
 identity to filesystem authority remains the preset provider's responsibility.
-Preset Profile resolution uses a construction-time frozen Agent-only factory
-allowlist. A source cannot name Store, Process, Jobs, Kernel, provider, Host, or
+Preset Profile resolution uses one immutable Agent-only factory
+snapshot acquired before each build. The same snapshot owns the preset compiler
+and contribution resolver; source refresh cannot mix their authority. A source cannot name Store, Process, Jobs, Kernel, provider, Host, or
 other global factories. Unknown or unsupported contribution identities fail
 before a Tool stage is sealed or any session capacity is reserved.
 
@@ -27,8 +28,9 @@ derives `AgentCallerAuthority` from the exact live claim and injects it as a
 typed Tool extension; model arguments carry only requested targets and cannot
 name a root, claim seal, or approval authority. Kernel lineage checks constrain
 spawn, message, list, wait, and interrupt operations. The standard Session
-adapter routes an approval answer only after resolving one unambiguous pending
-approval identity within the caller's durable Agent tree.
+adapter routes an approval answer only after validating the explicit owning
+Session within the caller's durable Agent tree, then dispatches the exact
+(Session, approval identity) tuple.
 
 The session header records redacted configuration facts only. It may contain a
 credential reference but never a resolved secret. Provider error summaries and

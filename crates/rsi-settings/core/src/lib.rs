@@ -7,9 +7,11 @@
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_settings_protocol::{
-    Result, Settings, SettingsContract, SettingsDocument, SettingsError, SettingsLease,
-    SettingsProvider, SettingsProviderContract, SettingsRegistration, SettingsScope,
-    SettingsSnapshot, SettingsSpec, validate_namespace, validate_section,
+    Result, Settings, SettingsAccess, SettingsAccessContract, SettingsContract,
+    SettingsDescription, SettingsDocument, SettingsError, SettingsLease, SettingsMetadata,
+    SettingsPage, SettingsProvider, SettingsProviderContract, SettingsRegistration, SettingsScope,
+    SettingsScopeId, SettingsSnapshot, SettingsSpec, SettingsVersion, validate_namespace,
+    validate_section, validate_settings_page,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,11 +40,13 @@ struct ServiceInner {
 #[derive(Debug)]
 struct NamespaceState {
     registration: u64,
+    scope_id: SettingsScopeId,
     revision: u64,
     raw: Option<Value>,
     resolved: Value,
     defaults: Value,
     base: Value,
+    metadata: SettingsMetadata,
     validator: Arc<dyn rsi_settings_protocol::SettingsValidator>,
     in_flight: usize,
     retiring: bool,
@@ -83,11 +87,110 @@ impl Drop for InFlightCommit {
     }
 }
 
+#[async_trait]
+impl SettingsAccess for Service {
+    async fn list(&self, after: Option<&str>, limit: usize) -> Result<SettingsPage> {
+        validate_settings_page(after, limit)?;
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut names = std::collections::BTreeSet::new();
+        for (name, entry) in &state.namespaces {
+            if entry.retiring || after.is_some_and(|after| name.as_str() <= after) {
+                continue;
+            }
+            names.insert(name.as_str());
+            if names.len() > limit + 1 {
+                names.pop_last();
+            }
+        }
+        let more = names.len() > limit;
+        let namespaces: Vec<String> = names.into_iter().take(limit).map(str::to_owned).collect();
+        let next = more.then(|| namespaces.last().expect("nonempty lookahead page").clone());
+        Ok(SettingsPage { namespaces, next })
+    }
+    async fn describe(&self, namespace: &str) -> Result<SettingsDescription> {
+        validate_namespace(namespace)?;
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state
+            .namespaces
+            .get(namespace)
+            .filter(|entry| !entry.retiring)
+            .ok_or_else(|| SettingsError::UnknownNamespace(namespace.into()))?;
+        Ok(SettingsDescription {
+            namespace: namespace.into(),
+            version: SettingsVersion {
+                scope_id: entry.scope_id.clone(),
+                revision: entry.revision,
+            },
+            defaults: entry.defaults.clone(),
+            metadata: entry.metadata.clone(),
+            writable: self.provider.writable(),
+        })
+    }
+    async fn read(&self, namespace: &str) -> Result<SettingsSnapshot> {
+        self.scope(namespace)?.get()
+    }
+    async fn replace(
+        &self,
+        namespace: &str,
+        expected: &SettingsVersion,
+        value: Value,
+    ) -> Result<SettingsSnapshot> {
+        let scope = self.resolve_scope(namespace, Some(expected))?;
+        scope.replace(expected.revision, value).await
+    }
+    async fn clear(&self, namespace: &str, expected: &SettingsVersion) -> Result<SettingsSnapshot> {
+        let scope = self.resolve_scope(namespace, Some(expected))?;
+        scope.clear(expected.revision).await
+    }
+}
+
+impl Service {
+    fn resolve_scope(
+        &self,
+        namespace: &str,
+        expected: Option<&SettingsVersion>,
+    ) -> Result<Arc<dyn SettingsScope>> {
+        validate_namespace(namespace)?;
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state
+            .namespaces
+            .get(namespace)
+            .filter(|entry| !entry.retiring)
+            .ok_or_else(|| SettingsError::UnknownNamespace(namespace.into()))?;
+        if expected.is_some_and(|version| version.scope_id != entry.scope_id) {
+            return Err(SettingsError::StaleRegistration(namespace.into()));
+        }
+        Ok(Arc::new(Scope {
+            namespace: namespace.into(),
+            registration: entry.registration,
+            provider: self.provider.clone(),
+            state: Arc::downgrade(&self.state),
+        }))
+    }
+}
+
 impl Settings for Service {
+    fn scope(&self, namespace: &str) -> Result<Arc<dyn SettingsScope>> {
+        self.resolve_scope(namespace, None)
+    }
+
     fn register(&self, spec: SettingsSpec) -> Result<SettingsRegistration> {
         validate_namespace(&spec.namespace)?;
         validate_section(&spec.defaults)?;
         validate_section(&spec.base)?;
+        spec.metadata.validate()?;
         let mut state = self
             .state
             .inner
@@ -108,15 +211,22 @@ impl Settings for Service {
             .checked_add(1)
             .ok_or_else(|| SettingsError::InvalidInput("registration identity exhausted".into()))?;
         let registration = state.next_registration;
+        let mut entropy = [0_u8; 16];
+        getrandom::fill(&mut entropy).map_err(|error| {
+            SettingsError::Io(format!("settings registration entropy: {error}"))
+        })?;
+        let scope_id = SettingsScopeId::parse(hex::encode(entropy))?;
         state.namespaces.insert(
             spec.namespace.clone(),
             NamespaceState {
                 registration,
+                scope_id,
                 revision: 0,
                 raw,
                 resolved,
                 defaults: spec.defaults,
                 base: spec.base,
+                metadata: spec.metadata,
                 validator: spec.validator,
                 in_flight: 0,
                 retiring: false,
@@ -167,6 +277,7 @@ impl SettingsScope for Scope {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = active_entry(&inner, &self.namespace, self.registration)?;
         Ok(SettingsSnapshot {
+            scope_id: entry.scope_id.clone(),
             revision: entry.revision,
             value: entry.resolved.clone(),
         })
@@ -322,6 +433,7 @@ fn publish_settings_commit(
                     entry.raw.clone_from(&committed);
                     entry.resolved = resolve(&entry.defaults, &entry.base, committed.as_ref());
                     Ok(SettingsSnapshot {
+                        scope_id: entry.scope_id.clone(),
                         revision: entry.revision,
                         value: entry.resolved.clone(),
                     })
@@ -390,7 +502,7 @@ impl PluginFactory for SettingsFactory {
                 .and_then(|()| validate_section(section).map(|_| ()))
                 .map_err(|error| MetaError::Activation(error.to_string()))?;
         }
-        let settings: Arc<dyn Settings> = Arc::new(Service {
+        let settings = Arc::new(Service {
             provider,
             state: Arc::new(ServiceState {
                 inner: Mutex::new(ServiceInner {
@@ -401,11 +513,17 @@ impl PluginFactory for SettingsFactory {
                 write_lock: Arc::new(AsyncMutex::new(())),
             }),
         });
-        let supply = plan.context().provide_local::<SettingsContract>(settings)?;
+        let supply = plan
+            .context()
+            .provide_local::<SettingsContract>(settings.clone())?;
+        let access = plan
+            .context()
+            .provide_local::<SettingsAccessContract>(settings)?;
         plan.defer(
             "withdraw Settings registry",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(access);
                     drop(supply);
                     Ok(())
                 })

@@ -1,11 +1,12 @@
-use crate::host::{LinkedCatalog, PROFILE_PLUGIN_ID};
+use crate::host::{FrozenCatalog, PROFILE_PLUGIN_ID};
 use crate::{
     Host, HostError, HostPaths, ProfileControlContract, ProfileFragment, ProfileLimits,
     ProfilePatch, Result,
 };
 use rsi_meta::{
-    ActivationPlan, ConfigValue, LocalContract, LocalContractKey, LocalEvent, LocalEventKey,
-    PluginFactory, PluginId, PreparedActivation, Runtime, RuntimeLimits, UpdateMode,
+    ActivationPlan, ConfigValue, FactoryIdentity, LocalContract, LocalContractKey, LocalEvent,
+    LocalEventKey, PluginFactory, PluginId, PreparedActivation, ResolvedFactory, Runtime,
+    RuntimeLimits, UpdateMode,
 };
 use rsi_meta_profile::ProfileEnvironment;
 use std::any::{TypeId, type_name};
@@ -17,8 +18,8 @@ use std::sync::Arc;
 pub struct HostLimits {
     /// Bounds enforced by `rsi-meta-profile`.
     pub profile: ProfileLimits,
-    /// Maximum linked factory registrations.
-    pub maximum_linked_plugins: usize,
+    /// Maximum resolved factory registrations.
+    pub maximum_factories: usize,
     /// Maximum immutable linked fragments.
     pub maximum_fragments: usize,
     /// Maximum registered Local contract markers.
@@ -33,7 +34,7 @@ impl Default for HostLimits {
     fn default() -> Self {
         Self {
             profile: ProfileLimits::default(),
-            maximum_linked_plugins: 4_096,
+            maximum_factories: 4_096,
             maximum_fragments: 256,
             maximum_local_contracts: 4_096,
             maximum_local_events: 4_096,
@@ -44,12 +45,13 @@ impl Default for HostLimits {
 
 /// Freezes all generic Host composition inputs before Runtime creation.
 pub struct HostBuilder {
-    paths: HostPaths,
+    paths: Option<HostPaths>,
     platform: String,
     defines: BTreeMap<String, ConfigValue>,
     limits: HostLimits,
     runtime_limits: RuntimeLimits,
-    linked: BTreeMap<PluginId, LinkedRegistration>,
+    execution: Option<rsi_meta::Execution>,
+    factories: BTreeMap<PluginId, ResolvedFactory>,
     local_contract_keys: BTreeMap<LocalContractKey, TypeId>,
     local_contract_types: HashMap<TypeId, &'static str>,
     local_event_keys: BTreeMap<LocalEventKey, TypeId>,
@@ -68,17 +70,10 @@ impl std::fmt::Debug for HostBuilder {
             .field("defines", &self.defines.keys())
             .field("limits", &self.limits)
             .field("runtime_limits", &self.runtime_limits)
-            .field("linked", &self.linked.keys())
+            .field("factories", &self.factories.keys())
             .field("fragments", &self.fragment_ids)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct LinkedRegistration {
-    pub(crate) revision: String,
-    pub(crate) update_mode: UpdateMode,
-    pub(crate) implementation: Arc<dyn PluginFactory>,
 }
 
 struct ContainedFactory {
@@ -98,14 +93,14 @@ impl PluginFactory for ContainedFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         self.inner
             .as_ref()
-            .expect("linked factory remains available until destruction")
+            .expect("factory remains available until destruction")
             .prepare(desired)
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         self.inner
             .as_ref()
-            .expect("linked factory remains available until destruction")
+            .expect("factory remains available until destruction")
             .activate(plan)
             .await
     }
@@ -122,13 +117,26 @@ impl Drop for ContainedFactory {
 impl HostBuilder {
     /// Creates a builder from explicit path authority and frozen target platform.
     pub fn new(paths: HostPaths) -> Self {
+        Self::from_environment(
+            Some(paths),
+            format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        )
+    }
+
+    /// Creates a builder for an embedder with no filesystem authority.
+    pub fn without_paths(platform: impl Into<String>) -> Self {
+        Self::from_environment(None, platform.into())
+    }
+
+    fn from_environment(paths: Option<HostPaths>, platform: String) -> Self {
         Self {
             paths,
-            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            platform,
             defines: BTreeMap::new(),
             limits: HostLimits::default(),
             runtime_limits: RuntimeLimits::default(),
-            linked: BTreeMap::new(),
+            execution: None,
+            factories: BTreeMap::new(),
             local_contract_keys: BTreeMap::new(),
             local_contract_types: HashMap::new(),
             local_event_keys: BTreeMap::new(),
@@ -143,6 +151,13 @@ impl HostBuilder {
     #[must_use]
     pub fn limits(mut self, limits: HostLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Freezes explicit platform execution for startup without running any work.
+    #[must_use]
+    pub fn execution(mut self, execution: rsi_meta::Execution) -> Self {
+        self.execution = Some(execution);
         self
     }
 
@@ -173,8 +188,8 @@ impl HostBuilder {
     }
 
     /// Returns the explicit frozen path candidate.
-    pub const fn paths(&self) -> &HostPaths {
-        &self.paths
+    pub const fn paths(&self) -> Option<&HostPaths> {
+        self.paths.as_ref()
     }
 
     /// Registers one process-linked implementation without executing it.
@@ -185,36 +200,51 @@ impl HostBuilder {
         update_mode: UpdateMode,
         implementation: Arc<dyn PluginFactory>,
     ) -> Result<&mut Self> {
+        self.register_factory(ResolvedFactory::linked(
+            plugin,
+            revision,
+            update_mode,
+            implementation,
+        ))
+    }
+
+    /// Registers explicit trusted resolver provenance without executing the factory.
+    /// Native identities come from the embedder's `NativeCatalog`; Host does not load artifacts.
+    pub fn register_factory(&mut self, factory: ResolvedFactory) -> Result<&mut Self> {
+        let (identity, update_mode, implementation) = factory.into_parts();
+        // Contain destruction even when validation rejects the incoming registration.
+        let factory = ResolvedFactory::new(
+            identity,
+            update_mode,
+            Arc::new(ContainedFactory {
+                inner: Some(implementation),
+            }),
+        );
         validate_limits(&self.limits)?;
-        if self.linked.len() >= self.limits.maximum_linked_plugins {
-            return Err(HostError::CapacityExceeded {
-                resource: "linked plugins",
-                maximum: self.limits.maximum_linked_plugins,
+        let plugin = validate_identity(factory.identity(), self.limits.maximum_identifier_bytes)?;
+        if plugin.as_str() == PROFILE_PLUGIN_ID || self.factories.contains_key(plugin) {
+            return Err(HostError::DuplicatePlugin {
+                plugin: plugin.clone(),
             });
         }
-        let plugin = plugin.into();
-        validate_identifier(
-            "plugin",
-            plugin.as_str(),
-            self.limits.maximum_identifier_bytes,
-        )?;
-        if plugin.as_str() == PROFILE_PLUGIN_ID || self.linked.contains_key(&plugin) {
-            return Err(HostError::DuplicatePlugin { plugin });
+        if self.factories.len() >= self.limits.maximum_factories {
+            return Err(HostError::CapacityExceeded {
+                resource: "factories",
+                maximum: self.limits.maximum_factories,
+            });
         }
-        let revision = revision.into();
-        validate_identifier("revision", &revision, self.limits.maximum_identifier_bytes)?;
-        let implementation: Arc<dyn PluginFactory> = Arc::new(ContainedFactory {
-            inner: Some(implementation),
-        });
-        self.linked.insert(
-            plugin,
-            LinkedRegistration {
-                revision,
-                update_mode,
-                implementation,
-            },
-        );
+        self.factories.insert(plugin.clone(), factory);
         Ok(self)
+    }
+
+    /// Reports whether this exact Local contract marker has already been registered.
+    pub fn has_local_contract<C: LocalContract>(&self) -> bool {
+        self.local_contract_keys.get(&LocalContractKey::new(C::KEY)) == Some(&TypeId::of::<C>())
+    }
+
+    /// Reports whether this exact Local event marker has already been registered.
+    pub fn has_local_event<E: LocalEvent>(&self) -> bool {
+        self.local_event_keys.get(&LocalEventKey::new(E::KEY)) == Some(&TypeId::of::<E>())
     }
 
     /// Registers one exact Rust Local contract marker for Profile naming.
@@ -315,9 +345,9 @@ impl HostBuilder {
         validate_limits(&self.limits)?;
         self.limits.profile.validate()?;
         validate_collection(
-            "linked plugins",
-            self.linked.len(),
-            self.limits.maximum_linked_plugins,
+            "factories",
+            self.factories.len(),
+            self.limits.maximum_factories,
         )?;
         validate_collection(
             "Profile fragments",
@@ -347,17 +377,8 @@ impl HostBuilder {
         for key in self.defines.keys() {
             validate_identifier("define", key, self.limits.maximum_identifier_bytes)?;
         }
-        for (plugin, registration) in &self.linked {
-            validate_identifier(
-                "plugin",
-                plugin.as_str(),
-                self.limits.maximum_identifier_bytes,
-            )?;
-            validate_identifier(
-                "revision",
-                &registration.revision,
-                self.limits.maximum_identifier_bytes,
-            )?;
+        for factory in self.factories.values() {
+            validate_identity(factory.identity(), self.limits.maximum_identifier_bytes)?;
         }
         for key in self.local_contract_keys.keys() {
             validate_identifier(
@@ -385,25 +406,27 @@ impl HostBuilder {
                 self.limits.profile.maximum_identifier_bytes,
             )?;
         }
-        ProfileEnvironment::new(
-            self.paths.config(),
-            self.paths.state(),
-            self.paths.cache(),
-            self.platform.clone(),
-            self.defines.clone(),
-        )?
-        .validate(&self.limits.profile)?;
+        let environment = match &self.paths {
+            Some(paths) => ProfileEnvironment::new(
+                paths.config(),
+                paths.state(),
+                paths.cache(),
+                self.platform,
+                self.defines,
+            )?,
+            None => ProfileEnvironment::without_paths(self.platform, self.defines)?,
+        };
+        environment.validate(&self.limits.profile)?;
         let runtime_limits = self.runtime_limits;
-        let runtime = Runtime::new(runtime_limits.clone())?;
+        Runtime::validate_limits(&runtime_limits)?;
         Ok(Host::new(
             self.paths,
-            self.platform,
-            self.defines,
+            environment,
             self.limits,
             runtime_limits,
-            runtime,
-            LinkedCatalog {
-                linked: self.linked,
+            self.execution,
+            FrozenCatalog {
+                factories: self.factories,
                 fragments: self.fragments,
                 local_contracts: self.local_contract_keys,
                 local_events: self.local_event_keys,
@@ -430,9 +453,30 @@ pub(crate) fn validate_identifier(kind: &'static str, value: &str, maximum: usiz
     }
 }
 
+fn validate_identity(identity: &FactoryIdentity, maximum: usize) -> Result<&PluginId> {
+    let plugin = match identity {
+        FactoryIdentity::Linked { plugin, revision } => {
+            validate_identifier("revision", revision, maximum)?;
+            plugin
+        }
+        FactoryIdentity::Native { plugin, sha256 } => {
+            if sha256.len() != 64
+                || !sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return Err(HostError::InvalidNativeDigest);
+            }
+            plugin
+        }
+    };
+    validate_identifier("plugin", plugin.as_str(), maximum)?;
+    Ok(plugin)
+}
+
 fn validate_limits(limits: &HostLimits) -> Result<()> {
     for (resource, value) in [
-        ("linked plugins", limits.maximum_linked_plugins),
+        ("factories", limits.maximum_factories),
         ("Profile fragments", limits.maximum_fragments),
         ("Local contracts", limits.maximum_local_contracts),
         ("Local events", limits.maximum_local_events),

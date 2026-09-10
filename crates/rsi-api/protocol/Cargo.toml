@@ -1,0 +1,26 @@
+[package]
+name = "rsi-api-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+tokio-util.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+getrandom.workspace = true
+
+[lints]
+workspace = true

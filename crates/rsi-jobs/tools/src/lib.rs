@@ -359,8 +359,8 @@ fn job_stream_value(read: &JobOutputRead) -> Value {
 }
 
 fn render_stream_text(stdout: &JobOutputRead, stderr: &JobOutputRead, fallback: &str) -> String {
-    let stdout_text = safe_model_text(&stdout.bytes);
-    let stderr_text = safe_model_text(&stderr.bytes);
+    let stdout_text = rsi_tools_protocol::safe_tool_text(&stdout.bytes);
+    let stderr_text = rsi_tools_protocol::safe_tool_text(&stderr.bytes);
     let stdout = render_one_stream("stdout", stdout, &stdout_text);
     let stderr = render_one_stream("stderr", stderr, &stderr_text);
     match (stdout.is_empty(), stderr.is_empty()) {
@@ -382,21 +382,6 @@ fn render_one_stream(kind: &str, read: &JobOutputRead, text: &str) -> String {
     } else {
         text.to_owned()
     }
-}
-
-fn safe_model_text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .map(|character| {
-            if (character.is_ascii_control() && !matches!(character, '\t' | '\n' | '\r'))
-                || character == '\u{7f}'
-            {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect()
 }
 
 fn jobs_error_result(error: &JobsError) -> rsi_tools_protocol::Result<ToolResult> {

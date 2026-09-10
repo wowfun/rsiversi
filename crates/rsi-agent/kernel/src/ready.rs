@@ -47,7 +47,7 @@ impl Drop for ReadyReservation {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     pub(super) fn request_ready_scan(&self) {
         let mut scheduler = self
             .inner

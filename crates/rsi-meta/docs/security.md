@@ -7,6 +7,13 @@ and allocator contract at the operation that relies on it.
 
 ## Runtime policy and durable input
 
+Runtime execution is injected before composition. Platform task, clock and timer
+adapters are trusted safe-Rust dependencies; JS objects may not be made Send/Sync
+through unsafe implementations. Native execution retains the captured Tokio
+handle. Browser bridges retain foreign resources in bounded thread-local tables.
+Unwind containment applies only where the target supports unwinding: a browser
+Worker trap is fatal and cannot establish cleanup completion.
+
 `Runtime::new` validates topology, payload, execution, and deadline groups
 before constructing a downstream primitive. Zero widths, arithmetic overflow,
 Tokio primitive maxima, inconsistent aggregate/per-item limits, and deadlines
@@ -94,7 +101,11 @@ modules above core; Context contains no arbitrary extension value or intercept
 map that can become ambient authority.
 
 Every mutable plugin operation validates Runtime, Fiber, generation, and
-transaction state while holding the owning state lock. User setup, cleanup,
+transaction state while holding the owning state lock. Stable child positions
+are opaque Runtime-local metadata scoped to the exact parent generation.
+Selection and reorder validate that owner, and apply exclusively claims the
+position while the admitted Fiber occupies it. Retained position metadata has
+its own capacity bound and cannot keep execution admission open. User setup, cleanup,
 notification, Local object/event, Portable service, and listener callbacks run without Runtime or
 scope-store locks.
 
@@ -242,8 +253,9 @@ gate, cache lease, and accounting until foreign code actually returns.
 
 The native loader owns a dedicated content-addressed staging cache and its callback,
 instance, destruction, staging, and durable-byte limits. It accepts regular
-non-symlink files, hashes through bounded private staging, validates ABI before
-mapping, and records the digest of the exact stable copy. It performs no package
+non-symlink files, hashes through bounded private staging, optionally fences an
+expected digest before mapping, and validates ABI entry before publication. It
+records the digest of the exact stable copy. It performs no package
 discovery or version resolution. Unix operations resolve
 against the pinned and locked directory object; Windows support requires an
 exclusive private writer followed by a read-only handle denying write and

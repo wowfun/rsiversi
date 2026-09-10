@@ -2,15 +2,56 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct ClaimMutationGate {
-    pub(super) closed: AtomicBool,
-    pub(super) retiring: AtomicBool,
-    reopen: AtomicBool,
-    draining: AtomicBool,
-    terminal_admitted: AtomicBool,
-    waiting: AtomicBool,
-    pub(super) active: AtomicUsize,
-    pub(super) drained: Notify,
-    pub(super) stopping: CancellationToken,
+    state: std::sync::Mutex<ClaimMutationState>,
+    drained: Notify,
+    stopping: CancellationToken,
+}
+
+#[derive(Default, Eq, PartialEq)]
+enum MutationAdmission {
+    #[default]
+    Open,
+    Closed,
+    ReopenPending,
+    TerminalAdmitted,
+    Failed,
+}
+
+#[derive(Default)]
+struct ClaimMutationState {
+    admission: MutationAdmission,
+    retiring: bool,
+    terminal_drainer: bool,
+    waiting: bool,
+    active: usize,
+}
+
+impl ClaimMutationGate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ClaimMutationState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn is_retiring(&self) -> bool {
+        self.lock().retiring
+    }
+
+    pub(super) fn retire(&self) -> bool {
+        let drained = {
+            let mut state = self.lock();
+            state.retiring = true;
+            if !matches!(
+                state.admission,
+                MutationAdmission::TerminalAdmitted | MutationAdmission::Failed
+            ) {
+                state.admission = MutationAdmission::Closed;
+            }
+            state.active == 0
+        };
+        self.stopping.cancel();
+        drained
+    }
 }
 
 pub(super) struct AgentMutationLease {
@@ -31,7 +72,7 @@ impl std::ops::Deref for WaitMutationLease {
 
 impl Drop for WaitMutationLease {
     fn drop(&mut self) {
-        self.0.gate.waiting.store(false, Ordering::Release);
+        self.0.gate.lock().waiting = false;
     }
 }
 
@@ -40,31 +81,31 @@ pub(super) struct TerminalMutationDrain {
     session_id: SessionId,
     turn_id: TurnId,
     gate: Arc<ClaimMutationGate>,
-    admitted: bool,
 }
 
 impl TerminalMutationDrain {
-    pub(super) fn admit(mut self) {
-        self.gate.terminal_admitted.store(true, Ordering::Release);
-        self.admitted = true;
+    pub(super) fn admit(self) {
+        self.gate.lock().admission = MutationAdmission::TerminalAdmitted;
     }
 }
 
 impl Drop for TerminalMutationDrain {
     fn drop(&mut self) {
-        if self.admitted {
-            self.gate.draining.store(false, Ordering::Release);
-            return;
+        let inner = self.inner.upgrade();
+        let mut kernel_state = inner.as_ref().map(|inner| lock_state(inner));
+        {
+            let mut state = self.gate.lock();
+            state.terminal_drainer = false;
+            if !matches!(
+                state.admission,
+                MutationAdmission::TerminalAdmitted | MutationAdmission::Failed
+            ) {
+                state.admission = MutationAdmission::ReopenPending;
+            }
         }
-        let Some(inner) = self.inner.upgrade() else {
-            return;
-        };
-        let mut state = lock_state(&inner);
-        self.gate.draining.store(false, Ordering::Release);
-        self.gate.reopen.store(true, Ordering::Release);
-        if let Some(turn) = state
-            .sessions
-            .get_mut(&self.session_id)
+        if let Some(turn) = kernel_state
+            .as_mut()
+            .and_then(|state| state.sessions.get_mut(&self.session_id))
             .and_then(|session| session.turns.get_mut(&self.turn_id))
         {
             reopen_drained_gate(turn, &self.gate);
@@ -73,11 +114,14 @@ impl Drop for TerminalMutationDrain {
 }
 
 fn reopen_drained_gate(turn: &mut TurnControl, gate: &Arc<ClaimMutationGate>) {
-    if gate.reopen.load(Ordering::Acquire)
-        && !gate.retiring.load(Ordering::Acquire)
-        && !gate.terminal_admitted.load(Ordering::Acquire)
-        && !gate.draining.load(Ordering::Acquire)
-        && gate.active.load(Ordering::Acquire) == 0
+    let can_reopen = {
+        let state = gate.lock();
+        state.admission == MutationAdmission::ReopenPending
+            && !state.retiring
+            && !state.terminal_drainer
+            && state.active == 0
+    };
+    if can_reopen
         && turn.terminal.is_none()
         && !turn.cancellation.is_cancelled()
         && let Some(owner) = &mut turn.claim
@@ -108,9 +152,12 @@ impl AgentMutationLease {
         {
             return;
         }
-        session
-            .permanent_flush_error
-            .get_or_insert_with(|| bounded_diagnostic(&format!("retained wait failed: {error}")));
+        // Permanent failure closes business admission while preserving explicit claim release.
+        self.gate.lock().admission = MutationAdmission::Failed;
+        self.gate.stopping.cancel();
+        session.permanent_flush_error.get_or_insert_with(|| {
+            bounded_diagnostic(&format!("retained mutation failed: {error}"))
+        });
         session.flush_status.send_replace(FlushStatus {
             durable_seq: session.durable_seq,
             permanent_error: session.permanent_flush_error.clone(),
@@ -121,7 +168,7 @@ impl AgentMutationLease {
 
     pub(super) fn validate(
         &self,
-        kernel: &SessionKernel,
+        kernel: &AgentKernel,
         caller: &AgentCallerAuthority,
     ) -> TurnResult<()> {
         kernel.validate_issued_claim(caller.claim())?;
@@ -147,10 +194,16 @@ impl Drop for AgentMutationLease {
             return;
         };
         let mut state = lock_state(&inner);
-        let remaining = self.gate.active.fetch_sub(1, Ordering::AcqRel) - 1;
+        let (remaining, retiring) = {
+            let mut gate = self.gate.lock();
+            gate.active = gate
+                .active
+                .checked_sub(1)
+                .expect("every mutation lease releases once");
+            (gate.active, gate.retiring)
+        };
         if remaining == 0 {
-            self.gate.drained.notify_waiters();
-            if self.gate.retiring.load(Ordering::Acquire) {
+            if retiring {
                 let mut requeue = false;
                 if let Some(turn) = state
                     .sessions
@@ -166,7 +219,6 @@ impl Drop for AgentMutationLease {
                 if requeue {
                     enqueue(&mut state, self.session_id.clone(), self.turn_id.clone());
                 }
-                inner.claim_changed.notify_waiters();
             } else if let Some(turn) = state
                 .sessions
                 .get_mut(&self.session_id)
@@ -175,16 +227,27 @@ impl Drop for AgentMutationLease {
                 reopen_drained_gate(turn, &self.gate);
             }
         }
+        drop(state);
+        if remaining == 0 {
+            self.gate.drained.notify_waiters();
+            if retiring {
+                inner.claim_changed.notify_waiters();
+            }
+        }
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     pub(super) fn admit_wait_mutation(
         &self,
         caller: &AgentCallerAuthority,
     ) -> TurnResult<WaitMutationLease> {
         let mutation = self.admit_agent_mutation(caller, &CancellationToken::new())?;
-        if mutation.gate.waiting.swap(true, Ordering::AcqRel) {
+        let already_waiting = {
+            let mut state = mutation.gate.lock();
+            std::mem::replace(&mut state.waiting, true)
+        };
+        if already_waiting {
             return Err(TurnError::Invalid(
                 "claim already owns a retained wait".into(),
             ));
@@ -207,13 +270,14 @@ impl SessionKernel {
             .as_ref()
             .expect("validated claim owner")
             .mutations;
-        if gate.closed.load(Ordering::Acquire)
+        let mut admission = gate.lock();
+        if admission.admission != MutationAdmission::Open
             || turn.cancellation.is_cancelled()
             || cancellation.is_cancelled()
         {
             return Err(TurnError::StaleClaim);
         }
-        gate.active.fetch_add(1, Ordering::AcqRel);
+        admission.active += 1;
         Ok(AgentMutationLease {
             inner: Arc::downgrade(&self.inner),
             session_id: caller.session_id().clone(),
@@ -233,12 +297,17 @@ impl SessionKernel {
             .as_ref()
             .expect("validated claim owner")
             .mutations;
-        if !gate.closed.load(Ordering::Acquire) || gate.active.load(Ordering::Acquire) != 0 {
+        let mut admission = gate.lock();
+        if !matches!(
+            admission.admission,
+            MutationAdmission::Closed | MutationAdmission::TerminalAdmitted
+        ) || admission.active != 0
+        {
             return Err(TurnError::Invariant(
                 "terminal mutation gate was not drained".into(),
             ));
         }
-        gate.active.fetch_add(1, Ordering::AcqRel);
+        admission.active += 1;
         Ok(AgentMutationLease {
             inner: Arc::downgrade(&self.inner),
             session_id: claim.session_id().clone(),
@@ -261,17 +330,21 @@ impl SessionKernel {
                     .expect("validated claim owner")
                     .mutations,
             );
-            if gate.draining.swap(true, Ordering::AcqRel) {
-                return Err(TurnError::StaleClaim);
+            {
+                let mut admission = gate.lock();
+                if admission.terminal_drainer || admission.admission == MutationAdmission::Failed {
+                    return Err(TurnError::StaleClaim);
+                }
+                admission.terminal_drainer = true;
+                if admission.admission != MutationAdmission::TerminalAdmitted {
+                    admission.admission = MutationAdmission::Closed;
+                }
             }
-            gate.closed.store(true, Ordering::Release);
-            gate.reopen.store(false, Ordering::Release);
             gate.stopping.cancel();
             TerminalMutationDrain {
                 inner: Arc::downgrade(&self.inner),
                 session_id: claim.session_id().clone(),
                 turn_id: claim.turn_id().clone(),
-                admitted: gate.terminal_admitted.load(Ordering::Acquire),
                 gate,
             }
         };
@@ -280,7 +353,7 @@ impl SessionKernel {
                 let notified = drain.gate.drained.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if drain.gate.active.load(Ordering::Acquire) == 0 {
+                if drain.gate.lock().active == 0 {
                     break;
                 }
                 notified.await;
@@ -310,7 +383,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     pub(super) async fn interrupt_descendant(
         &self,
         caller: &AgentCallerAuthority,
@@ -320,16 +393,16 @@ impl SessionKernel {
     ) -> TurnResult<CancelResult> {
         let admission = self.inner.submission_admission.acquire(session_id).await?;
         self.ensure_session_loaded(session_id).await?;
-        let live_seq = {
+        let wait = {
             let state = lock_state(&self.inner);
-            state
+            let session = state
                 .sessions
                 .get(session_id)
-                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-                .live_seq()
-                .map_err(turn_kernel_error)?
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
+            DurabilityWait::new(session, session.live_seq().map_err(turn_kernel_error)?)
         };
-        self.wait_for_durable(session_id, live_seq)
+        let live_seq = wait.through_seq;
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         let (fact, turn_cancellation) = {
@@ -375,14 +448,13 @@ impl SessionKernel {
             let _source = source;
             kernel
                 .inner
-                .store
                 .commit_agent(AtomicAgentCommit {
                     sessions: vec![AtomicSessionAppend {
                         session_id: session_id.clone(),
                         expected_fact_seq: live_seq,
                         expected_control_seq,
                         header: None,
-                        facts: vec![fact.as_ref().clone()],
+                        facts: vec![Arc::clone(&fact)],
                         controls: Vec::new(),
                     }],
                     required_active_activations: Vec::new(),
@@ -402,7 +474,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     fn install_committed_interrupt(
         &self,
         session_id: &SessionId,

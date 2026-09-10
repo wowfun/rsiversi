@@ -14,7 +14,7 @@ rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rsi-process-local = { path = "../../rsi-process/local" }
@@ -22,7 +22,7 @@ rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
 rsi-tools = { path = "../../rsi-tools/core" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 tokio-util.workspace = true
 
 [lints]

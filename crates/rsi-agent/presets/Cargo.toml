@@ -21,7 +21,10 @@ rustix.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [lints]
 workspace = true

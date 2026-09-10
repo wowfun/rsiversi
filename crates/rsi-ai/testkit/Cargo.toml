@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+bytes.workspace = true
 futures-util.workspace = true
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }

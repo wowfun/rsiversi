@@ -1,8 +1,22 @@
 # rsi-agent-workspace-context
 
 This package owns bounded filesystem discovery for model-visible workspace
-instructions and skills. It exposes one process-local snapshot service; the
-Agent Kernel owns durable Fact insertion and digest comparison.
+instructions and skills. Its global snapshot service owns filesystem discovery;
+its Agent-only contributor owns direct-user invocation interpretation, digest
+comparison, replacement/tombstone inputs and last-good state. The contributor
+registers a typed `rsi.workspace-context` domain and returns the actual entered
+text with its state proposal. The executor commits the whole stage through the
+generic Kernel boundary.
+
+The state carries a Session-and-Turn-bound Fact cursor. A complete snapshot advances the
+cursor and digests atomically with its inputs; an incomplete snapshot advances
+neither. Each new Turn starts at its exact acceptance, so a claim-filtered scan
+cannot skip a previously queued acceptance when its Turn later executes. A fork
+likewise starts from the child's acceptance and retains only inherited digests.
+History is paged at the captured horizon and only the current Turn's Human
+entered content or direct Turn acceptance can
+request skills. The filesystem source receives bounded selected invocation
+names and never receives a Store writer.
 
 All instances and generations share four process-wide blocking lanes. Each job
 reserves a conservative 16 MiB aggregate envelope, including configuration,
@@ -43,7 +57,7 @@ rendered result is
 bounded by UTF-8 bytes without splitting a scalar value. Malformed, oversized,
 or Session-unsafe optional files containing NUL or DEL are skipped.
 An absent optional path is also a complete omission. Any other filesystem I/O
-failure marks the observation incomplete, so the Kernel preserves the last-good
+failure marks the observation incomplete, so the contributor preserves the last-good
 durable digests instead of publishing replacement or tombstone Facts from a
 partial scan.
 
@@ -53,7 +67,7 @@ fit; project sections are selected deepest-first so the most specific policy
 wins, then rendered root-to-cwd. The skill catalog retains its lexical prefix.
 `complete` means discovery and selected reads formed a coherent observation; it
 does not mean every eligible source byte fit the model-visible render. Digests
-always cover the exact bounded text returned to the Kernel.
+always cover the exact bounded text proposed for persistence.
 
 The trusted project authority root is acquired once per snapshot without
 following Unix path components and retained as a directory capability. Project
@@ -63,12 +77,14 @@ redirect a read outside the selected project. A project skill root or entry
 that is itself a symbolic link is a complete omission rather than an unexpected
 I/O failure. The source is still reopened on each observation, so edits remain
 visible before the next provider request.
+The Unix handle mechanics are shared through
+[`rsi-files-native-fs`](../../rsi-files/native-fs/README.md); instruction discovery,
+WorkspaceTrust and snapshot capacity remain owned here.
 The typed Session Header is trusted at this process-local seam; only its cwd and
 workspace-trust value cross into the blocking discovery task.
 
-The service returns complete instruction and catalog digests. It recognizes a
-skill invocation only in direct Human content whose first nonempty-line token is
-`/<name>`, and returns the selected skill body separately so the Kernel can put
-it last in the Step context. Callers lend message references; invocation names
-are extracted before blocking filesystem discovery, so large durable message
-payloads are not cloned merely to cross the blocking-task boundary.
+The service returns complete instruction and catalog digests. The contributor
+recognizes a skill invocation only in direct Human content whose first
+nonempty-line token is `/<name>`, and places selected skill bodies after its
+background inputs. Invocation names are extracted from borrowed Fact content
+before blocking filesystem discovery; durable message payloads are not cloned.

@@ -201,7 +201,11 @@ fn opening_a_service_outside_tokio_uses_the_caller_fiber_executor_without_panick
         .enable_all()
         .build()
         .unwrap();
-    let runtime = Runtime::default();
+    let runtime = Runtime::with_execution(
+        RuntimeLimits::default(),
+        rsi_meta::Execution::native(executor.handle().clone()),
+    )
+    .unwrap();
     let service = executor.block_on(captured_service(
         &runtime,
         Arc::new(CompletingEndpoint {
@@ -229,7 +233,11 @@ fn opening_a_service_does_not_probe_an_unrelated_runtime_without_time() {
         .enable_all()
         .build()
         .unwrap();
-    let runtime = Runtime::default();
+    let runtime = Runtime::with_execution(
+        RuntimeLimits::default(),
+        rsi_meta::Execution::native(setup_executor.handle().clone()),
+    )
+    .unwrap();
     let service = setup_executor.block_on(captured_service(
         &runtime,
         Arc::new(CancellationAwarePendingEndpoint {

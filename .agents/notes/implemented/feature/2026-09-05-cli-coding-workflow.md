@@ -25,8 +25,8 @@ interaction snapshots. The line CLI owns one renderer and independent
 observation and interaction-refresh tasks. These tasks cannot suspend a Store
 read while synchronously waiting on another read through the same byte budget.
 The input reader is a bounded handoff; a receipt always describes durable
-Kernel acceptance. Session format 7, SQLite schema 12, and wire epoch 5 make
-the new contracts explicit without pre-release compatibility shims.
+Kernel acceptance. Durable formats and the [local connection fence](../../../../crates/rsi/service-host/README.md)
+make these contracts explicit without pre-release compatibility shims.
 
 Human-wait cleanup is registered before its handle escapes. A retained lease
 can finish its admitted control transition after claim release or shutdown;

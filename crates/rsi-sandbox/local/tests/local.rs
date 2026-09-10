@@ -12,6 +12,109 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[tokio::test]
+async fn workspace_scopes_preserve_each_mode_and_exact_provider_generation() {
+    let runtime = Runtime::default();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let mut previous = None;
+    for _ in 0..2 {
+        let fiber = runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "sandbox",
+                    "test",
+                    UpdateMode::Replayable,
+                    Arc::new(SandboxLocalFactory::default()),
+                ),
+                json!({"bubblewrap": [], "landlock": []}),
+            )
+            .await
+            .unwrap();
+        let service = runtime.root().lookup_local::<SandboxContract>().unwrap();
+        let mut generation = None;
+        for mode in [
+            SandboxMode::ReadOnly,
+            SandboxMode::WorkspaceWrite,
+            SandboxMode::DangerFullAccess,
+        ] {
+            let scope = service
+                .workspace_read(rsi_sandbox::WorkspaceReadRequest {
+                    mode,
+                    cwd: root.join("not-opened-child"),
+                    workspace: root.clone(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(scope.mode(), mode);
+            assert_eq!(scope.cwd(), root.join("not-opened-child"));
+            assert_eq!(scope.workspace(), root);
+            if let Some(generation) = &generation {
+                assert_eq!(scope.generation(), generation);
+            }
+            if let Some(previous) = &previous {
+                assert_ne!(scope.generation(), previous);
+            }
+            generation = Some(scope.generation().clone());
+        }
+        previous = generation;
+        assert!(fiber.dispose().await.is_clean());
+    }
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreign_policy_paths_are_rejected_before_native_resolution() {
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "sandbox",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::default()),
+            ),
+            json!({"bubblewrap": [], "landlock": []}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    for mode in [
+        SandboxMode::ReadOnly,
+        SandboxMode::WorkspaceWrite,
+        SandboxMode::DangerFullAccess,
+    ] {
+        for field in ["cwd", "workspace"] {
+            let native = temporary.path().to_owned();
+            let foreign = PathBuf::from(r"C:\project");
+            let result = sandbox
+                .confine(ProcessRequest {
+                    mode,
+                    program: std::env::current_exe().unwrap(),
+                    arguments: vec![],
+                    cwd: if field == "cwd" {
+                        foreign.clone()
+                    } else {
+                        native.clone()
+                    },
+                    workspace: if field == "workspace" {
+                        foreign
+                    } else {
+                        native
+                    },
+                })
+                .await;
+            assert!(matches!(result, Err(SandboxError::InvalidInput(message))
+                if message.contains(field) && message.contains("native absolute")));
+        }
+    }
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[derive(Debug)]
 struct Probe {
     replace_during_probe: Option<PathBuf>,
@@ -810,4 +913,58 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
     std::fs::remove_file(host_tmp_marker).unwrap();
     drop(sandbox);
     assert!(fiber.dispose().await.is_clean());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn system_probe_retries_a_temporarily_writable_executable_without_accepting_a_failed_probe() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("probe");
+    let mut writer = std::fs::File::create(&path).unwrap();
+    writer.write_all(b"#!/bin/sh\nexit 23\n").unwrap();
+    writer.sync_all().unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let probe = rsi_sandbox_local::SystemSandboxProbe;
+    let mut pending = Box::pin(probe.available(&path, &[]));
+    assert!(
+        futures_poll(&mut pending).await,
+        "the busy executable must remain retryable"
+    );
+    drop(writer);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), pending)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    let rejected = temporary.path().join("rejected");
+    std::fs::write(&rejected, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&rejected, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(!probe.available(&rejected, &[]).await.unwrap());
+}
+
+#[cfg(target_os = "linux")]
+async fn futures_poll<F: std::future::Future>(future: &mut std::pin::Pin<Box<F>>) -> bool {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())).await
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(start_paused = true)]
+async fn a_permanently_busy_probe_exhausts_one_absolute_deadline() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("probe");
+    let mut writer = std::fs::File::create(&path).unwrap();
+    writer.write_all(b"#!/bin/sh\nexit 23\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let started = tokio::time::Instant::now();
+    let result = rsi_sandbox_local::SystemSandboxProbe
+        .available(&path, &[])
+        .await;
+    assert!(matches!(result, Err(SandboxError::Probe(message)) if message.contains("timed out")));
+    assert_eq!(started.elapsed(), std::time::Duration::from_secs(2));
+    drop(writer);
 }

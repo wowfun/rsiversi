@@ -285,7 +285,7 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = kernel.start_workers();
@@ -350,13 +350,10 @@ async fn shutdown_settles_joined_cold_hydration_without_installing_a_resident_pi
     });
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     store.pause_next_open_turn_read();
 
@@ -595,7 +592,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
     };
     let memory = Arc::new(MemoryStore::new());
     let store: Arc<dyn SessionStore> = memory.clone();
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store,
         composition(),
         Arc::new(FixedClock),
@@ -701,7 +698,7 @@ async fn publication_larger_than_an_empty_process_budget_is_invalid() {
             > accepted_bytes
     );
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store,
         composition(),
         Arc::new(FixedClock),
@@ -796,7 +793,8 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
     let second_base_bytes = SessionFact::new(5, 42, second_delta_base)
         .unwrap()
         .encoded_len();
-    let pending_budget = usize::try_from(MAXIMUM_TURN_GENERATED_FACT_BYTES).unwrap() - intent_bytes;
+    let pending_budget =
+        usize::try_from(MAXIMUM_TURN_GENERATED_RECORD_BYTES).unwrap() - intent_bytes;
     let second_text_bytes = pending_budget
         .checked_sub(started_bytes + first_delta_bytes + second_base_bytes - 1)
         .expect("maximum deltas leave room for the second event");
@@ -888,7 +886,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
     .unwrap();
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store.clone() as Arc<dyn SessionStore>,
         composition(),
         Arc::new(FixedClock),
@@ -1009,7 +1007,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
             .encoded_len();
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store.clone() as Arc<dyn SessionStore>,
         composition(),
         Arc::new(FixedClock),
@@ -1144,7 +1142,7 @@ async fn live_session_working_set_has_an_exact_global_bound() {
 async fn active_observer_capacity_is_exact_and_released_on_drop() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store;
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
@@ -1225,12 +1223,13 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         let session_id = SessionId::new(format!("terminal-session-{index}")).unwrap();
         let turn_id = TurnId::new(format!("terminal-turn-{index}")).unwrap();
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store.as_ref(),
+            AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: Some(header(session_id.as_str())),
-                facts: vec![
+                facts: (vec![
                     SessionFact::new(
                         1,
                         1,
@@ -1252,10 +1251,14 @@ async fn cancelling_evicted_terminal_turns_does_not_consume_live_session_capacit
                         },
                     )
                     .unwrap(),
-                ],
-            })
-            .await
-            .unwrap();
+                ])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            },
+        )
+        .await
+        .unwrap();
         terminal_turns.push((session_id, turn_id));
     }
     let kernel = kernel(store).await;
@@ -1290,12 +1293,13 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         let session_id = SessionId::new(format!("invalid-resume-session-{index}")).unwrap();
         let turn_id = TurnId::new(format!("invalid-resume-turn-{index}")).unwrap();
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store.as_ref(),
+            AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq: 0,
                 header: Some(header(session_id.as_str())),
-                facts: vec![
+                facts: (vec![
                     SessionFact::new(
                         1,
                         1,
@@ -1317,10 +1321,14 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
                         },
                     )
                     .unwrap(),
-                ],
-            })
-            .await
-            .unwrap();
+                ])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            },
+        )
+        .await
+        .unwrap();
         terminal_sessions.push(session_id);
     }
     let kernel = kernel(store).await;
@@ -1362,7 +1370,7 @@ async fn failed_admission_after_hydration_releases_idle_resident_capacity() {
     }
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
@@ -1419,7 +1427,7 @@ async fn historical_outcome_lookup_does_not_page_the_complete_session_log() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     store.reset_read_attempts();
@@ -1448,7 +1456,7 @@ async fn recovery_skips_fact_pages_for_sessions_without_open_turns() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
 
-    SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+    AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
 
@@ -1471,7 +1479,7 @@ async fn durable_observation_pages_store_reads_instead_of_reading_one_fact_at_a_
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     store.reset_read_attempts();
@@ -1500,7 +1508,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = kernel.start_workers();
@@ -1562,13 +1570,10 @@ async fn concurrent_resume_joins_the_resident_load_when_source_becomes_unavailab
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
-    let kernel = SessionKernel::recover_with_clock(
-        store_contract,
-        composition_contract,
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store_contract, composition_contract, Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     store.pause_next_open_turn_read();
 
@@ -1623,7 +1628,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     store.block_header_reads();
@@ -1633,6 +1638,9 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();
@@ -1687,7 +1695,7 @@ async fn cancelled_fresh_header_lookup_releases_its_exact_reservation() {
 async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock_and_limits(
+    let kernel = AgentKernel::recover_with_clock_and_limits(
         store_contract,
         composition(),
         Arc::new(FixedClock),
@@ -1705,6 +1713,9 @@ async fn failed_fresh_submission_releases_its_prepared_generation_pin() {
         session_header.agent_preset_id().clone(),
         "a".repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(DropOwner(Arc::clone(&drops))),
     )
     .unwrap();
@@ -1734,7 +1745,7 @@ async fn cancelled_hydration_leader_settles_followers_and_releases_capacity() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     store.pause_next_open_turn_read();
@@ -1807,7 +1818,7 @@ async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
     let store = Arc::new(FactReadRaceStore::new(memory));
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel =
-        SessionKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store_contract, composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = kernel.start_workers();
@@ -1838,4 +1849,599 @@ async fn cold_resume_resolves_its_header_before_resident_capacity_rejection() {
         "cold resume must read its durable preset before resident admission"
     );
     kernel.shutdown(worker).await.unwrap();
+}
+
+async fn retained_history(store: &MemoryStore, name: &str) -> usize {
+    let turn = TurnId::new("retained-turn").unwrap();
+    let bodies = vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "accepted".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::ModelEvent {
+            turn_id: turn.clone(),
+            effect_id: EffectId::new("retained-effect").unwrap(),
+            event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                index: 0,
+                delta: rsi_ai_protocol::ContentDelta::Text("x".repeat(8 * 1024 * 1024)),
+            },
+        },
+        SessionFactBody::TurnTerminal {
+            turn_id: turn,
+            outcome: TurnOutcome::Completed,
+        },
+    ];
+    let facts = bodies
+        .into_iter()
+        .enumerate()
+        .map(|(index, body)| {
+            Arc::new(SessionFact::new(u64::try_from(index + 1).unwrap(), 1, body).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let bytes = facts.iter().map(|fact| fact.encoded_len()).sum();
+    rsi_agent_testkit::append_history_fixture(
+        store,
+        AppendBatch {
+            session_id: SessionId::new(name).unwrap(),
+            expected_seq: 0,
+            header: Some(header(name)),
+            facts,
+        },
+    )
+    .await
+    .unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_exactly() {
+    use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
+    let memory = Arc::new(MemoryStore::new());
+    let bytes = retained_history(&memory, "retained-history").await;
+    let kernel = AgentKernel::recover_with_clock(memory, composition(), Arc::new(FixedClock))
+        .await
+        .unwrap();
+    let session = SessionId::new("retained-history").unwrap();
+    let admitted = rsi_agent_turn_protocol::DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES / bytes;
+    let mut streams = Vec::new();
+    for _ in 0..admitted {
+        streams.push(
+            kernel
+                .observe_session(
+                    &session,
+                    ObservationCursor {
+                        control_seq: 1,
+                        fact_seq: 0,
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    assert!(matches!(
+        kernel
+            .observe_session(
+                &session,
+                ObservationCursor {
+                    control_seq: 1,
+                    fact_seq: 0
+                }
+            )
+            .await,
+        Err(TurnError::Capacity)
+    ));
+    let mut stream = streams.pop().unwrap();
+    drop(stream.next().await.unwrap().unwrap());
+    let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
+        panic!("Fact history")
+    };
+    assert_eq!(fact.seq(), 2);
+    let last_clone = fact.clone();
+    drop(fact);
+    drop(stream);
+    assert!(
+        matches!(
+            kernel
+                .observe_session(
+                    &session,
+                    ObservationCursor {
+                        control_seq: 1,
+                        fact_seq: 0
+                    }
+                )
+                .await,
+            Err(TurnError::Capacity)
+        ),
+        "dropping the stream must not uncharge a retained item clone"
+    );
+    drop(last_clone);
+    let replacement = kernel
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 1,
+                fact_seq: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let mut resumed = kernel
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 1,
+                fact_seq: 2,
+            },
+        )
+        .await
+        .unwrap();
+    let SessionObservation::Fact { fact, .. } = resumed.next().await.unwrap().unwrap() else {
+        panic!("terminal Fact")
+    };
+    assert_eq!(fact.seq(), 3);
+    drop(replacement);
+    drop(streams);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unrelated_executor_changes_do_not_reread_idle_durable_observers() {
+    use rsi_agent_turn_protocol::ObservationCursor;
+    let memory = Arc::new(MemoryStore::new());
+    for index in 0..12 {
+        append_terminal_history(&memory, &format!("idle-observer-{index}"), 1).await;
+    }
+    let kernel =
+        AgentKernel::recover_with_clock(memory.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let mut streams = Vec::new();
+    for index in 0..12 {
+        let session = SessionId::new(format!("idle-observer-{index}")).unwrap();
+        streams.push(
+            kernel
+                .observe_session(
+                    &session,
+                    ObservationCursor {
+                        control_seq: 1,
+                        fact_seq: 2,
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    memory.take_fact_read_cursors();
+    let mut waiting = streams
+        .iter_mut()
+        .map(|stream| Box::pin(stream.next()))
+        .collect::<Vec<_>>();
+    for future in &mut waiting {
+        assert!(futures_util::poll!(future.as_mut()).is_pending());
+    }
+    let _registration = kernel.register("unrelated-executor".into()).unwrap();
+    for future in &mut waiting {
+        assert!(futures_util::poll!(future.as_mut()).is_pending());
+    }
+    assert!(memory.take_fact_read_cursors().is_empty());
+}
+
+#[tokio::test]
+async fn minimum_retention_and_read_budgets_make_progress_one_page_at_a_time() {
+    use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
+    let memory = Arc::new(MemoryStore::new());
+    retained_history(&memory, "minimum-retention").await;
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        memory,
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_store_read_bytes: rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES,
+            maximum_retained_observation_bytes:
+                rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let session = SessionId::new("minimum-retention").unwrap();
+    let mut stream = kernel
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 1,
+                fact_seq: 0,
+            },
+        )
+        .await
+        .unwrap();
+    for expected in 1..=3 {
+        let update = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let SessionObservation::Fact { fact, .. } = update else {
+            panic!("Fact history")
+        };
+        assert_eq!(fact.seq(), expected);
+    }
+}
+
+#[tokio::test]
+async fn durable_observation_alternates_pages_without_prefetching_the_second_payload_page() {
+    use rsi_agent_session_protocol::{
+        ActivationOutcome, AgentControlRecord, AgentControlRecordBody, AgentPath,
+    };
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
+    let memory = Arc::new(MemoryStore::new());
+    let session = SessionId::new("alternating-pages").unwrap();
+    append_terminal_history(&memory, session.as_str(), 300).await;
+    for start in [300_u64, 600] {
+        let controls = (0..150)
+            .flat_map(|offset| {
+                let seq = start + offset * 2 + 1;
+                let activation = ActivationId::new(format!("activation-{seq}")).unwrap();
+                [
+                    AgentControlRecord::new(
+                        seq,
+                        1,
+                        AgentControlRecordBody::ActivationStarted {
+                            activation_id: activation.clone(),
+                            parent_session_id: None,
+                            root_session_id: session.clone(),
+                            path: AgentPath::root(),
+                        },
+                    )
+                    .unwrap(),
+                    AgentControlRecord::new(
+                        seq + 1,
+                        1,
+                        AgentControlRecordBody::ActivationSettled {
+                            activation_id: activation,
+                            outcome: ActivationOutcome::Completed,
+                        },
+                    )
+                    .unwrap(),
+                ]
+            })
+            .collect();
+        memory
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: session.clone(),
+                    expected_fact_seq: 600,
+                    expected_control_seq: start,
+                    header: None,
+                    facts: vec![],
+                    controls,
+                }],
+                required_active_activations: vec![],
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+    }
+    let observed = Arc::new(FactReadRaceStore::new(memory));
+    let kernel =
+        AgentKernel::recover_with_clock(observed.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    observed.reset_read_attempts();
+    let mut stream = kernel
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 300,
+                fact_seq: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.read_attempts(),
+        0,
+        "the initial control page must not retain a Fact page too"
+    );
+    for (controls, first, last) in [
+        (true, 301, 812),
+        (false, 1, 512),
+        (true, 813, 900),
+        (false, 513, 600),
+    ] {
+        for expected in first..=last {
+            match stream.next().await.unwrap().unwrap() {
+                SessionObservation::Control { record, .. } => {
+                    assert!(controls);
+                    assert_eq!(record.seq(), expected);
+                }
+                SessionObservation::Fact { fact, .. } => {
+                    assert!(!controls);
+                    assert_eq!(fact.seq(), expected);
+                }
+            }
+        }
+    }
+    assert_eq!(observed.read_attempts(), 2);
+}
+
+#[tokio::test]
+async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets() {
+    use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("maximum-observed-fact").unwrap();
+    let turn = TurnId::new("maximum-turn").unwrap();
+    let model_fact = |text| {
+        SessionFact::new(
+            2,
+            2,
+            SessionFactBody::ModelEvent {
+                turn_id: turn.clone(),
+                effect_id: EffectId::new("maximum-effect").unwrap(),
+                event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: rsi_ai_protocol::ContentDelta::Text(text),
+                },
+            },
+        )
+        .unwrap()
+    };
+    let overhead = model_fact("x".into()).encoded_len() - 1;
+    let payload = MAXIMUM_SESSION_FACT_BYTES - overhead;
+    // JSON escapes NUL to six bytes. The decoded delta remains below 32 MiB.
+    let text = "\0".repeat(payload / 6) + &"x".repeat(payload % 6);
+    let maximum = model_fact(text);
+    assert_eq!(maximum.encoded_len(), MAXIMUM_SESSION_FACT_BYTES);
+    let accepted = SessionFact::new(
+        1,
+        1,
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "accepted".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    )
+    .unwrap();
+    let terminal = SessionFact::new(
+        3,
+        3,
+        SessionFactBody::TurnTerminal {
+            turn_id: turn,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .unwrap();
+    rsi_agent_testkit::append_history_fixture(
+        store.as_ref(),
+        AppendBatch {
+            session_id: session.clone(),
+            header: Some(header(session.as_str())),
+            expected_seq: 0,
+            facts: vec![Arc::new(accepted), Arc::new(maximum), Arc::new(terminal)],
+        },
+    )
+    .await
+    .unwrap();
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        store,
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
+            maximum_retained_observation_bytes: MAXIMUM_SESSION_FACT_BYTES,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut stream = kernel
+        .observe_session(
+            &session,
+            ObservationCursor {
+                control_seq: 1,
+                fact_seq: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
+        panic!("maximum Fact expected");
+    };
+    assert_eq!(fact.encoded_len(), MAXIMUM_SESSION_FACT_BYTES);
+    drop(fact);
+    let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
+        panic!("terminal Fact expected");
+    };
+    assert_eq!(fact.seq(), 3);
+}
+
+#[tokio::test]
+async fn tree_membership_watch_can_precede_the_first_durable_root() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store).await;
+    let worker = kernel.start_workers();
+    let id = SessionId::new("watched-before-create").unwrap();
+    let mut watch = kernel.watch_tree_membership(&id).unwrap();
+    let mut next = Box::pin(watch.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let submitted = submit(&kernel, id.as_str(), "create watched root").await;
+    assert_eq!(submitted.session_id, id);
+    tokio::time::timeout(std::time::Duration::from_secs(1), next)
+        .await
+        .unwrap()
+        .unwrap();
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
+    use rsi_agent_session_protocol::{AgentControlRecord, MessageDiscardReason};
+    use rsi_agent_store_protocol::StoreControlPage;
+    let mut failures = Vec::new();
+    for controls in [false, true] {
+        for (name, after_seq, first_seq, count, tail) in [
+            ("replayed page", 0, 1, 1, 3),
+            ("skipped page", 2, 3, 1, 3),
+            ("duplicate record", 1, 1, 1, 3),
+            ("gap within page", 1, 3, 1, 3),
+            ("ignores requested limit", 1, 2, 2, 3),
+            ("exceeds protocol count", 1, 2, 513, 514),
+            ("no progress", 1, 2, 0, 3),
+        ] {
+            let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+            let kernel = AgentKernel::recover_with_clock_and_limits(
+                store.clone(),
+                composition(),
+                Arc::new(FixedClock),
+                KernelLimits {
+                    maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
+                    ..KernelLimits::default()
+                },
+            )
+            .await
+            .unwrap();
+            *store.control_page_override.lock().unwrap() = Some(StoreControlPage {
+                after_seq: if controls { after_seq } else { 0 },
+                durable_seq: if controls { tail } else { 0 },
+                records: if controls {
+                    (first_seq..first_seq + count)
+                        .map(|seq| {
+                            AgentControlRecord::new(
+                                seq,
+                                seq,
+                                AgentControlRecordBody::MessageDiscarded {
+                                    message_id: MessageId::new(format!("message-{seq}")).unwrap(),
+                                    reason: MessageDiscardReason::Cancelled,
+                                },
+                            )
+                            .unwrap()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            });
+            if !controls {
+                *store.fact_page_override.lock().unwrap() = Some(StoreFactPage {
+                    after_seq,
+                    durable_seq: tail,
+                    facts: (first_seq..first_seq + count)
+                        .map(|seq| accepted_fact(seq, &TurnId::new(format!("turn-{seq}")).unwrap()))
+                        .collect(),
+                });
+            }
+            let result = kernel
+                .observe_session(
+                    &SessionId::new("fault-page").unwrap(),
+                    ObservationCursor {
+                        control_seq: u64::from(controls),
+                        fact_seq: u64::from(!controls),
+                    },
+                )
+                .await;
+            if !matches!(result, Err(TurnError::Invariant(_))) {
+                failures.push((controls, name));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "invalid pages escaped invariant rejection: {failures:?}"
+    );
+}
+
+#[tokio::test]
+async fn tree_membership_requeries_a_creation_with_a_lost_store_acknowledgement() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let id = SessionId::new("lost-creation-ack").unwrap();
+    let mut watch = kernel.watch_tree_membership(&id).unwrap();
+    store
+        .fail_agent_creation_after_apply
+        .store(true, Ordering::Release);
+    let result = kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header(id.as_str())),
+            message: mailbox_message("lost-ack-message"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await;
+    assert!(matches!(result, Err(TurnError::Store(_))));
+    assert_eq!(memory.header(&id).await.unwrap().session_id(), &id);
+    assert_eq!(
+        futures_util::FutureExt::now_or_never(watch.next()),
+        Some(Some(())),
+        "a committed creation must remain discoverable after its acknowledgement is lost"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn tree_membership_requeries_a_write_behind_creation_with_a_lost_acknowledgement() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_workers();
+    let id = SessionId::new("lost-append-creation-ack").unwrap();
+    let mut watch = kernel.watch_tree_membership(&id).unwrap();
+    store
+        .fail_append_creation_after_apply
+        .store(true, Ordering::Release);
+    let result = kernel
+        .submit(SubmitTurn {
+            turn_id: client_turn_id(),
+            session: fresh(header(id.as_str())),
+            text: "create through append".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await;
+    assert!(matches!(result, Err(TurnError::Flush(_))), "{result:?}");
+    assert_eq!(memory.header(&id).await.unwrap().session_id(), &id);
+    assert_eq!(
+        futures_util::FutureExt::now_or_never(watch.next()),
+        Some(Some(())),
+        "a committed root must remain discoverable after losing its append receipt"
+    );
+    let _ = kernel.shutdown(worker).await;
+}
+
+#[tokio::test]
+async fn tree_watches_share_observer_capacity_and_release_it_on_drop() {
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        Arc::new(MemoryStore::new()),
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_active_observers: 1,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let id = SessionId::new("watch-capacity").unwrap();
+    let watch = kernel.watch_tree_membership(&id).unwrap();
+    assert!(matches!(
+        kernel.watch_tree_membership(&id),
+        Err(TurnError::ObserverCapacity)
+    ));
+    assert!(matches!(
+        kernel
+            .observe_session(&id, ObservationCursor::default())
+            .await,
+        Err(TurnError::ObserverCapacity)
+    ));
+    drop(watch);
+    assert!(kernel.watch_tree_membership(&id).is_ok());
 }

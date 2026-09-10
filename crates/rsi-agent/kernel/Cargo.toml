@@ -13,7 +13,6 @@ rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-agent-turn-protocol = { path = "../turn-protocol" }
-rsi-agent-workspace-context = { path = "../workspace-context" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
@@ -22,14 +21,15 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-agent-context = { path = "../context" }
 rsi-agent-store-sqlite = { path = "../store-sqlite" }
 tempfile.workspace = true
 rsi-agent-testkit = { path = "../testkit" }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

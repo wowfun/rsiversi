@@ -24,12 +24,26 @@ mod admission;
 mod attempts;
 mod call_identity;
 mod capabilities;
+mod registration;
+pub use registration::{RegistrationContext, RegistrationLease, RegistrationPosition};
+mod composition_order;
 mod configuration;
+pub use composition_order::{
+    ChildPosition, RegistrationOrderSnapshot, RegistrationRank, RuntimeIdentity,
+};
+use composition_order::{CompositionOrder, PositionOccupancy};
 mod context_api;
 mod context_scope;
 mod diagnostics;
 mod effects;
 mod generation_activation;
+mod inspection;
+pub use inspection::{
+    InspectedCleanupState, InspectedCollection, InspectedDependency, InspectedEffect,
+    InspectedFiber, InspectedFiberState, InspectedOwner, InspectedProvider, InspectedService,
+    InspectedSupply, InspectionRequest, MAXIMUM_INSPECTION_FIBERS, MAXIMUM_INSPECTION_ITEMS,
+    RuntimeInspection,
+};
 mod lifecycle;
 mod limits;
 mod local_event_registry;
@@ -62,7 +76,7 @@ use local_event_registry::{LocalEventListeners, LocalEventSlot, LocalListenerLoc
 pub(crate) use local_services::LocalBinding;
 pub use local_services::LocalSupplyHandle;
 use local_services::{LocalSlot, LocalSupplyEntry};
-pub(crate) use ownership::EventOwnership;
+pub(crate) use ownership::RegistrationOwnership;
 pub(crate) use panic_containment::{contain_panic_result, drop_catching_unwind};
 use pending_report::PendingReportBuilder;
 pub use preparation::PreparedPlugin;
@@ -95,6 +109,9 @@ impl fmt::Debug for Runtime {
 }
 
 struct RuntimeInner {
+    composition_order: Arc<CompositionOrder>,
+    empty_local_event_bindings: std::sync::OnceLock<Arc<crate::local_events::LocalEventBindings>>,
+    execution: crate::Execution,
     limits: ValidatedRuntimeLimits,
     resources: RuntimeResources,
     state: Mutex<RuntimeState>,
@@ -113,6 +130,7 @@ struct RuntimeInner {
     next_generation: AtomicU64,
     next_isolation: AtomicU64,
     next_listener: AtomicU64,
+    next_registration: AtomicU64,
     next_capability_entry: AtomicU64,
     next_call: AtomicU64,
     next_effect: AtomicU64,
@@ -154,7 +172,7 @@ struct Fiber {
     id: FiberId,
     depth: usize,
     runtime: Weak<RuntimeInner>,
-    executor: tokio::runtime::Handle,
+    executor: crate::Execution,
     parent: Option<Owner>,
     base_context: ContextScope,
     configuration: Arc<AsyncMutex<()>>,
@@ -169,6 +187,7 @@ struct Fiber {
 }
 
 struct FiberData {
+    position: Option<PositionOccupancy>,
     identity: FactoryIdentity,
     update_mode: UpdateMode,
     factory: Option<RetainedFactory>,
@@ -347,7 +366,7 @@ struct ShutdownRunState {
     failed: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Owner {
     fiber: FiberId,
     generation: FiberGeneration,
@@ -373,6 +392,7 @@ pub(crate) struct ContextScope {
 /// Immutable scoped capability used to apply plugins and access owned resources.
 #[derive(Clone)]
 pub struct Context {
+    child_position: Option<ChildPosition>,
     runtime: Runtime,
     owner: Option<Owner>,
     setup_effect: Option<EffectScope>,
@@ -417,8 +437,25 @@ pub struct FiberHandle {
 }
 
 impl Runtime {
+    /// Validates execution-independent policy without constructing a Runtime.
+    pub fn validate_limits(limits: &RuntimeLimits) -> Result<()> {
+        ValidatedRuntimeLimits::new(limits.clone()).map(|_| ())
+    }
+
     /// Creates an empty Runtime after validating capacities, arithmetic, and deadlines.
+    /// Captures the currently entered native Tokio executor.
+    #[cfg(not(target_family = "wasm"))]
     pub fn new(limits: RuntimeLimits) -> Result<Self> {
+        // Validate before looking up execution so invalid policies remain ordinary errors.
+        Self::validate_limits(&limits)?;
+        let handle = tokio::runtime::Handle::try_current().map_err(|error| {
+            MetaError::InvalidInput(format!("Runtime needs explicit execution: {error}"))
+        })?;
+        Self::with_execution(limits, crate::Execution::native(handle))
+    }
+
+    /// Creates an empty Runtime with explicit platform execution authority.
+    pub fn with_execution(limits: RuntimeLimits, execution: crate::Execution) -> Result<Self> {
         let limits = ValidatedRuntimeLimits::new(limits)?;
         let resources = RuntimeResources::new(limits.configured());
         let preparation_admission = Arc::new(Semaphore::new(
@@ -437,6 +474,12 @@ impl Runtime {
         ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                empty_local_event_bindings: std::sync::OnceLock::new(),
+                composition_order: CompositionOrder::new(
+                    limits.topology.maximum_composition_positions,
+                    limits.topology.maximum_effects,
+                ),
+                execution,
                 limits,
                 resources,
                 state: Mutex::new(RuntimeState {
@@ -467,6 +510,7 @@ impl Runtime {
                 next_generation: AtomicU64::new(0),
                 next_isolation: AtomicU64::new(0),
                 next_listener: AtomicU64::new(0),
+                next_registration: AtomicU64::new(0),
                 next_capability_entry: AtomicU64::new(0),
                 next_call: AtomicU64::new(0),
                 next_effect: AtomicU64::new(0),
@@ -482,6 +526,7 @@ impl Runtime {
         Context {
             runtime: self.clone(),
             owner: None,
+            child_position: None,
             setup_effect: None,
             isolation: Arc::new(BTreeMap::new()),
             local_isolation: Arc::new(BTreeMap::new()),
@@ -490,6 +535,11 @@ impl Runtime {
             encoded_bytes: 0,
             trace: None,
         }
+    }
+
+    /// Returns the execution authority retained by this Runtime.
+    pub fn execution(&self) -> &crate::Execution {
+        &self.inner.execution
     }
 
     /// Returns the immutable limits selected at construction.
@@ -563,7 +613,7 @@ impl Runtime {
         &self,
         parent: &Context,
         prepared: PreparedPlugin,
-    ) -> Result<FiberHandle> {
+    ) -> Result<PendingApplyOwnership> {
         let PreparedPlugin {
             runtime,
             admission,
@@ -628,6 +678,11 @@ impl Runtime {
             .collect::<Vec<_>>();
 
         let id = self.next_fiber_id()?;
+        let position = match &parent.child_position {
+            Some(position) => position.clone(),
+            None => parent.child_position()?,
+        };
+        let position = position.claim(self, parent.owner, id)?;
         let initial = FiberSnapshot {
             id,
             generation: FiberGeneration(0),
@@ -641,7 +696,7 @@ impl Runtime {
             id,
             depth,
             runtime: Arc::downgrade(&self.inner),
-            executor: tokio::runtime::Handle::current(),
+            executor: self.inner.execution.clone(),
             parent: parent.owner,
             base_context,
             configuration: Arc::new(AsyncMutex::new(())),
@@ -657,6 +712,7 @@ impl Runtime {
             disposal: Arc::new(DisposalRun::default()),
             cleanup_phase: Mutex::new(CleanupPhase::Scheduled),
             data: Mutex::new(FiberData {
+                position: Some(position),
                 identity,
                 update_mode,
                 factory: Some(factory),
@@ -723,7 +779,7 @@ impl Runtime {
         // of the shutdown root snapshot; the proof's external admission can
         // be released before reconciliation continues.
         drop(admission);
-        let mut ownership = PendingApplyOwnership {
+        let ownership = PendingApplyOwnership {
             runtime: Arc::downgrade(&self.inner),
             fiber: Arc::clone(&fiber),
             armed: true,
@@ -735,11 +791,7 @@ impl Runtime {
             }
         })
         .await;
-        ownership.armed = false;
-        Ok(FiberHandle {
-            runtime: self.clone(),
-            fiber,
-        })
+        Ok(ownership)
     }
 
     fn owner_fiber(&self, owner: Owner) -> Result<Arc<Fiber>> {
@@ -787,6 +839,7 @@ impl Runtime {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Default for Runtime {
     fn default() -> Self {
         Self::new(RuntimeLimits::default()).expect("default runtime limits are valid")

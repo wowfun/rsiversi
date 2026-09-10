@@ -54,7 +54,7 @@ fn prepare_context_rejects_an_invalid_public_snapshot() {
 
 #[derive(Debug)]
 struct BlockingResolver {
-    body: Arc<[u8]>,
+    body: bytes::Bytes,
     calls: AtomicUsize,
     started: Arc<Semaphore>,
     release: Arc<Semaphore>,
@@ -65,10 +65,10 @@ impl MediaResolver for BlockingResolver {
         &self,
         _descriptor: MediaDescriptor,
         _abort: AbortSignal,
-    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
+    ) -> AdapterFuture<Result<bytes::Bytes, AiError>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.started.add_permits(1);
-        let body = Arc::clone(&self.body);
+        let body = self.body.clone();
         let release = Arc::clone(&self.release);
         Box::pin(async move {
             release
@@ -83,7 +83,7 @@ impl MediaResolver for BlockingResolver {
 
 #[tokio::test]
 async fn identical_media_resolution_is_single_flight_within_one_prepared_call() {
-    let body: Arc<[u8]> = Arc::from(b"same media".as_slice());
+    let body: bytes::Bytes = bytes::Bytes::from(b"same media".as_slice());
     let descriptor = descriptor(&body);
     let resolver = Arc::new(BlockingResolver {
         body,
@@ -117,12 +117,12 @@ async fn identical_media_resolution_is_single_flight_within_one_prepared_call() 
     let second = second.expect("second task").expect("second media");
 
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(std::ptr::eq(first.as_ptr(), second.as_ptr()));
 }
 
 #[tokio::test]
 async fn a_waiter_can_cancel_without_waiting_for_the_shared_media_read() {
-    let body: Arc<[u8]> = Arc::from(b"cancelled waiter".as_slice());
+    let body: bytes::Bytes = bytes::Bytes::from(b"cancelled waiter".as_slice());
     let descriptor = descriptor(&body);
     let resolver = Arc::new(BlockingResolver {
         body,
@@ -167,7 +167,7 @@ async fn a_waiter_can_cancel_without_waiting_for_the_shared_media_read() {
 
 #[tokio::test]
 async fn cancelling_the_first_waiter_does_not_cancel_the_shared_media_read() {
-    let body: Arc<[u8]> = Arc::from(b"independent shared read".as_slice());
+    let body: bytes::Bytes = bytes::Bytes::from(b"independent shared read".as_slice());
     let descriptor = descriptor(&body);
     let resolver = Arc::new(BlockingResolver {
         body,
@@ -211,7 +211,7 @@ async fn cancelling_the_first_waiter_does_not_cancel_the_shared_media_read() {
 
 #[derive(Debug)]
 struct FlakyResolver {
-    body: Arc<[u8]>,
+    body: bytes::Bytes,
     calls: AtomicUsize,
 }
 
@@ -220,9 +220,9 @@ impl MediaResolver for FlakyResolver {
         &self,
         _descriptor: MediaDescriptor,
         _abort: AbortSignal,
-    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
+    ) -> AdapterFuture<Result<bytes::Bytes, AiError>> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let body = Arc::clone(&self.body);
+        let body = self.body.clone();
         Box::pin(async move {
             if call == 0 {
                 Err(AiError::new(
@@ -241,7 +241,7 @@ impl MediaResolver for FlakyResolver {
 
 #[tokio::test]
 async fn media_resolution_does_not_cache_failures_or_cross_prepared_calls() {
-    let body: Arc<[u8]> = Arc::from(b"retry media".as_slice());
+    let body: bytes::Bytes = bytes::Bytes::from(b"retry media".as_slice());
     let descriptor = descriptor(&body);
     let resolver = Arc::new(FlakyResolver {
         body,
@@ -273,7 +273,7 @@ async fn media_resolution_does_not_cache_failures_or_cross_prepared_calls() {
 
 #[tokio::test]
 async fn releasing_a_completed_media_cache_forces_a_fresh_read() {
-    let body: Arc<[u8]> = Arc::from(b"released media".as_slice());
+    let body: bytes::Bytes = bytes::Bytes::from(b"released media".as_slice());
     let descriptor = descriptor(&body);
     let resolver = Arc::new(FlakyResolver {
         body,
@@ -297,11 +297,11 @@ async fn releasing_a_completed_media_cache_forces_a_fresh_read() {
 
 #[tokio::test]
 async fn media_resolution_rejects_declared_length_and_digest_mismatches() {
-    let expected: Arc<[u8]> = Arc::from(b"expected body".as_slice());
+    let expected: bytes::Bytes = bytes::Bytes::from(b"expected body".as_slice());
     let descriptor = descriptor(&expected);
     for invalid in [
-        Arc::<[u8]>::from(b"short".as_slice()),
-        Arc::<[u8]>::from(b"tampered body".as_slice()),
+        bytes::Bytes::from(b"short".as_slice()),
+        bytes::Bytes::from(b"tampered body".as_slice()),
     ] {
         let resolver = Arc::new(FlakyResolver {
             body: invalid,

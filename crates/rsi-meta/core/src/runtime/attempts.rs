@@ -382,16 +382,19 @@ impl Runtime {
             .yield_reconciliation_slot(async move {
                 let (admission, reservations) = runtime.wait_for_attempt_preparation().await?;
                 Ok::<_, MetaError>(
-                    tokio::task::spawn_blocking(move || {
-                        runtime.prepare_retained_attempt_admitted(
-                            &factory,
-                            &desired,
-                            desired_revision,
-                            admission,
-                            reservations,
-                        )
-                    })
-                    .await,
+                    runtime
+                        .execution()
+                        .clone()
+                        .prepare(move || {
+                            runtime.prepare_retained_attempt_admitted(
+                                &factory,
+                                &desired,
+                                desired_revision,
+                                admission,
+                                reservations,
+                            )
+                        })
+                        .await,
                 )
             })
             .await;

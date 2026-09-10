@@ -30,3 +30,9 @@ byte-for-byte unchanged.
 Provider response identities become replay extensions only through the bounded
 extension constructor. An identity that cannot fit that durable contract is a
 typed output-validation failure; untrusted terminal events never reach a panic.
+
+Typed Responses endpoint options select its path, instruction-role translation
+and state mode. The default uses OpenAI response identities and deferred
+operations. Stateless mode uses inline plain reasoning, emits no response-id
+replay extension, rejects such extensions on input and rejects deferred work.
+These options do not change Images URLs or provider-neutral request identity.

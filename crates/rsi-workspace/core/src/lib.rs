@@ -5,104 +5,25 @@
 #![allow(clippy::missing_errors_doc)]
 
 use async_trait::async_trait;
-use rsi_meta::{
-    ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
-};
+use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_storage::StorageError;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_workspace_protocol::{
+    MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceError, WorkspaceId,
+    WorkspacePage, WorkspaceRecord, WorkspaceRegistry, WorkspaceRegistryContract, WorkspaceStatus,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
 const DOMAIN_ID: &str = "rsi.workspace";
-const DOMAIN_VERSION: u32 = 2;
+const DOMAIN_VERSION: u32 = 3;
+const ALLOCATION_KEY: &str = "allocation";
 const MAXIMUM_WORKSPACES: usize = 16_384;
 const MAXIMUM_WORKSPACE_DOMAIN_BYTES: usize = 128 * 1024 * 1024;
-
-/// Stable host-local workspace identity.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct WorkspaceId(String);
-
-impl WorkspaceId {
-    /// Borrows the exact identity.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for WorkspaceId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-/// Durable workspace registration.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceRecord {
-    /// Stable identity derived from canonical path.
-    pub id: WorkspaceId,
-    /// Canonical physical absolute directory.
-    pub path: PathBuf,
-}
-
-/// Current uncached directory status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceStatus {
-    /// Canonical directory still exists.
-    Ok,
-    /// Registered directory is missing or no longer a directory.
-    MissingDirectory,
-}
-
-/// Closed Workspace failure taxonomy.
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum WorkspaceError {
-    /// Invalid or unavailable path/identity.
-    #[error("invalid workspace: {0}")]
-    InvalidInput(String),
-    /// Unknown registry identity.
-    #[error("workspace `{0}` is not registered")]
-    Unknown(WorkspaceId),
-    /// Durable state is malformed or inconsistent.
-    #[error("workspace registry is corrupt: {0}")]
-    Corrupt(String),
-    /// Storage-domain operation failed.
-    #[error("workspace storage failed: {0}")]
-    Storage(String),
-}
-
-/// Workspace result.
-pub type Result<T> = std::result::Result<T, WorkspaceError>;
-
-/// Durable host-local Workspace registry.
-#[async_trait]
-pub trait WorkspaceRegistry: fmt::Debug + Send + Sync + 'static {
-    /// Returns registrations in stable user order.
-    async fn list(&self) -> Vec<WorkspaceRecord>;
-    /// Finds or durably creates the canonical directory registration.
-    async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord>;
-    /// Returns current filesystem status without mutating state.
-    async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus>;
-    /// Deletes only the registration and returns whether it existed.
-    async fn delete_registration(&self, id: &WorkspaceId) -> Result<bool>;
-}
-
-/// Nominal Local contract for [`WorkspaceRegistry`].
-#[derive(Debug)]
-pub struct WorkspaceRegistryContract;
-
-impl LocalContract for WorkspaceRegistryContract {
-    const KEY: &'static str = "rsi.workspace";
-    type Service = dyn WorkspaceRegistry;
-}
 
 /// Configuration accepted by [`WorkspaceFactory`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,6 +38,12 @@ pub struct WorkspaceConfig {
 struct DurableWorkspaceRecord {
     order: u64,
     record: WorkspaceRecord,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Allocation {
+    high_water: u64,
 }
 
 #[derive(Debug, Default)]
@@ -135,13 +62,42 @@ struct Service {
 
 #[async_trait]
 impl WorkspaceRegistry for Service {
-    async fn list(&self) -> Vec<WorkspaceRecord> {
+    async fn get(&self, id: &WorkspaceId) -> Result<WorkspaceRecord> {
+        self.state
+            .read()
+            .await
+            .records
+            .get(id)
+            .map(|(_, record)| record.clone())
+            .ok_or_else(|| WorkspaceError::Unknown(id.clone()))
+    }
+
+    async fn list(&self, after: Option<WorkspaceCursor>, limit: usize) -> Result<WorkspacePage> {
+        if limit == 0 || limit > MAXIMUM_WORKSPACES_PER_PAGE {
+            return Err(WorkspaceError::InvalidInput(format!(
+                "workspace page limit must be in 1..={MAXIMUM_WORKSPACES_PER_PAGE}"
+            )));
+        }
         let state = self.state.read().await;
-        state
+        let start = after.map_or(0, |cursor| cursor.after_order);
+        let mut rows = state
             .order
-            .values()
-            .filter_map(|id| state.records.get(id).map(|(_, record)| record.clone()))
-            .collect()
+            .range((std::ops::Bound::Excluded(start), std::ops::Bound::Unbounded));
+        let mut records = Vec::with_capacity(limit);
+        let mut last = start;
+        for (order, id) in rows.by_ref().take(limit) {
+            records.push(
+                state
+                    .records
+                    .get(id)
+                    .expect("registry order references an existing record")
+                    .1
+                    .clone(),
+            );
+            last = *order;
+        }
+        let next = rows.next().map(|_| WorkspaceCursor { after_order: last });
+        Ok(WorkspacePage { records, next })
     }
 
     async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord> {
@@ -189,12 +145,19 @@ impl WorkspaceRegistry for Service {
         let durable_key = id.as_str().to_owned();
         tokio::spawn(async move {
             let _commit = _commit;
+            // Reserve even an uncertain allocation locally; an error cannot prove
+            // that the durable write did not happen. No registration is published
+            // until its reservation has been acknowledged.
+            state.write().await.next_order = order;
+            domain
+                .put(ALLOCATION_KEY, serde_json::json!({"high_water": order}))
+                .await
+                .map_err(|error| storage_error(&error))?;
             domain
                 .put(&durable_key, value)
                 .await
                 .map_err(|error| storage_error(&error))?;
             let mut state = state.write().await;
-            state.next_order = order;
             state.order.insert(order, id.clone());
             state.records.insert(id, (order, record.clone()));
             Ok(record)
@@ -214,7 +177,7 @@ impl WorkspaceRegistry for Service {
             .get(id)
             .map(|(_, record)| record.path.clone())
             .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
-        Ok(match tokio::fs::metadata(path).await {
+        Ok(match tokio::fs::symlink_metadata(path).await {
             Ok(metadata) if metadata.is_dir() => WorkspaceStatus::Ok,
             _ => WorkspaceStatus::MissingDirectory,
         })
@@ -233,10 +196,15 @@ impl WorkspaceRegistry for Service {
         let id = id.clone();
         tokio::spawn(async move {
             let _commit = _commit;
-            domain
+            if !domain
                 .delete(id.as_str())
                 .await
-                .map_err(|error| storage_error(&error))?;
+                .map_err(|error| storage_error(&error))?
+            {
+                return Err(WorkspaceError::Corrupt(
+                    "registered Workspace is absent from its durable domain".into(),
+                ));
+            }
             let mut state = state.write().await;
             state.records.remove(&id);
             state.order.remove(&order);
@@ -275,7 +243,7 @@ impl PluginFactory for WorkspaceFactory {
                 id: DOMAIN_ID.into(),
                 backend: config.backend,
                 version: DOMAIN_VERSION,
-                maximum_records: MAXIMUM_WORKSPACES,
+                maximum_records: MAXIMUM_WORKSPACES + 1,
                 maximum_bytes: MAXIMUM_WORKSPACE_DOMAIN_BYTES,
             })
             .await
@@ -304,6 +272,7 @@ impl PluginFactory for WorkspaceFactory {
 }
 
 async fn canonical_directory(path: &Path) -> Result<PathBuf> {
+    rsi_workspace_protocol::validate_workspace_path(path)?;
     if !path.is_absolute() {
         return Err(WorkspaceError::InvalidInput(
             "workspace path must be absolute".into(),
@@ -312,7 +281,7 @@ async fn canonical_directory(path: &Path) -> Result<PathBuf> {
     let canonical = tokio::fs::canonicalize(path)
         .await
         .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?;
-    let metadata = tokio::fs::metadata(&canonical)
+    let metadata = tokio::fs::symlink_metadata(&canonical)
         .await
         .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?;
     if !metadata.is_dir() {
@@ -320,6 +289,7 @@ async fn canonical_directory(path: &Path) -> Result<PathBuf> {
             "workspace path must name a directory".into(),
         ));
     }
+    rsi_workspace_protocol::validate_workspace_path(&canonical)?;
     Ok(canonical)
 }
 
@@ -327,33 +297,49 @@ fn workspace_id(path: &Path) -> Result<WorkspaceId> {
     let path = path
         .to_str()
         .ok_or_else(|| WorkspaceError::InvalidInput("workspace path is not UTF-8".into()))?;
-    Ok(WorkspaceId(hex::encode(Sha256::digest(path.as_bytes()))))
+    WorkspaceId::parse(hex::encode(Sha256::digest(path.as_bytes())))
 }
 
-fn load_registry(snapshot: BTreeMap<String, ConfigValue>) -> Result<RegistryData> {
+fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<RegistryData> {
+    let allocation = snapshot.remove(ALLOCATION_KEY);
+    let high_water = match allocation {
+        Some(value) => {
+            serde_json::from_value::<Allocation>(value)
+                .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?
+                .high_water
+        }
+        None if snapshot.is_empty() => 0,
+        None => {
+            return Err(WorkspaceError::Corrupt(
+                "workspace allocation is missing".into(),
+            ));
+        }
+    };
     if snapshot.len() > MAXIMUM_WORKSPACES {
         return Err(WorkspaceError::Corrupt(
             "workspace record bound is exceeded".into(),
         ));
     }
-    let mut state = RegistryData::default();
+    let mut state = RegistryData {
+        next_order: high_water,
+        ..RegistryData::default()
+    };
     let mut paths = HashSet::new();
     for (key, value) in snapshot {
         let durable: DurableWorkspaceRecord = serde_json::from_value(value)
             .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
         let record = durable.record;
+        record
+            .validate()
+            .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
         if durable.order == 0
+            || durable.order > high_water
             || key != record.id.as_str()
             || !record.path.is_absolute()
             || !paths.insert(record.path.clone())
         {
             return Err(WorkspaceError::Corrupt(
                 "workspace record identity or path is inconsistent".into(),
-            ));
-        }
-        if workspace_id(&record.path)? != record.id {
-            return Err(WorkspaceError::Corrupt(
-                "workspace identity does not match its physical path".into(),
             ));
         }
         let id = record.id.clone();
@@ -364,7 +350,6 @@ fn load_registry(snapshot: BTreeMap<String, ConfigValue>) -> Result<RegistryData
                 "workspace order or identity is duplicated".into(),
             ));
         }
-        state.next_order = state.next_order.max(durable.order);
     }
     Ok(state)
 }

@@ -8,3 +8,8 @@ neutral spawn, raw output, termination, and outcome seam;
 Process owns no shell syntax, executable search, timeout classification, job
 identity, model presentation, or sandbox-policy choice. Callers provide every
 argv, environment, stdin, capture, and TERM-to-KILL grace value explicitly.
+
+The Output API endpoint and client plugins expose only the completed-output
+cache. Remote readers do not acquire process execution or Session authority.
+`OutputPage` has no Serde representation: adapters encode bounded metadata and
+carry its raw bytes separately, so JSON cannot expand a byte page into numbers.

@@ -1,0 +1,22 @@
+[package]
+name = "rsi-client-preferences"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-settings = { path = "../../rsi-settings/core" }
+rsi-settings-testkit = { path = "../../rsi-settings/testkit" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

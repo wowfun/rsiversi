@@ -1,0 +1,26 @@
+[package]
+name = "rsi-settings-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-settings-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-settings = { path = "../core" }
+rsi-settings-local = { path = "../local" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

@@ -62,6 +62,12 @@ struct UnusedSandbox;
 
 #[async_trait]
 impl Sandbox for UnusedSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        Err(rsi_sandbox::SandboxError::Unsupported(request.mode))
+    }
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess, SandboxError> {
         Err(SandboxError::Unsupported(request.mode))
     }

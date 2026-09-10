@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+bytes.workspace = true
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 serde.workspace = true

@@ -10,4 +10,9 @@ metadata and bytes match exactly.
 
 Every read opens an unchanged regular file without following its final
 symlink, then revalidates the envelope, reference, length, and SHA-256 digest.
+The backend admits at most 64 I/O tasks before scheduling blocking work. Each
+read reserves its bounded declared file length before allocation and rejects
+length changes. Its 64 MiB read pool remains charged with the returned allocation's
+last clone or slice, including the header retained by a canonical-body view.
+Cancellation of an async waiter cannot release a running blocking read's charge.
 Garbage collection and reference counting are intentionally absent.

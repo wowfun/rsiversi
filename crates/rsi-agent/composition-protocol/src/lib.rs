@@ -4,12 +4,37 @@
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
+use rsi_agent_context::ModelContextBuilder;
 use rsi_agent_session_protocol::{AgentPresetId, SessionHeader};
 use rsi_meta_contract::LocalContract;
 use rsi_tools_protocol::ToolRuntime;
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
+
+mod command;
+mod contribution;
+pub use command::{
+    DraftCommandError, DraftCommandMutation, DraftCommandPreparation, DraftCommandResult,
+    MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedDraftCommand, SessionCommand, SessionCommandContext,
+    SessionCommandRegistration,
+};
+mod domain;
+mod projection;
+pub use contribution::{
+    ContextContributor, ContributionBatch, ContributionCatalog, ContributionContext,
+    ContributionError, ContributionFactPage, ContributionFactReader, ContributionHorizon,
+    ContributionInput, ContributionKind, ContributionOutput, ContributionRegistrar,
+    ContributionRegistrarContract, ContributionRegistration, ContributionResult, ContributionStage,
+    MAXIMUM_AGENT_CONTRIBUTIONS, MAXIMUM_CONTRIBUTION_INPUT_BYTES, MAXIMUM_CONTRIBUTION_INPUTS,
+    PostToolContributor, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
+};
+pub use domain::{
+    DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
+    DomainError, DomainHandle, DomainRegistrar, DomainRegistrarContract, DomainRegistration,
+    ValidatedDomainProposal,
+};
+pub use projection::{SessionProjection, SessionProjectionAdapter, SessionProjectionContext};
 
 /// Opaque lifetime owner retained by one composition pin.
 pub trait AgentGenerationOwner: fmt::Debug + Send + Sync + 'static {}
@@ -22,6 +47,9 @@ pub struct AgentCompositionPin {
     preset_id: AgentPresetId,
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
+    context_builder: Arc<dyn ModelContextBuilder>,
+    domains: DomainCatalog,
+    contributions: ContributionCatalog,
     _owner: Arc<dyn AgentGenerationOwner>,
 }
 
@@ -36,6 +64,9 @@ impl AgentCompositionPin {
         preset_id: AgentPresetId,
         source_digest: impl Into<String>,
         tools: Arc<dyn ToolRuntime>,
+        context_builder: Arc<dyn ModelContextBuilder>,
+        domains: DomainCatalog,
+        contributions: ContributionCatalog,
         owner: Arc<dyn AgentGenerationOwner>,
     ) -> Result<Self> {
         let source_digest = source_digest.into();
@@ -52,6 +83,9 @@ impl AgentCompositionPin {
             preset_id,
             source_digest,
             tools,
+            context_builder,
+            domains,
+            contributions,
             _owner: owner,
         })
     }
@@ -61,7 +95,10 @@ impl AgentCompositionPin {
         &self.preset_id
     }
 
-    /// Returns the exact source digest used to build this generation.
+    /// Returns the effective source identity used to build this generation.
+    ///
+    /// The standing builder combines the Profile program and frozen executable
+    /// catalog. This process-local identity is not a persisted artifact locator.
     pub fn source_digest(&self) -> &str {
         &self.source_digest
     }
@@ -69,6 +106,21 @@ impl AgentCompositionPin {
     /// Returns the immutable Tool Runtime pinned by this generation.
     pub fn tools(&self) -> Arc<dyn ToolRuntime> {
         Arc::clone(&self.tools)
+    }
+
+    /// Returns the unique immutable context builder from this exact generation.
+    pub fn context_builder(&self) -> Arc<dyn ModelContextBuilder> {
+        Arc::clone(&self.context_builder)
+    }
+
+    /// Returns the exact immutable domain definitions frozen with this generation.
+    pub const fn domains(&self) -> &DomainCatalog {
+        &self.domains
+    }
+
+    /// Returns callbacks captured and ordered with this exact generation.
+    pub const fn contributions(&self) -> &ContributionCatalog {
+        &self.contributions
     }
 }
 
@@ -79,6 +131,7 @@ impl fmt::Debug for AgentCompositionPin {
             .field("preset_id", &self.preset_id)
             .field("source_digest", &self.source_digest)
             .field("tools", &"<immutable Tool Runtime>")
+            .field("context_builder", self.context_builder.identity())
             .finish_non_exhaustive()
     }
 }
@@ -124,6 +177,7 @@ pub struct PreparedFreshSession {
 struct PreparedFreshSessionInner {
     header: SessionHeader,
     composition: AgentCompositionPin,
+    baseline: DomainBaseline,
 }
 
 impl PreparedFreshSession {
@@ -139,10 +193,12 @@ impl PreparedFreshSession {
                 "fresh Session header and composition preset identities differ".into(),
             ));
         }
+        let baseline = DomainBaseline::new(composition.domains().clone())?;
         Ok(Self {
             inner: Box::new(PreparedFreshSessionInner {
                 header,
                 composition,
+                baseline,
             }),
         })
     }
@@ -157,19 +213,51 @@ impl PreparedFreshSession {
         &self.inner.composition
     }
 
+    /// Returns the actual frozen initial states to be committed with first acceptance.
+    pub const fn baseline(&self) -> &DomainBaseline {
+        &self.inner.baseline
+    }
+
+    /// Selects already prepared initial state from the exact same generation.
+    ///
+    /// # Errors
+    /// Rejects a baseline from another generation.
+    pub fn with_baseline(mut self, baseline: DomainBaseline) -> Result<Self> {
+        baseline.ensure_catalog(self.inner.composition.domains())?;
+        self.inner.baseline = baseline;
+        Ok(self)
+    }
+
     /// Consumes the fresh admission into its exact owned parts.
-    pub fn into_parts(self) -> (SessionHeader, AgentCompositionPin) {
+    pub fn into_parts(self) -> (SessionHeader, AgentCompositionPin, DomainBaseline) {
         let inner = *self.inner;
-        (inner.header, inner.composition)
+        (inner.header, inner.composition, inner.baseline)
     }
 }
 
 /// Process-local empty-session draft that has not created Store state.
 #[derive(Debug)]
 pub struct AgentSessionDraft {
+    identity: Arc<()>,
+    revision: u64,
+    command_receipts: std::collections::BTreeMap<
+        rsi_agent_session_protocol::DomainRequestId,
+        rsi_agent_session_protocol::SessionCommandReceipt,
+    >,
     header: SessionHeader,
     composition_service: Arc<dyn AgentComposition>,
     composition: AgentCompositionPin,
+    baseline: DomainBaseline,
+}
+
+/// Move-only replacement generation prepared for one exact draft predecessor.
+#[derive(Debug)]
+pub struct PreparedDraftPreset {
+    identity: Arc<()>,
+    expected_revision: u64,
+    header: SessionHeader,
+    composition: AgentCompositionPin,
+    baseline: DomainBaseline,
 }
 
 impl AgentSessionDraft {
@@ -189,11 +277,21 @@ impl AgentSessionDraft {
                 "Agent composition returned a different preset identity".into(),
             ));
         }
+        let baseline = DomainBaseline::new(composition.domains().clone())?;
         Ok(Self {
             header,
             composition_service,
             composition,
+            baseline,
+            identity: Arc::new(()),
+            revision: 0,
+            command_receipts: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// Returns the actual candidate Header, including the currently selected preset.
+    pub const fn header(&self) -> &SessionHeader {
+        &self.header
     }
 
     /// Returns the currently selected logical preset identity.
@@ -206,6 +304,54 @@ impl AgentSessionDraft {
         &self.composition
     }
 
+    /// Returns the current process-local initial states.
+    pub const fn baseline(&self) -> &DomainBaseline {
+        &self.baseline
+    }
+
+    /// Applies a typed initial-state proposal without writing a Header or control.
+    ///
+    /// # Errors
+    /// Rejects wrong generations, nonzero revisions and aggregate bound violations.
+    pub fn apply_domain_initial(&mut self, proposal: &ValidatedDomainProposal) -> Result<()> {
+        self.apply_domain_initial_batch(std::slice::from_ref(proposal))
+    }
+
+    /// Applies a complete initial-state batch without publishing a successful prefix.
+    ///
+    /// # Errors
+    /// Rejects invalid generation, revision, duplicate domain or aggregate bounds.
+    pub fn apply_domain_initial_batch(
+        &mut self,
+        proposals: &[ValidatedDomainProposal],
+    ) -> Result<()> {
+        if proposals.is_empty() {
+            return Ok(());
+        }
+        let revision = self.next_revision()?;
+        self.baseline.apply_batch(proposals)?;
+        self.revision = revision;
+        Ok(())
+    }
+
+    fn next_revision(&self) -> Result<u64> {
+        self.revision
+            .checked_add(1)
+            .ok_or_else(|| AgentCompositionError::InvalidInput("draft revision exhausted".into()))
+    }
+
+    /// Freezes the actual draft payload for one first-publication attempt.
+    /// The lease owner serializes this operation with mutations and publication.
+    pub fn freeze(&self) -> PreparedFreshSession {
+        PreparedFreshSession {
+            inner: Box::new(PreparedFreshSessionInner {
+                header: self.header.clone(),
+                composition: self.composition.clone(),
+                baseline: self.baseline.clone(),
+            }),
+        }
+    }
+
     /// Fully stages and then atomically selects one replacement preset.
     ///
     /// # Errors
@@ -213,19 +359,70 @@ impl AgentSessionDraft {
     /// Propagates composition resolution failure or rejects a service result
     /// carrying a different preset identity. Failure leaves the draft intact.
     pub async fn select_preset(&mut self, preset_id: AgentPresetId) -> Result<()> {
-        let composition = self.composition_service.pin(&preset_id).await?;
-        if composition.preset_id() != &preset_id {
-            return Err(AgentCompositionError::InvalidInput(
-                "Agent composition returned a different preset identity".into(),
-            ));
+        let prepared = self.prepare_preset_selection(preset_id).await?;
+        self.apply_preset_selection(prepared)
+            .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))
+    }
+
+    /// Captures an owned generation-preparation future without holding mutation admission.
+    ///
+    /// # Errors
+    /// The future rejects exhausted revisions, unavailable or mismatched generations.
+    pub fn prepare_preset_selection(
+        &self,
+        preset_id: AgentPresetId,
+    ) -> impl std::future::Future<Output = Result<PreparedDraftPreset>> + Send + 'static {
+        let next = self.next_revision();
+        let expected_revision = self.revision;
+        let identity = self.identity.clone();
+        let service = self.composition_service.clone();
+        let header = self.header.clone();
+        async move {
+            next?;
+            let composition = service.pin(&preset_id).await?;
+            if composition.preset_id() != &preset_id {
+                return Err(AgentCompositionError::InvalidInput(
+                    "Agent composition returned a different preset identity".into(),
+                ));
+            }
+            let header = header
+                .with_agent_preset_id(preset_id)
+                .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
+            let baseline = DomainBaseline::new(composition.domains().clone())?;
+            Ok(PreparedDraftPreset {
+                identity,
+                expected_revision,
+                header,
+                composition,
+                baseline,
+            })
         }
-        let header = self
-            .header
-            .clone()
-            .with_agent_preset_id(preset_id)
-            .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
-        self.header = header;
-        self.composition = composition;
+    }
+
+    /// Atomically selects a prepared Header, pin and defaults for the same draft predecessor.
+    ///
+    /// # Errors
+    /// Rejects another draft or any intervening mutation, preserving the current payload.
+    pub fn apply_preset_selection(
+        &mut self,
+        prepared: PreparedDraftPreset,
+    ) -> DraftCommandResult<()> {
+        use rsi_agent_session_protocol::CommandRevision;
+        if !Arc::ptr_eq(&self.identity, &prepared.identity) {
+            return Err(DraftCommandError::WrongDraft);
+        }
+        if self.revision != prepared.expected_revision {
+            return Err(DraftCommandError::Revision {
+                expected: CommandRevision::Draft {
+                    revision: prepared.expected_revision,
+                },
+                actual: self.revision(),
+            });
+        }
+        self.header = prepared.header;
+        self.composition = prepared.composition;
+        self.baseline = prepared.baseline;
+        self.revision = prepared.expected_revision + 1;
         Ok(())
     }
 
@@ -235,6 +432,7 @@ impl AgentSessionDraft {
             inner: Box::new(PreparedFreshSessionInner {
                 header: self.header,
                 composition: self.composition,
+                baseline: self.baseline,
             }),
         }
     }
@@ -243,6 +441,9 @@ impl AgentSessionDraft {
 /// Closed composition failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentCompositionError {
+    /// Typed initial-state validation or binding failed.
+    #[error(transparent)]
+    Domain(#[from] DomainError),
     /// Malformed or internally inconsistent bounded input.
     #[error("invalid Agent composition input: {0}")]
     InvalidInput(String),

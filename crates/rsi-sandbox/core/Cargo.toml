@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 serde.workspace = true

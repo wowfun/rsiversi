@@ -1,0 +1,33 @@
+[package]
+name = "rsi-terminal-native"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+revision-b = []
+
+[dependencies]
+rsi-meta-native = { path = "../../rsi-meta/native" }
+rsi-terminal-ui = { path = "../terminal-ui" }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

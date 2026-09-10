@@ -1,30 +1,63 @@
 use super::{
-    CandidateLeaf, IsolationSpec, ProfileCandidate, ProfileCompiler, ProfileEnvironment,
-    ProfileError, ProfileLimits, ProfileProgram, Result, TreeNode, bound_message,
-    read_file_bounded,
+    CandidateLeaf, ProfileCandidate, ProfileCompiler, ProfileEnvironment, ProfileError,
+    ProfileLimits, ProfileProgram, Result, TreeNode, bound_message,
 };
+mod bindings;
+mod updates;
 use async_trait::async_trait;
+use bindings::{BindingSnapshot, EffectiveBindings, Namespace};
+use futures_util::stream::{FuturesUnordered, StreamExt as _};
+use updates::Command;
+pub use updates::{ProfileInput, ProfileUpdateHandle, ProfileUpdateTicket};
+#[cfg(not(target_family = "wasm"))]
+mod native_watch;
+#[cfg(not(target_family = "wasm"))]
+use native_watch::{WatchPlan, WatchProbe};
+
+#[cfg(target_family = "wasm")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WatchPlan;
+#[cfg(target_family = "wasm")]
+impl WatchPlan {
+    #[allow(clippy::unused_self)] // The shared controller observes either a native or immutable plan.
+    fn health(&self) -> WatcherHealth {
+        WatcherHealth::Inactive
+    }
+    fn establish(candidate: &ProfileCandidate, _: &ProfileLimits) -> Result<Self> {
+        if !candidate.watch_paths().is_empty() || !candidate.source_fingerprints.is_empty() {
+            return Err(ProfileError::InvalidProgram(
+                "native watching is unavailable in a Worker".into(),
+            ));
+        }
+        Ok(Self)
+    }
+}
+
 use rsi_meta::{
     ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberHandle, FiberState, LocalContract,
     MetaError, PendingReport, PluginFactory, PluginId, PreparedActivation, PreparedPlugin,
     ResolvedFactory, Runtime, UpdateMode,
 };
-use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime};
-use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Duration;
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(target_family = "wasm"))]
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(not(target_family = "wasm"))]
 const FULL_CONTENT_AUDIT_TICKS: usize = 50;
+#[cfg(not(target_family = "wasm"))]
 const MINIMUM_AUTOMATIC_RELOAD_BACKOFF: Duration = Duration::from_secs(1);
+#[cfg(not(target_family = "wasm"))]
 const MAXIMUM_AUTOMATIC_RELOAD_BACKOFF: Duration = Duration::from_secs(5);
 
+#[cfg(not(target_family = "wasm"))]
 fn automatic_reload_backoff(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(5);
     MINIMUM_AUTOMATIC_RELOAD_BACKOFF
@@ -37,8 +70,27 @@ pub trait ProfileResolver: Send + Sync + fmt::Debug + 'static {
     /// Resolves one catalog key to immutable executable provenance.
     fn resolve(&self, plugin: &PluginId) -> Result<ResolvedFactory>;
 
-    /// Applies one validated group isolation declaration to a child Context.
-    fn isolate(&self, context: Context, isolation: &IsolationSpec) -> Result<Context>;
+    /// Verifies that a successor preserves every registered nominal Local/event marker.
+    /// Resolvers must opt in with a complete check; ordinary reload needs no successor.
+    fn validate_successor(&self, _successor: &dyn ProfileResolver) -> Result<()> {
+        Err(ProfileError::IncompatibleInput(
+            "resolver does not support input replacement".to_owned(),
+        ))
+    }
+
+    /// Resolves a stable Local key to its frozen nominal marker; never allocates isolation.
+    fn local_contract_type(&self, key: &str) -> Result<std::any::TypeId> {
+        Err(ProfileError::UnknownLocalContract {
+            key: key.to_owned(),
+        })
+    }
+
+    /// Resolves a stable event key to its frozen nominal marker; never allocates isolation.
+    fn local_event_type(&self, key: &str) -> Result<std::any::TypeId> {
+        Err(ProfileError::UnknownLocalEvent {
+            key: key.to_owned(),
+        })
+    }
 }
 
 /// Health of the latest desired Profile target.
@@ -217,6 +269,14 @@ pub struct ProfileSnapshot {
 }
 
 impl ProfileSnapshot {
+    pub(super) fn from_candidate(candidate: &ProfileCandidate) -> Self {
+        Self {
+            revision: 0,
+            source_digest: candidate.source_digest.clone(),
+            nodes: snapshot_nodes(&candidate.tree),
+        }
+    }
+
     /// Revision associated with this desired tree.
     pub const fn revision(&self) -> u64 {
         self.revision
@@ -321,16 +381,17 @@ impl ProfileBootstrap {
         environment: ProfileEnvironment,
         limits: ProfileLimits,
     ) -> Result<Self> {
-        let compiler = ProfileCompiler::new(environment, limits);
-        let candidate = compiler.compile(&program)?;
-        let prepared = prepare_new_target(runtime, resolver.as_ref(), candidate)?;
-        let control = Arc::new(Controller::new(
-            runtime.clone(),
-            resolver,
-            program,
-            compiler,
-            &prepared.target,
-        ));
+        Self::prepare_input(
+            runtime,
+            ProfileInput::new(resolver, program, environment, limits),
+        )
+    }
+
+    /// Prepares an immutable complete input for one ordinary Profile activation.
+    pub fn prepare_input(runtime: &Runtime, input: ProfileInput) -> Result<Self> {
+        let candidate = input.compiler.compile(&input.program)?;
+        let prepared = prepare_new_target(runtime, input.resolver.as_ref(), candidate)?;
+        let control = Arc::new(Controller::new(runtime.clone(), input, &prepared.target));
         let factory = Arc::new(ProfileFactory {
             initial: Mutex::new(Some(prepared)),
             control: Arc::downgrade(&control),
@@ -346,6 +407,11 @@ impl ProfileBootstrap {
     /// Returns an external strong control handle retained by the running Host.
     pub fn control(&self) -> Arc<dyn ProfileControl> {
         Arc::new(StrongControl(Arc::clone(&self.control)))
+    }
+
+    /// Grants input replacement to the composition owner, separate from published control.
+    pub fn updater(&self) -> ProfileUpdateHandle {
+        ProfileUpdateHandle::new(Arc::clone(&self.control))
     }
 }
 
@@ -373,6 +439,7 @@ impl fmt::Debug for ResolvedLeaf {
 struct ResolvedTarget {
     candidate: ProfileCandidate,
     leaves: Vec<ResolvedLeaf>,
+    bindings: BindingSnapshot,
 }
 
 /// Opaque one-shot plan for one static Profile generation.
@@ -500,7 +567,10 @@ async fn prepare_generation(
         let runtime = runtime.clone();
         let factory = leaf.factory.clone();
         let config = leaf.candidate.config().clone();
-        let mut task = tokio::task::spawn_blocking(move || runtime.prepare(factory, config));
+        let mut task = runtime
+            .execution()
+            .clone()
+            .prepare(move || runtime.prepare(factory, config));
         let joined = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
@@ -536,6 +606,9 @@ async fn mount_generation(
         Ok(candidate) => candidate,
         Err(error) => return rollback_generation(handle, error).await,
     };
+    if let Err(error) = publish_order(&candidate) {
+        return rollback_generation(handle, error).await;
+    }
     for (index, mut bound) in candidate.leaves.into_iter().enumerate() {
         let leaf_target = candidate.target.leaves[index].clone();
         if cancellation.is_cancelled() {
@@ -636,12 +709,14 @@ struct PreparedTarget {
 }
 
 struct BoundTarget {
+    parent: Context,
     target: ResolvedTarget,
     leaves: Vec<BoundLeaf>,
 }
 
 struct BoundLeaf {
     context: Context,
+    bindings: EffectiveBindings,
     prepared: Option<PreparedPlugin>,
 }
 
@@ -649,186 +724,27 @@ struct BoundLeaf {
 struct ActiveLeaf {
     resolved: ResolvedLeaf,
     handle: FiberHandle,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct WatchPlan {
-    fingerprints: BTreeMap<PathBuf, [u8; 32]>,
-    stamps: BTreeMap<PathBuf, SourceStamp>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SourceStamp {
-    length: u64,
-    modified: Option<SystemTime>,
-}
-
-enum WatchProbe {
-    MetadataUnchanged,
-    ContentVerified(WatchPlan),
-}
-
-impl WatchPlan {
-    fn capture(paths: &[PathBuf], limits: &ProfileLimits) -> Result<Self> {
-        let mut fingerprints = BTreeMap::new();
-        let mut stamps = BTreeMap::new();
-        let mut total = 0_usize;
-        for path in paths {
-            let bytes =
-                read_file_bounded(path, limits.maximum_document_bytes).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::InvalidData {
-                        ProfileError::CapacityExceeded {
-                            resource: "document bytes",
-                            maximum: limits.maximum_document_bytes,
-                        }
-                    } else {
-                        ProfileError::Source {
-                            message: "cannot read a required watched source".to_owned(),
-                        }
-                    }
-                })?;
-            total = total
-                .checked_add(bytes.len())
-                .ok_or(ProfileError::CapacityExceeded {
-                    resource: "source bytes",
-                    maximum: limits.maximum_source_bytes,
-                })?;
-            if total > limits.maximum_source_bytes {
-                return Err(ProfileError::CapacityExceeded {
-                    resource: "source bytes",
-                    maximum: limits.maximum_source_bytes,
-                });
-            }
-            let digest: [u8; 32] = Sha256::digest(&bytes).into();
-            fingerprints.insert(path.clone(), digest);
-            stamps.insert(path.clone(), source_stamp(path, limits)?);
-        }
-        Ok(Self {
-            fingerprints,
-            stamps,
-        })
-    }
-
-    fn probe(
-        baseline: &Self,
-        limits: &ProfileLimits,
-        force_content_audit: bool,
-    ) -> Result<WatchProbe> {
-        let paths = baseline.fingerprints.keys().cloned().collect::<Vec<_>>();
-        let stamps = capture_stamps(&paths, limits)?;
-        if !force_content_audit && stamps == baseline.stamps {
-            return Ok(WatchProbe::MetadataUnchanged);
-        }
-        Self::capture(&paths, limits).map(WatchProbe::ContentVerified)
-    }
-
-    fn health(&self) -> WatcherHealth {
-        if self.fingerprints.is_empty() {
-            WatcherHealth::Inactive
-        } else {
-            WatcherHealth::Healthy
-        }
-    }
-
-    fn establish(candidate: &ProfileCandidate, limits: &ProfileLimits) -> Result<Self> {
-        let plan = Self::capture(candidate.watch_paths(), limits)?;
-        if plan.fingerprints != candidate.source_fingerprints {
-            return Err(ProfileError::Source {
-                message: "a required source changed after Profile compilation".to_owned(),
-            });
-        }
-        Ok(plan)
-    }
-}
-
-fn source_stamp(path: &PathBuf, limits: &ProfileLimits) -> Result<SourceStamp> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| ProfileError::Source {
-        message: "cannot read a required watched source".to_owned(),
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(ProfileError::Source {
-            message: "a required watched source is not a regular file".to_owned(),
-        });
-    }
-    let length = metadata.len();
-    if length > limits.maximum_document_bytes as u64 {
-        return Err(ProfileError::CapacityExceeded {
-            resource: "document bytes",
-            maximum: limits.maximum_document_bytes,
-        });
-    }
-    Ok(SourceStamp {
-        length,
-        modified: metadata.modified().ok(),
-    })
-}
-
-fn capture_stamps(
-    paths: &[PathBuf],
-    limits: &ProfileLimits,
-) -> Result<BTreeMap<PathBuf, SourceStamp>> {
-    let mut stamps = BTreeMap::new();
-    let mut total = 0_usize;
-    for path in paths {
-        let stamp = source_stamp(path, limits)?;
-        let length = usize::try_from(stamp.length).map_err(|_| ProfileError::CapacityExceeded {
-            resource: "source bytes",
-            maximum: limits.maximum_source_bytes,
-        })?;
-        total = total
-            .checked_add(length)
-            .ok_or(ProfileError::CapacityExceeded {
-                resource: "source bytes",
-                maximum: limits.maximum_source_bytes,
-            })?;
-        if total > limits.maximum_source_bytes {
-            return Err(ProfileError::CapacityExceeded {
-                resource: "source bytes",
-                maximum: limits.maximum_source_bytes,
-            });
-        }
-        stamps.insert(path.clone(), stamp);
-    }
-    Ok(stamps)
-}
-
-#[cfg(test)]
-mod watch_tests {
-    use super::*;
-
-    #[test]
-    fn metadata_fast_path_and_forced_content_audit_are_distinct() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("profile.toml");
-        fs::write(&path, b"format = 1\n").unwrap();
-        let limits = ProfileLimits::default();
-        let baseline = WatchPlan::capture(std::slice::from_ref(&path), &limits).unwrap();
-
-        assert!(matches!(
-            WatchPlan::probe(&baseline, &limits, false).unwrap(),
-            WatchProbe::MetadataUnchanged
-        ));
-        fs::write(&path, b"format = 2\n").unwrap();
-        let WatchProbe::ContentVerified(changed) =
-            WatchPlan::probe(&baseline, &limits, true).unwrap()
-        else {
-            panic!("forced audit must hash content");
-        };
-        assert_ne!(changed.fingerprints, baseline.fingerprints);
-    }
+    position: rsi_meta::ChildPosition,
+    bindings: EffectiveBindings,
 }
 
 #[derive(Debug)]
 struct Controller {
     runtime: Runtime,
-    resolver: Arc<dyn ProfileResolver>,
-    program: ProfileProgram,
-    compiler: ProfileCompiler,
+    input: Mutex<(u64, Option<ProfileInput>)>,
+    retired_snapshot: Mutex<Option<ProfileSnapshot>>,
+    limits: ProfileLimits,
+    commands: mpsc::Sender<Command>,
+    receiver: Mutex<Option<mpsc::Receiver<Command>>>,
+    accepting: AtomicBool,
+    command_stop: CancellationToken,
     state: Mutex<Option<ControllerState>>,
     reload_lock: AsyncMutex<()>,
     status_tx: watch::Sender<ProfileStatus>,
     membership_changed: Notify,
+    #[cfg(not(target_family = "wasm"))]
     dirty: AtomicBool,
+    #[cfg(not(target_family = "wasm"))]
     dirty_notify: Notify,
 }
 
@@ -841,18 +757,13 @@ struct ControllerState {
     context: Context,
     target: ResolvedTarget,
     converged_target: ResolvedTarget,
+    input_restart_required: bool,
     active: Vec<ActiveLeaf>,
     watch_plan: WatchPlan,
 }
 
 impl Controller {
-    fn new(
-        runtime: Runtime,
-        resolver: Arc<dyn ProfileResolver>,
-        program: ProfileProgram,
-        compiler: ProfileCompiler,
-        initial: &ResolvedTarget,
-    ) -> Self {
+    fn new(runtime: Runtime, input: ProfileInput, initial: &ResolvedTarget) -> Self {
         let initial_status = ProfileStatus {
             revision: 0,
             health: ProfileHealth::Converging,
@@ -863,16 +774,23 @@ impl Controller {
             diagnostic: None,
         };
         let (status_tx, _) = watch::channel(initial_status);
+        let (commands, receiver) = mpsc::channel(1);
         Self {
             runtime,
-            resolver,
-            program,
-            compiler,
+            limits: input.compiler.limits.clone(),
+            input: Mutex::new((1, Some(input))),
+            retired_snapshot: Mutex::new(None),
+            commands,
+            receiver: Mutex::new(Some(receiver)),
+            accepting: AtomicBool::new(false),
+            command_stop: CancellationToken::new(),
             state: Mutex::new(None),
             reload_lock: AsyncMutex::new(()),
             status_tx,
             membership_changed: Notify::new(),
+            #[cfg(not(target_family = "wasm"))]
             dirty: AtomicBool::new(false),
+            #[cfg(not(target_family = "wasm"))]
             dirty_notify: Notify::new(),
         }
     }
@@ -884,13 +802,15 @@ impl Controller {
         active: Vec<ActiveLeaf>,
     ) -> Result<()> {
         let candidate = target.candidate.clone();
-        let limits = self.compiler.limits.clone();
-        let watch_plan =
-            tokio::task::spawn_blocking(move || WatchPlan::establish(&candidate, &limits))
-                .await
-                .map_err(|_| {
-                    ProfileError::InvalidProgram("Profile watcher task failed".to_owned())
-                })??;
+        let limits = self.limits.clone();
+        let watch_plan = self
+            .runtime
+            .execution()
+            .prepare(move || WatchPlan::establish(&candidate, &limits))
+            .await
+            .map_err(|_| {
+                ProfileError::InvalidProgram("Profile watcher task failed".to_owned())
+            })??;
         let watcher = watch_plan.health();
         let mut state = self.state.lock().expect("Profile state poisoned");
         if state.is_some() {
@@ -905,6 +825,7 @@ impl Controller {
             diagnostic: None,
             context,
             converged_target: target.clone(),
+            input_restart_required: false,
             target,
             active,
             watch_plan,
@@ -927,20 +848,28 @@ impl Controller {
                 nodes: snapshot_nodes(&state.target.candidate.tree),
             }
         } else {
-            ProfileSnapshot {
-                revision: 0,
-                source_digest: self.status_tx.borrow().source_digest.clone(),
-                nodes: Vec::new(),
-            }
+            self.retired_snapshot
+                .lock()
+                .expect("retired Profile snapshot poisoned")
+                .clone()
+                .unwrap_or_else(|| ProfileSnapshot {
+                    revision: 0,
+                    source_digest: self.status_tx.borrow().source_digest.clone(),
+                    nodes: Vec::new(),
+                })
         }
     }
 
     async fn reload(&self) -> Result<ReloadOutcome> {
-        let _reload = self.reload_lock.lock().await;
-        self.reload_serialized().await
+        self.submit(None)?.wait().await
     }
 
-    async fn reload_serialized(&self) -> Result<ReloadOutcome> {
+    async fn reload_serialized(
+        &self,
+        input: &ProfileInput,
+        previous: &ProfileInput,
+        replacement: bool,
+    ) -> Result<ReloadOutcome> {
         if self
             .state
             .lock()
@@ -950,7 +879,7 @@ impl Controller {
         {
             return Err(ProfileError::Stopped);
         }
-        let (candidate, watch_plan) = match self.resolve_reload().await {
+        let (candidate, watch_plan) = match self.resolve_reload(input).await {
             Ok(result) => result,
             Err(error) => {
                 self.publish_preflight_error(&error);
@@ -960,46 +889,38 @@ impl Controller {
 
         let (revision, health, context, previous_target) = self.reload_base()?;
 
-        if health == ProfileHealth::Converged {
-            let equal = {
-                let state = self.state.lock().expect("Profile state poisoned");
-                semantic_equal(
-                    &state.as_ref().expect("checked active state").target,
-                    &candidate,
-                )
-            };
-            if equal {
-                let status = self.complete_unchanged(candidate, watch_plan);
-                return Ok(ReloadOutcome::Unchanged(status));
-            }
-        }
-
-        let needs_restart = {
-            let state = self.state.lock().expect("Profile state poisoned");
-            restart_required(
-                &state
-                    .as_ref()
-                    .expect("checked active state")
-                    .converged_target,
-                &candidate,
-            )
-        };
-        if needs_restart {
-            let status = self.complete_restart(revision, candidate, watch_plan);
-            return Ok(ReloadOutcome::RestartRequired(status));
-        }
-
         let candidate = self.publish_pre_mutation_failure(bind_resolved_target(
             candidate,
             &context,
-            self.resolver.as_ref(),
+            input.resolver.as_ref(),
+            &previous_target.bindings,
         ))?;
+        if matches!(
+            health,
+            ProfileHealth::Converged | ProfileHealth::RestartRequired
+        ) && semantic_equal(&previous_target, &candidate.target)
+        {
+            let status = self.complete_unchanged(candidate.target, watch_plan, replacement);
+            return Ok(if status.health() == ProfileHealth::RestartRequired {
+                ReloadOutcome::RestartRequired(status)
+            } else {
+                ReloadOutcome::Unchanged(status)
+            });
+        }
+        if restart_required(&previous_target, &candidate.target) {
+            let status = self.complete_restart(candidate.target, watch_plan, replacement);
+            return Ok(ReloadOutcome::RestartRequired(status));
+        }
+
         let rollback = self.publish_pre_mutation_failure(bind_resolved_target(
-            previous_target,
+            previous_target.clone(),
             &context,
-            self.resolver.as_ref(),
+            previous.resolver.as_ref(),
+            &previous_target.bindings,
         ))?;
         let candidate_target = candidate.target.clone();
+        let acknowledge_restart =
+            replacement || !semantic_equal(&previous_target, &candidate_target);
         self.set_converging(&candidate.target);
 
         let mut active = {
@@ -1013,7 +934,13 @@ impl Controller {
         };
         match self.converge_once(&mut active, candidate).await {
             Ok(target) => {
-                let status = self.complete_applied(revision, target, active, watch_plan);
+                let status = self.complete_applied(
+                    revision,
+                    target,
+                    active,
+                    watch_plan,
+                    acknowledge_restart,
+                );
                 Ok(ReloadOutcome::Applied(status))
             }
             Err(error) => {
@@ -1039,17 +966,15 @@ impl Controller {
         watch_plan: WatchPlan,
         error: String,
     ) -> Result<ReloadOutcome> {
-        let error = bound_message(error, self.compiler.limits.maximum_diagnostic_bytes);
+        let error = bound_message(error, self.limits.maximum_diagnostic_bytes);
         match self.converge_once(&mut active, rollback).await {
             Ok(restored) => {
-                let status = self.complete_applied(revision, restored, active, watch_plan);
+                let status = self.complete_applied(revision, restored, active, watch_plan, false);
                 Ok(ReloadOutcome::RolledBack { status, error })
             }
             Err(rollback_error) => {
-                let rollback_error = bound_message(
-                    rollback_error,
-                    self.compiler.limits.maximum_diagnostic_bytes,
-                );
+                let rollback_error =
+                    bound_message(rollback_error, self.limits.maximum_diagnostic_bytes);
                 let status = self.complete_degraded(
                     revision,
                     candidate_target,
@@ -1066,23 +991,30 @@ impl Controller {
         }
     }
 
-    async fn resolve_reload(&self) -> Result<(ResolvedTarget, WatchPlan)> {
-        let source_compiler = self.compiler.clone();
-        let program = self.program.clone();
-        let candidate = tokio::task::spawn_blocking(move || source_compiler.compile(&program))
+    async fn resolve_reload(&self, input: &ProfileInput) -> Result<(ResolvedTarget, WatchPlan)> {
+        let source_compiler = input.compiler.clone();
+        let program = input.program.clone();
+        let candidate = self
+            .runtime
+            .execution()
+            .prepare(move || source_compiler.compile(&program))
             .await
             .map_err(|_| {
                 ProfileError::InvalidProgram("Profile compiler task failed".to_owned())
             })??;
-        let resolver = Arc::clone(&self.resolver);
-        let limits = self.compiler.limits.clone();
-        tokio::task::spawn_blocking(move || {
-            let target = resolve_target(resolver.as_ref(), candidate)?;
-            let watch_plan = WatchPlan::establish(&target.candidate, &limits)?;
-            Ok::<_, ProfileError>((target, watch_plan))
-        })
-        .await
-        .map_err(|_| ProfileError::InvalidProgram("Profile resolution task failed".to_owned()))?
+        let resolver = Arc::clone(&input.resolver);
+        let limits = self.limits.clone();
+        self.runtime
+            .execution()
+            .prepare(move || {
+                let target = resolve_target(resolver.as_ref(), candidate)?;
+                let watch_plan = WatchPlan::establish(&target.candidate, &limits)?;
+                Ok::<_, ProfileError>((target, watch_plan))
+            })
+            .await
+            .map_err(|_| {
+                ProfileError::InvalidProgram("Profile resolution task failed".to_owned())
+            })?
     }
 
     fn reload_base(&self) -> Result<(u64, ProfileHealth, Context, ResolvedTarget)> {
@@ -1092,12 +1024,14 @@ impl Controller {
             .revision
             .checked_add(1)
             .ok_or_else(|| ProfileError::InvalidProgram("Profile revision exhausted".to_owned()))?;
-        Ok((
-            revision,
-            state.health,
-            state.context.clone(),
-            state.converged_target.clone(),
-        ))
+        let mut previous = state.converged_target.clone();
+        for leaf in &state.active {
+            previous
+                .bindings
+                .positions
+                .insert(leaf.resolved.candidate.id().clone(), leaf.position.clone());
+        }
+        Ok((revision, state.health, state.context.clone(), previous))
     }
 
     async fn converge_once(
@@ -1105,10 +1039,28 @@ impl Controller {
         active: &mut Vec<ActiveLeaf>,
         mut candidate: BoundTarget,
     ) -> std::result::Result<ResolvedTarget, String> {
-        let retained = retained_prefix(active, &candidate.target.leaves);
-        while active.len() > retained {
-            let removed = active.pop().expect("active suffix exists");
-            self.remove_active_tail(&removed);
+        let wanted = candidate
+            .target
+            .leaves
+            .iter()
+            .enumerate()
+            .map(|(index, leaf)| (leaf.candidate.id().clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        for index in (0..active.len()).rev() {
+            let retained = wanted
+                .get(active[index].resolved.candidate.id())
+                .is_some_and(|next| {
+                    keep_leaf(
+                        &active[index],
+                        &candidate.target.leaves[*next],
+                        &candidate.leaves[*next],
+                    )
+                });
+            if retained {
+                continue;
+            }
+            let removed = active.remove(index);
+            self.remove_active(index, &removed);
             let report = removed.handle.dispose().await;
             if !report.is_clean() {
                 return Err(format!(
@@ -1118,11 +1070,23 @@ impl Controller {
                 ));
             }
         }
-        for index in 0..retained {
-            candidate.leaves[index].prepared.take();
+        publish_order(&candidate).map_err(|error| error.to_string())?;
+        active.sort_by_key(|leaf| wanted[leaf.resolved.candidate.id()]);
+        for leaf in active.iter_mut() {
+            leaf.resolved = candidate.target.leaves[wanted[leaf.resolved.candidate.id()]].clone();
         }
-        for index in retained..candidate.target.leaves.len() {
+        self.replace_active(active);
+        // The ordered retained subsequence is extended one leaf at a time. No
+        // preparation proof or Fiber admission is reserved for a second graph.
+        for index in 0..candidate.target.leaves.len() {
             let resolved = candidate.target.leaves[index].clone();
+            if active
+                .get(index)
+                .is_some_and(|leaf| leaf.resolved.candidate.id() == resolved.candidate.id())
+            {
+                candidate.leaves[index].prepared.take();
+                continue;
+            }
             let prepared = match candidate.leaves[index].prepared.take() {
                 Some(prepared) => prepared,
                 None => self
@@ -1149,8 +1113,16 @@ impl Controller {
                     .to_string()
                 })?;
             let state = handle.snapshot().state;
-            active.push(ActiveLeaf { resolved, handle });
-            self.append_active_tail(active.last().expect("active leaf was appended"));
+            active.insert(
+                index,
+                ActiveLeaf {
+                    position: candidate.target.bindings.positions[resolved.candidate.id()].clone(),
+                    resolved,
+                    handle,
+                    bindings: candidate.leaves[index].bindings.clone(),
+                },
+            );
+            self.insert_active(index, &active[index]);
             if let Some(diagnostic) =
                 settled_failure(candidate.target.leaves[index].candidate.id(), &state)
             {
@@ -1169,9 +1141,22 @@ impl Controller {
         self.publish_locked_state(state);
     }
 
-    fn complete_unchanged(&self, target: ResolvedTarget, watch_plan: WatchPlan) -> ProfileStatus {
+    fn complete_unchanged(
+        &self,
+        target: ResolvedTarget,
+        watch_plan: WatchPlan,
+        replacement: bool,
+    ) -> ProfileStatus {
         let mut state = self.state.lock().expect("Profile state poisoned");
         let state = state.as_mut().expect("checked active state");
+        if replacement {
+            state.input_restart_required = false;
+        }
+        state.health = if state.input_restart_required {
+            ProfileHealth::RestartRequired
+        } else {
+            ProfileHealth::Converged
+        };
         state.target = target.clone();
         state.converged_target = target;
         state.watch_plan = watch_plan;
@@ -1182,17 +1167,19 @@ impl Controller {
 
     fn complete_restart(
         &self,
-        revision: u64,
         target: ResolvedTarget,
         watch_plan: WatchPlan,
+        replacement: bool,
     ) -> ProfileStatus {
         let mut state = self.state.lock().expect("Profile state poisoned");
         let state = state.as_mut().expect("checked active state");
-        state.revision = revision;
         state.health = ProfileHealth::RestartRequired;
-        state.target = target;
-        state.watch_plan = watch_plan;
-        state.watcher = state.watch_plan.health();
+        state.input_restart_required = replacement;
+        if !replacement {
+            state.target = target;
+            state.watch_plan = watch_plan;
+            state.watcher = state.watch_plan.health();
+        }
         state.diagnostic = None;
         self.publish_locked_state(state)
     }
@@ -1203,12 +1190,20 @@ impl Controller {
         target: ResolvedTarget,
         active: Vec<ActiveLeaf>,
         watch_plan: WatchPlan,
+        acknowledge_restart: bool,
     ) -> ProfileStatus {
         let status = {
             let mut state = self.state.lock().expect("Profile state poisoned");
             let state = state.as_mut().expect("checked active state");
             state.revision = revision;
-            state.health = ProfileHealth::Converged;
+            if acknowledge_restart {
+                state.input_restart_required = false;
+            }
+            state.health = if state.input_restart_required {
+                ProfileHealth::RestartRequired
+            } else {
+                ProfileHealth::Converged
+            };
             state.target = target.clone();
             state.converged_target = target;
             state.active = active;
@@ -1245,10 +1240,10 @@ impl Controller {
         status
     }
 
-    fn remove_active_tail(&self, removed: &ActiveLeaf) {
+    fn remove_active(&self, index: usize, removed: &ActiveLeaf) {
         let mut state = self.state.lock().expect("Profile state poisoned");
         if let Some(state) = state.as_mut() {
-            let mirrored = state.active.pop().expect("active graph suffix exists");
+            let mirrored = state.active.remove(index);
             debug_assert_eq!(
                 mirrored.resolved.candidate.id(),
                 removed.resolved.candidate.id()
@@ -1256,10 +1251,17 @@ impl Controller {
         }
     }
 
-    fn append_active_tail(&self, added: &ActiveLeaf) {
+    fn insert_active(&self, index: usize, added: &ActiveLeaf) {
         let mut state = self.state.lock().expect("Profile state poisoned");
         if let Some(state) = state.as_mut() {
-            state.active.push(added.clone());
+            state.active.insert(index, added.clone());
+        }
+    }
+
+    fn replace_active(&self, active: &[ActiveLeaf]) {
+        let mut state = self.state.lock().expect("Profile state poisoned");
+        if let Some(state) = state.as_mut() {
+            state.active = active.to_vec();
         }
     }
 
@@ -1268,7 +1270,7 @@ impl Controller {
         if let Some(state) = state.as_mut() {
             state.diagnostic = Some(bound_message(
                 error.to_string(),
-                self.compiler.limits.maximum_diagnostic_bytes,
+                self.limits.maximum_diagnostic_bytes,
             ));
             self.publish_locked_state(state);
         }
@@ -1281,12 +1283,10 @@ impl Controller {
         result
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn publish_watcher_error(&self, baseline: &WatchPlan) -> bool {
         const DIAGNOSTIC: &str = "a required watched Profile source is unavailable";
-        let diagnostic = bound_message(
-            DIAGNOSTIC.to_owned(),
-            self.compiler.limits.maximum_diagnostic_bytes,
-        );
+        let diagnostic = bound_message(DIAGNOSTIC.to_owned(), self.limits.maximum_diagnostic_bytes);
         let mut state = self.state.lock().expect("Profile state poisoned");
         if let Some(state) = state.as_mut()
             && state.health != ProfileHealth::Stopped
@@ -1324,7 +1324,7 @@ impl Controller {
             state.health = ProfileHealth::Degraded;
             state.diagnostic = Some(bound_message(
                 diagnostic,
-                self.compiler.limits.maximum_diagnostic_bytes,
+                self.limits.maximum_diagnostic_bytes,
             ));
         }
         let status = status_from_state(state);
@@ -1345,12 +1345,14 @@ impl Controller {
         status
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn mark_dirty(&self) {
         if !self.dirty.swap(true, Ordering::AcqRel) {
             self.dirty_notify.notify_one();
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     async fn poll_sources(self: &Arc<Self>, mut stop: watch::Receiver<bool>) {
         let mut ticks_since_content_audit = 0_usize;
         loop {
@@ -1360,7 +1362,7 @@ impl Controller {
                         return;
                     }
                 }
-                () = tokio::time::sleep(WATCH_INTERVAL) => {
+                () = self.runtime.execution().sleep(WATCH_INTERVAL) => {
                     ticks_since_content_audit = ticks_since_content_audit
                         .checked_add(1)
                         .unwrap_or(FULL_CONTENT_AUDIT_TICKS);
@@ -1379,9 +1381,9 @@ impl Controller {
                             })
                     };
                     let Some((plan, was_faulted)) = baseline else { continue; };
-                    let limits = self.compiler.limits.clone();
+                    let limits = self.limits.clone();
                     let probed_plan = plan.clone();
-                    let current = tokio::task::spawn_blocking(move || {
+                    let current = self.runtime.execution().prepare(move || {
                         WatchPlan::probe(
                             &probed_plan,
                             &limits,
@@ -1409,6 +1411,7 @@ impl Controller {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn refresh_watch_plan(&self, baseline: &WatchPlan, current: WatchPlan) {
         let mut state = self.state.lock().expect("Profile state poisoned");
         let Some(state) = state.as_mut() else {
@@ -1419,11 +1422,15 @@ impl Controller {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     async fn drive_dirty(self: &Arc<Self>, mut stop: watch::Receiver<bool>) {
         let mut consecutive_failures = 0_u32;
         loop {
             if self.dirty.swap(false, Ordering::AcqRel) {
-                if self.reload().await.is_err() {
+                if let Err(error) = self.reload().await {
+                    if matches!(error, ProfileError::Busy) {
+                        self.mark_dirty();
+                    }
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     tokio::select! {
                         changed = stop.changed() => {
@@ -1431,7 +1438,7 @@ impl Controller {
                                 return;
                             }
                         }
-                        () = tokio::time::sleep(automatic_reload_backoff(consecutive_failures)) => {}
+                        () = self.runtime.execution().sleep(automatic_reload_backoff(consecutive_failures)) => {}
                     }
                 } else {
                     consecutive_failures = 0;
@@ -1469,61 +1476,45 @@ impl Controller {
                 .map(|handle| handle.subscribe())
                 .collect::<Vec<_>>();
             self.refresh_observed();
-            let mut subscriptions = tokio::task::JoinSet::new();
-            let child_changed = Arc::new(Notify::new());
-            for mut receiver in receivers {
-                let child_changed = Arc::clone(&child_changed);
-                subscriptions.spawn(async move {
-                    while receiver.changed().await.is_ok() {
-                        child_changed.notify_one();
-                    }
-                    child_changed.notify_one();
-                });
-            }
+            let mut subscriptions = receivers
+                .into_iter()
+                .map(next_child_change)
+                .collect::<FuturesUnordered<_>>();
             loop {
-                if subscriptions.is_empty() {
-                    tokio::select! {
-                        stop_change = stop.changed() => {
-                            if stop_change.is_err() || *stop.borrow() {
-                                return;
-                            }
-                        }
-                        () = self.membership_changed.notified() => break,
-                        () = child_changed.notified() => self.refresh_observed(),
+                tokio::select! {
+                    stop_change = stop.changed() => {
+                        if stop_change.is_err() || *stop.borrow() { return; }
                     }
-                } else {
-                    tokio::select! {
-                        stop_change = stop.changed() => {
-                            if stop_change.is_err() || *stop.borrow() {
-                                subscriptions.abort_all();
-                                return;
-                            }
+                    () = self.membership_changed.notified() => break,
+                    changed = subscriptions.next(), if !subscriptions.is_empty() => {
+                        if let Some((receiver, open)) = changed {
+                            self.refresh_observed();
+                            if open { subscriptions.push(next_child_change(receiver)); }
                         }
-                        () = self.membership_changed.notified() => break,
-                        () = child_changed.notified() => self.refresh_observed(),
-                        _ = subscriptions.join_next() => self.refresh_observed(),
                     }
                 }
             }
-            subscriptions.abort_all();
         }
-    }
-
-    fn has_watched_sources(&self) -> bool {
-        self.state
-            .lock()
-            .expect("Profile state poisoned")
-            .as_ref()
-            .is_some_and(|state| !state.watch_plan.fingerprints.is_empty())
     }
 
     async fn stop(&self) {
+        self.accepting.store(false, Ordering::Release);
+        self.command_stop.cancel();
         let _reload = self.reload_lock.lock().await;
         let mut state = self.state.lock().expect("Profile state poisoned");
-        if let Some(state) = state.as_mut() {
-            state.health = ProfileHealth::Stopped;
-            self.publish_locked_state(state);
+        if let Some(mut stopped) = state.take() {
+            stopped.health = ProfileHealth::Stopped;
+            *self
+                .retired_snapshot
+                .lock()
+                .expect("retired Profile snapshot poisoned") = Some(ProfileSnapshot {
+                revision: stopped.revision,
+                source_digest: stopped.target.candidate.source_digest().to_owned(),
+                nodes: snapshot_nodes(&stopped.target.candidate.tree),
+            });
+            self.publish_locked_state(&mut stopped);
         }
+        self.input.lock().expect("Profile input poisoned").1.take();
     }
 }
 
@@ -1614,7 +1605,14 @@ impl PluginFactory for ProfileFactory {
             .expect("initial Profile target poisoned")
             .take()
             .ok_or_else(|| MetaError::Activation("Profile bootstrap is single-use".to_owned()))?;
-        let candidate = bind_target(prepared, plan.context(), control.resolver.as_ref())
+        let input = control
+            .input
+            .lock()
+            .expect("Profile input poisoned")
+            .1
+            .clone()
+            .ok_or_else(|| MetaError::Activation("Profile input was closed".into()))?;
+        let candidate = bind_target(prepared, plan.context(), input.resolver.as_ref())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
 
         let tasks = Arc::new(TaskOwner::new());
@@ -1634,10 +1632,15 @@ impl PluginFactory for ProfileFactory {
                         .expect("Profile task owner poisoned")
                         .take()
                         .unwrap_or_default();
+                    let mut failed = false;
                     for handle in handles {
-                        let _ = handle.await;
+                        failed |= handle.await.is_err();
                     }
-                    Ok(())
+                    if failed {
+                        Err("Profile background task failed".to_owned())
+                    } else {
+                        Ok(())
+                    }
                 })
             }),
         )?;
@@ -1657,19 +1660,34 @@ impl PluginFactory for ProfileFactory {
             .map_err(|error| MetaError::Activation(error.to_string()))?;
 
         let mut handles = Vec::new();
-        if control.has_watched_sources() {
-            handles.push(tokio::spawn({
+        let receiver = control
+            .receiver
+            .lock()
+            .expect("Profile receiver poisoned")
+            .take()
+            .ok_or_else(|| {
+                MetaError::Activation("Profile command worker is single-use".to_owned())
+            })?;
+        control.accepting.store(true, Ordering::Release);
+        handles.push(control.runtime.execution().spawn({
+            let control = Arc::clone(&control);
+            let stop = tasks.stop.subscribe();
+            async move { control.drive_commands(receiver, stop).await }
+        }));
+        #[cfg(not(target_family = "wasm"))]
+        {
+            handles.push(control.runtime.execution().spawn({
                 let control = Arc::clone(&control);
                 let stop = tasks.stop.subscribe();
                 async move { control.poll_sources(stop).await }
             }));
-            handles.push(tokio::spawn({
+            handles.push(control.runtime.execution().spawn({
                 let control = Arc::clone(&control);
                 let stop = tasks.stop.subscribe();
                 async move { control.drive_dirty(stop).await }
             }));
         }
-        handles.push(tokio::spawn({
+        handles.push(control.runtime.execution().spawn({
             let control = Arc::clone(&control);
             let stop = tasks.stop.subscribe();
             async move { control.refresh_loop(stop).await }
@@ -1682,7 +1700,7 @@ impl PluginFactory for ProfileFactory {
 #[derive(Debug)]
 struct TaskOwner {
     stop: watch::Sender<bool>,
-    handles: Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>,
+    handles: Mutex<Option<Vec<rsi_meta::Task<()>>>>,
 }
 
 impl TaskOwner {
@@ -1699,6 +1717,7 @@ async fn apply_initial(
     active: &mut Vec<ActiveLeaf>,
     mut candidate: BoundTarget,
 ) -> std::result::Result<ResolvedTarget, String> {
+    publish_order(&candidate).map_err(|error| error.to_string())?;
     for index in 0..candidate.target.leaves.len() {
         let resolved = candidate.target.leaves[index].clone();
         let prepared = candidate.leaves[index]
@@ -1716,7 +1735,14 @@ async fn apply_initial(
                 .to_string()
             })?;
         let state = handle.snapshot().state;
-        active.push(ActiveLeaf { resolved, handle });
+        active.push(ActiveLeaf {
+            resolved,
+            handle,
+            position: candidate.target.bindings.positions
+                [candidate.target.leaves[index].candidate.id()]
+            .clone(),
+            bindings: candidate.leaves[index].bindings.clone(),
+        });
         if let Some(diagnostic) =
             settled_failure(candidate.target.leaves[index].candidate.id(), &state)
         {
@@ -1766,16 +1792,21 @@ fn resolve_target(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(ResolvedTarget { candidate, leaves })
+    Ok(ResolvedTarget {
+        candidate,
+        leaves,
+        bindings: BindingSnapshot::default(),
+    })
 }
 
 fn bind_resolved_target(
     target: ResolvedTarget,
     base: &Context,
     resolver: &dyn ProfileResolver,
+    previous: &BindingSnapshot,
 ) -> Result<BoundTarget> {
     let prepared = (0..target.leaves.len()).map(|_| None).collect();
-    bind_target_parts(target, prepared, base, resolver)
+    bind_target_parts(target, prepared, base, resolver, previous)
 }
 
 fn bind_target(
@@ -1783,73 +1814,125 @@ fn bind_target(
     base: &Context,
     resolver: &dyn ProfileResolver,
 ) -> Result<BoundTarget> {
-    bind_target_parts(prepared.target, prepared.prepared, base, resolver)
+    bind_target_parts(
+        prepared.target,
+        prepared.prepared,
+        base,
+        resolver,
+        &BindingSnapshot::default(),
+    )
 }
 
 fn bind_target_parts(
-    target: ResolvedTarget,
+    mut target: ResolvedTarget,
     mut prepared: Vec<Option<PreparedPlugin>>,
     base: &Context,
     resolver: &dyn ProfileResolver,
+    previous: &BindingSnapshot,
 ) -> Result<BoundTarget> {
-    let mut contexts = BTreeMap::<Vec<String>, Context>::new();
+    let namespace = Namespace::select(base, previous)?;
+    let mut snapshot = BindingSnapshot {
+        namespace: Some(namespace.clone()),
+        ..BindingSnapshot::default()
+    };
     let mut leaves = Vec::with_capacity(target.leaves.len());
     for (index, leaf) in target.leaves.iter().enumerate() {
-        let mut context = base.clone();
-        for (depth, isolation) in leaf.candidate.isolations().iter().enumerate() {
-            let key = leaf.candidate.groups()[..=depth].to_vec();
-            if let Some(existing) = contexts.get(&key) {
-                context = existing.clone();
-                continue;
+        let mut effective = EffectiveBindings::new();
+        for (group, isolation) in leaf
+            .candidate
+            .groups()
+            .iter()
+            .zip(leaf.candidate.isolations())
+        {
+            if !snapshot.groups.contains_key(group) {
+                let delta = namespace.delta(base, resolver, group, isolation)?;
+                snapshot.groups.insert(group.clone(), delta);
             }
-            context = resolver.isolate(context, isolation)?;
-            contexts.insert(key, context.clone());
+            effective.extend(snapshot.groups[group].clone());
         }
+        let id = leaf.candidate.id();
+        let position = match previous.positions.get(id) {
+            Some(position) => position.clone(),
+            None => base.child_position()?,
+        };
+        let context = bindings::apply(base.with_child_position(&position)?, &effective)?;
+        snapshot.positions.insert(id.clone(), position);
+        snapshot.effective.insert(id.clone(), effective.clone());
         leaves.push(BoundLeaf {
             context,
+            bindings: effective,
             prepared: prepared[index].take(),
         });
     }
-    Ok(BoundTarget { target, leaves })
+    target.bindings = snapshot;
+    Ok(BoundTarget {
+        parent: base.clone(),
+        target,
+        leaves,
+    })
 }
 
-fn retained_prefix(active: &[ActiveLeaf], target: &[ResolvedLeaf]) -> usize {
-    active
+fn publish_order(target: &BoundTarget) -> Result<()> {
+    let positions = target
+        .target
+        .leaves
         .iter()
-        .zip(target)
-        .take_while(|(active, target)| resolved_leaf_equal(&active.resolved, target))
-        .count()
+        .map(|leaf| target.target.bindings.positions[leaf.candidate.id()].clone())
+        .collect::<Vec<_>>();
+    target.parent.reorder_children(&positions)?;
+    Ok(())
+}
+
+fn keep_leaf(active: &ActiveLeaf, resolved: &ResolvedLeaf, bound: &BoundLeaf) -> bool {
+    resolved_leaf_equal(&active.resolved, resolved)
+        && active.bindings == bound.bindings
+        && matches!(
+            active.handle.snapshot().state,
+            FiberState::Active | FiberState::Pending(_) | FiberState::Loading
+        )
 }
 
 fn semantic_equal(left: &ResolvedTarget, right: &ResolvedTarget) -> bool {
     left.leaves.len() == right.leaves.len()
-        && left
-            .leaves
-            .iter()
-            .zip(&right.leaves)
-            .all(|(left, right)| resolved_leaf_equal(left, right))
+        && left.leaves.iter().zip(&right.leaves).all(|(a, b)| {
+            resolved_leaf_equal(a, b)
+                && left.bindings.effective.get(a.candidate.id())
+                    == right.bindings.effective.get(b.candidate.id())
+        })
 }
 
 fn resolved_leaf_equal(left: &ResolvedLeaf, right: &ResolvedLeaf) -> bool {
-    left.candidate == right.candidate
+    left.candidate.id() == right.candidate.id()
+        && left.candidate.config() == right.candidate.config()
         && left.identity == right.identity
         && left.update_mode == right.update_mode
 }
 
 fn restart_required(left: &ResolvedTarget, right: &ResolvedTarget) -> bool {
-    let maximum = left.leaves.len().max(right.leaves.len());
-    (0..maximum).any(
-        |index| match (left.leaves.get(index), right.leaves.get(index)) {
-            (Some(left), Some(right)) if resolved_leaf_equal(left, right) => false,
-            (Some(left), Some(right)) => {
-                left.update_mode == UpdateMode::RestartRequired
-                    || right.update_mode == UpdateMode::RestartRequired
-            }
-            (Some(left), None) => left.update_mode == UpdateMode::RestartRequired,
-            (None, Some(right)) => right.update_mode == UpdateMode::RestartRequired,
-            (None, None) => false,
-        },
-    )
+    let old = left
+        .leaves
+        .iter()
+        .map(|leaf| (leaf.candidate.id(), leaf))
+        .collect::<BTreeMap<_, _>>();
+    let new = right
+        .leaves
+        .iter()
+        .map(|leaf| (leaf.candidate.id(), leaf))
+        .collect::<BTreeMap<_, _>>();
+    let unchanged = |a: &ResolvedLeaf, b: &ResolvedLeaf| {
+        resolved_leaf_equal(a, b)
+            && left.bindings.effective.get(a.candidate.id())
+                == right.bindings.effective.get(b.candidate.id())
+    };
+    old.iter().any(|(id, leaf)| {
+        leaf.update_mode == UpdateMode::RestartRequired
+            && new.get(id).is_none_or(|next| !unchanged(leaf, next))
+    }) || new.iter().any(|(id, leaf)| {
+        leaf.update_mode == UpdateMode::RestartRequired
+            && old
+                .get(id)
+                .is_none_or(|previous| !unchanged(previous, leaf))
+    })
 }
 
 fn target_status(target: &ResolvedTarget) -> Vec<ProfileTargetStatus> {
@@ -1950,10 +2033,60 @@ fn stopped_status() -> ProfileStatus {
     }
 }
 
+async fn next_child_change(
+    mut receiver: watch::Receiver<rsi_meta::FiberSnapshot>,
+) -> (watch::Receiver<rsi_meta::FiberSnapshot>, bool) {
+    let open = receiver.changed().await.is_ok();
+    (receiver, open)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ProfileInstanceState, redacted_instance_state, settled_failure};
     use rsi_meta::{FiberState, InstanceId};
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(start_paused = true)]
+    async fn automatic_reload_retries_busy_without_another_source_notification() {
+        use super::*;
+        #[derive(Debug)]
+        struct EmptyResolver;
+        impl ProfileResolver for EmptyResolver {
+            fn resolve(&self, _: &PluginId) -> Result<ResolvedFactory> {
+                panic!("empty Profile has no factories")
+            }
+        }
+        let runtime = Runtime::default();
+        let bootstrap = ProfileBootstrap::prepare(
+            &runtime,
+            Arc::new(EmptyResolver),
+            ProfileProgram::from_profile(crate::Profile::new([])),
+            ProfileEnvironment::without_paths("test", BTreeMap::new()).unwrap(),
+            ProfileLimits::default(),
+        )
+        .unwrap();
+        let control = &bootstrap.control;
+        control.accepting.store(true, Ordering::Release);
+        let mut commands = control.receiver.lock().unwrap().take().unwrap();
+        let _queued = control.submit(None).unwrap();
+        assert!(matches!(control.submit(None), Err(ProfileError::Busy)));
+        control.mark_dirty();
+        let (stop, receiver) = watch::channel(false);
+        let driver = tokio::spawn({
+            let control = control.clone();
+            async move { control.drive_dirty(receiver).await }
+        });
+        tokio::task::yield_now().await;
+        drop(commands.recv().await.unwrap());
+        // Only queue capacity changes: there is no new filesystem event.
+        let retried = tokio::time::timeout(Duration::from_secs(6), commands.recv())
+            .await
+            .is_ok();
+        stop.send_replace(true);
+        driver.await.unwrap();
+        assert!(retried, "Busy discarded the automatic reload notification");
+        let _ = runtime.shutdown().await;
+    }
 
     #[test]
     fn failed_runtime_state_is_projected_without_its_diagnostic() {

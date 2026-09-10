@@ -25,6 +25,11 @@ carry exact evidence of already-applied effects; only a cooperative
 This preserves quiescence but cannot preempt a trusted tool that ignores
 cooperative cancellation.
 
+Cancellation already signalled before the settlement task first enters the body
+produces a retained Cancelled outcome without invoking Tool code. Body-first
+completion priority applies only after this initial cancellation fence; it never
+permits a pre-cancelled invocation to perform a new effect.
+
 A trusted Tool body returns a bounded typed result. Settlement attaches the
 collected enforcement stamps and validates that combined result once before it
 enters retained state; the provider does not immediately rewalk and
@@ -65,3 +70,16 @@ Prepared request identity is lowercase hex SHA-256 of UTF-8
 are recursively sorted lexically, arrays retain order, and scalar JSON values
 retain their serde_json representation. The call ID, cwd, sandbox policy, and
 approval outcome are separate execution metadata, outside this digest.
+
+
+`PortableToolsFactory` is an ordinary contributor configured with one explicit
+Portable service key. It imports the [Portable Tool protocol](../protocol/README.md#portable-contributions)
+into an injected unpublished Local registrar. Its effect owns the batch lease;
+failed activation withdraws an open batch, and sealing pins its exact Portable
+executors. The bridge adds no provider catalog, policy or result store.
+
+A sealed catalog retains its exact executor but does not override Meta generation
+fences. Retiring the bridge or its Portable provider closes that capability's
+admission. Standard product generation pins must therefore retain the native
+provider and bridge together with their catalog; replacement must not retire a
+scope still pinned by an old Session.

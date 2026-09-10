@@ -121,13 +121,13 @@ fn path_and_collection_bounds_fail_before_runtime_construction() {
         Err(HostError::PathNotAbsolute { kind: "config", .. })
     ));
     let limits = HostLimits {
-        maximum_linked_plugins: 0,
+        maximum_factories: 0,
         ..HostLimits::default()
     };
     assert!(matches!(
         HostBuilder::new(paths()).limits(limits).build(),
         Err(HostError::CapacityExceeded {
-            resource: "linked plugins",
+            resource: "factories",
             maximum: 0
         })
     ));
@@ -236,4 +236,203 @@ fn composition_digest_tracks_frozen_host_inputs_but_not_top_level_profile_source
         )]))
         .unwrap();
     assert_eq!(first.composition_digest().unwrap(), before);
+}
+
+#[tokio::test]
+async fn resolved_native_identity_survives_preview_and_runtime_and_changes_digest() {
+    use rsi_meta::{FactoryIdentity, ResolvedFactory};
+    let identity = FactoryIdentity::native("test.noop", "a".repeat(64));
+    let make = |identity: FactoryIdentity, mode| {
+        let mut builder = HostBuilder::without_paths("test");
+        builder
+            .register_factory(ResolvedFactory::new(identity, mode, Arc::new(Noop)))
+            .unwrap();
+        builder
+            .register_fragment(ProfileFragment::new(
+                "base",
+                [ProfileEntry::new("base", "test.noop", Value::Null)],
+            ))
+            .unwrap();
+        builder.build().unwrap()
+    };
+    let host = make(identity.clone(), UpdateMode::Replayable);
+    let digest = host.composition_digest().unwrap();
+    assert_eq!(
+        host.preview(rsi_host::Profile::default()).unwrap().leaves[0].identity,
+        identity
+    );
+    for other in [
+        make(
+            FactoryIdentity::linked("test.noop", "a".repeat(64)),
+            UpdateMode::Replayable,
+        ),
+        make(
+            FactoryIdentity::native("test.noop", "b".repeat(64)),
+            UpdateMode::Replayable,
+        ),
+        make(identity.clone(), UpdateMode::RestartRequired),
+    ] {
+        assert_ne!(digest, other.composition_digest().unwrap());
+    }
+    let running = host.start(rsi_host::Profile::default()).await.unwrap();
+    assert!(
+        running
+            .runtime_snapshot()
+            .fibers
+            .iter()
+            .any(|fiber| fiber.factory == identity)
+    );
+    let _ = running.shutdown().await;
+    assert!(running.runtime_snapshot().fibers.is_empty());
+}
+
+#[test]
+fn factory_registration_rejects_malformed_native_provenance_and_shared_capacity() {
+    use rsi_meta::ResolvedFactory;
+    let mut builder = HostBuilder::without_paths("test").limits(HostLimits {
+        maximum_factories: 1,
+        ..HostLimits::default()
+    });
+    for digest in [
+        String::new(),
+        "a".repeat(63),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        assert!(
+            builder
+                .register_factory(ResolvedFactory::native(
+                    "test.noop",
+                    digest,
+                    UpdateMode::Replayable,
+                    Arc::new(Noop),
+                ))
+                .is_err()
+        );
+    }
+    builder
+        .register_factory(ResolvedFactory::native(
+            "test.noop",
+            "a".repeat(64),
+            UpdateMode::Replayable,
+            Arc::new(Noop),
+        ))
+        .unwrap();
+    assert!(matches!(
+        builder.register_linked("another", "1", UpdateMode::Replayable, Arc::new(Noop)),
+        Err(HostError::CapacityExceeded {
+            resource: "factories",
+            maximum: 1
+        })
+    ));
+    builder.build().unwrap();
+}
+
+#[test]
+fn accepted_and_rejected_factory_destructors_are_contained() {
+    #[derive(Debug)]
+    struct PanickingDrop;
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            panic!("expected factory destructor panic");
+        }
+    }
+    #[async_trait]
+    impl PluginFactory for PanickingDrop {
+        fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+        async fn activate(&self, _plan: ActivationPlan) -> rsi_meta::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut builder = HostBuilder::without_paths("test");
+            builder
+                .register_factory(rsi_meta::ResolvedFactory::native(
+                    "test.noop",
+                    "a".repeat(64),
+                    UpdateMode::Replayable,
+                    Arc::new(PanickingDrop),
+                ))
+                .unwrap();
+            assert!(
+                builder
+                    .register_linked(
+                        "test.noop",
+                        "1",
+                        UpdateMode::Replayable,
+                        Arc::new(PanickingDrop)
+                    )
+                    .is_err()
+            );
+            assert!(
+                builder
+                    .register_factory(rsi_meta::ResolvedFactory::native(
+                        "bad",
+                        "invalid",
+                        UpdateMode::Replayable,
+                        Arc::new(PanickingDrop),
+                    ))
+                    .is_err()
+            );
+            drop(builder.build().unwrap());
+        })
+        .is_ok()
+    );
+}
+
+#[test]
+fn edit_preview_resolves_the_frozen_catalog_and_can_repair_invalid_source_without_prepare() {
+    #[derive(Debug)]
+    struct NeverPrepare;
+    #[async_trait]
+    impl PluginFactory for NeverPrepare {
+        fn prepare(&self, _: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            panic!("pure preview cannot prepare a factory")
+        }
+        async fn activate(&self, _: ActivationPlan) -> rsi_meta::Result<()> {
+            panic!("pure preview cannot activate")
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("root.toml");
+    let before = b"format = 1\n";
+    let after = b"format = 1\n[[steps]]\nkind = 'plugin'\nid = 'leaf'\nplugin = 'test.preview'\n[steps.config]\nsecret = 'do-not-print'\n";
+    std::fs::write(&path, before).unwrap();
+    let mut builder = HostBuilder::without_paths("edit-preview");
+    builder
+        .register_linked(
+            "test.preview",
+            "exact-revision",
+            UpdateMode::Replayable,
+            Arc::new(NeverPrepare),
+        )
+        .unwrap();
+    let host = builder.build().unwrap();
+    let preview = host.preview_file_edit(&path, after).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(preview.previous.is_some());
+    assert_eq!(preview.proposed.nodes()[0].id(), "leaf");
+    assert_eq!(preview.changes.as_ref().unwrap()[0].id, "leaf");
+    assert_eq!(preview.leaves[0].plugin_id, "test.preview");
+    assert!(
+        matches!(&preview.leaves[0].identity,rsi_meta::FactoryIdentity::Linked { revision, .. } if revision == "exact-revision")
+    );
+    assert_eq!(preview.sources.len(), 1);
+    assert_eq!(preview.sources[0].path, path.canonicalize().unwrap());
+    assert!(!format!("{preview:?}").contains("do-not-print"));
+    std::fs::write(&path, after).unwrap();
+    assert_eq!(
+        preview.proposed.source_digest(),
+        host.preview_file(&path).unwrap().source_digest
+    );
+    std::fs::write(&path, "invalid existing source").unwrap();
+    let repair = host.preview_file_edit(&path, after).unwrap();
+    assert!(repair.previous.is_none() && repair.changes.is_none());
+    let unknown = String::from_utf8(after.to_vec())
+        .unwrap()
+        .replace("test.preview", "unknown");
+    assert!(host.preview_file_edit(&path, unknown.as_bytes()).is_err());
 }

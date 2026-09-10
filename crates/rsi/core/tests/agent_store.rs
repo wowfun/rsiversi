@@ -85,7 +85,7 @@ fn built_binary_verify_rejects_a_snapshot_with_an_uncheckpointed_wal() {
                     )
                     .unwrap(),
                 ),
-                facts: vec![
+                facts: (vec![
                     SessionFact::new(
                         1,
                         1,
@@ -98,7 +98,10 @@ fn built_binary_verify_rejects_a_snapshot_with_an_uncheckpointed_wal() {
                         },
                     )
                     .unwrap(),
-                ],
+                ])
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             }),
         )
         .unwrap();

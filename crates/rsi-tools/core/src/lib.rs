@@ -25,6 +25,9 @@ use std::time::Duration;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 
+mod portable;
+pub use portable::PortableToolsFactory;
+
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 const MAXIMUM_SHUTDOWN_TIMEOUT_MS: u64 = 300_000;
 
@@ -654,6 +657,9 @@ async fn settle(
     shutdown: CancellationToken,
 ) -> Result<ToolResult> {
     let cancellation = start.cancellation.clone();
+    if cancellation.is_cancelled() || entry.retirement.is_cancelled() || shutdown.is_cancelled() {
+        return Err(ToolError::Cancelled);
+    }
     let owned_cancellation = CancellationToken::new();
     let execution_start = ToolStart {
         cancellation: owned_cancellation.clone(),

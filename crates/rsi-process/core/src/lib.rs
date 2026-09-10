@@ -219,8 +219,17 @@ pub fn validate_output_read(id: &str, limit: usize) -> Result<()> {
 }
 
 /// One raw page from a completed, best-effort output cache.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Adapters encode metadata separately from the raw binary payload.
+///
+/// ```compile_fail
+/// fn requires_json<T: serde::Serialize>() {}
+/// requires_json::<rsi_process::OutputPage>();
+/// ```
+/// ```compile_fail
+/// fn requires_json<T: serde::de::DeserializeOwned>() {}
+/// requires_json::<rsi_process::OutputPage>();
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputPage {
     /// Exact published identity supplied by the caller.
     pub id: String,
@@ -231,7 +240,7 @@ pub struct OutputPage {
     /// Complete stream byte length.
     pub total_bytes: u64,
     /// Unmodified raw bytes; consumers own decoding and terminal sanitization.
-    pub bytes: Vec<u8>,
+    pub bytes: bytes::Bytes,
 }
 
 impl OutputPage {
@@ -363,6 +372,9 @@ impl LocalContract for ProcessContract {
 /// Closed managed-process failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ProcessError {
+    /// Common API failure retained by a remote read-only capability.
+    #[error(transparent)]
+    Api(rsi_api_protocol::ApiError),
     /// Malformed or out-of-bounds request/read.
     #[error("invalid process request: {0}")]
     InvalidInput(String),
@@ -546,7 +558,7 @@ mod output_page_tests {
             offset: 0,
             next_offset: 1,
             total_bytes: 1,
-            bytes: vec![b'x'],
+            bytes: vec![b'x'].into(),
         };
         page.validate_for(&id, 0, 1).unwrap();
         page.total_bytes = u64::MAX;

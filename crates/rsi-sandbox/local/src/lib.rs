@@ -62,11 +62,22 @@ impl SandboxProbe for SystemSandboxProbe {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        match tokio::time::timeout(PROBE_TIMEOUT, command.status()).await {
-            Ok(Ok(status)) => Ok(status.code() == Some(PROBE_SUCCESS_CODE)),
-            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Ok(Err(error)) => Err(SandboxError::Probe(error.to_string())),
-            Err(_) => Err(SandboxError::Probe(format!(
+        let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+        let probing = async {
+            loop {
+                match command.status().await {
+                    Ok(status) => return Ok(status.code() == Some(PROBE_SUCCESS_CODE)),
+                    Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(SandboxError::Probe(error.to_string())),
+                }
+            }
+        };
+        match tokio::time::timeout_at(deadline, probing).await {
+            Ok(result) if tokio::time::Instant::now() < deadline => result,
+            _ => Err(SandboxError::Probe(format!(
                 "probe timed out for {}",
                 path.display()
             ))),
@@ -111,6 +122,7 @@ impl SandboxLocalConfig {
 
 #[derive(Debug)]
 struct Service {
+    generation: rsi_sandbox::SandboxGeneration,
     backend: Option<SelectedBackend>,
     _staged: Option<tempfile::TempDir>,
 }
@@ -169,6 +181,12 @@ impl ProbeBudget {
 
 #[async_trait]
 impl Sandbox for Service {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> Result<rsi_sandbox::WorkspaceReadScope> {
+        rsi_sandbox::WorkspaceReadScope::new(request, self.generation.clone())
+    }
     async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
         let (program, cwd, workspace) = validate_request(&request)?;
         if request.mode == SandboxMode::DangerFullAccess {
@@ -389,6 +407,7 @@ impl PluginFactory for SandboxLocalFactory {
             None => (None, None),
         };
         let sandbox: Arc<dyn Sandbox> = Arc::new(Service {
+            generation: rsi_sandbox::SandboxGeneration::default(),
             backend,
             _staged: staged,
         });
@@ -448,6 +467,11 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
 }
 
 fn canonical_directory(path: &Path, kind: &str) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(SandboxError::InvalidInput(format!(
+            "{kind} must be a native absolute path"
+        )));
+    }
     let canonical = path
         .canonicalize()
         .map_err(|error| SandboxError::InvalidInput(format!("{kind} is unavailable: {error}")))?;
@@ -527,6 +551,7 @@ fn stage_backend(kind: BackendKind, source: &Path) -> Result<(SelectedBackend, t
     destination
         .sync_all()
         .map_err(|error| SandboxError::Probe(error.to_string()))?;
+    drop(destination);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

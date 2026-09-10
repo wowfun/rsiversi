@@ -13,7 +13,7 @@ rsi-jobs = { path = "../core" }
 rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]

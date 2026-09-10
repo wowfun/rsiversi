@@ -72,9 +72,14 @@ pub(super) fn apply_executor_body(
     if turn.terminal.is_some() {
         return Err(TurnError::Invalid("Fact follows a terminal turn".into()));
     }
-    if turn.budget_exhausted.is_some() && !matches!(body, SessionFactBody::TurnTerminal { .. }) {
+    if turn.budget_exhausted.is_some()
+        && !matches!(
+            body,
+            SessionFactBody::StepEnded { .. } | SessionFactBody::TurnTerminal { .. }
+        )
+    {
         return Err(TurnError::Invalid(
-            "only the terminal Fact may follow budget exhaustion".into(),
+            "only the current-Step closure and terminal may follow budget exhaustion".into(),
         ));
     }
     match body {
@@ -85,31 +90,13 @@ pub(super) fn apply_executor_body(
         | SessionFactBody::ImageStarted { .. }
         | SessionFactBody::ImageOutput { .. } => apply_image_body(turn, body)?,
         SessionFactBody::ToolIntent { .. }
+        | SessionFactBody::ToolRejected { .. }
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
-        SessionFactBody::StepStarted { step_id, .. } => {
-            if turn.current_step.replace(step_id.clone()).is_some() {
-                return Err(TurnError::Invalid(
-                    "Step start follows another open Step".into(),
-                ));
-            }
-        }
-        SessionFactBody::InputMessageEntered { step_id, .. }
-        | SessionFactBody::WorkspaceTouched { step_id, .. } => {
-            if turn.current_step.as_ref() != Some(step_id) {
-                return Err(TurnError::Invalid(
-                    "Step-scoped Fact does not match the open Step".into(),
-                ));
-            }
-        }
-        SessionFactBody::StepEnded { step_id, .. } => {
-            if turn.current_step.as_ref() != Some(step_id) {
-                return Err(TurnError::Invalid(
-                    "Step end does not match the open Step".into(),
-                ));
-            }
-            turn.current_step = None;
-        }
+        SessionFactBody::StepStarted { .. }
+        | SessionFactBody::InputMessageEntered { .. }
+        | SessionFactBody::WorkspaceTouched { .. }
+        | SessionFactBody::StepEnded { .. } => apply_step_body(turn, body)?,
         SessionFactBody::BudgetExhausted {
             dimension,
             consumed,
@@ -162,6 +149,39 @@ pub(super) fn apply_executor_body(
                 "executor cannot publish acceptance or cancellation Facts".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
+    match body {
+        SessionFactBody::StepStarted { step_id, .. } => {
+            if turn.current_step.replace(step_id.clone()).is_some() {
+                return Err(TurnError::Invalid(
+                    "Step start follows another open Step".into(),
+                ));
+            }
+        }
+        SessionFactBody::InputMessageEntered { step_id, .. }
+        | SessionFactBody::WorkspaceTouched { step_id, .. } => {
+            if turn.current_step.as_ref() != Some(step_id) {
+                return Err(TurnError::Invalid(
+                    "Step-scoped Fact does not match the open Step".into(),
+                ));
+            }
+            if matches!(body, SessionFactBody::InputMessageEntered { .. }) {
+                ensure_no_active_effect(turn)?;
+            }
+        }
+        SessionFactBody::StepEnded { step_id, .. } => {
+            if turn.current_step.as_ref() != Some(step_id) {
+                return Err(TurnError::Invalid(
+                    "Step end does not match the open Step".into(),
+                ));
+            }
+            turn.current_step = None;
+        }
+        _ => unreachable!("caller selected a Step Fact"),
     }
     Ok(())
 }
@@ -254,6 +274,7 @@ pub(super) fn apply_image_body(turn: &mut TurnControl, body: &SessionFactBody) -
 
 pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     match body {
+        SessionFactBody::ToolRejected { .. } => ensure_no_active_effect(turn)?,
         SessionFactBody::ToolIntent {
             effect_id,
             identity,
@@ -334,17 +355,30 @@ pub(super) fn ensure_no_active_effect(turn: &TurnControl) -> TurnResult<()> {
     Ok(())
 }
 
+fn is_terminal_step_closure(facts: &[SessionFact], index: usize) -> bool {
+    matches!(facts[index].body(), SessionFactBody::StepEnded { .. })
+        && match &facts[index + 1..] {
+            [terminal] => matches!(terminal.body(), SessionFactBody::TurnTerminal { .. }),
+            [budget, terminal] => {
+                matches!(budget.body(), SessionFactBody::BudgetExhausted { .. })
+                    && matches!(terminal.body(), SessionFactBody::TurnTerminal { .. })
+            }
+            _ => false,
+        }
+}
+
 pub(super) fn enforce_turn_budget(
     budget: &TurnBudget,
     turn: &TurnControl,
     facts: &[SessionFact],
     now_ms: u64,
 ) -> TurnResult<BudgetUsage> {
-    let admits_work = facts.iter().any(|fact| {
-        !matches!(
-            fact.body(),
-            SessionFactBody::BudgetExhausted { .. } | SessionFactBody::TurnTerminal { .. }
-        )
+    let admits_work = facts.iter().enumerate().any(|(index, fact)| {
+        !is_terminal_step_closure(facts, index)
+            && !matches!(
+                fact.body(),
+                SessionFactBody::BudgetExhausted { .. } | SessionFactBody::TurnTerminal { .. }
+            )
     });
     if admits_work {
         let elapsed = turn.elapsed.consumed(turn.accepted_at_ms, now_ms);
@@ -361,8 +395,10 @@ pub(super) fn enforce_turn_budget(
     }
 
     let mut usage = turn.budget_usage;
-    for fact in facts {
-        record_budget_usage(&mut usage, fact).map_err(TurnError::Invariant)?;
+    for (index, fact) in facts.iter().enumerate() {
+        if !is_terminal_step_closure(facts, index) {
+            record_budget_usage(&mut usage, fact).map_err(TurnError::Invariant)?;
+        }
     }
     check_budget_usage(budget, usage)?;
     Ok(usage)
@@ -384,13 +420,54 @@ pub(super) fn validate_budget_marker(budget: &TurnBudget, fact: &SessionFact) ->
     Ok(())
 }
 
+pub(super) fn add_generated_usage(
+    usage: &mut BudgetUsage,
+    records: u64,
+    bytes: u64,
+) -> TurnResult<()> {
+    usage.generated_records = usage
+        .generated_records
+        .checked_add(records)
+        .ok_or_else(|| TurnError::Invariant("generated record count overflow".into()))?;
+    usage.generated_record_bytes = usage
+        .generated_record_bytes
+        .checked_add(bytes)
+        .ok_or_else(|| TurnError::Invariant("generated record byte count overflow".into()))?;
+    Ok(())
+}
+
+pub(super) fn enforce_domain_budget(
+    budget: &TurnBudget,
+    turn: &TurnControl,
+    facts: &[SessionFact],
+    control: &AgentControlRecord,
+    now_ms: u64,
+) -> TurnResult<BudgetUsage> {
+    let elapsed = turn.elapsed.consumed(turn.accepted_at_ms, now_ms);
+    if elapsed >= budget.maximum_elapsed_ms() {
+        return Err(TurnError::BudgetExceeded {
+            dimension: BudgetDimension::Elapsed,
+            consumed: elapsed,
+            limit: budget.maximum_elapsed_ms(),
+        });
+    }
+    let mut usage = turn.budget_usage;
+    for fact in facts {
+        validate_budget_marker(budget, fact)?;
+        record_budget_usage(&mut usage, fact).map_err(TurnError::Invariant)?;
+    }
+    add_generated_usage(&mut usage, 1, control.encoded_len() as u64)?;
+    check_budget_usage(budget, usage)?;
+    Ok(usage)
+}
+
 pub(super) const fn budget_limit(budget: &TurnBudget, dimension: BudgetDimension) -> u64 {
     match dimension {
         BudgetDimension::Elapsed => budget.maximum_elapsed_ms(),
         BudgetDimension::ProviderAttempts => budget.maximum_provider_attempts(),
         BudgetDimension::ToolCalls => budget.maximum_tool_calls(),
-        BudgetDimension::GeneratedFacts => budget.maximum_generated_facts(),
-        BudgetDimension::GeneratedFactBytes => budget.maximum_generated_fact_bytes(),
+        BudgetDimension::GeneratedRecords => budget.maximum_generated_records(),
+        BudgetDimension::GeneratedRecordBytes => budget.maximum_generated_record_bytes(),
     }
 }
 
@@ -407,14 +484,14 @@ pub(super) fn check_budget_usage(budget: &TurnBudget, usage: BudgetUsage) -> Tur
             budget.maximum_tool_calls(),
         ),
         (
-            BudgetDimension::GeneratedFacts,
-            usage.generated_facts,
-            budget.maximum_generated_facts(),
+            BudgetDimension::GeneratedRecords,
+            usage.generated_records,
+            budget.maximum_generated_records(),
         ),
         (
-            BudgetDimension::GeneratedFactBytes,
-            usage.generated_fact_bytes,
-            budget.maximum_generated_fact_bytes(),
+            BudgetDimension::GeneratedRecordBytes,
+            usage.generated_record_bytes,
+            budget.maximum_generated_record_bytes(),
         ),
     ] {
         if consumed > limit {
@@ -443,17 +520,17 @@ pub(super) fn record_budget_usage(
     ) {
         return Ok(());
     }
-    usage.generated_facts = usage
-        .generated_facts
+    usage.generated_records = usage
+        .generated_records
         .checked_add(1)
-        .ok_or_else(|| "generated Fact count overflowed".to_owned())?;
-    usage.generated_fact_bytes = usage
-        .generated_fact_bytes
+        .ok_or_else(|| "generated record count overflowed".to_owned())?;
+    usage.generated_record_bytes = usage
+        .generated_record_bytes
         .checked_add(
             u64::try_from(fact.encoded_len())
-                .map_err(|_| "generated Fact byte length exceeds u64".to_owned())?,
+                .map_err(|_| "generated record byte length exceeds u64".to_owned())?,
         )
-        .ok_or_else(|| "generated Fact bytes overflowed".to_owned())?;
+        .ok_or_else(|| "generated record bytes overflowed".to_owned())?;
     match fact.body() {
         SessionFactBody::ModelIntent { .. } | SessionFactBody::ImageIntent { .. } => {
             usage.provider_attempts = usage
@@ -461,7 +538,7 @@ pub(super) fn record_budget_usage(
                 .checked_add(1)
                 .ok_or_else(|| "provider attempt count overflowed".to_owned())?;
         }
-        SessionFactBody::ToolIntent { .. } => {
+        SessionFactBody::ToolIntent { .. } | SessionFactBody::ToolRejected { .. } => {
             usage.tool_calls = usage
                 .tool_calls
                 .checked_add(1)
@@ -642,10 +719,7 @@ pub(super) fn deregister_executor(
 /// Closes one current claim; returns whether nonterminal work can be requeued now.
 pub(super) fn retire_claim(turn: &mut TurnControl) -> bool {
     let gate = &turn.claim.as_ref().expect("current claim owner").mutations;
-    gate.closed.store(true, Ordering::Release);
-    gate.retiring.store(true, Ordering::Release);
-    gate.stopping.cancel();
-    if gate.active.load(Ordering::Acquire) != 0 {
+    if !gate.retire() {
         return false;
     }
     turn.claim = None;
@@ -667,6 +741,18 @@ pub(super) fn turn_store_error(error: StoreError) -> TurnError {
         }
         StoreError::NotFound(session) => TurnError::SessionNotFound(session),
         StoreError::TurnNotFound { session, turn } => TurnError::TurnNotFound { session, turn },
+        StoreError::DomainRevisionConflict {
+            domain,
+            expected,
+            actual,
+        } => TurnError::DomainRevisionConflict {
+            domain,
+            expected: rsi_agent_session_protocol::DomainRevision::new(expected),
+            actual: rsi_agent_session_protocol::DomainRevision::new(actual),
+        },
+        StoreError::DomainRequestConflict { request_id } => {
+            TurnError::DomainRequestConflict { request_id }
+        }
         other => TurnError::Store(bounded_diagnostic(&other.to_string())),
     }
 }
@@ -677,6 +763,7 @@ pub(super) fn turn_composition_error(error: AgentCompositionError) -> TurnError 
             TurnError::Invalid(bounded_diagnostic(&message))
         }
         AgentCompositionError::Unavailable { .. }
+        | AgentCompositionError::Domain(_)
         | AgentCompositionError::DefaultUnavailable { .. }
         | AgentCompositionError::Capacity => {
             TurnError::Composition(bounded_diagnostic(&error.to_string()))
@@ -729,14 +816,4 @@ pub(super) fn turn_kernel_error(error: KernelError) -> TurnError {
 #[allow(clippy::needless_pass_by_value)] // This is a direct `map_err` adapter over an owned error.
 pub(super) fn kernel_turn_error(error: TurnError) -> KernelError {
     KernelError::Invariant(bounded_diagnostic(&error.to_string()))
-}
-
-pub(super) fn turn_workspace_error(
-    error: rsi_agent_workspace_context::WorkspaceContextError,
-) -> TurnError {
-    match error {
-        rsi_agent_workspace_context::WorkspaceContextError::Capacity => TurnError::Capacity,
-        rsi_agent_workspace_context::WorkspaceContextError::Closed => TurnError::ShuttingDown,
-        other => TurnError::Invalid(bounded_diagnostic(&other.to_string())),
-    }
 }

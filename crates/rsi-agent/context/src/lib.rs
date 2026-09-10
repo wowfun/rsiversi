@@ -4,6 +4,15 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod builder;
+mod default_provider;
+
+pub use builder::{
+    ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ModelContextBuilder,
+    ModelContextBuilderContract, ModelContextCursor, ModelContextState,
+};
+pub use default_provider::{DefaultContextBuilder, DefaultContextBuilderFactory};
+
 use rsi_agent_session_protocol::{
     AgentMessageContent, EMPTY_FACT_PREFIX_DIGEST, EffectId, InputMessageSource, SessionFact,
     SessionFactBody, SessionHeader, TurnId, advance_fact_prefix_digest,
@@ -739,6 +748,15 @@ impl ContextFold {
                 effect_id,
                 event,
             } => self.apply_model_event(turn_id, effect_id, event)?,
+            SessionFactBody::ToolRejected {
+                turn_id,
+                identity,
+                rejection,
+                ..
+            } => {
+                let message = rejected_tool_message(identity.call_id(), rejection)?;
+                self.push_turn_message(turn_id, message)?;
+            }
             SessionFactBody::ToolResult {
                 turn_id,
                 identity,
@@ -1031,6 +1049,20 @@ fn assistant_message(
     Message::assistant(content).map_err(|error| ContextError::Invalid(error.to_string()))
 }
 
+fn rejected_tool_message(
+    call_id: &str,
+    rejection: &rsi_agent_session_protocol::ToolRejection,
+) -> Result<Message> {
+    Message::tool_result(
+        call_id,
+        vec![MessageContent::Text {
+            text: rejection.message().into_owned(),
+        }],
+        true,
+    )
+    .map_err(|error| ContextError::Invalid(error.to_string()))
+}
+
 fn tool_message(call_id: &str, result: &ToolResult) -> Result<Message> {
     let mut content = Vec::new();
     for item in &result.content {
@@ -1064,7 +1096,9 @@ fn input_message(source: &InputMessageSource, content: &[AgentMessageContent]) -
         })
         .collect::<Result<Vec<_>>>()?;
     match source {
-        InputMessageSource::AgentInstructions { .. } | InputMessageSource::SkillCatalog { .. } => {
+        InputMessageSource::AgentInstructions { .. }
+        | InputMessageSource::SkillCatalog { .. }
+        | InputMessageSource::PluginContext { .. } => {
             let text = content
                 .iter()
                 .filter_map(|content| match content {

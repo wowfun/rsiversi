@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default)]
 pub(crate) struct AdmissionLease {
     state: AtomicUsize,
     drained: Notify,
+    closed: CancellationToken,
 }
 
 impl AdmissionLease {
@@ -39,6 +41,7 @@ impl AdmissionLease {
 
     pub(crate) fn close(&self) {
         let previous = self.state.fetch_or(Self::CLOSED, Ordering::AcqRel);
+        self.closed.cancel();
         if previous & Self::ACTIVE == 0 {
             self.drained.notify_waiters();
         }
@@ -48,6 +51,7 @@ impl AdmissionLease {
         let previous = self
             .state
             .fetch_or(Self::CLOSED | Self::SEALED, Ordering::AcqRel);
+        self.closed.cancel();
         if previous & Self::ACTIVE == 0 {
             self.drained.notify_waiters();
         }
@@ -63,6 +67,10 @@ impl AdmissionLease {
             }
             notified.as_mut().await;
         }
+    }
+
+    pub(crate) fn retirement_observer(&self) -> super::CancellationObserver {
+        super::CancellationObserver::new(self.closed.clone())
     }
 
     fn release(&self) {

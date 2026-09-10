@@ -21,6 +21,9 @@ use std::sync::Mutex;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+/// Closed byte protocol for explicitly injected Portable tool contributions.
+pub mod portable;
+
 /// Maximum tool name or call identity bytes.
 pub const MAXIMUM_TOOL_IDENTIFIER_BYTES: usize = 256;
 /// Maximum encoded schema, arguments, or canonical result bytes.
@@ -47,6 +50,20 @@ pub const MAXIMUM_TOOL_ENFORCEMENT_STAMPS: usize = 256;
 pub const MAXIMUM_TOOL_JSON_DEPTH: usize = 64;
 /// Maximum values and containers in model-produced Tool arguments.
 pub const MAXIMUM_TOOL_JSON_NODES: usize = 100_000;
+
+/// Decode byte-source Tool output lossily and replace disallowed terminal controls.
+pub fn safe_tool_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| {
+            if character.is_ascii_control() && !matches!(character, '\t' | '\n' | '\r') {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
 
 /// Provider-neutral tool declaration shared by Tools, AI, and Agent.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -288,7 +305,9 @@ impl<'de> Deserialize<'de> for ToolExecutionPolicy {
 impl ToolExecutionPolicy {
     /// Validates process-plan paths before Tool preparation is started.
     pub fn validate(&self) -> Result<()> {
-        if !self.cwd.is_absolute() || !self.workspace.is_absolute() {
+        if !rsi_workspace_path::is_absolute_path(&self.cwd)
+            || !rsi_workspace_path::is_absolute_path(&self.workspace)
+        {
             return Err(ToolError::InvalidInput(
                 "Tool sandbox paths must be absolute".into(),
             ));
@@ -423,6 +442,20 @@ pub struct ToolExecution {
 }
 
 impl ToolExecution {
+    /// Plans a workspace-only read through the exact pinned policy and Sandbox generation.
+    pub async fn workspace_read(&self) -> Result<rsi_sandbox::WorkspaceReadScope> {
+        if self.cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        self.sandbox
+            .workspace_read(rsi_sandbox::WorkspaceReadRequest {
+                mode: self.policy.mode,
+                cwd: self.policy.cwd.clone(),
+                workspace: self.policy.workspace.clone(),
+            })
+            .await
+            .map_err(ToolError::Sandbox)
+    }
     /// Returns the exact orchestrator-pinned process policy.
     pub const fn policy(&self) -> &ToolExecutionPolicy {
         &self.policy
@@ -512,7 +545,7 @@ impl ToolEnforcement {
 
 /// Model-facing ordered content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolContent {
     /// UTF-8 text.
     Text {

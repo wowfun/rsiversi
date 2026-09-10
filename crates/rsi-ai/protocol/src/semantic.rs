@@ -143,6 +143,13 @@ pub struct LanguageModelProfiles {
 }
 
 impl LanguageModelProfiles {
+    /// Iterates exact configured models in strict lexical order without allocating.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, LanguageModelLimits)> {
+        self.profiles
+            .iter()
+            .map(|(model, limits)| (model.as_str(), *limits))
+    }
+
     /// Adds one unique, bounded printable-ASCII model identifier.
     pub fn with_profile(
         mut self,

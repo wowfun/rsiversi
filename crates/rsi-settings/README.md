@@ -12,3 +12,8 @@ Namespace registration is caller-owned and duplicate names fail loud. Every
 write uses a namespace revision CAS. A provider persists before the service
 publishes the new value. Settings never stores credentials or guesses a
 provider-specific merge policy.
+
+The Settings API endpoint and client plugins expose only exact registered
+namespace projections. Registration identity and revision cross the same typed
+contract; neither API access nor client rendering grants namespace-registration
+or raw-document authority.

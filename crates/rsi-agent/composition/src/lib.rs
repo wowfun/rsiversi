@@ -3,16 +3,30 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod catalog;
+mod snapshot;
+pub use catalog::AgentContributionCatalog;
+pub use snapshot::{
+    AgentCompositionSnapshot, AgentCompositionSource, AgentCompositionSourceContract,
+};
+mod contribution;
+mod domain;
+mod root;
+pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
+
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
+    ContributionCatalog, ContributionRegistrar, ContributionRegistrarContract, DomainCatalog,
+    DomainRegistrar, DomainRegistrarContract,
 };
+use rsi_agent_context::{ModelContextBuilder, ModelContextBuilderContract};
 use rsi_agent_presets::{AgentPresetCatalog, AgentPresetId, PresetError};
 use rsi_meta::{
-    ActivationPlan, ConfigValue, Context, FactoryIdentity, FiberState, MetaError, PluginFactory,
-    PluginId, PreparedActivation, ResolvedFactory, UpdateMode,
+    ActivationPlan, ConfigValue, Context, FiberState, MetaError, PluginFactory, PreparedActivation,
+    ResolvedFactory, UpdateMode,
 };
-use rsi_meta_profile::{IsolationSpec, ProfileError, ProfileGenerationPlan, ProfileResolver};
+use rsi_meta_profile::{ProfileError, ProfileGenerationPlan, ProfileResolver};
 use rsi_meta_scope::{ScopeHandle, ScopeRoot};
 use rsi_tools_protocol::{
     ToolCatalogProvider, ToolCatalogProviderContract, ToolCatalogStage, ToolRegistrar,
@@ -28,89 +42,19 @@ use tokio_util::sync::CancellationToken;
 pub const MAXIMUM_CONCURRENT_BUILDS: usize = 8;
 /// Maximum preset rows retained by one standing composition provider.
 pub const MAXIMUM_CURRENT_PRESETS: usize = 256;
+/// Maximum explicitly selected Local markers in each Agent catalog lane.
+pub const MAXIMUM_CATALOG_MARKERS: usize = 4096;
+/// Maximum exact factory identities selected by one Agent catalog.
+pub const MAXIMUM_CATALOG_FACTORIES: usize = 4096;
+/// Maximum UTF-8 bytes in an explicit Portable generation-isolation key.
+pub const MAXIMUM_CATALOG_KEY_BYTES: usize = 256;
 
-const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.tool-registrar";
-
-/// Frozen Agent-only allowlist of exact resolved contribution factories.
-#[derive(Clone)]
-pub struct AgentContributionCatalog {
-    factories: BTreeMap<PluginId, ResolvedFactory>,
-}
-
-impl AgentContributionCatalog {
-    /// Freezes exact executable identities selected by the application.
-    ///
-    /// Duplicate plugin identities are rejected rather than resolved by input
-    /// order.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ProfileError::InvalidProgram`] when the input repeats one
-    /// plugin identity.
-    pub fn new(
-        factories: impl IntoIterator<Item = ResolvedFactory>,
-    ) -> rsi_meta_profile::Result<Self> {
-        let mut by_plugin = BTreeMap::new();
-        for factory in factories {
-            let plugin = match factory.identity() {
-                FactoryIdentity::Linked { plugin, .. } | FactoryIdentity::Native { plugin, .. } => {
-                    plugin.clone()
-                }
-            };
-            if by_plugin.insert(plugin.clone(), factory).is_some() {
-                return Err(ProfileError::InvalidProgram(format!(
-                    "Agent contribution factory `{plugin}` appears more than once"
-                )));
-            }
-        }
-        Ok(Self {
-            factories: by_plugin,
-        })
-    }
-}
-
-impl fmt::Debug for AgentContributionCatalog {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AgentContributionCatalog")
-            .field("factories", &self.factories.keys())
-            .finish()
-    }
-}
-
-impl ProfileResolver for AgentContributionCatalog {
-    fn resolve(&self, plugin: &PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
-        self.factories
-            .get(plugin)
-            .cloned()
-            .ok_or_else(|| ProfileError::UnknownPlugin {
-                plugin: plugin.clone(),
-            })
-    }
-
-    fn isolate(
-        &self,
-        mut context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        if let Some(key) = isolation.local().first() {
-            return Err(ProfileError::UnknownLocalContract { key: key.clone() });
-        }
-        if let Some(key) = isolation.events().first() {
-            return Err(ProfileError::UnknownLocalEvent { key: key.clone() });
-        }
-        for key in isolation.portable() {
-            context = context.isolate_fresh(key)?.0;
-        }
-        Ok(context)
-    }
-}
+const REGISTRAR_FACTORY_ID: &str = "rsi.agent.composition.registrars";
 
 /// Ordinary plugin factory for one standing Agent composition provider.
 #[derive(Clone)]
 pub struct AgentCompositionFactory {
-    presets: AgentPresetCatalog,
-    contributions: Arc<AgentContributionCatalog>,
+    source: Option<Arc<dyn AgentCompositionSource>>,
     scopes: ScopeRoot,
 }
 
@@ -121,9 +65,24 @@ impl AgentCompositionFactory {
         contributions: AgentContributionCatalog,
         scopes: ScopeRoot,
     ) -> Self {
+        Self::with_source(
+            Arc::new(AgentCompositionSnapshot::new(presets, contributions)),
+            scopes,
+        )
+    }
+
+    /// Selects an application-owned immutable snapshot once per admitted build.
+    pub fn with_source(source: Arc<dyn AgentCompositionSource>, scopes: ScopeRoot) -> Self {
         Self {
-            presets,
-            contributions: Arc::new(contributions),
+            source: Some(source),
+            scopes,
+        }
+    }
+
+    /// Requires an ordinary Local staged-source provider before activation.
+    pub fn from_source_contract(scopes: ScopeRoot) -> Self {
+        Self {
+            source: None,
             scopes,
         }
     }
@@ -133,7 +92,7 @@ impl fmt::Debug for AgentCompositionFactory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentCompositionFactory")
-            .field("contributions", &self.contributions)
+            .field("source", &self.source)
             .finish_non_exhaustive()
     }
 }
@@ -146,20 +105,31 @@ impl PluginFactory for AgentCompositionFactory {
                 "Agent composition configuration must be null".to_owned(),
             ));
         }
-        Ok(PreparedActivation::new(ConfigValue::Null)
-            .requiring_local::<ToolCatalogProviderContract>())
+        let prepared = PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<ToolCatalogProviderContract>()
+            .requiring_local::<AgentGenerationRootContract>();
+        Ok(if self.source.is_none() {
+            prepared.requiring_local::<AgentCompositionSourceContract>()
+        } else {
+            prepared
+        })
     }
 
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let tools = plan.local::<ToolCatalogProviderContract>()?;
+        let source = match &self.source {
+            Some(source) => Arc::clone(source),
+            None => plan.local::<AgentCompositionSourceContract>()?,
+        };
         let state = Arc::new(CompositionState {
-            presets: self.presets.clone(),
-            contributions: Arc::clone(&self.contributions),
+            source,
             scopes: self.scopes.clone(),
-            // Generation Fibers are owned by their pins, not by the provider
-            // Fiber. Root them beside the provider so its deferred shutdown
-            // can wait for the final pin before explicitly disposing them.
-            parent: plan.context().runtime().root(),
+            // Preserve the containing service's isolation while pins can outlive
+            // this provider's admission and delay its deferred cleanup.
+            parent: plan
+                .local::<AgentGenerationRootContract>()?
+                .as_ref()
+                .clone(),
             tools,
             build_slots: Arc::new(Semaphore::new(MAXIMUM_CONCURRENT_BUILDS)),
             shutdown: CancellationToken::new(),
@@ -212,8 +182,7 @@ impl AgentComposition for CompositionService {
 }
 
 struct CompositionState {
-    presets: AgentPresetCatalog,
-    contributions: Arc<AgentContributionCatalog>,
+    source: Arc<dyn AgentCompositionSource>,
     scopes: ScopeRoot,
     parent: Context,
     tools: Arc<dyn ToolCatalogProvider>,
@@ -263,8 +232,11 @@ impl PresetRow {
 
 struct Generation {
     preset_id: AgentPresetId,
-    source_digest: String,
+    identity: snapshot::GenerationIdentity,
     tools: Arc<dyn ToolRuntime>,
+    context_builder: Arc<dyn ModelContextBuilder>,
+    domains: DomainCatalog,
+    contributions: ContributionCatalog,
     owner: Arc<GenerationOwner>,
 }
 
@@ -273,7 +245,7 @@ impl fmt::Debug for Generation {
         formatter
             .debug_struct("Generation")
             .field("preset_id", &self.preset_id)
-            .field("source_digest", &self.source_digest)
+            .field("source_digest", &self.identity.effective_digest)
             .finish_non_exhaustive()
     }
 }
@@ -282,8 +254,11 @@ impl Generation {
     fn pin(&self) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         AgentCompositionPin::new(
             self.preset_id.clone(),
-            self.source_digest.clone(),
+            self.identity.effective_digest.clone(),
             Arc::clone(&self.tools),
+            Arc::clone(&self.context_builder),
+            self.domains.clone(),
+            self.contributions.clone(),
             self.owner.clone(),
         )
     }
@@ -292,6 +267,7 @@ impl Generation {
 struct ScopeRecord {
     id: u64,
     scope: ScopeHandle,
+    _catalog: Arc<AgentContributionCatalog>,
 }
 
 impl fmt::Debug for ScopeRecord {
@@ -310,9 +286,15 @@ struct GenerationOwner {
 }
 
 struct UnpublishedGeneration {
+    catalog: Arc<AgentContributionCatalog>,
     stage: Option<Box<dyn ToolCatalogStage>>,
     scope: Option<ScopeHandle>,
     tools: Option<Arc<dyn ToolRuntime>>,
+    context_builder: Option<Arc<dyn ModelContextBuilder>>,
+    domain_stage: domain::DomainStage,
+    domains: Option<DomainCatalog>,
+    contribution_stage: contribution::ContributionStage,
+    contributions: Option<ContributionCatalog>,
     singleflight: Option<OwnedMutexGuard<()>>,
     build_slot: Option<OwnedSemaphorePermit>,
     state: Weak<CompositionState>,
@@ -334,15 +316,25 @@ impl UnpublishedGeneration {
     fn new(
         stage: Box<dyn ToolCatalogStage>,
         scope: ScopeHandle,
+        catalog: Arc<AgentContributionCatalog>,
         singleflight: OwnedMutexGuard<()>,
         build_slot: OwnedSemaphorePermit,
         owner_state: Weak<CompositionState>,
         executor: tokio::runtime::Handle,
     ) -> Self {
+        let domain_stage = domain::DomainStage::new(scope.context().meta().runtime_identity());
+        let contribution_stage =
+            contribution::ContributionStage::new(scope.context().meta().runtime_identity());
         Self {
+            catalog,
             stage: Some(stage),
             scope: Some(scope),
             tools: None,
+            context_builder: None,
+            domain_stage,
+            domains: None,
+            contribution_stage,
+            contributions: None,
             singleflight: Some(singleflight),
             build_slot: Some(build_slot),
             state: owner_state,
@@ -363,16 +355,46 @@ impl UnpublishedGeneration {
             .expect("unpublished Agent generation owns its Scope")
     }
 
-    fn seal(&mut self) -> rsi_tools_protocol::Result<()> {
+    fn seal(
+        &mut self,
+        context: &Context,
+        preset_id: &AgentPresetId,
+    ) -> rsi_agent_composition_protocol::Result<()> {
+        let builder = context
+            .lookup_local::<ModelContextBuilderContract>()
+            .ok_or_else(|| unavailable(preset_id, "Agent Profile requires one context builder"))?;
+        self.domains = Some(
+            self.domain_stage
+                .seal()
+                .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
+        );
+        self.contributions = Some(
+            self.contribution_stage
+                .seal()
+                .map_err(|_| unavailable(preset_id, "Agent execution catalog sealing failed"))?,
+        );
         let stage = self
             .stage
             .take()
             .expect("unsealed Agent generation owns its Tool stage");
-        self.tools = Some(stage.seal()?);
+        self.tools = Some(
+            stage
+                .seal()
+                .map_err(|_| unavailable(preset_id, "Tool catalog sealing failed"))?,
+        );
+        self.context_builder = Some(builder);
         Ok(())
     }
 
-    fn into_published_parts(mut self) -> (Arc<dyn ToolRuntime>, ScopeHandle) {
+    fn into_published_parts(
+        mut self,
+    ) -> (
+        Arc<dyn ToolRuntime>,
+        Arc<dyn ModelContextBuilder>,
+        DomainCatalog,
+        ContributionCatalog,
+        ScopeHandle,
+    ) {
         let tools = self
             .tools
             .take()
@@ -381,9 +403,21 @@ impl UnpublishedGeneration {
             .scope
             .take()
             .expect("published Agent generation owns its Scope");
+        let context_builder = self
+            .context_builder
+            .take()
+            .expect("published Agent generation has a context builder");
+        let domains = self
+            .domains
+            .take()
+            .expect("published Agent generation has domain definitions");
         drop(self.singleflight.take());
         drop(self.build_slot.take());
-        (tools, scope)
+        let contributions = self
+            .contributions
+            .take()
+            .expect("published Agent generation has contributions");
+        (tools, context_builder, domains, contributions, scope)
     }
 
     async fn rollback(mut self) -> bool {
@@ -420,6 +454,7 @@ impl Drop for UnpublishedGeneration {
         };
         let tools = self.tools.take();
         let stage = self.stage.take();
+        let catalog = Arc::clone(&self.catalog);
         let singleflight = self.singleflight.take();
         let build_slot = self.build_slot.take();
         let owner_state = self.state.clone();
@@ -436,6 +471,7 @@ impl Drop for UnpublishedGeneration {
             }
             drop(tools);
             drop(stage);
+            drop(catalog);
             drop(singleflight);
             drop(build_slot);
         });
@@ -503,7 +539,13 @@ impl CompositionState {
         {
             return Err(AgentCompositionError::ShuttingDown);
         }
-        let default = self.presets.default_id().await;
+        let snapshot =
+            self.source
+                .snapshot()
+                .map_err(|_| AgentCompositionError::DefaultUnavailable {
+                    reason: "Agent catalog snapshot unavailable".into(),
+                })?;
+        let default = snapshot.presets.default_id().await;
         if self.shutdown.is_cancelled() {
             return Err(AgentCompositionError::ShuttingDown);
         }
@@ -531,7 +573,11 @@ impl CompositionState {
             },
         };
 
-        let presets = self.presets.clone();
+        let snapshot = self
+            .source
+            .snapshot()
+            .map_err(|_| unavailable(preset_id, "Agent catalog snapshot unavailable"))?;
+        let presets = snapshot.presets.clone();
         let compile_preset_id = preset_id.clone();
         let compilation = blocking_with_build_admission(
             self.executor.clone(),
@@ -556,17 +602,24 @@ impl CompositionState {
                 .lock()
                 .expect("composition row poisoned")
                 .as_ref()
-                .filter(|generation| generation.source_digest == candidate.source_digest())
+                .filter(|generation| {
+                    generation
+                        .identity
+                        .matches(candidate.source_digest(), &snapshot.contributions)
+                })
                 .cloned()
         };
         if let Some(generation) = current {
             return generation.pin();
         }
 
-        let resolver: Arc<dyn ProfileResolver> = self.contributions.clone();
+        let resolver: Arc<dyn ProfileResolver> = snapshot.contributions.clone();
         let generation_plan = ProfileGenerationPlan::resolve(candidate, resolver)
             .map_err(|error| profile_unavailable(preset_id, &error))?;
-        let source_digest = generation_plan.source_digest().to_owned();
+        let identity = snapshot::GenerationIdentity::new(
+            generation_plan.source_digest(),
+            Arc::clone(&snapshot.contributions),
+        );
         let cancellation = self.shutdown.child_token();
         let mut cancel_on_drop = CancelBuildOnDrop::new(cancellation.clone());
         let state = Arc::clone(self);
@@ -576,6 +629,7 @@ impl CompositionState {
                 .build_unpublished_generation(
                     &build_preset_id,
                     generation_plan,
+                    snapshot.contributions.clone(),
                     singleflight,
                     build_slot,
                     cancellation,
@@ -586,19 +640,15 @@ impl CompositionState {
             .await
             .map_err(|_| unavailable(preset_id, "Agent generation build task failed"))??;
         cancel_on_drop.disarm();
-        self.publish(
-            Arc::clone(&row),
-            preset_id.clone(),
-            source_digest,
-            unpublished,
-        )
-        .await
+        self.publish(Arc::clone(&row), preset_id.clone(), identity, unpublished)
+            .await
     }
 
     async fn build_unpublished_generation(
         self: &Arc<Self>,
         preset_id: &AgentPresetId,
         generation_plan: ProfileGenerationPlan,
+        catalog: Arc<AgentContributionCatalog>,
         singleflight: OwnedMutexGuard<()>,
         build_slot: OwnedSemaphorePermit,
         cancellation: CancellationToken,
@@ -615,6 +665,7 @@ impl CompositionState {
         let mut unpublished = UnpublishedGeneration::new(
             stage,
             scope,
+            Arc::clone(&catalog),
             singleflight,
             build_slot,
             Arc::downgrade(self),
@@ -630,13 +681,17 @@ impl CompositionState {
             .meta()
             .clone()
             .isolate_local_fresh::<ToolRegistrarContract>()
+            .and_then(|(context, _)| context.isolate_local_fresh::<ModelContextBuilderContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<DomainRegistrarContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<ContributionRegistrarContract>())
+            .and_then(|(context, _)| catalog.isolate(context))
         {
-            Ok((context, _isolation)) => context,
+            Ok(context) => context,
             Err(_error) => {
                 let _clean = unpublished.rollback().await;
                 return Err(unavailable(
                     preset_id,
-                    "Agent Tool registrar isolation failed",
+                    "Agent contribution isolation failed",
                 ));
             }
         };
@@ -647,8 +702,10 @@ impl CompositionState {
                     REGISTRAR_FACTORY_ID,
                     env!("CARGO_PKG_VERSION"),
                     UpdateMode::RestartRequired,
-                    Arc::new(ToolRegistrarFactory {
+                    Arc::new(AgentRegistrarFactory {
                         registrar: unpublished.registrar(),
+                        domains: unpublished.domain_stage.registrar(),
+                        contributions: unpublished.contribution_stage.registrar(),
                     }),
                 ),
                 ConfigValue::Null,
@@ -659,17 +716,11 @@ impl CompositionState {
             Ok(handle) => {
                 let _cleanup = handle.dispose().await;
                 let _clean = unpublished.rollback().await;
-                return Err(unavailable(
-                    preset_id,
-                    "Agent Tool registrar activation failed",
-                ));
+                return Err(unavailable(preset_id, "Agent registrar activation failed"));
             }
             Err(_error) => {
                 let _clean = unpublished.rollback().await;
-                return Err(unavailable(
-                    preset_id,
-                    "Agent Tool registrar activation failed",
-                ));
+                return Err(unavailable(preset_id, "Agent registrar activation failed"));
             }
         };
         let _registrar_handle = registrar_handle;
@@ -689,12 +740,9 @@ impl CompositionState {
             return Err(self.cancelled_build_error(preset_id));
         }
 
-        match unpublished.seal() {
-            Ok(()) => {}
-            Err(_error) => {
-                let _clean = unpublished.rollback().await;
-                return Err(unavailable(preset_id, "Tool catalog sealing failed"));
-            }
+        if let Err(error) = unpublished.seal(&generation_context, preset_id) {
+            let _clean = unpublished.rollback().await;
+            return Err(error);
         }
         if cancellation.is_cancelled() {
             let _clean = unpublished.rollback().await;
@@ -742,7 +790,7 @@ impl CompositionState {
         self: &Arc<Self>,
         row: Arc<PresetRow>,
         preset_id: AgentPresetId,
-        source_digest: String,
+        identity: snapshot::GenerationIdentity,
         unpublished: UnpublishedGeneration,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         let published = {
@@ -757,11 +805,13 @@ impl CompositionState {
             if let Some(error) = rejection {
                 Err((error, unpublished))
             } else {
-                let (tools, scope) = unpublished.into_published_parts();
+                let (tools, context_builder, domains, contributions, scope) =
+                    unpublished.into_published_parts();
                 inner.next_scope += 1;
                 let record = Arc::new(ScopeRecord {
                     id: inner.next_scope,
                     scope,
+                    _catalog: Arc::clone(&identity.catalog),
                 });
                 inner.scopes.insert(record.id, Arc::downgrade(&record));
                 let owner = Arc::new(GenerationOwner {
@@ -771,8 +821,11 @@ impl CompositionState {
                 });
                 let generation = Arc::new(Generation {
                     preset_id,
-                    source_digest,
+                    identity,
                     tools,
+                    context_builder,
+                    domains,
+                    contributions,
                     owner,
                 });
                 let previous = row
@@ -875,16 +928,18 @@ where
 }
 
 #[derive(Debug)]
-struct ToolRegistrarFactory {
+struct AgentRegistrarFactory {
     registrar: Arc<dyn ToolRegistrar>,
+    domains: Arc<dyn DomainRegistrar>,
+    contributions: Arc<dyn ContributionRegistrar>,
 }
 
 #[async_trait]
-impl PluginFactory for ToolRegistrarFactory {
+impl PluginFactory for AgentRegistrarFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         if !desired.is_null() {
             return Err(MetaError::InvalidInput(
-                "Agent Tool registrar configuration must be null".to_owned(),
+                "Agent registrar configuration must be null".to_owned(),
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null))
@@ -894,11 +949,19 @@ impl PluginFactory for ToolRegistrarFactory {
         let supply = plan
             .context()
             .provide_local::<ToolRegistrarContract>(Arc::clone(&self.registrar))?;
+        let domain_supply = plan
+            .context()
+            .provide_local::<DomainRegistrarContract>(Arc::clone(&self.domains))?;
+        let contribution_supply = plan
+            .context()
+            .provide_local::<ContributionRegistrarContract>(Arc::clone(&self.contributions))?;
         plan.defer(
-            "withdraw Agent Tool registrar",
+            "withdraw Agent registrars",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    drop(domain_supply);
+                    drop(contribution_supply);
                     Ok(())
                 })
             }),

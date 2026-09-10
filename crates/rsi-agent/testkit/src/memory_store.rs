@@ -2,19 +2,18 @@ use super::{
     AgentCommitWatermark, AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit,
     Arc, AtomicAgentCommit, AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet,
     CasObjectRef, Digest, EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
-    InputMessageSource, MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES,
-    MAXIMUM_STORE_FACT_PAGE_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState,
-    MemoryStore, MemoryTurnBoundary, MessageId, MessageTarget, Ordering, Result, SessionFact,
-    SessionFactBody, SessionHeader, SessionId, SessionStore, Sha256, StoreActivationPhase,
-    StoreActiveActivation, StoreAgentChild, StoreAgentChildPage, StoreAgentDescendantStatus,
-    StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState,
-    StoreAgentSessionStatus, StoreAgentSubtreeSnapshot, StoreBackwardFactPage, StoreControlPage,
-    StoreError, StoreFactPage, StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn,
-    StoreOpenTurnPage, StoreReadyMessage, StoreReadyMessageCursor, StoreReadyMessagePage,
-    StoreReadyRootPage, StoreRecentSession, StoreRecentSessionCursor, StoreRecentSessionPage,
-    StoreSessionPage, StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage,
-    StoreWorkspaceContextState, StoredContextCheckpoint, TurnId, WriteContextCheckpoint,
-    advance_control_prefix_digest, advance_fact_prefix_digest, async_trait,
+    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
+    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState, MemoryStore, MemoryTurnBoundary,
+    MessageId, MessageTarget, Ordering, Result, SessionFact, SessionHeader, SessionId,
+    SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation, StoreAgentChild,
+    StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary,
+    StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
+    StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
+    StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
+    StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
+    StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreTurnBoundary,
+    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, TurnId,
+    WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest, async_trait,
     validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 
@@ -30,7 +29,7 @@ impl SessionStore for MemoryStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(session) = state.sessions.get_mut(&batch.session_id) {
-            let actual = session.facts.last().map_or(0, SessionFact::seq);
+            let actual = session.facts.last().map_or(0, |fact| fact.seq());
             if actual != batch.expected_seq {
                 return Err(StoreError::Conflict {
                     expected: batch.expected_seq,
@@ -44,12 +43,9 @@ impl SessionStore for MemoryStore {
             }
             let (turn_updates, fact_prefix_digest) =
                 index_appended_turns(&session.turns, &batch.facts, session.fact_prefix_digest)?;
-            let workspace_context =
-                workspace_context_after(session.workspace_context.clone(), &batch.facts);
             session.facts.extend(batch.facts);
             session.turns.extend(turn_updates);
             session.fact_prefix_digest = fact_prefix_digest;
-            session.workspace_context = workspace_context;
             Ok(AppendCommit {
                 durable_seq: session
                     .facts
@@ -75,8 +71,6 @@ impl SessionStore for MemoryStore {
                 .seq();
             let (turns, fact_prefix_digest) =
                 index_appended_turns(&BTreeMap::new(), &batch.facts, EMPTY_FACT_PREFIX_DIGEST)?;
-            let workspace_context =
-                workspace_context_after(StoreWorkspaceContextState::default(), &batch.facts);
             state
                 .recent_sessions
                 .insert((header.created_at_ms(), batch.session_id.clone()));
@@ -100,7 +94,9 @@ impl SessionStore for MemoryStore {
                     checkpoint: None,
                     controls: Vec::new(),
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
-                    workspace_context,
+                    domain_versions: BTreeMap::new(),
+                    domain_requests: BTreeMap::new(),
+                    domain_usage: BTreeMap::new(),
                 },
             );
             Ok(AppendCommit { durable_seq })
@@ -152,6 +148,117 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
     }
 
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        at_control_seq: Option<u64>,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        use rsi_agent_store_protocol::{StoreDomainState, StoreDomainStatePage};
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
+        let selected_control_seq = at_control_seq.unwrap_or(durable_control_seq);
+        if selected_control_seq > durable_control_seq {
+            return Err(StoreError::Invalid(
+                "domain horizon exceeds current control tail".into(),
+            ));
+        }
+        let mut states = Vec::new();
+        for versions in session.domain_versions.values() {
+            let Some(index) = versions
+                .partition_point(|head| head.control_seq <= selected_control_seq)
+                .checked_sub(1)
+            else {
+                continue;
+            };
+            let head = &versions[index];
+            let record = domain_control(session, head.control_seq)?;
+            let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+                return Err(StoreError::Corrupt(
+                    "domain index points to another control kind".into(),
+                ));
+            };
+            let update = commit.updates().get(head.update_index).ok_or_else(|| {
+                StoreError::Corrupt("domain update offset exceeds canonical request".into())
+            })?;
+            if update.revision() != head.revision {
+                return Err(StoreError::Corrupt(
+                    "domain indexed revision differs from canonical update".into(),
+                ));
+            }
+            states.push(StoreDomainState {
+                head: head.clone(),
+                snapshot: update.snapshot().clone(),
+            });
+        }
+        let page = StoreDomainStatePage {
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq,
+            selected_control_seq,
+            states,
+        };
+        page.validate()?;
+        Ok(page)
+    }
+
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<AgentControlRecord>> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let Some(seq) = session.domain_requests.get(request_id) else {
+            return Ok(None);
+        };
+        let record = domain_control(session, *seq)?;
+        if !matches!(record.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.request_id() == Some(request_id))
+        {
+            return Err(StoreError::Corrupt(
+                "domain request index differs from canonical request".into(),
+            ));
+        }
+        Ok(Some(record.clone()))
+    }
+
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<rsi_agent_store_protocol::StoreTurnDomainUsage> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let (records, bytes) = session
+            .domain_usage
+            .get(turn_id)
+            .copied()
+            .unwrap_or_default();
+        Ok(rsi_agent_store_protocol::StoreTurnDomainUsage {
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            records,
+            bytes,
+        })
+    }
+
     async fn read_facts(
         &self,
         session_id: &SessionId,
@@ -168,7 +275,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         if after_seq > durable_seq {
             return Err(StoreError::Invalid(
                 "Fact cursor exceeds the durable tail".into(),
@@ -186,7 +293,7 @@ impl SessionStore for MemoryStore {
                 break;
             }
             encoded_bytes = projected;
-            facts.push(fact.clone());
+            facts.push(fact.as_ref().clone());
         }
         let page = StoreFactPage {
             after_seq,
@@ -256,7 +363,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         let maximum_before = durable_seq
             .checked_add(1)
             .ok_or_else(|| StoreError::Corrupt("durable sequence is exhausted".into()))?;
@@ -284,7 +391,7 @@ impl SessionStore for MemoryStore {
                 break;
             }
             encoded_bytes = projected;
-            facts.push(fact.clone());
+            facts.push(fact.as_ref().clone());
         }
         facts.reverse();
         let has_more = facts.first().is_some_and(|fact| fact.seq() > 1);
@@ -314,7 +421,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         if after_seq > durable_seq {
             return Err(StoreError::Invalid(
                 "turn Fact cursor exceeds the durable tail".into(),
@@ -345,7 +452,7 @@ impl SessionStore for MemoryStore {
                 break;
             }
             encoded_bytes = projected;
-            facts.push(fact.clone());
+            facts.push(fact.as_ref().clone());
         }
         let page = StoreTurnFactPage {
             turn_id: turn_id.clone(),
@@ -387,16 +494,18 @@ impl SessionStore for MemoryStore {
                 .facts
                 .get(usize::try_from(seq - 1).expect("bounded sequence"))
                 .expect("turn index terminal points into Facts")
+                .as_ref()
                 .clone()
         });
         StoreTurnBoundary::new(
             turn_id.clone(),
-            accepted.clone(),
+            accepted.as_ref().clone(),
             terminal,
-            session.facts.last().map_or(0, SessionFact::seq),
+            session.facts.last().map_or(0, |fact| fact.seq()),
         )
     }
 
+    #[allow(clippy::too_many_lines)] // One selection validates balanced membership and both terminal prefixes.
     async fn resolve_fork_boundary(
         &self,
         session_id: &SessionId,
@@ -494,7 +603,24 @@ impl SessionStore for MemoryStore {
                     })
             },
         )?;
+        let (resolved_terminal_control_seq, terminal_control_prefix_sha256) =
+            selected.last().map_or_else(
+                || Ok((0, hex::encode(EMPTY_CONTROL_PREFIX_DIGEST))),
+                |(_, _, turn_id)| {
+                    session
+                        .turns
+                        .get(*turn_id)
+                        .and_then(|turn| turn.terminal_control.clone())
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(
+                                "completed Turn has no terminal control boundary".into(),
+                            )
+                        })
+                },
+            )?;
         Ok(StoreForkBoundary {
+            resolved_terminal_control_seq,
+            terminal_control_prefix_sha256,
             resolved_after_seq,
             resolved_terminal_seq,
             terminal_prefix_sha256,
@@ -517,7 +643,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))?;
-        let durable_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_seq = session.facts.last().map_or(0, |fact| fact.seq());
         if after_accepted_seq > durable_seq {
             return Err(StoreError::Invalid(
                 "open-turn cursor exceeds the durable tail".into(),
@@ -724,7 +850,7 @@ impl SessionStore for MemoryStore {
         pending.sort_by_key(|entry| entry.accepted_control_seq);
         let inspection = StoreSessionInspection {
             header: session.header.clone(),
-            durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             pending,
             active_turn_id: session
@@ -757,7 +883,7 @@ impl SessionStore for MemoryStore {
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
-        let durable_fact_seq = session.facts.last().map_or(0, SessionFact::seq);
+        let durable_fact_seq = session.facts.last().map_or(0, |fact| fact.seq());
         let selected = selected_message_id
             .and_then(|message_id| {
                 state
@@ -841,38 +967,10 @@ impl SessionStore for MemoryStore {
                     .collect()
             },
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
-            durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         };
         summary.validate()?;
         Ok(summary)
-    }
-
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<StoreWorkspaceContextState> {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let workspace_context = state
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?
-            .workspace_context
-            .clone();
-        let workspace_context = StoreWorkspaceContextState {
-            durable_fact_seq: state
-                .sessions
-                .get(session_id)
-                .expect("validated workspace-context session exists")
-                .facts
-                .last()
-                .map_or(0, SessionFact::seq),
-            ..workspace_context
-        };
-        workspace_context.validate()?;
-        Ok(workspace_context)
     }
 
     async fn list_agent_children(
@@ -1035,7 +1133,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get_mut(&write.session_id)
             .ok_or_else(|| StoreError::NotFound(write.session_id.to_string()))?;
-        let actual = session.facts.last().map_or(0, SessionFact::seq);
+        let actual = session.facts.last().map_or(0, |fact| fact.seq());
         if actual != write.expected_durable_seq {
             return Err(StoreError::Conflict {
                 expected: write.expected_durable_seq,
@@ -1101,6 +1199,80 @@ impl SessionStore for MemoryStore {
     }
 }
 
+fn domain_control(session: &MemorySession, seq: u64) -> Result<&AgentControlRecord> {
+    let index = seq
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+        .ok_or_else(|| StoreError::Corrupt("invalid domain control position".into()))?;
+    session
+        .controls
+        .get(index)
+        .filter(|record| record.seq() == seq)
+        .ok_or_else(|| StoreError::Corrupt("domain control is absent".into()))
+}
+
+fn apply_domain_updates(
+    session: &mut MemorySession,
+    minimum_fact_seq: u64,
+    controls: &[AgentControlRecord],
+) -> Result<()> {
+    use rsi_agent_session_protocol::DomainMutationSource;
+    for record in controls {
+        let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+            continue;
+        };
+        if let Some(request) = commit.request_id()
+            && session.domain_requests.contains_key(request)
+        {
+            return Err(StoreError::DomainRequestConflict {
+                request_id: request.to_string(),
+            });
+        }
+        if let DomainMutationSource::Turn { turn_id, .. } = commit.source() {
+            let live = session.turns.get(turn_id).is_some_and(|turn| {
+                turn.terminal_seq
+                    .is_none_or(|terminal| terminal >= minimum_fact_seq)
+            });
+            if !live {
+                return Err(StoreError::Invalid(
+                    "domain mutation has no open originating Turn".into(),
+                ));
+            }
+            let usage = session.domain_usage.entry(turn_id.clone()).or_default();
+            usage.0 = usage
+                .0
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Invalid("domain record count overflow".into()))?;
+            usage.1 = usage
+                .1
+                .checked_add(record.encoded_len() as u64)
+                .ok_or_else(|| StoreError::Invalid("domain byte count overflow".into()))?;
+        }
+        let heads: Vec<_> = session
+            .domain_versions
+            .values()
+            .filter_map(|versions| versions.last().cloned())
+            .collect();
+        let next = rsi_agent_store_protocol::domain_heads_after(&heads, record.seq(), commit)?;
+        for head in next
+            .into_iter()
+            .filter(|head| head.control_seq == record.seq())
+        {
+            session
+                .domain_versions
+                .entry(head.identity.id().into())
+                .or_default()
+                .push(head);
+        }
+        if let Some(request) = commit.request_id() {
+            session
+                .domain_requests
+                .insert(request.clone(), record.seq());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Keep the mechanical atomic-append mirror auditable as one transaction state transition.
 fn apply_atomic_memory_append(
     state: &mut MemoryState,
@@ -1117,7 +1289,7 @@ fn apply_atomic_memory_append(
                 "existing session cannot replace its immutable Header".into(),
             ));
         }
-        let actual_fact = session.facts.last().map_or(0, SessionFact::seq);
+        let actual_fact = session.facts.last().map_or(0, |fact| fact.seq());
         let actual_control = session.controls.last().map_or(0, AgentControlRecord::seq);
         if actual_fact != append.expected_fact_seq {
             return Err(StoreError::Conflict {
@@ -1134,8 +1306,6 @@ fn apply_atomic_memory_append(
         }
         let (turn_updates, fact_digest) =
             index_appended_turns(&session.turns, &append.facts, session.fact_prefix_digest)?;
-        let workspace_context =
-            workspace_context_after(session.workspace_context.clone(), &append.facts);
         let control_digest =
             append
                 .controls
@@ -1149,7 +1319,6 @@ fn apply_atomic_memory_append(
         session.fact_prefix_digest = fact_digest;
         session.controls.extend(append.controls.clone());
         session.control_prefix_digest = control_digest;
-        session.workspace_context = workspace_context;
         apply_message_updates(
             state,
             &session_id,
@@ -1165,8 +1334,6 @@ fn apply_atomic_memory_append(
         validate_memory_agent_node(state, &header)?;
         let (turns, fact_digest) =
             index_appended_turns(&BTreeMap::new(), &append.facts, EMPTY_FACT_PREFIX_DIGEST)?;
-        let workspace_context =
-            workspace_context_after(StoreWorkspaceContextState::default(), &append.facts);
         let control_digest =
             append
                 .controls
@@ -1198,7 +1365,9 @@ fn apply_atomic_memory_append(
                 checkpoint: None,
                 controls: append.controls.clone(),
                 control_prefix_digest: control_digest,
-                workspace_context,
+                domain_versions: BTreeMap::new(),
+                domain_requests: BTreeMap::new(),
+                domain_usage: BTreeMap::new(),
             },
         );
         apply_message_updates(
@@ -1212,36 +1381,33 @@ fn apply_atomic_memory_append(
     }
     let session = state
         .sessions
-        .get(&session_id)
+        .get_mut(&session_id)
         .expect("atomic append installed or updated its session");
+    apply_domain_updates(session, minimum_entered_fact_seq, &append.controls)?;
+    if let Some(record) = append.controls.last()
+        && let AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id,
+            terminal_fact_seq,
+        } = record.body()
+    {
+        let boundary = session
+            .turns
+            .get_mut(turn_id)
+            .ok_or_else(|| StoreError::Corrupt("terminal marker lost its Turn".into()))?;
+        if boundary.terminal_seq != Some(*terminal_fact_seq) || boundary.terminal_control.is_some()
+        {
+            return Err(StoreError::Corrupt(
+                "terminal marker differs from its Fact".into(),
+            ));
+        }
+        boundary.terminal_control =
+            Some((record.seq(), hex::encode(session.control_prefix_digest)));
+    }
     Ok(AgentCommitWatermark {
         session_id,
-        durable_fact_seq: session.facts.last().map_or(0, SessionFact::seq),
+        durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
     })
-}
-
-fn workspace_context_after(
-    mut state: StoreWorkspaceContextState,
-    facts: &[SessionFact],
-) -> StoreWorkspaceContextState {
-    for fact in facts {
-        if let SessionFactBody::InputMessageEntered { source, .. } = fact.body() {
-            match source {
-                InputMessageSource::AgentInstructions { sha256, .. } => {
-                    state.instructions_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::SkillCatalog { sha256 } => {
-                    state.skill_catalog_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::Human { .. }
-                | InputMessageSource::Agent { .. }
-                | InputMessageSource::Completion { .. }
-                | InputMessageSource::UserSkillInvocation { .. } => {}
-            }
-        }
-    }
-    state
 }
 
 fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Result<()> {
@@ -1414,7 +1580,7 @@ fn apply_message_updates(
                     turn_id,
                     step_id,
                     minimum_entered_fact_seq,
-                    fact,
+                    fact.map(AsRef::as_ref),
                 )?;
                 let entry = state
                     .agent_messages
@@ -1468,7 +1634,9 @@ fn apply_message_updates(
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
     }
     Ok(())
@@ -1709,7 +1877,9 @@ fn apply_activation_updates(
                 ..
             }
             | AgentControlRecordBody::MessagePromoted { .. }
-            | AgentControlRecordBody::MessageDiscarded { .. } => {}
+            | AgentControlRecordBody::MessageDiscarded { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
     }
     Ok(())
@@ -1799,7 +1969,9 @@ fn apply_ready_updates(
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
     }
     Ok(())
@@ -1807,7 +1979,7 @@ fn apply_ready_updates(
 
 fn index_appended_turns(
     turns: &BTreeMap<TurnId, MemoryTurnBoundary>,
-    facts: &[SessionFact],
+    facts: &[Arc<SessionFact>],
     mut prefix_digest: [u8; 32],
 ) -> Result<(BTreeMap<TurnId, MemoryTurnBoundary>, [u8; 32])> {
     let mut updates = BTreeMap::new();
@@ -1827,6 +1999,7 @@ fn index_appended_turns(
                         accepted_seq: fact.seq(),
                         terminal_seq: None,
                         terminal_prefix_sha256: None,
+                        terminal_control: None,
                     },
                 );
             }

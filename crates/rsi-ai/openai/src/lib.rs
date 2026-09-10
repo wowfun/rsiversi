@@ -60,11 +60,23 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// Fixed official `OpenAI` endpoint policy shared by all HTTP capabilities.
+/// Responses history and remote operation capabilities selected by the endpoint owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponsesState {
+    /// Response identities may retain reasoning and support deferred operations.
+    Stored,
+    /// Every request carries its own history, including plain reasoning.
+    Stateless,
+}
+
+/// Fixed endpoint policy shared by the Responses and Images adapters.
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
     endpoint: String,
     language_models: LanguageModelProfiles,
+    responses_path: String,
+    responses_state: ResponsesState,
+    responses_developer_role: MessageRole,
 }
 
 impl Default for OpenAiConfig {
@@ -72,6 +84,9 @@ impl Default for OpenAiConfig {
         Self {
             endpoint: "https://api.openai.com".to_owned(),
             language_models: LanguageModelProfiles::default(),
+            responses_path: "/v1/responses".into(),
+            responses_state: ResponsesState::Stored,
+            responses_developer_role: MessageRole::Developer,
         }
     }
 }
@@ -81,12 +96,37 @@ impl OpenAiConfig {
     pub fn new(endpoint: impl Into<String>) -> Result<Self, AiError> {
         let config = Self {
             endpoint: endpoint.into().trim_end_matches('/').to_owned(),
-            language_models: LanguageModelProfiles::default(),
+            ..Self::default()
         };
         for path in ["/v1/responses", "/v1/images/generations"] {
             HttpRequest::new(Method::POST, config.url(path)).map_err(invalid_request_error)?;
         }
         Ok(config)
+    }
+
+    /// Selects bounded Responses wire policy without changing Images URLs.
+    pub fn with_responses_options(
+        mut self,
+        path: impl Into<String>,
+        state: ResponsesState,
+        developer_role: MessageRole,
+    ) -> Result<Self, AiError> {
+        let path = path.into();
+        if !path.starts_with('/')
+            || path.len() > 1024
+            || !path.is_ascii()
+            || path.contains(['?', '#'])
+            || !matches!(developer_role, MessageRole::System | MessageRole::Developer)
+        {
+            return Err(invalid_language_profile(
+                "invalid Responses path or instruction role",
+            ));
+        }
+        HttpRequest::new(Method::POST, self.url(&path)).map_err(invalid_request_error)?;
+        self.responses_path = path;
+        self.responses_state = state;
+        self.responses_developer_role = developer_role;
+        Ok(self)
     }
 
     /// Adds one exact model-capacity profile; duplicates and oversized maps fail.

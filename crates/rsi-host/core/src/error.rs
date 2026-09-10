@@ -12,12 +12,15 @@ pub enum HostError {
         /// Rejected path.
         path: PathBuf,
     },
-    /// One linked implementation key was already registered.
+    /// One implementation key was already registered.
     #[error("plugin `{plugin}` is already registered")]
     DuplicatePlugin {
         /// Duplicate catalog key.
         plugin: PluginId,
     },
+    /// A native artifact digest was not canonical lowercase SHA-256.
+    #[error("native factory digest must be 64 lowercase hexadecimal bytes")]
+    InvalidNativeDigest,
     /// One Local contract key was already bound to a Rust type.
     #[error("Local contract key `{key}` is already registered")]
     DuplicateLocalContractKey {

@@ -20,6 +20,32 @@ use the current healthy source generation. The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
+The independent Session projection read service retains an existing resident pin
+without acquiring a claim. A cold view may resolve the current generation without
+hydrating the Session or validating unrelated codecs; each projection unit owns
+its semantic decode. Capture uses the Store's simultaneous durable Fact/control
+watermarks and verifies the requested selected horizon before presenting state.
+Bounded capture admission and cancellation are independent of mutation admission;
+projection callbacks never run under the Kernel state or Session mutation lock.
+
+Turn domain mutations accept exact-generation validated proposals and optional
+Facts as one request. Kernel assigns the claimed Turn as their source, flushes
+the preceding speculative suffix, validates the entire candidate state and
+budget, and commits both streams atomically under retained source and Session
+admission. Generated-record limits charge generated Facts and Turn domain
+controls using their complete canonical envelope bytes. A receipt binds the
+source, replacements and accompanying Fact bodies; same-ID changes conflict.
+Result-unknown reconciliation queries that canonical request before releasing
+ownership or permitting a new mutation. Domain-only work is still charged and
+elapsed-limited. Protocol-constrained budget and terminal records retain their
+ending channel after business work is exhausted. `finish_turn` owns a bounded
+atomic ending batch: at most one current-Step closure, one required budget
+marker and the terminal Fact. Only the adjacent closure in that ending batch
+is exempt from generated-record and elapsed limits. Ordinary Step closure
+remains charged. Domain mutations cannot append ending records. This prevents
+an exhausted open Step from blocking finalization without creating a reusable
+free business-work lane.
+
 Agent mutations prepare and acquire target admission before their final source
 check. That check, under the short Kernel state lock, verifies the exact claim,
 executor registration, open mutation gate, and execution cancellation. An
@@ -39,7 +65,45 @@ admission after the last retained mutation drains, provided that the same claim
 is still live and has not been retired. Restoration installs a fresh stop token;
 it cannot revive a cancelled, replaced, or terminal claim. Once the terminal
 commit task owns admission, its gate remains closed through Store reconciliation.
-Activation terminals must use `finish_activation_turn`, which commits the
+One mutex owns the gate's admission phase (`Open`, `Closed`, `ReopenPending`,
+`TerminalAdmitted`, or `Failed`), retirement flag, terminal drainer, retained wait, and
+active lease count. Retirement and draining are independent dimensions. Lock
+order is Kernel state then gate state; a gate guard never survives an await or
+an attempt to acquire Kernel state. The last lease release and drainer drop
+use the same reopening rule, and an admitted terminal never reopens.
+An indeterminate retained mutation fails business admission while preserving
+explicit claim release. Once Store reads recover, domain receipts and terminal
+outcomes remain queryable from canonical history; failed resident state cannot
+mask a committed result. Execution resumes only through cold recovery.
+Factory preparation validates limits once and retains a private typed value
+alongside normalized configuration; activation consumes that value. Public
+recovery constructors still validate raw caller-supplied limits.
+
+Durable observers subscribe to Session changes before their first read.
+Submission, cancellation, and flush barriers capture their exact flush-status
+receiver under the same Kernel lock as the source sequence. Completed Session
+eviction may close the sender but cannot erase an already published durable
+watermark. Waiting never looks up that Session again to recover its receipt.
+Successful Store commit watermarks notify only touched Sessions; publication
+of a new immutable Header also notifies that root's tree-membership watch.
+Watch entries exist only while subscribed, coalesce revisions without payload
+queues, and are independent of the scheduler's global claim notification.
+Observers mark a revision before collecting a page and keep a five-second
+fallback for changes recovered outside their process-local notification path.
+
+Observer retention has its own default 64 MiB canonical-payload budget, separate
+from read materialization.
+The pool is shared by all Sessions and observers of one Kernel: retained handles
+from one consumer can cause `Capacity` in another. Release those handles before
+retrying from the last delivered cursor.
+A read reserves its page's actual retained bytes before releasing transient read
+admission. Retained admission never waits:
+failure releases the page and returns `Capacity` without delivering a cursor.
+Durable observations retain at most one page, alternating controls and Facts;
+live Facts are also charged. The item handle owns the charge through all
+consumer clones, including a renderer queue after the stream is detached.
+Configuration can tighten the pool only while admitting one maximum Fact.
+Activation terminals must use `finish_turn`, which commits the
 terminal and activation transition together; raw terminal publication is only
 valid for direct Turns.
 Agent interruption publishes its cancellation Fact only after the direct atomic
@@ -86,7 +150,7 @@ with at most four preparation jobs and one job per root. New durable input
 requests another root scan even while the previous final page still has a
 blocked preparation; retained preparations continue to count against the bound.
 A generation-bound reservation releases the exact root on completion. A candidate reserves one of
-its tree's three lanes before composition/workspace preparation and transfers
+its tree's three lanes before composition preparation and transfers
 that lane through the resident Turn into the executor claim. Failure in one root's bounded Store scan is
 isolated from later roots and from the executor lease; an otherwise idle claim
 loop retries skipped roots every five seconds as well as on commit notification.
@@ -112,9 +176,10 @@ flush failure. Recovery terminalizes durably cancelled work
 as `Cancelled` and all other unfinished work as `Interrupted`. Effect start
 Facts require their matching intent to have crossed the durable watermark.
 
-`KernelLimits` owns three process-wide admissions independently of per-session
+`KernelLimits` owns four process-wide admissions independently of per-session
 bounds: total speculative Fact bytes, conservative maximum-page Store-read
-materialization, and attached observers. Defaults are 64 MiB, 64 MiB, and
+materialization, retained observation bytes, and attached observers. Defaults are
+64 MiB, 64 MiB, 64 MiB, and
 1,024 respectively and configuration may only tighten them. Because the Store
 read contract bounds Fact and control pages at 64 MiB, while the indexed
 mailbox has its own 32 MiB pending-prefix bound plus one selected message; the
@@ -178,9 +243,17 @@ payloads nor leaves partial live state.
 Observation consumes
 watch watermarks with `borrow_and_update`, preserving durability advances that
 arrive while the stream is not being polled. Durable observation reads bounded
-pages and emits their Facts incrementally. In-process commits wake idle durable
-observers through the shared Kernel generation; a bounded five-second poll is
-only the fallback for writers outside this Kernel process. Speculative lookup
+pages and emits their Facts incrementally. Before retention or cursor advance,
+both Fact and control pages must echo the requested cursor, respect the requested
+count, and pass their bounded contiguous-page validation. A mismatched response
+ends observation without delivering any of that page.
+In-process commits wake only observers of the affected Session; a bounded
+five-second poll also reconciles missed commit acknowledgements. Tree-membership
+watches follow this Kernel's root and child creation notifications, including
+atomic and write-behind creation attempts with an uncertain Store acknowledgement. Such a notification
+is a requery hint, never proof of commit. The standard
+Host owns the sole Kernel and Store writer lease; concurrent external writes
+are outside that ownership contract. Speculative lookup
 is direct within the contiguous pending suffix. Flush selection snapshots only
 `Arc` Fact handles while holding the global Kernel lock; materializing the
 Store-owned batch occurs after that lock is released.

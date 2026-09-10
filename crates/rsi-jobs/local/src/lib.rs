@@ -16,7 +16,7 @@ use rsi_jobs::{
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -147,11 +147,107 @@ struct Registry {
     producers: HashMap<String, ProducerEntry>,
     scopes: HashMap<JobScopeId, Weak<JobScopeAuthorityState>>,
     jobs: BTreeMap<String, JobRecord>,
+    retention_by_scope: HashMap<u64, ScopeRetention>,
+    evictable: BTreeMap<u64, String>,
+    #[cfg(test)]
+    eviction_candidates_examined: usize,
     reservations_global: usize,
     reservations_by_scope: HashMap<u64, usize>,
     active_global: usize,
     active_by_scope: HashMap<u64, usize>,
     active_by_producer: HashMap<u64, usize>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ScopeRetention {
+    retained: usize,
+    evictable: BTreeSet<u64>,
+}
+
+impl Registry {
+    fn insert_record(&mut self, id: &str, record: JobRecord) {
+        self.retention_by_scope
+            .entry(record.scope.generation())
+            .or_default()
+            .retained += 1;
+        let previous = self.jobs.insert(id.to_owned(), record);
+        assert!(previous.is_none(), "published job identities are unique");
+        self.refresh_eligibility(id);
+    }
+
+    fn refresh_eligibility(&mut self, id: &str) {
+        let record = self
+            .jobs
+            .get(id)
+            .expect("eligibility requires a retained job");
+        let scope = self
+            .retention_by_scope
+            .get_mut(&record.scope.generation())
+            .expect("every retained job has a scope count");
+        if record.status.is_terminal() && record.reported && record.readers == 0 {
+            scope.evictable.insert(record.sequence);
+            self.evictable
+                .entry(record.sequence)
+                .or_insert_with(|| id.to_owned());
+        } else {
+            scope.evictable.remove(&record.sequence);
+            self.evictable.remove(&record.sequence);
+        }
+    }
+
+    fn remove_record(&mut self, id: &str) {
+        let record = self
+            .jobs
+            .remove(id)
+            .expect("eviction candidate is retained");
+        let generation = record.scope.generation();
+        let scope = self
+            .retention_by_scope
+            .get_mut(&generation)
+            .expect("every retained job has a scope count");
+        scope.retained -= 1;
+        scope.evictable.remove(&record.sequence);
+        self.evictable.remove(&record.sequence);
+        if scope.retained == 0 {
+            self.retention_by_scope.remove(&generation);
+        }
+    }
+
+    fn oldest_evictable(&mut self, scope_generation: Option<u64>) -> Option<String> {
+        let sequence = match scope_generation {
+            Some(generation) => *self
+                .retention_by_scope
+                .get(&generation)?
+                .evictable
+                .first()?,
+            None => *self.evictable.first_key_value()?.0,
+        };
+        #[cfg(test)]
+        {
+            self.eviction_candidates_examined += 1;
+        }
+        self.evictable.get(&sequence).cloned()
+    }
+}
+
+struct JobReadLease<'a> {
+    service: &'a Service,
+    id: &'a str,
+}
+
+impl Drop for JobReadLease<'_> {
+    fn drop(&mut self) {
+        let mut registry = lock(&self.service.registry);
+        let record = registry
+            .jobs
+            .get_mut(self.id)
+            .expect("an admitted reader prevents record eviction");
+        record.readers = record
+            .readers
+            .checked_sub(1)
+            .expect("every admitted read has one release");
+        registry.refresh_eligibility(self.id);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -329,8 +425,8 @@ impl Jobs for Service {
             } else {
                 next_generation(&self.next_id, "job identity exhausted").map(|sequence| {
                     let id = format!("job-{sequence}");
-                    registry.jobs.insert(
-                        id.clone(),
+                    registry.insert_record(
+                        &id,
                         JobRecord {
                             sequence,
                             scope: scope.clone(),
@@ -415,54 +511,48 @@ impl Jobs for Service {
             self.validate_scope(&registry, scope)?;
             let record = visible_record_mut(&mut registry, scope, id)?;
             record.readers = record.readers.checked_add(1).ok_or(JobsError::Capacity)?;
-            (
+            let snapshot = (
                 record.control.clone(),
                 record.status.is_terminal(),
                 record.stream_ends,
+            );
+            registry.refresh_eligibility(id);
+            snapshot
+        };
+        let _read_lease = JobReadLease { service: self, id };
+        let (mut stdout, mut stderr) = if let Some(control) = &control {
+            (
+                contained_read(control, JobStream::Stdout, stdout_offset)?,
+                contained_read(control, JobStream::Stderr, stderr_offset)?,
+            )
+        } else {
+            (
+                compacted_read(stream_ends[0], stdout_offset),
+                compacted_read(stream_ends[1], stderr_offset),
             )
         };
-        let result = (|| {
-            let (mut stdout, mut stderr) = if let Some(control) = &control {
-                (
-                    contained_read(control, JobStream::Stdout, stdout_offset)?,
-                    contained_read(control, JobStream::Stderr, stderr_offset)?,
-                )
-            } else {
-                (
-                    compacted_read(stream_ends[0], stdout_offset),
-                    compacted_read(stream_ends[1], stderr_offset),
-                )
-            };
-            let active_summary = {
-                let registry = lock(&self.registry);
-                let record = visible_record(&registry, scope, id)?;
-                (!terminal && !record.status.is_terminal()).then(|| record.summary(id))
-            };
-            if let Some(job) = active_summary {
-                return Ok(JobRead {
-                    job,
-                    stdout,
-                    stderr,
-                });
-            }
-            if let Some(control) = &control {
-                stdout = contained_read(control, JobStream::Stdout, stdout_offset)?;
-                stderr = contained_read(control, JobStream::Stderr, stderr_offset)?;
-            }
-            let job = self.report_job(id)?;
-            Ok(JobRead {
+        let active_summary = {
+            let registry = lock(&self.registry);
+            let record = visible_record(&registry, scope, id)?;
+            (!terminal && !record.status.is_terminal()).then(|| record.summary(id))
+        };
+        if let Some(job) = active_summary {
+            return Ok(JobRead {
                 job,
                 stdout,
                 stderr,
-            })
-        })();
-        if let Some(record) = lock(&self.registry).jobs.get_mut(id) {
-            record.readers = record
-                .readers
-                .checked_sub(1)
-                .expect("every admitted read has one release");
+            });
         }
-        result
+        if let Some(control) = &control {
+            stdout = contained_read(control, JobStream::Stdout, stdout_offset)?;
+            stderr = contained_read(control, JobStream::Stderr, stderr_offset)?;
+        }
+        let job = self.report_job(id)?;
+        Ok(JobRead {
+            job,
+            stdout,
+            stderr,
+        })
     }
 
     async fn wait(
@@ -612,6 +702,7 @@ impl Service {
             record.control = None;
         }
         let settled = Arc::clone(&record.settled);
+        registry.refresh_eligibility(id);
         decrement_active(&mut registry, reservation);
         drop(registry);
         settled.notify_waiters();
@@ -706,7 +797,9 @@ impl Service {
                 record.control = None;
             }
         }
-        Ok(Some(record.summary(id)))
+        let summary = record.summary(id);
+        registry.refresh_eligibility(id);
+        Ok(Some(summary))
     }
 
     fn withdraw_producer(&self, name: &str, generation: u64) {
@@ -941,7 +1034,10 @@ fn compact_for_admission(
     config: &JobsLocalConfig,
     scope_generation: u64,
 ) -> Result<()> {
-    while scope_record_count(registry, scope_generation)
+    while registry
+        .retention_by_scope
+        .get(&scope_generation)
+        .map_or(0, |scope| scope.retained)
         .checked_add(
             registry
                 .reservations_by_scope
@@ -951,10 +1047,10 @@ fn compact_for_admission(
         )
         .is_none_or(|count| count >= config.maximum_retained_jobs_per_scope)
     {
-        let Some(id) = oldest_evictable(registry, Some(scope_generation)) else {
+        let Some(id) = registry.oldest_evictable(Some(scope_generation)) else {
             return Err(JobsError::Capacity);
         };
-        registry.jobs.remove(&id);
+        registry.remove_record(&id);
     }
     while registry
         .jobs
@@ -962,34 +1058,12 @@ fn compact_for_admission(
         .checked_add(registry.reservations_global)
         .is_none_or(|count| count >= config.maximum_retained_jobs)
     {
-        let Some(id) = oldest_evictable(registry, None) else {
+        let Some(id) = registry.oldest_evictable(None) else {
             return Err(JobsError::Capacity);
         };
-        registry.jobs.remove(&id);
+        registry.remove_record(&id);
     }
     Ok(())
-}
-
-fn scope_record_count(registry: &Registry, generation: u64) -> usize {
-    registry
-        .jobs
-        .values()
-        .filter(|record| record.scope.generation() == generation)
-        .count()
-}
-
-fn oldest_evictable(registry: &Registry, scope_generation: Option<u64>) -> Option<String> {
-    registry
-        .jobs
-        .iter()
-        .filter(|(_, record)| {
-            record.status.is_terminal()
-                && record.reported
-                && record.readers == 0
-                && scope_generation.is_none_or(|generation| record.scope.generation() == generation)
-        })
-        .min_by_key(|(_, record)| record.sequence)
-        .map(|(id, _)| id.clone())
 }
 
 fn release_reservation_count(registry: &mut Registry, reservation: Reservation) {
@@ -1124,6 +1198,129 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_retention_invariant(registry: &Registry) {
+        let mut scopes = HashMap::<u64, ScopeRetention>::new();
+        let mut evictable = BTreeMap::new();
+        for (id, record) in &registry.jobs {
+            let scope = scopes.entry(record.scope.generation()).or_default();
+            scope.retained += 1;
+            if record.status.is_terminal() && record.reported && record.readers == 0 {
+                scope.evictable.insert(record.sequence);
+                evictable.insert(record.sequence, id.clone());
+            }
+        }
+        assert_eq!(registry.retention_by_scope, scopes);
+        assert_eq!(registry.evictable, evictable);
+    }
+
+    fn retained_record(sequence: u64, generation: u64) -> JobRecord {
+        let scope = JobScopeId::new("test", [generation.to_string()]).unwrap();
+        JobRecord {
+            sequence,
+            scope: JobScopeAuthority::provider_owned(scope, 1, generation),
+            name: "fixture".into(),
+            producer: "fixture".into(),
+            producer_generation: 1,
+            status: JobStatus::Running,
+            control: None,
+            terminal: None,
+            requires_report: true,
+            reported: false,
+            readers: 0,
+            stream_ends: [0, 0],
+            settled: Arc::new(Notify::new()),
+        }
+    }
+
+    #[test]
+    fn retention_indexes_follow_reporting_readers_and_revoked_scope() {
+        let mut registry = Registry::default();
+        registry.insert_record("job-1", retained_record(1, 1));
+        assert_retention_invariant(&registry);
+        assert!(registry.oldest_evictable(None).is_none());
+        registry.jobs.get_mut("job-1").unwrap().status = JobStatus::Failed;
+        registry.refresh_eligibility("job-1");
+        assert_retention_invariant(&registry);
+        assert!(registry.oldest_evictable(None).is_none());
+        registry.jobs.get_mut("job-1").unwrap().reported = true;
+        registry.refresh_eligibility("job-1");
+        assert_retention_invariant(&registry);
+        assert_eq!(registry.oldest_evictable(None).as_deref(), Some("job-1"));
+        for readers in [1, 2, 1, 0] {
+            registry.jobs.get_mut("job-1").unwrap().readers = readers;
+            registry.refresh_eligibility("job-1");
+            assert_retention_invariant(&registry);
+            assert_eq!(registry.oldest_evictable(Some(1)).is_some(), readers == 0);
+        }
+        registry.jobs["job-1"].scope.revoke();
+        assert_retention_invariant(&registry);
+        assert_eq!(registry.retention_by_scope[&1].retained, 1);
+        registry.remove_record("job-1");
+        assert_retention_invariant(&registry);
+        assert!(registry.retention_by_scope.is_empty());
+    }
+
+    #[test]
+    fn admission_examines_only_required_candidates_among_4096_records() {
+        let mut registry = Registry::default();
+        for sequence in 1..=4096 {
+            let mut record = retained_record(sequence, (sequence - 1) / 256 + 1);
+            if sequence == 17 || sequence == 3000 {
+                record.status = JobStatus::Failed;
+                record.reported = true;
+            }
+            registry.insert_record(&format!("job-{sequence}"), record);
+        }
+        assert_retention_invariant(&registry);
+        let config = JobsLocalConfig {
+            maximum_retained_jobs: 4095,
+            ..JobsLocalConfig::default()
+        };
+        compact_for_admission(&mut registry, &config, 1).unwrap();
+        assert_retention_invariant(&registry);
+        assert!(!registry.jobs.contains_key("job-17"));
+        assert!(!registry.jobs.contains_key("job-3000"));
+        assert_eq!(registry.eviction_candidates_examined, 2);
+        assert_eq!(registry.jobs.len(), 4094);
+        assert!(matches!(
+            compact_for_admission(&mut registry, &config, 2),
+            Err(JobsError::Capacity)
+        ));
+        assert_eq!(registry.eviction_candidates_examined, 2);
+    }
+
+    #[test]
+    fn final_read_lease_release_restores_eviction_eligibility_during_unwind() {
+        let mut registry = Registry::default();
+        let mut record = retained_record(1, 1);
+        record.status = JobStatus::Failed;
+        record.reported = true;
+        record.readers = 1;
+        registry.insert_record("job-1", record);
+        let service = Service {
+            config: JobsLocalConfig::default(),
+            provider_id: 1,
+            accepting: AtomicBool::new(true),
+            next_id: AtomicU64::new(1),
+            next_scope_generation: AtomicU64::new(1),
+            next_producer_generation: AtomicU64::new(1),
+            registry: Mutex::new(registry),
+            changed: Notify::new(),
+            self_weak: Weak::new(),
+        };
+        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _lease = JobReadLease {
+                service: &service,
+                id: "job-1",
+            };
+            panic!("reader exits early");
+        }));
+        assert!(panic.is_err());
+        let mut registry = lock(&service.registry);
+        assert_retention_invariant(&registry);
+        assert_eq!(registry.oldest_evictable(None).as_deref(), Some("job-1"));
+    }
 
     #[test]
     fn dead_scope_lookup_entries_are_pruned() {

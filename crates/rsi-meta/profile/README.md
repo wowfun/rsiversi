@@ -18,11 +18,34 @@ open, and is read through a byte bound; special files are rejected without a
 blocking read. Canonical identities are checked against fixed cycle, include
 depth, group depth, file-count, and aggregate-byte bounds.
 
+An immutable `ProfileBundle` supplies bounded UTF-8 TOML documents under relative
+slash-separated identities. Its includes resolve within that bundle; absolute
+paths, traversal above its root, ambiguous separators and missing documents fail
+before composition. Bundle loading uses the same ordered compiler, Rhai engine,
+patch rules and rebuild budgets as native files. The complete retained bundle
+also obeys document, source-count and aggregate-byte limits, including unused
+documents. Native file opening and watching are excluded from browser builds.
+
+Frozen environments may omit filesystem paths. In that case Rhai receives an
+empty `paths` map, and the absence participates in the source digest. Browser
+callers do not supply invented native directories. Immutable bundles install no
+file watcher; manual reload rechecks the same immutable program.
+
 Nodes are declarative groups or plugin leaves. `InstanceId` is unique across
 the complete tree; one `PluginId` may appear at several leaves. Groups own
 enabled state and exact Local, event, and Portable isolation declarations for
-their descendants. Reparenting or changing a group's isolation retires and
-recreates those descendants.
+their descendants. Each lane accepts a fresh contract key string or
+`{ key = "contract.key", label = "shared-label" }`. A key occurs at most once
+per lane in a group. Contract keys and labels obey the identifier bound; the
+complete resulting tree has at most `maximum_isolation_bindings` declarations
+(16,384 by default), including disabled groups. Compiled leaves and target
+snapshots share immutable lane storage; fanout does not duplicate every key and
+label string per descendant.
+
+Named labels share only inside one Profile activation. Its opaque namespace is
+the Runtime identity plus the owning wrapper FiberId and generation. Reload
+preserves that namespace; another controlled or static wrapper has another
+namespace. Configuration never supplies or persists this identity.
 
 A patch either appends nodes to a group, replaces a leaf's entire config,
 changes enabled state with group cascading, or replaces a group's complete
@@ -46,15 +69,16 @@ values never appear in diagnostics.
 Every startup or reload rereads immutable sources and rebuilds the candidate
 from an empty tree. Parse, source bounds, expression evaluation, identity and
 patch checks, factory resolution, context/isolation derivation, and watcher
-capture complete before Runtime mutation begins. Equality and restart checks
+capture complete before retiring or applying child Fibers. Position preflight
+reserves only bounded composition metadata, without execution admission. Equality and restart checks
 therefore reserve no duplicate Fibers. Replayable convergence prepares and
-applies only the next leaf after prior capacity has been released; rollback
-does the same for the previous suffix. This keeps reload possible at the exact
+applies only the next changed or new leaf after prior capacity has been released;
+rollback does the same for the retired members. This keeps reload possible at the exact
 Runtime Fiber ceiling instead of requiring a shadow copy of either graph. A
 prepared leaf may commit as Pending when its declared dependencies are absent.
 
 Equal healthy trees return `Unchanged` without advancing revision. Degraded
-state never suppresses a same-content retry. A changed `RestartRequired` leaf
+state never suppresses a same-content retry. A changed `RestartRequired` leaf in the committed source program
 publishes the candidate source digest and `RestartRequired` status without
 changing the observed graph. Replayable changes converge in the existing Meta
 graph. Failure retires candidate generations and reconstructs the prior target;
@@ -63,6 +87,76 @@ retryable. During convergence the controller mirrors each membership delta
 internally but publishes the complete observed graph only at attempt
 boundaries, avoiding a full graph clone after every leaf. This is bounded
 convergence, not atomic shadow-Runtime replacement.
+
+Each group stores only its own binding delta. Effective bindings overlay that
+delta on inherited bindings. Fresh allocation keys contain the namespace, group
+InstanceId, lane and contract key; named keys contain the namespace, lane,
+contract key and label. The resolver maps nominal Local/event keys through its
+frozen catalog, while Profile owns allocation and inheritance. Current,
+candidate and compensation targets keep their exact allocations alive; weak
+lookup entries are pruned during binding, with no historical allocation owner.
+
+Leaf retention compares InstanceId, FactoryIdentity, UpdateMode, evaluated
+configuration and effective bindings. Group moves alone do not require a new
+generation. A leaf's stable ChildPosition survives rebuild; pure reorder only
+publishes the new position ranks. Convergence retires changed/removed leaves in
+reverse old order, publishes the candidate order, then prepares and applies new
+members in new order. Compensation removes failed candidate members, restores
+old bindings/order and reconstructs only members this attempt retired. A retained
+member may still participate in ordinary Meta dependency convergence. There is
+no prefix/suffix fallback or cross-registry atomicity claim.
+
+## Input replacement
+
+`ProfileInput` retains one immutable resolver, source program and compiler
+environment. `ProfileBootstrap::updater` grants its composition owner a separate
+`ProfileUpdateHandle`; the published `ProfileControl` does not grant that
+authority. A frozen Host can prepare another input without mutating its catalog.
+Replacement preserves the existing Runtime, Context, namespace and limits. The
+old resolver must validate that every registered Local/event name retains its
+nominal marker; resolvers that cannot establish this reject replacement.
+
+`ProfileInput::preflight_linked` lets product bootstraps reject linked argument
+and configuration errors before opening their native staging owner. It compiles
+the program and prepares selected known linked factories, containing preparation
+and prepared-state destruction panics on unwind targets. With `panic=abort`
+(including the browser WASM build), a panic terminates the process or Worker.
+It leaves unresolved/native factories to
+the complete preflight after staging and provides no Runtime activation proof.
+
+Manual reload, source notifications and input submissions share one owned
+command worker, with one executing command and at most one queued command.
+Submission returns a ticket; dropping a ticket never cancels admitted work.
+Retirement closes admission, lets the executing command finish convergence or
+compensation and rejects pending commands. Profile effect cleanup joins all
+background tasks and reports a failed task; a panicked command worker closes
+its queue, settling outstanding tickets as Stopped. Input revision is
+independent of completed graph revision and advances on accepted `Applied` or
+`Unchanged` input replacement. A stale expected revision returns `InputConflict`;
+an incompatible input returns `IncompatibleInput`. A full queue returns `Busy`
+without mutation, including manual reload; source
+notification retries use the normal capped backoff. Restart-required and failed attempts retain
+the previous complete input, including its resolver for compensation.
+An owner replacement requiring restart publishes `RestartRequired` while keeping
+the committed target and watch plan. Reloading that unchanged input preserves the
+indication; an accepted replacement or a changed committed tree supersedes it.
+Successful compensation preserves an outstanding owner restart indication. Failed
+compensation publishes `Degraded` while retaining that indication for recovery;
+repairing the old committed tree does not silently acknowledge the refused input.
+Restart refusals and no-op reloads do not advance graph revision. Reverting a
+file-based restart candidate to the converged tree clears its indication without
+reapplying Fibers.
+Scoped owners call `ProfileUpdateHandle::close` before disposing their child tree.
+This closes input and reload admission and waits for the executing command.
+Whole-Runtime owners call synchronous `close_admission` before Runtime shutdown;
+Meta's waiter deadline then includes any executing command, and the Profile effect
+owns its final joins. The command worker releases executable inputs after its
+admitted command settles, without waiting for child cleanup to reach the parent's
+deferred effect. The product's `ScopedProfile` uses the first path and
+`RunningHost` uses the second.
+Stopped control handles retain redacted status and tree snapshots, releasing
+their resolver and executable targets. A long-lived observation handle therefore
+does not postpone native factory finalization after its owning tree retires.
 
 ## Static generations
 
@@ -93,7 +187,10 @@ The Profile Fiber watches the root and every transitive include. Change signals
 use a serialized single-flight worker with a dirty bit, so a signal arriving
 during reload causes one subsequent rebuild. A candidate watch plan is fully
 established before mutation and replaces the old plan only after commit.
-The portable polling watcher performs bounded metadata probes at its short
+If the command queue is full, the automatic worker retains the dirty signal and
+retries with capped backoff; it does not require another source event. Manual
+reload continues to report `Busy` to its caller without admitting a command.
+The native polling watcher performs bounded metadata probes at its short
 interval, rereads immediately when metadata changes, and forces a complete
 content hash at least every five seconds to detect changes that preserve size
 and modification time. Watcher read failures publish bounded redacted status
@@ -128,3 +225,30 @@ source identities and bytes, and every environment path/platform/define input;
 it never depends on Rust `Debug` formatting. Because native path bytes and the
 explicit platform value are inputs, the digest is a host-platform-scoped
 identity and must not be used as a cross-platform cache key.
+
+`ProfileFragment::source_digest` fingerprints a linked declaration with the same
+source encoding used by the compiler, under a fixed path-free identity domain.
+It evaluates no expressions or patch targets. It is suitable for catalog source
+identity before assembly; it does not replace whole-program preflight or prove
+that any plugin configuration will activate.
+
+For native authoring, `ProfileCompiler::preview_file_edit` compiles replacement
+bytes for the selected root file without writing it. The existing regular-file
+reader still verifies that root's identity; includes retain their own source
+bytes and ordinary path, depth and aggregate bounds. Linked fragments and launch
+patches keep their original order. The prospective source digest is identical to
+a normal compile after those exact bytes are written at that source, provided
+all other sources and the environment are unchanged. Memory and bundle programs
+have no writable root and are rejected by this entry point. Preview does not
+prepare factories or confer write authority. Product authoring owns source
+selection, optimistic conflict checks, cooperative locks and atomic publication.
+
+Compiled candidates expose the same redacted tree shape as Profile control, with
+revision zero to distinguish pure compilation from observed Runtime revisions.
+Candidate comparison reports added/removed nodes and changed kind, plugin,
+parent, sibling order, enabled state, configuration or isolation. It compares
+typed values in-process and emits only aspect names, never configurations or
+expression text. Changes are ordered by stable node ID and bounded by the union
+of the two already-bounded trees. Per-source fingerprints remain available for
+an authoring owner to recheck the complete prospective include set before write;
+reading those identities grants no write or activation authority.

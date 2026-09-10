@@ -13,3 +13,7 @@ CAS; [`rsi-media-testkit`](testkit/README.md) provides memory storage.
 The public ref deliberately carries no normalizer version. Any change to final
 bytes produces a new identity. Audio, video, arbitrary files, URL fetches, CLI
 export, and garbage collection are outside the current contract.
+
+The ordinary Media API endpoint and client plugins expose independent import
+and canonical-reference reads. Remote upload is bounded to 64 MiB of source
+bytes; the existing canonical image bound remains 32 MiB.

@@ -85,38 +85,68 @@ impl SessionStore for SqliteStore {
                 });
             }
         }
-        let touched = commit
-            .sessions
-            .iter()
-            .map(|append| append.session_id.clone())
-            .collect::<Vec<_>>();
-        let owner = Arc::clone(&self.inner);
-        let result = self
-            .with_writer(move |connection| {
-                let transaction = connection
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(sql_error)?;
-                validate_sqlite_activation_guards(&transaction, &commit)?;
-                let mut sessions = Vec::with_capacity(commit.sessions.len());
-                for append in commit.sessions {
-                    sessions.push(apply_atomic_sqlite_append(&transaction, append)?);
+        let mut commit = commit;
+        let mut proofs = BTreeSet::new();
+        loop {
+            let known = proofs.clone();
+            let owner = Arc::clone(&self.inner);
+            let attempt = self
+                .with_writer(move |connection| {
+                    let transaction = connection
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .map_err(sql_error)?;
+                    validate_sqlite_activation_guards(&transaction, &commit)?;
+                    if let Some(root) = &commit.quiescent_descendants_of {
+                        let exists = transaction
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                                [root.as_str()],
+                                |row| row.get::<_, bool>(0),
+                            )
+                            .map_err(sql_error)?;
+                        if exists {
+                            let snapshot = read_agent_subtree(&transaction, root)?;
+                            let missing = owner.missing_subtree_proofs(&snapshot, &known);
+                            if !missing.is_empty() {
+                                return Ok(Err((commit, missing)));
+                            }
+                        }
+                    }
+                    let mut sessions = Vec::with_capacity(commit.sessions.len());
+                    for append in commit.sessions {
+                        sessions.push(apply_atomic_sqlite_append(&transaction, append)?);
+                    }
+                    let subtree = validate_sqlite_quiescence_guard(
+                        &transaction,
+                        commit.quiescent_descendants_of.as_ref(),
+                    )?;
+                    transaction.commit().map_err(sql_error)?;
+                    if let Some(subtree) = &subtree {
+                        owner.mark_subtree_validated(subtree);
+                    }
+                    if let Ok(mut cache) = owner.validated_sessions.lock() {
+                        for watermark in &sessions {
+                            cache.insert(watermark.session_id.clone());
+                        }
+                    }
+                    Ok(Ok(AtomicAgentCommitResult { sessions }))
+                })
+                .await?;
+            match attempt {
+                Ok(result) => return Ok(result),
+                Err((original, missing)) => {
+                    commit = original;
+                    for session_id in missing {
+                        self.ensure_session_validated(&session_id).await?;
+                        proofs.insert(session_id);
+                    }
+                    assert!(
+                        proofs.len() <= MAXIMUM_DURABLE_AGENT_TREE_NODES,
+                        "immutable subtree proof set cannot exceed the validated tree bound"
+                    );
                 }
-                let subtree = validate_sqlite_quiescence_guard(
-                    &transaction,
-                    commit.quiescent_descendants_of.as_ref(),
-                    &owner,
-                )?;
-                transaction.commit().map_err(sql_error)?;
-                if let Some(subtree) = &subtree {
-                    owner.mark_subtree_validated(subtree);
-                }
-                Ok(AtomicAgentCommitResult { sessions })
-            })
-            .await?;
-        for session_id in touched {
-            self.mark_session_validated(session_id);
+            }
         }
-        Ok(result)
     }
 
     async fn validate_session(&self, session_id: &SessionId) -> Result<()> {
@@ -127,6 +157,57 @@ impl SessionStore for SqliteStore {
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
             read_session_header_row(connection, &session_id).map(|(header, _)| header)
+        })
+        .await
+    }
+
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        at_control_seq: Option<u64>,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let states = super::domain::read_states(&transaction, &session_id, at_control_seq)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(states)
+        })
+        .await
+    }
+
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<AgentControlRecord>> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let request_id = request_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let record = super::domain::read_request(&transaction, &session_id, &request_id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(record)
+        })
+        .await
+    }
+
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<rsi_agent_store_protocol::StoreTurnDomainUsage> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        let turn_id = turn_id.clone();
+        self.with_reader(move |connection| {
+            super::domain::read_turn_usage(connection, &session_id, &turn_id)
         })
         .await
     }
@@ -642,20 +723,20 @@ impl SessionStore for SqliteStore {
                 ForkTurnSelection::All => available_completed_turns,
                 ForkTurnSelection::Last(count) => available_completed_turns.min(count),
             };
-            let (resolved_after_seq, resolved_terminal_seq, terminal_prefix_sha256) =
+            let (resolved_after_seq, resolved_terminal_seq, terminal_prefix_sha256, resolved_terminal_control_seq, terminal_control_prefix_sha256) =
                 if effective_turns == 0 {
-                    (0, 0, hex::encode(EMPTY_FACT_PREFIX_DIGEST))
+                    (0, 0, hex::encode(EMPTY_FACT_PREFIX_DIGEST), 0, hex::encode(EMPTY_CONTROL_PREFIX_DIGEST))
                 } else {
-                    let (sequence, digest) = transaction
+                    let (sequence, digest, control_seq, control_digest) = transaction
                     .query_row(
-                        "SELECT terminal_seq, terminal_prefix_sha256 FROM turns
+                        "SELECT terminal_seq, terminal_prefix_sha256, terminal_control_seq, terminal_control_prefix_sha256 FROM turns
                          WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2
                          ORDER BY terminal_seq DESC LIMIT 1",
                         params![
                             session_id.as_str(),
                             sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?,
                         ],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
                     )
                     .map_err(sql_error)?;
                     let resolved_terminal_seq =
@@ -719,9 +800,14 @@ impl SessionStore for SqliteStore {
                         ));
                     }
                     validate_sha256("terminal-prefix digest", &digest)?;
-                    (resolved_after_seq, resolved_terminal_seq, digest)
+                    {
+                        validate_sha256("terminal control-prefix digest", &control_digest)?;
+                        (resolved_after_seq, resolved_terminal_seq, digest, decode_u64("terminal control sequence", control_seq)?, control_digest)
+                    }
                 };
             let boundary = StoreForkBoundary {
+                resolved_terminal_control_seq,
+                terminal_control_prefix_sha256,
                 resolved_after_seq,
                 resolved_terminal_seq,
                 terminal_prefix_sha256,
@@ -1082,12 +1168,10 @@ impl SessionStore for SqliteStore {
     ) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
         use rsi_agent_session_protocol::MessageDelivery;
         use rsi_agent_store_protocol::{StorePendingMessage, StoreSessionInspection};
-        self.ensure_session_validated(session_id).await?;
+        let root = session_id.clone();
         let session_id = session_id.clone();
-        let owner = self.inner.clone();
-        self.with_reader(move |connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
-            let (header, _) = read_session_header_row(&transaction, &session_id)?;
+        self.with_subtree_reader(&root, move |transaction, tree| {
+            let (header, _) = read_session_header_row(transaction, &session_id)?;
             let (fact_seq, control_seq) = transaction.query_row("SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1", [session_id.as_str()],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).map_err(sql_error)?;
             let mut statement = transaction.prepare("SELECT
@@ -1117,10 +1201,8 @@ impl SessionStore for SqliteStore {
             let phase = transaction.query_row("SELECT CASE WHEN length(phase) <= 32 THEN phase ELSE '' END FROM active_activations WHERE session_id = ?1", [session_id.as_str()], |row| row.get::<_, String>(0)).optional().map_err(sql_error)?;
             let activation_phase = phase.map(|phase| match phase.as_str() { "running" => Ok(StoreActivationPhase::Running), "parked" => Ok(StoreActivationPhase::Parked), "waiting" => Ok(StoreActivationPhase::WaitingForDescendants), _ => Err(StoreError::Corrupt("invalid inspected activation phase".into())) }).transpose()?;
             let inspection = StoreSessionInspection { header, durable_fact_seq: decode_u64("inspection Fact tail", fact_seq)?, durable_control_seq: decode_u64("inspection control tail", control_seq)?,
-                pending, active_turn_id, activation_phase, tree: owner.read_validated_agent_subtree(&transaction, &session_id)?, };
+                pending, active_turn_id, activation_phase, tree, };
             inspection.validate()?;
-            transaction.commit().map_err(sql_error)?;
-            owner.mark_subtree_validated(&inspection.tree);
             Ok(inspection)
         }).await
     }
@@ -1323,38 +1405,6 @@ impl SessionStore for SqliteStore {
         .await
     }
 
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<StoreWorkspaceContextState> {
-        self.ensure_session_validated(session_id).await?;
-        let session_id = session_id.clone();
-        self.with_reader(move |connection| {
-            let (instructions_sha256, skill_catalog_sha256, durable_fact_seq) = connection
-                .query_row(
-                    "SELECT workspace_instructions_sha256,
-                            workspace_skill_catalog_sha256, durable_seq
-                     FROM sessions WHERE session_id = ?1",
-                    [session_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?)),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-            let state = StoreWorkspaceContextState {
-                instructions_sha256,
-                skill_catalog_sha256,
-                durable_fact_seq: decode_u64(
-                    "workspace-context durable Fact sequence",
-                    durable_fact_seq,
-                )?,
-            };
-            state.validate()?;
-            Ok(state)
-        })
-        .await
-    }
-
     async fn list_agent_children(
         &self,
         parent_session_id: &SessionId,
@@ -1417,19 +1467,8 @@ impl SessionStore for SqliteStore {
         &self,
         parent_session_id: &SessionId,
     ) -> Result<StoreAgentSubtreeSnapshot> {
-        self.ensure_session_validated(parent_session_id).await?;
-        let root = parent_session_id.clone();
-        let owner = Arc::clone(&self.inner);
-        self.with_reader(move |connection| {
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Deferred)
-                .map_err(sql_error)?;
-            let snapshot = owner.read_validated_agent_subtree(&transaction, &root)?;
-            transaction.commit().map_err(sql_error)?;
-            owner.mark_subtree_validated(&snapshot);
-            Ok(snapshot)
-        })
-        .await
+        self.with_subtree_reader(parent_session_id, |_, snapshot| Ok(snapshot))
+            .await
     }
 
     async fn active_activation(
@@ -1845,6 +1884,28 @@ impl SessionStore for SqliteStore {
 }
 
 impl StoreInner {
+    #[cfg_attr(not(test), allow(clippy::unused_self))] // Per-Store deterministic validation instrumentation.
+    pub(super) fn validate_selected(
+        &self,
+        connection: &Connection,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.validation_runs.fetch_add(1, Ordering::Relaxed);
+            if let Some((entered, release)) = self.validation_barrier.lock().unwrap().take() {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+        }
+        let decoded = validate_session(connection, session_id)?;
+        #[cfg(not(test))]
+        let _ = decoded;
+        #[cfg(test)]
+        self.control_decodes.fetch_add(decoded, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub(super) fn touch_validated_session(&self, session_id: &SessionId) -> bool {
         self.validated_sessions
             .lock()
@@ -1862,15 +1923,28 @@ impl StoreInner {
         {
             let validated = self.touch_validated_session(&status.session_id);
             if !validated {
-                #[cfg(test)]
-                self.validation_runs.fetch_add(1, Ordering::Relaxed);
-                validate_session(connection, &status.session_id)?;
+                self.validate_selected(connection, &status.session_id)?;
             }
         }
         Ok(snapshot)
     }
 
-    fn mark_subtree_validated(&self, snapshot: &StoreAgentSubtreeSnapshot) {
+    pub(super) fn missing_subtree_proofs(
+        &self,
+        snapshot: &StoreAgentSubtreeSnapshot,
+        known: &BTreeSet<SessionId>,
+    ) -> Vec<SessionId> {
+        std::iter::once(&snapshot.session)
+            .chain(snapshot.descendants.iter().map(|child| &child.status))
+            .filter(|status| {
+                !known.contains(&status.session_id)
+                    && !self.touch_validated_session(&status.session_id)
+            })
+            .map(|status| status.session_id.clone())
+            .collect()
+    }
+
+    pub(super) fn mark_subtree_validated(&self, snapshot: &StoreAgentSubtreeSnapshot) {
         let Ok(mut validated) = self.validated_sessions.lock() else {
             return;
         };

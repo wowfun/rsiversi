@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
-    ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, ForkTurnSelection,
-    MessageDiscardReason, MessageId, SessionFact, SessionFactBody, SessionHeader, SessionId,
-    StepId, TurnId, TurnOutcome, validate_identifier, validate_safe_diagnostic,
+    ActivationId, AgentControlRecord, AgentMessage, AgentPath, BudgetDimension, DomainStateView,
+    ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
+    SessionHeader, SessionId, StepId, TurnId, TurnOutcome, validate_identifier,
+    validate_safe_diagnostic,
 };
 use rsi_meta_contract::LocalContract;
 use std::fmt;
@@ -18,6 +19,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+
+mod command;
+mod projection;
+pub use projection::{SessionProjectionChanges, SessionProjections, SessionProjectionsContract};
+mod domain;
+pub use command::{SessionCommands, SessionCommandsContract};
+mod observation;
+pub use domain::{DomainMutation, DomainMutationReceipt};
+pub use observation::{
+    DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
+};
 
 /// Kernel-owned issuer for exact resume admissions.
 ///
@@ -194,9 +206,11 @@ pub struct SubmittedTurn {
 }
 
 /// Durable state of one admitted mailbox message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessageState {
     /// Accepted but not yet claimed or discarded.
+    #[serde(deserialize_with = "deserialize_empty_message_state")]
     Pending,
     /// Entered one exact execution boundary.
     Claimed {
@@ -218,8 +232,18 @@ pub enum MessageState {
     },
 }
 
+fn deserialize_empty_message_state<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<(), D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+    <Empty as serde::Deserialize>::deserialize(deserializer).map(|_| ())
+}
+
 /// Durable receipt for one accepted mailbox message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessageReceipt {
     /// Exact target session.
     pub session_id: SessionId,
@@ -418,7 +442,8 @@ pub enum AgentWaitResult {
 }
 
 /// Cursor spanning independent Agent-control and Fact streams.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservationCursor {
     /// Last observed durable Agent-control sequence.
     pub control_seq: u64,
@@ -432,14 +457,14 @@ pub enum SessionObservation {
     /// Agent-control record and its durable sequence.
     Control {
         /// Exact record.
-        record: Arc<AgentControlRecord>,
+        record: ObservedControl,
         /// Durable control watermark.
         durable_control_seq: u64,
     },
     /// Model-visible Fact and its durable sequence.
     Fact {
         /// Exact Fact.
-        fact: Arc<SessionFact>,
+        fact: ObservedFact,
         /// Durable Fact watermark.
         durable_fact_seq: u64,
     },
@@ -449,8 +474,18 @@ pub enum SessionObservation {
 pub type SessionObservationStream =
     Pin<Box<dyn Stream<Item = Result<SessionObservation>> + Send + 'static>>;
 
+/// Coalesced process-local notifications that a root's durable membership changed.
+/// Subscribe before collecting a tree snapshot; no payload history is retained.
+pub type TreeMembershipChanges = Pin<Box<dyn Stream<Item = ()> + Send + 'static>>;
+
 /// Idempotent cancellation target before or after message claim.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum CancelTarget {
     /// Discard one accepted, unclaimed message.
     Message(MessageId),
@@ -459,7 +494,8 @@ pub enum CancelTarget {
 }
 
 /// Idempotent cancellation result.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CancelResult {
     /// Whether a new cancellation Fact entered the live stream.
     pub accepted: bool,
@@ -474,7 +510,7 @@ pub enum TurnUpdate {
     /// `durable_seq` may lag only a nonterminal Fact.
     Fact {
         /// Exact Fact.
-        fact: Arc<SessionFact>,
+        fact: ObservedFact,
         /// Durable watermark at publication time.
         durable_seq: u64,
     },
@@ -504,6 +540,13 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
     /// Preparation does not reserve resident capacity or materialize Facts.
     /// Dropping the returned token has no Store semantics.
     async fn prepare_resume(&self, session_id: &SessionId) -> Result<PreparedResumeSession>;
+    /// Subscribes before the root exists so a fresh Session can observe its first publication.
+    fn watch_tree_membership(&self, root: &SessionId) -> Result<TreeMembershipChanges> {
+        let _ = root;
+        Err(TurnError::Invalid(
+            "tree membership observation is unavailable".into(),
+        ))
+    }
     /// Lists the exact root followed by every durable descendant in stable tree order.
     async fn tree_sessions(&self, session_id: &SessionId) -> Result<Vec<SessionId>> {
         let _ = session_id;
@@ -631,6 +674,24 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<TurnOutcome>>;
     /// Reads the immutable durable or current-process lazy header.
     async fn session_header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads complete opaque domain states without requiring execution codecs.
+    async fn domain_states(&self, session_id: &SessionId) -> Result<Vec<DomainStateView>> {
+        let _ = session_id;
+        Err(TurnError::Invalid(
+            "domain state reads are unsupported".into(),
+        ))
+    }
+    /// Resolves an exact domain request after a lost acknowledgement without replaying effects.
+    async fn domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<DomainMutationReceipt>> {
+        let _ = (session_id, request_id);
+        Err(TurnError::Invalid(
+            "domain request reads are unsupported".into(),
+        ))
+    }
 }
 
 /// Nominal application-facing Turn service contract.
@@ -928,19 +989,29 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Option<ForkFactPage>>;
     /// Atomically enters every pending next-Step message at one safe model boundary.
     async fn enter_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
-    /// Refreshes complete trust-bound workspace context before provider I/O.
-    async fn refresh_workspace_context(&self, claim: &TurnClaim) -> Result<usize>;
-    /// Closes the current Agent Step before its Turn terminal boundary.
+    /// Captures a durable Fact/control horizon and complete domain state at a safe boundary.
+    /// Opens a charged Step for a direct Turn when necessary. The reader expires with the
+    /// exact claim or supplied stage cancellation; no callback executes under admission.
+    /// Rejects cancelled or ending Turns, including an already recorded budget exhaustion.
+    async fn contribution_context(
+        &self,
+        claim: &TurnClaim,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_composition_protocol::ContributionContext> {
+        let _ = (claim, cancellation);
+        Err(TurnError::Invalid(
+            "execution contributions are unsupported".into(),
+        ))
+    }
+    /// Publishes an ordinary charged Step closure. Turn finalization uses `finish_turn`.
     async fn close_current_step(&self, claim: &TurnClaim, outcome: &TurnOutcome) -> Result<()>;
-    /// Atomically closes an activation-owned Turn and advances tree settlement.
-    ///
-    /// `None` means the claimed Turn is not owned by a mailbox activation and
-    /// should use ordinary terminal publication.
-    async fn finish_activation_turn(
+    /// Durably closes the current Step and Turn in one bounded ending transaction.
+    /// Kernel adds any required budget marker and advances mailbox/tree settlement.
+    async fn finish_turn(
         &self,
         claim: &TurnClaim,
         outcome: &TurnOutcome,
-    ) -> Result<Option<Arc<SessionFact>>>;
+    ) -> Result<Arc<SessionFact>>;
     /// Reads bounded live Facts after a cursor, including a speculative suffix.
     async fn read_facts(
         &self,
@@ -994,8 +1065,20 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (claim, checkpoint);
         Ok(false)
     }
+    /// Commits exact-generation domain proposals and their optional Facts as one durable request.
+    /// Kernel assigns the claimed Turn as source and charges complete canonical records.
+    async fn commit_domains(
+        &self,
+        claim: &TurnClaim,
+        mutation: DomainMutation,
+    ) -> Result<DomainMutationReceipt> {
+        let _ = (claim, mutation);
+        Err(TurnError::Invalid(
+            "domain mutation admission is unsupported".into(),
+        ))
+    }
     /// Publishes validated bodies as the next live Facts without claiming durability.
-    /// Activation terminals must use `finish_activation_turn`; only direct Turns
+    /// Activation terminals must use `finish_turn`; only direct Turns
     /// may publish a raw `TurnTerminal` body.
     async fn publish(
         &self,
@@ -1083,7 +1166,7 @@ impl TurnFinalizationReport {
         }
     }
 
-    /// Returns the optional blocker selected by registration order.
+    /// Returns the optional blocker selected by declaration order.
     pub const fn completion_blocker(&self) -> Option<&TurnCompletionBlocker> {
         self.completion_blocker.as_ref()
     }
@@ -1102,14 +1185,15 @@ pub trait TurnFinalizer: fmt::Debug + Send + Sync + 'static {
 /// Ordered process-local finalizer registry invoked by the Agent executor.
 #[async_trait]
 pub trait TurnFinalization: fmt::Debug + Send + Sync + 'static {
-    /// Registers one exact finalizer name until the returned lease drops.
+    /// Registers one exact name, owned by the caller's generation and returned lease.
     fn register(
         &self,
+        context: &rsi_meta::RegistrationContext,
         name: String,
         finalizer: Arc<dyn TurnFinalizer>,
     ) -> FinalizationResult<TurnFinalizerLease>;
 
-    /// Starts an immutable snapshot concurrently and resolves errors and blockers by registration order.
+    /// Starts an immutable snapshot concurrently and resolves errors and blockers by declaration order.
     ///
     /// The caller owns the deadline for the complete snapshot.
     async fn finalize(
@@ -1128,32 +1212,23 @@ impl LocalContract for TurnFinalizationContract {
 }
 
 /// Effect-owned exact finalizer registration.
-pub struct TurnFinalizerLease {
-    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
-}
+#[derive(Debug)]
+pub struct TurnFinalizerLease(rsi_meta::RegistrationLease);
 
 impl TurnFinalizerLease {
-    /// Creates a lease from one exact deregistration action.
-    pub fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self {
-            cleanup: Some(Box::new(cleanup)),
-        }
+    /// Wraps the exact registration installed through the caller's credential.
+    pub const fn from_registration(lease: rsi_meta::RegistrationLease) -> Self {
+        Self(lease)
+    }
+
+    /// Withdraws this contribution and joins its owning effect cleanup.
+    pub async fn dispose(&self) -> rsi_meta::CleanupReport {
+        self.0.dispose().await
     }
 }
 
-impl fmt::Debug for TurnFinalizerLease {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TurnFinalizerLease(..)")
-    }
-}
-
-impl Drop for TurnFinalizerLease {
-    fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
-    }
-}
+/// Maximum simultaneously registered pre-terminal hooks in one Kernel.
+pub const MAXIMUM_TURN_FINALIZERS: usize = 64;
 
 /// Closed pre-terminal finalization failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -1243,6 +1318,36 @@ pub enum TurnError {
         /// Message identity.
         message: String,
     },
+    /// A replacement did not name the exact durable predecessor revision.
+    #[error("domain {domain} revision conflict: expected {expected:?}, actual {actual:?}")]
+    DomainRevisionConflict {
+        /// Durable domain name.
+        domain: String,
+        /// Caller-observed predecessor.
+        expected: rsi_agent_session_protocol::DomainRevision,
+        /// Current durable revision.
+        actual: rsi_agent_session_protocol::DomainRevision,
+    },
+    /// A command no longer names the exact draft or durable predecessor.
+    #[error("command revision conflict: expected {expected:?}, actual {actual:?}")]
+    CommandRevisionConflict {
+        /// Predecessor frozen in the invocation.
+        expected: rsi_agent_session_protocol::CommandRevision,
+        /// Current owner revision.
+        actual: rsi_agent_session_protocol::CommandRevision,
+    },
+    /// An already committed request has different provenance, state or Fact bodies.
+    #[error("domain request {request_id} conflicts with its committed content")]
+    DomainRequestConflict {
+        /// Exact conflicting request.
+        request_id: String,
+    },
+    /// Store failure prevented reconciliation; execution-owned requests close their Session.
+    #[error("domain request {request_id} outcome is unknown; query the canonical request")]
+    DomainOutcomeUnknown {
+        /// Exact request to query.
+        request_id: String,
+    },
     /// The session already has its bounded number of live turns.
     #[error("Agent session live-turn capacity is exhausted")]
     Capacity,
@@ -1316,5 +1421,20 @@ mod tests {
         };
 
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn pending_message_state_rejects_fields_despite_having_no_payload() {
+        assert_eq!(
+            serde_json::from_str::<MessageState>(r#"{"kind":"pending"}"#).unwrap(),
+            MessageState::Pending
+        );
+        assert!(
+            serde_json::from_str::<MessageState>(r#"{"kind":"pending","foreign":true}"#).is_err()
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageState::Pending).unwrap(),
+            r#"{"kind":"pending"}"#
+        );
     }
 }

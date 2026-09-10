@@ -39,7 +39,7 @@ impl From<TurnError> for WaitControlError {
 }
 
 struct Parked {
-    kernel: SessionKernel,
+    kernel: AgentKernel,
     mutation: super::mutation::WaitMutationLease,
     caller: AgentCallerAuthority,
     elapsed: Option<Arc<elapsed::ElapsedState>>,
@@ -90,7 +90,7 @@ impl Guard {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     pub(super) async fn park_human(
         &self,
         claim: &TurnClaim,

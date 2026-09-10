@@ -11,7 +11,7 @@ use checkpoint::{CheckpointRequest, CheckpointScheduler, run_checkpoint_writer};
 use async_trait::async_trait;
 use futures_util::{FutureExt as _, StreamExt as _, future::join_all};
 use rsi_agent_composition_protocol::AgentCompositionPin;
-use rsi_agent_context::{ContextFold, ContextLimits};
+use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_session_protocol::{
     BudgetDimension, EffectId, EffectKind, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, SessionFact,
     SessionFactBody, SessionId, TurnId, TurnOutcome,
@@ -214,13 +214,6 @@ impl ExecutorConfig {
         Ok(())
     }
 
-    fn limits(&self) -> ContextLimits {
-        ContextLimits {
-            max_messages: self.max_context_messages,
-            max_bytes: self.max_context_bytes,
-        }
-    }
-
     const fn durability_wait(&self) -> Duration {
         Duration::from_millis(self.durability_wait_ms)
     }
@@ -289,13 +282,14 @@ const fn elapsed_deadline_wins(
     deadline_fired && matches!(drive, Err(DriveFailure::Stopped))
 }
 
+mod contributions;
 mod driver;
 mod execution_support;
 
 use execution_support::{
     CombinedCancellation, DriveFailure, ai_failure, apply_finalization_failure, bounded,
     combine_cancellation, failed, failure_outcome, fatal, image_ai_failure,
-    image_operation_failure, next_effect_id, prepare_tool_effect, publish_budget_exhaustion,
+    image_operation_failure, next_effect_id, prepare_tool_effect,
     publish_nonterminal_with_capacity_retry, publish_terminal, retry_delay, run_executor_pool,
     settled_tool_budget, should_retry, tool_failure,
 };
@@ -450,6 +444,9 @@ fn scan_turn(
                 state.effects.remove(index);
                 state.completed_model_without_successor = true;
             }
+            SessionFactBody::ToolRejected { turn_id, .. } if turn_id == claim.turn_id() => {
+                state.completed_model_without_successor = true;
+            }
             SessionFactBody::ToolIntent {
                 turn_id,
                 effect_id,
@@ -517,6 +514,7 @@ fn scan_turn(
             | SessionFactBody::ImageOutput { .. }
             | SessionFactBody::ModelEvent { .. }
             | SessionFactBody::ToolIntent { .. }
+            | SessionFactBody::ToolRejected { .. }
             | SessionFactBody::ToolStarted { .. }
             | SessionFactBody::ToolResult { .. }
             | SessionFactBody::TurnTerminal { .. } => {}

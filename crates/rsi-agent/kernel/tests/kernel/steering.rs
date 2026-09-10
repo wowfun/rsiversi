@@ -3,7 +3,7 @@ use rsi_agent_session_protocol::MessageDelivery;
 use rsi_agent_store_protocol::StoreAgentMessageState;
 
 async fn submit(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     session: &SessionId,
     id: &str,
     delivery: MessageDelivery,
@@ -21,7 +21,7 @@ async fn submit(
 #[allow(clippy::too_many_lines)] // Identical terminal/recovery assertions run against both Store backends.
 async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
     let initial =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let worker = initial.start_workers();
@@ -100,17 +100,13 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
             }
             _ => unreachable!(),
         };
-        initial
-            .finish_activation_turn(&claim, &outcome)
-            .await
-            .unwrap()
-            .unwrap();
+        initial.finish_turn(&claim, &outcome).await.unwrap();
         initial.shutdown(worker).await.unwrap();
         drop(lease);
     }
     drop(initial);
     let restarted =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let promoted = store
@@ -224,9 +220,8 @@ async fn consumed_steer_retries_retain_the_original_turn_and_conflicting_text_is
         Err(TurnError::MessageConflict { .. })
     ));
     kernel
-        .finish_activation_turn(&claim, &TurnOutcome::Completed)
+        .finish_turn(&claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert!(
         store

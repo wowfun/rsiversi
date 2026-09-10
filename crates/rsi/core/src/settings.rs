@@ -1,40 +1,32 @@
 use async_trait::async_trait;
 use rsi_agent_session_protocol::FrozenAgentSettings;
-use rsi_meta::{ActivationPlan, ConfigValue, LocalContract, PluginFactory, PreparedActivation};
+use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
 use rsi_settings_protocol::{SettingsContract, SettingsError, SettingsSpec, ValidateWith};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-pub(crate) const SETTINGS_FACTORY: &str = "rsi.session.settings";
+pub(crate) const SETTINGS_FACTORY: &str = "rsi.agent.defaults";
 const SETTINGS_NAMESPACE: &str = "rsi.agent";
 
-/// Frozen standard Agent defaults resolved from Settings during boot.
-pub trait AgentSettings: std::fmt::Debug + Send + Sync + 'static {
-    /// Returns the validated creation-time Agent settings template.
-    fn current(&self) -> &FrozenAgentSettings;
-}
-
-/// Nominal Local contract for standard Agent defaults.
-#[derive(Debug)]
-pub struct AgentSettingsContract;
-
-impl LocalContract for AgentSettingsContract {
-    const KEY: &'static str = "rsi.session.agent_settings";
-    type Service = dyn AgentSettings;
-}
+use rsi_session_protocol::{AgentSettingsContract, AgentSettingsSource, SessionError};
 
 #[derive(Debug)]
 struct Service {
-    settings: FrozenAgentSettings,
+    scope: Arc<dyn rsi_settings_protocol::SettingsScope>,
 }
 
-impl AgentSettings for Service {
-    fn current(&self) -> &FrozenAgentSettings {
-        &self.settings
+impl AgentSettingsSource for Service {
+    fn current(&self) -> rsi_session_protocol::Result<FrozenAgentSettings> {
+        let snapshot = self
+            .scope
+            .get()
+            .map_err(|error| SessionError::Backend(error.to_string()))?;
+        serde_json::from_value(snapshot.value)
+            .map_err(|error| SessionError::Backend(error.to_string()))
     }
 }
 
-/// Ordinary Settings consumer for the standard Session Host.
+/// Ordinary Settings consumer for the standard Service Host.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentSettingsFactory;
 
@@ -43,7 +35,7 @@ impl PluginFactory for AgentSettingsFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         if !desired.is_null() && !desired.as_object().is_some_and(serde_json::Map::is_empty) {
             return Err(rsi_meta::MetaError::InvalidInput(
-                "Session Agent Settings configuration must be null or empty".into(),
+                "Agent defaults configuration must be null or empty".into(),
             ));
         }
         Ok(PreparedActivation::new(Value::Null).requiring_local::<SettingsContract>())
@@ -63,30 +55,27 @@ impl PluginFactory for AgentSettingsFactory {
                         "maximum_elapsed_ms": 1_800_000,
                         "maximum_provider_attempts": 64,
                         "maximum_tool_calls": 256,
-                        "maximum_generated_facts": 65_536,
-                        "maximum_generated_fact_bytes": 67_108_864
+                        "maximum_generated_records": 65_536,
+                        "maximum_generated_record_bytes": 67_108_864
                     }
                 }),
                 base: json!({}),
+                metadata: metadata(),
                 validator: Arc::new(ValidateWith(validate_settings)),
             })
             .map_err(|error| settings_meta(&error))?;
-        let snapshot = registration
-            .scope
-            .get()
-            .map_err(|error| settings_meta(&error))?;
-        let settings: FrozenAgentSettings =
-            serde_json::from_value(snapshot.value).map_err(|error| {
-                rsi_meta::MetaError::Activation(format!(
-                    "invalid `{SETTINGS_NAMESPACE}` Settings: {error}"
-                ))
-            })?;
-        let service: Arc<dyn AgentSettings> = Arc::new(Service { settings });
+        let service = Service {
+            scope: registration.scope.clone(),
+        };
+        service
+            .current()
+            .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
+        let service: Arc<dyn AgentSettingsSource> = Arc::new(service);
         let supply = plan
             .context()
             .provide_local::<AgentSettingsContract>(service)?;
         plan.defer(
-            "withdraw Session Agent Settings",
+            "withdraw Agent defaults",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
@@ -95,6 +84,32 @@ impl PluginFactory for AgentSettingsFactory {
                 })
             }),
         )
+    }
+}
+
+fn metadata() -> rsi_settings_protocol::SettingsMetadata {
+    rsi_settings_protocol::SettingsMetadata {
+        schema: json!({
+            "type":"object", "additionalProperties":false,
+            "required":["settings_id","system_prompt","default_model","sandbox","require_approval","turn_budget"],
+            "properties": {
+                "settings_id":{"type":"string","description":"Immutable settings identity captured in each Session."},
+                "system_prompt":{"type":"string"},
+                "default_model":{"type":"object","additionalProperties":false,"required":["deployment","model"],"properties":{"deployment":{"type":"string"},"model":{"type":"string"}}},
+                "sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},
+                "require_approval":{"type":"boolean"},
+                "turn_budget":{"type":"object","additionalProperties":false,"properties":{
+                    "maximum_elapsed_ms":{"type":"integer","minimum":0},
+                    "maximum_provider_attempts":{"type":"integer","minimum":0},
+                    "maximum_tool_calls":{"type":"integer","minimum":0},
+                    "maximum_generated_records":{"type":"integer","minimum":0},
+                    "maximum_generated_record_bytes":{"type":"integer","minimum":0}
+                },"description":"The Agent validator enforces its exact bounded Turn budget."}
+            }
+        }),
+        applies: rsi_settings_protocol::SettingsApply::NewSession,
+        description: "New conversations capture these values. Existing drafts and durable Sessions keep their original defaults; explicit Turn inputs retain their existing override rules.".into(),
+        sensitive_fields: vec![],
     }
 }
 
@@ -118,6 +133,74 @@ fn settings_meta(error: &SettingsError) -> rsi_meta::MetaError {
 mod tests {
     use super::validate_settings;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn defaults_read_current_validated_settings_and_retire_with_their_scope() {
+        use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
+        use rsi_session_protocol::AgentSettingsContract;
+        use rsi_settings_protocol::SettingsContract;
+        use std::sync::Arc;
+
+        let runtime = Runtime::default();
+        let provider = runtime.root().apply(ResolvedFactory::linked("settings-memory", "test", UpdateMode::Replayable,
+            Arc::new(rsi_settings_testkit::MemorySettingsProviderFactory::new(json!({
+                "rsi.agent": { "default_model": {"deployment": "fixture", "model": "old"} }
+            })))), serde_json::Value::Null).await.unwrap();
+        let settings_fiber = runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "settings",
+                    "test",
+                    UpdateMode::Replayable,
+                    Arc::new(rsi_settings::SettingsFactory),
+                ),
+                serde_json::Value::Null,
+            )
+            .await
+            .unwrap();
+        let defaults_fiber = runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "defaults",
+                    "test",
+                    UpdateMode::Replayable,
+                    Arc::new(super::AgentSettingsFactory),
+                ),
+                serde_json::Value::Null,
+            )
+            .await
+            .unwrap();
+        let defaults = runtime
+            .root()
+            .lookup_local::<AgentSettingsContract>()
+            .unwrap();
+        let old = defaults.current().unwrap();
+        let settings = runtime.root().lookup_local::<SettingsContract>().unwrap();
+        let scope = settings.scope("rsi.agent").unwrap();
+        scope
+            .replace(
+                0,
+                json!({"default_model": {"deployment": "fixture", "model": "new"}}),
+            )
+            .await
+            .unwrap();
+        assert_ne!(defaults.current().unwrap(), old);
+        assert_eq!(old.default_model().model(), "old");
+        assert!(
+            scope
+                .replace(1, json!({"default_model": false}))
+                .await
+                .is_err()
+        );
+        assert_eq!(defaults.current().unwrap().default_model().model(), "new");
+        assert!(defaults_fiber.dispose().await.is_clean());
+        assert!(defaults.current().is_err());
+        assert!(settings_fiber.dispose().await.is_clean());
+        assert!(provider.dispose().await.is_clean());
+        assert!(runtime.shutdown().await.is_clean());
+    }
 
     #[test]
     fn missing_explicit_default_model_has_an_actionable_setting_path() {

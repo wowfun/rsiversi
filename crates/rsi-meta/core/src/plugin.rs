@@ -97,7 +97,9 @@ impl ResolvedFactory {
         self.update_mode
     }
 
-    pub(crate) fn into_parts(self) -> (FactoryIdentity, UpdateMode, Arc<dyn PluginFactory>) {
+    /// Consumes the resolved value for trusted resolver-side implementation wrapping.
+    /// This does not execute code, validate provenance, or confer Runtime authority.
+    pub fn into_parts(self) -> (FactoryIdentity, UpdateMode, Arc<dyn PluginFactory>) {
         (self.identity, self.update_mode, self.implementation)
     }
 }
@@ -144,6 +146,8 @@ mod tests {
 
     #[test]
     fn wrong_type_preserves_single_owner_state_and_success_consumes_it() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
         // Cell is Send but not Sync, proving the single-owner interface does
         // not impose a false sharing requirement.
         let state = PreparedState::new(Cell::new(7_u8), 1);

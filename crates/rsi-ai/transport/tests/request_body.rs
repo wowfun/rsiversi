@@ -11,20 +11,24 @@ fn text_only_json_is_buffered_while_media_json_is_streamed() {
         json_base64_body(json!({"text":"hello"}), Vec::new(), TEST_BODY_LIMIT).expect("buffered");
     assert!(format!("{buffered:?}").contains("streaming: false"));
 
-    let media: Arc<[u8]> = Arc::from([1, 2, 3]);
+    let owner: Arc<[u8]> = Arc::from([1, 2, 3]);
+    let media = bytes::Bytes::from_owner(owner.clone());
     let streamed = json_base64_body(
         json!({"media":null}),
         vec![JsonBase64Replacement::new(
             "/media",
             "data:application/octet-stream;base64,",
-            Arc::clone(&media),
+            media.clone(),
         )],
         TEST_BODY_LIMIT,
     )
     .expect("streamed");
     assert!(format!("{streamed:?}").contains("streaming: true"));
+    assert_eq!(Arc::strong_count(&owner), 2);
+    drop(media);
+    assert_eq!(Arc::strong_count(&owner), 2);
     drop(streamed);
-    assert_eq!(Arc::strong_count(&media), 1);
+    assert_eq!(Arc::strong_count(&owner), 1);
 }
 
 #[test]
@@ -40,7 +44,7 @@ fn replacement_markers_cannot_match_inside_caller_strings() {
         vec![JsonBase64Replacement::new(
             "/media",
             "",
-            Arc::from([1, 2, 3]),
+            bytes::Bytes::copy_from_slice(&[1, 2, 3]),
         )],
         expected.len(),
     )
@@ -51,7 +55,7 @@ fn replacement_markers_cannot_match_inside_caller_strings() {
             vec![JsonBase64Replacement::new(
                 "/media",
                 "",
-                Arc::from([1, 2, 3]),
+                bytes::Bytes::copy_from_slice(&[1, 2, 3]),
             )],
             expected.len() - 1,
         )
@@ -63,20 +67,16 @@ fn replacement_markers_cannot_match_inside_caller_strings() {
 
 #[test]
 fn replacement_slots_must_exist_and_be_null() {
-    let bytes: Arc<[u8]> = Arc::from([1, 2, 3]);
+    let bytes: bytes::Bytes = bytes::Bytes::copy_from_slice(&[1, 2, 3]);
     for result in [
         json_base64_body(
             json!({"media":null}),
-            vec![JsonBase64Replacement::new(
-                "/missing",
-                "",
-                Arc::clone(&bytes),
-            )],
+            vec![JsonBase64Replacement::new("/missing", "", bytes.clone())],
             TEST_BODY_LIMIT,
         ),
         json_base64_body(
             json!({"media":"occupied"}),
-            vec![JsonBase64Replacement::new("/media", "", Arc::clone(&bytes))],
+            vec![JsonBase64Replacement::new("/media", "", bytes.clone())],
             TEST_BODY_LIMIT,
         ),
     ] {
@@ -91,7 +91,7 @@ fn request_body_debug_never_contains_binary_media() {
     let replacement = JsonBase64Replacement::new(
         "/media",
         "data:audio/wav;base64,",
-        Arc::from(secret.as_slice()),
+        bytes::Bytes::copy_from_slice(secret.as_slice()),
     );
     let replacement_debug = format!("{replacement:?}");
     assert!(!replacement_debug.contains("sensitive-media-bytes"));
@@ -104,7 +104,8 @@ fn request_body_debug_never_contains_binary_media() {
 
 #[test]
 fn projected_json_body_limit_is_exact_before_streaming() {
-    let replacement = || JsonBase64Replacement::new("/media", "", Arc::from([1_u8, 2, 3]));
+    let replacement =
+        || JsonBase64Replacement::new("/media", "", bytes::Bytes::copy_from_slice(&[1_u8, 2, 3]));
     json_base64_body(json!({"media":null}), vec![replacement()], 16)
         .expect("exact projected length");
     let error = json_base64_body(json!({"media":null}), vec![replacement()], 15)
@@ -128,7 +129,13 @@ fn replacement_count_is_bounded_at_the_transport_seam() {
         "media": vec![serde_json::Value::Null; MAX_JSON_BASE64_REPLACEMENTS + 1]
     });
     let replacements = (0..=MAX_JSON_BASE64_REPLACEMENTS)
-        .map(|index| JsonBase64Replacement::new(format!("/media/{index}"), "", Arc::from([0_u8])))
+        .map(|index| {
+            JsonBase64Replacement::new(
+                format!("/media/{index}"),
+                "",
+                bytes::Bytes::copy_from_slice(&[0_u8]),
+            )
+        })
         .collect();
     let error = json_base64_body(template, replacements, TEST_BODY_LIMIT)
         .expect_err("replacement count overflow");

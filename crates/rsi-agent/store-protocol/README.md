@@ -1,5 +1,54 @@
 # rsi-agent-store-protocol
 
+## Domain mutations
+
+Domain state is canonical only in `DomainStateCommitted` controls. One record
+contains all distinct-domain replacements for a bounded request, its expected
+revisions and Kernel-assigned source. A receipt identifies that control and the
+request digest. Domain head/as-of and request indexes retain control positions,
+never a second authoritative state payload. Store does not invoke domain codecs.
+For command controls, the retained invocation's expected control revision must
+be the exact predecessor of that canonical control, in addition to each domain
+replacement's revision check.
+
+A mixed Turn mutation binds its exact contiguous same-append Fact span and a
+digest of those Fact bodies. The request digest includes that body digest,
+but excludes allocated sequences and timestamps. Store admission validates the
+binding before either stream changes; cold validation checks the canonical
+Fact interval again. A retry cannot change Facts while retaining the same
+domain request identity. Baselines and external commands do not claim Turn Facts.
+
+The initial nonempty baseline is control one of the atomic fresh Header and
+first acceptance commit; an omitted baseline denotes an empty domain set.
+Only baseline admission creates a domain. Later mutations require an existing
+matching codec and exact predecessor revision. Same request identity with
+different content conflicts. Querying a committed request recovers the exact
+receipt after an unknown result. Selecting a historical state uses the paired
+terminal control horizon, so later idle mutations cannot enter that fork.
+Domain read consumers bind the returned selected horizon to their request:
+an explicit cursor must match exactly, and a current-state read must select the
+reported durable control tail. Structural page validation alone cannot distinguish
+a valid historical page returned in place of current state.
+
+## Correlated terminal commits
+
+Every terminal Fact is committed with one `TurnBoundaryRecorded` control in the
+same `AtomicAgentCommit`. Each Session append contains at most one terminal;
+its marker is the final control, names that exact Turn and Fact sequence, and
+defines the terminal's control horizon. A marker without that same-append
+terminal, a duplicate, a later business control, or a Fact-only terminal append
+is rejected before mutation. Recovery repairs separate terminal boundaries in
+separate appends. This permits one exact Fact/control prefix pair for every
+completed historical Turn without inferring a control horizon from timestamps.
+
+The terminal index retains both sequences and rolling prefix digests, derived
+only from canonical records. Fork boundary reads return that exact pair.
+`none` inherits neither prefix; `all` and `N` use the selected terminal's control
+horizon, so later idle commands cannot alter an already selected historical
+cut. Index and offline validation reject missing, mismatched or fabricated
+terminal correlations. The schema cutover is explicit; old database files are
+preserved and never automatically rewritten.
+
 `inspect_session` is one bounded read snapshot of immutable Header, durable
 Fact/control cursors, pending-message metadata, current Turn and activation
 phase, and complete bounded descendant activity. It decodes no message bodies
@@ -16,7 +65,12 @@ Both adapters validate this against the canonical control stream.
 
 This crate owns the mechanical durable seam for Agent sessions. A Store accepts
 one immutable header, contiguous compare-and-append Fact batches, bounded
-reads, session enumeration for recovery, and immutable CAS objects. Alongside
+reads, session enumeration for recovery, and immutable CAS objects.
+Append and atomic-commit suffixes own `Arc<SessionFact>` handles. Transferring
+or retrying a prepared suffix shares immutable payloads; adapters validate and
+encode borrowed Facts. The Memory adapter retains those same allocations.
+Read pages keep their separate bounded materialization contract.
+Alongside
 the canonical session sequence it transactionally maintains mechanical turn
 membership and open/terminal indexes. Those indexes select durable bytes; they
 do not apply effect transitions, classify recovery, or select a turn outcome.

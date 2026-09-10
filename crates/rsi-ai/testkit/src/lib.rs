@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// In-memory content-addressed media source for deterministic adapter tests.
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryMediaResolver {
-    bodies: Arc<BTreeMap<String, Arc<[u8]>>>,
+    bodies: Arc<BTreeMap<String, bytes::Bytes>>,
 }
 
 impl InMemoryMediaResolver {
@@ -35,7 +35,7 @@ impl InMemoryMediaResolver {
             bodies: Arc::new(
                 bodies
                     .into_iter()
-                    .map(|(digest, bytes)| (digest, Arc::from(bytes)))
+                    .map(|(digest, bytes)| (digest, bytes.into()))
                     .collect(),
             ),
         }
@@ -47,7 +47,7 @@ impl MediaResolver for InMemoryMediaResolver {
         &self,
         descriptor: MediaDescriptor,
         _abort: AbortSignal,
-    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
+    ) -> AdapterFuture<Result<bytes::Bytes, AiError>> {
         let body = self.bodies.get(descriptor.sha256()).cloned();
         Box::pin(async move {
             body.ok_or_else(|| {
@@ -191,6 +191,12 @@ impl fmt::Debug for ScriptedLanguageAdapter {
 }
 
 impl LanguageAdapter for ScriptedLanguageAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        static MODELS: std::sync::LazyLock<rsi_ai_protocol::LanguageModelProfiles> =
+            std::sync::LazyLock::new(rsi_ai_protocol::LanguageModelProfiles::default);
+        &MODELS
+    }
+
     fn describe(&self, _model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
         Ok(test_language_profile())
     }
@@ -266,6 +272,12 @@ impl fmt::Debug for FunctionalLanguageAdapter {
 }
 
 impl LanguageAdapter for FunctionalLanguageAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        static MODELS: std::sync::LazyLock<rsi_ai_protocol::LanguageModelProfiles> =
+            std::sync::LazyLock::new(rsi_ai_protocol::LanguageModelProfiles::default);
+        &MODELS
+    }
+
     fn describe(&self, _model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
         Ok(test_language_profile())
     }

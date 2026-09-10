@@ -1,14 +1,26 @@
 # rsi-host
 
+`RunningHost::inspect` exposes Meta's bounded redacted ownership pages without
+exporting mutable Runtime authority. Profile status and desired-tree snapshots
+remain owned by Profile control; observation does not establish atomic convergence
+or cleanup quiescence.
+
+Generic composition accepts a frozen environment with or without filesystem
+paths. `HostBuilder::without_paths` supports embedders such as browser Workers;
+its Profile source is an immutable bundle or programmatic document. Native file
+entry points and watchers are target-specific. The caller injects platform
+Execution before starting the single Runtime. Host path access is optional and
+does not invent storage authority for a path-free application.
+
 `rsi-host` is the generic static composition SDK above
 [`rsi-meta`](../rsi-meta/README.md) and
 [`rsi-meta-profile`](../rsi-meta/profile/README.md). It owns an explicit per-Host
-linked factory catalog, stable Local marker registration, frozen Profile
+resolved factory catalog, stable Local marker registration, frozen Profile
 environment, Host paths, and the authority to start exactly one top-level
 Profile bootstrap. It does not own Profile parsing or convergence, a second
 runtime, product implementations, package discovery, or live remote control.
 
-`HostBuilder` rejects duplicate linked `PluginId`, Local contract key, Local
+`HostBuilder` rejects duplicate `PluginId`, Local contract key, Local
 event key, and linked-fragment registration before it creates a Host. Building
 freezes all bootstrap input. The Host supplies an immutable resolver to its
 Profile plugin, which delegates lifecycle work to the public Meta
@@ -19,6 +31,39 @@ selected source, environment, and launch patches and resolve every enabled
 plugin. Preview performs no factory preparation, Runtime activation, credential
 resolution, or Store lease acquisition.
 
+Building validates and freezes Runtime policy without creating an executor or
+Runtime. `HostBuilder::execution` can freeze explicit platform execution;
+startup constructs the Runtime from it. Native startup without an explicit
+backend captures its entered Tokio handle. Preview remains usable without Tokio.
+
+An existing application Runtime can consume `Host::prepare_in` to prepare an
+ordinary child Profile with the frozen catalog, environment and Profile limits.
+Preparation borrows the frozen Host; independent child Profiles may reuse that
+catalog while retaining separate control and generation ownership.
+That Runtime supplies execution and global resource policy. The caller installs
+the returned bootstrap through Meta in its owned Context and retains its control
+handle. Scope creation, Local isolation and child disposal belong to that caller;
+preparation neither creates nor shuts down a Runtime. This supports embedded
+compositions under the same Runtime/Context/Fiber authority as their application.
+
+`Host::profile_input` captures the same complete frozen composition for submission
+through a running Profile's owner-only updater. Building a second Host never
+mutates the first Host. Profile validates environment, limits and the old
+catalog's nominal Local/event identities before convergence; existing Context
+isolation remains unchanged. Runtime execution and global policy belong to the
+already running Runtime and are not replaced by an input.
+
+`Host::isolate_local_context` derives a caller-supplied Context with fresh Local
+identities for the frozen contract/event catalog and Profile control. It creates
+no Fiber or Runtime and does not activate a provider. Unregistered contracts and
+Portable identities keep the caller's mappings; explicit Profile groups own any
+additional isolation. This lets a product isolate a complete child catalog
+without duplicating its marker list, while retaining chosen uncatalogued parent
+dependencies. The caller still owns the real child Scope and its cleanup.
+This is catalog name isolation, not a capability allowlist or a security sandbox.
+Supply a parent Context exposing only authority intended for the child; inherited
+Portable services and uncatalogued Locals must be fenced explicitly by that caller.
+
 Because limits remain mutable until build, build revalidates every previously
 registered identifier, marker, fragment, define, and launch patch against the
 final limits before creating the Runtime.
@@ -27,9 +72,18 @@ final limits before creating the Runtime.
 
 Construction requires explicit absolute config, state, and cache paths; Host
 never discovers them from the process environment. The builder also receives
-bounded Host and Meta limits. Linked registrations bind one `PluginId`, build
-revision, `UpdateMode`, and factory implementation. Neither Profile parsing nor
-factory execution may replace that identity. Local contract and event names are
+bounded Host and Meta limits. `register_factory(ResolvedFactory)` accepts explicit
+trusted embedder provenance, update policy and implementation. Linked identity
+contains a build revision; Native identity contains the exact artifact SHA-256
+from the existing NativeCatalog load path. Host validates identifier bounds and
+canonical native digests but performs no artifact discovery or provenance
+attestation. Identity describes origin, not permission or cryptographic authority.
+`register_linked` constructs the same resolved registration for linked code.
+`maximum_factories` bounds both variants together. Accepted and rejected factory
+destruction is unwind-contained. Neither Profile parsing nor factory execution
+may replace the frozen identity. Composition digests tag the identity variant and
+include the linked revision or native digest. Preview reports the resolved
+identity without preparing its implementation. Local contract and event names are
 configuration keys only: the builder records their exact Rust `TypeId` and
 rejects key or type duplication before any factory is prepared.
 
@@ -48,9 +102,26 @@ explicitly frozen in its catalog, plus Profile's built-in `ProfileControl`.
 This does not expose the root Context or lifecycle mutation authority and does
 not create a managed dependency.
 
-Shutdown delegates deterministic quiescence to Meta and returns its structured
-cleanup outcome. Windows and macOS behavior is claimed only when their native
+Shutdown synchronously closes Profile command admission, then delegates
+deterministic quiescence to Meta and returns its structured cleanup outcome.
+An executing Profile update is included in Meta's shutdown waiter deadline;
+timeout retains the cleanup owner, and a later shutdown call joins the same work.
+Windows and macOS behavior is claimed only when their native
 test suites run on those systems.
 
 The SDK is usable by custom Rust applications. The standard product composition
 belongs to the [`rsi` product](../rsi/README.md), not this family.
+
+During explicit product assembly, builder `has_local_contract` and
+`has_local_event` report exact marker membership without mutation. An embedder
+may use these to share repeated declarations. The registering methods continue
+to reject duplicates and conflicting keys; no factory code runs during lookup.
+
+Native `Host::preview_file_edit` applies the frozen catalog, fragments, launch
+patches and environment to a prospective root edit. It returns the prior compiled
+tree when available, the complete redacted proposed tree and differences, exact
+resolved enabled factories, and fingerprints for every prospective native source.
+An invalid prior source has no comparison tree; it does not prevent previewing a
+valid repair. An unresolved proposed enabled factory rejects preview. This method
+performs no factory preparation, activation or write. Its caller owns the source
+transaction and must recheck captured inputs before committing a reviewed edit.

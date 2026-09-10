@@ -1,7 +1,10 @@
+#[cfg(target_os = "linux")]
+use rsi::StandardCodingTools;
 use rsi::{
-    ApplicationKind, ApplicationProfileId, HostProfileDocument, HostProfileId, ProfileCatalog,
-    ProfileCatalogError, ProfileSource, StandardCodingTools, StandardComposition,
+    ApplicationProfileId, HostProfileDocument, HostProfileId, ProfileCatalog, ProfileCatalogError,
+    ProfileSource, StandardComposition,
 };
+#[cfg(target_os = "linux")]
 use rsi_credentials_protocol::SecretValue;
 use rsi_host::HostPaths;
 use std::fs;
@@ -16,13 +19,16 @@ fn catalog(root: &std::path::Path) -> ProfileCatalog {
 fn builtins_are_explicit_strict_and_non_shadowable() {
     let temp = tempfile::tempdir().unwrap();
     let catalog = catalog(temp.path());
-    let session = ApplicationProfileId::new("session").unwrap();
+    let session = ApplicationProfileId::new("cli").unwrap();
     let standard = HostProfileId::new("standard").unwrap();
 
     let application = catalog.application(&session).unwrap();
     assert_eq!(application.source, ProfileSource::Builtin);
-    assert_eq!(application.profile.application(), ApplicationKind::Session);
-    assert_eq!(application.profile.host_profile(), &standard);
+    assert!(
+        String::from_utf8(application.contents)
+            .unwrap()
+            .contains("rsi.application.cli")
+    );
     assert_eq!(catalog.host(&standard).unwrap().contents, b"format = 1\n");
 
     let shadow = catalog.application_path(&session);
@@ -34,13 +40,13 @@ fn builtins_are_explicit_strict_and_non_shadowable() {
     .unwrap();
     assert!(matches!(
         catalog.application(&session),
-        Err(ProfileCatalogError::BuiltinShadowed { id, .. }) if id == "session"
+        Err(ProfileCatalogError::BuiltinShadowed { id, .. }) if id == "cli"
     ));
     assert!(catalog.list_applications().is_err());
 }
 
 #[test]
-fn ids_and_application_documents_are_rejected_at_the_catalog_boundary() {
+fn ids_and_legacy_application_documents_are_rejected_at_the_catalog_boundary() {
     for invalid in ["", "Upper", "-prefix", "contains_underscore", "slash/name"] {
         assert!(ApplicationProfileId::new(invalid).is_err(), "{invalid}");
     }
@@ -60,7 +66,7 @@ fn ids_and_application_documents_are_rejected_at_the_catalog_boundary() {
     .unwrap();
     assert!(matches!(
         catalog.application(&id),
-        Err(ProfileCatalogError::InvalidDocument { .. })
+        Err(ProfileCatalogError::LegacyApplication { .. })
     ));
 
     fs::write(
@@ -70,7 +76,7 @@ fn ids_and_application_documents_are_rejected_at_the_catalog_boundary() {
     .unwrap();
     assert!(matches!(
         catalog.application(&id),
-        Err(ProfileCatalogError::UnsupportedFormat { observed: 2, .. })
+        Err(ProfileCatalogError::LegacyApplication { .. })
     ));
 
     fs::write(
@@ -80,7 +86,7 @@ fn ids_and_application_documents_are_rejected_at_the_catalog_boundary() {
     .unwrap();
     assert!(matches!(
         catalog.application(&id),
-        Err(ProfileCatalogError::UnsupportedFormat { observed: 3, .. })
+        Err(ProfileCatalogError::LegacyApplication { .. })
     ));
 
     fs::write(
@@ -90,21 +96,47 @@ fn ids_and_application_documents_are_rejected_at_the_catalog_boundary() {
     .unwrap();
     assert!(matches!(
         catalog.application(&id),
-        Err(ProfileCatalogError::InvalidDocument { .. })
+        Err(ProfileCatalogError::LegacyApplication { .. })
     ));
+}
+
+#[test]
+fn legacy_application_documents_and_the_retired_name_require_explicit_recreation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let catalog = catalog(temporary.path());
+    let id = ApplicationProfileId::new("old-profile").unwrap();
+    let new_path = catalog.application_path(&id);
+    let legacy = new_path.with_file_name("application.toml");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let contents = "format = 1\napplication = 'session'\nhost_profile = 'standard'\n";
+    fs::write(&legacy, contents).unwrap();
+    assert!(matches!(
+        catalog.application(&id),
+        Err(ProfileCatalogError::LegacyApplication { .. })
+    ));
+    assert!(matches!(
+        catalog.copy_application(&ApplicationProfileId::new("cli").unwrap(), &id),
+        Err(ProfileCatalogError::LegacyApplication { .. })
+    ));
+    assert!(matches!(
+        catalog.application(&ApplicationProfileId::new("session").unwrap()),
+        Err(ProfileCatalogError::RetiredApplication)
+    ));
+    assert!(!new_path.exists());
+    assert_eq!(fs::read_to_string(legacy).unwrap(), contents);
 }
 
 #[test]
 fn copy_list_and_delete_touch_only_the_owned_document_directory() {
     let temp = tempfile::tempdir().unwrap();
     let catalog = catalog(temp.path());
-    let session = ApplicationProfileId::new("session").unwrap();
+    let session = ApplicationProfileId::new("cli").unwrap();
     let custom = ApplicationProfileId::new("my-session").unwrap();
     let path = catalog.copy_application(&session, &custom).unwrap();
     assert_eq!(path, catalog.application_path(&custom));
     assert_eq!(
-        catalog.application(&custom).unwrap().profile.application(),
-        ApplicationKind::Session
+        catalog.application(&custom).unwrap().contents,
+        catalog.application(&session).unwrap().contents
     );
     assert!(
         catalog

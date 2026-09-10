@@ -1,4 +1,3 @@
-use super::lifecycle::flush_status_receiver;
 use super::turn_state::apply_tool_body;
 use super::*;
 
@@ -78,26 +77,41 @@ fn next_step_message_claim_selects_an_ordered_byte_bounded_prefix() {
     assert_eq!(selected[0].message.message_id.as_str(), "message-first");
 }
 
-#[test]
-fn missing_flush_session_after_quiesce_is_a_shutdown_failure() {
-    let state = KernelState {
-        accepting: false,
-        sessions: BTreeMap::new(),
-        loading_sessions: BTreeMap::new(),
-        fresh_reservations: BTreeSet::new(),
-        executors: BTreeMap::new(),
-        next_executor_registration: 0,
-        finalizers: BTreeMap::new(),
-        finalizer_names: BTreeSet::new(),
-        next_finalizer_registration: 0,
-        tree_lanes: BTreeMap::new(),
-        next_claim: 0,
-        claim_queue: VecDeque::new(),
-        queued: BTreeSet::new(),
+#[tokio::test]
+async fn captured_durability_survives_resident_sender_eviction() {
+    let (status, receiver) = watch::channel(FlushStatus {
+        durable_seq: 0,
+        permanent_error: None,
+    });
+    let wait = DurabilityWait {
+        status: receiver,
+        through_seq: 1,
     };
-    let error = flush_status_receiver(&state, &SessionId::new("session-after-quiesce").unwrap())
-        .expect_err("quiesced sessions have been released");
-    assert!(matches!(error, KernelError::Shutdown(_)));
+    // A fast executor may finish and evict the resident Session before the
+    // submitting caller first polls its durability barrier.
+    status.send_replace(FlushStatus {
+        durable_seq: 2,
+        permanent_error: None,
+    });
+    drop(status);
+    assert_eq!(wait.wait(&CancellationToken::new()).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn closed_flush_owner_without_commit_still_fails() {
+    let (status, receiver) = watch::channel(FlushStatus {
+        durable_seq: 0,
+        permanent_error: None,
+    });
+    let wait = DurabilityWait {
+        status: receiver,
+        through_seq: 1,
+    };
+    drop(status);
+    assert!(matches!(
+        wait.wait(&CancellationToken::new()).await,
+        Err(KernelError::Shutdown(_))
+    ));
 }
 
 #[tokio::test(start_paused = true)]

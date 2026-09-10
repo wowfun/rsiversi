@@ -18,7 +18,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [lints]
 workspace = true

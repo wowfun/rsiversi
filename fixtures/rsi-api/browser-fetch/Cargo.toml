@@ -1,0 +1,31 @@
+[package]
+name = "rsi-api-browser-fetch"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
+rsi-credentials-protocol = { path = "../../../crates/rsi-credentials/protocol" }
+rsi-meta = { path = "../../../crates/rsi-meta/core" }
+rsi-meta-execution = { path = "../../../crates/rsi-meta/execution" }
+async-trait = "0.1"
+futures-util = "0.3"
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rsi-api-browser-client = { path = "../../../crates/rsi-api/browser-client" }
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "=0.4.77"
+tokio = { version = "1.47", features = ["sync", "macros"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rsi-api = { path = "../../../crates/rsi-api/core" }
+rsi-api-http = { path = "../../../crates/rsi-api/http" }
+tokio = { version = "1.47", features = ["sync", "macros", "rt-multi-thread", "net", "io-util", "io-std", "time"] }

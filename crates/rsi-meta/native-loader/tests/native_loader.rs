@@ -548,6 +548,7 @@ async fn apply_delayed_native(
         .unwrap();
     wait_active(&consumer).await;
     let service = slot.lock().unwrap().take().unwrap();
+    wait_for_callback_quiescence_async(catalog).await;
     (native, service)
 }
 

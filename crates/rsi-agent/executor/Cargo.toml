@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+bytes.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
@@ -24,18 +25,20 @@ rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-tools = { path = "../../rsi-files/tools" }
+tempfile.workspace = true
 rsi-agent-kernel = { path = "../kernel" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-agent-testkit = { path = "../testkit" }
-rsi-agent-workspace-context = { path = "../workspace-context" }
 rsi-ai-testkit = { path = "../../rsi-ai/testkit" }
 rsi-jobs-local = { path = "../../rsi-jobs/local" }
 rsi-tools = { path = "../../rsi-tools/core" }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

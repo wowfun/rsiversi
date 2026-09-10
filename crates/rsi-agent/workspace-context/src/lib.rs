@@ -11,6 +11,11 @@ use cap_std::fs::Dir;
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, SessionHeader, WorkspaceTrust,
 };
+#[cfg(unix)]
+use rsi_files_native_fs::{
+    is_link_rejection, open_absolute_directory_no_follow, open_relative_directory_no_follow,
+    open_relative_file_no_follow,
+};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
@@ -24,7 +29,11 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 mod budget;
+mod requests;
+pub use requests::WorkspaceSkillRequests;
+mod contributor;
 use budget::{SnapshotBudget, SnapshotOwner};
+pub use contributor::WorkspaceContributorFactory;
 
 /// Maximum bytes read from one instruction or skill source.
 pub const MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES: usize = 256 * 1024;
@@ -85,11 +94,11 @@ pub enum WorkspaceContextError {
 /// Process-local trust-aware workspace context source.
 #[async_trait]
 pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
-    /// Reads one complete bounded snapshot for the exact Session Header and messages.
+    /// Reads one complete bounded snapshot for the exact Header and selected skill names.
     async fn snapshot(
         &self,
         header: &SessionHeader,
-        messages: &[&AgentMessage],
+        requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError>;
 }
 
@@ -262,92 +271,6 @@ impl ProjectAuthority {
     }
 }
 
-#[cfg(unix)]
-fn open_absolute_directory_no_follow(path: &Path) -> std::io::Result<Dir> {
-    use rustix::fs::{Mode, OFlags, openat};
-    use std::path::Component;
-
-    if !path.is_absolute() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "project root is not absolute",
-        ));
-    }
-    let root = openat(
-        rustix::fs::CWD,
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    let mut directory = Dir::from_std_file(root.into());
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(component) => {
-                directory = open_relative_directory_no_follow(&directory, Path::new(component))?;
-            }
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "project root is not normalized",
-                ));
-            }
-        }
-    }
-    Ok(directory)
-}
-
-#[cfg(unix)]
-fn open_relative_directory_no_follow(directory: &Dir, path: &Path) -> std::io::Result<Dir> {
-    use rustix::fs::{Mode, OFlags, openat};
-    use std::os::fd::AsFd as _;
-    use std::path::Component;
-
-    let mut current = directory.try_clone()?;
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "project-relative directory is not normalized",
-            ));
-        };
-        let next = openat(
-            current.as_fd(),
-            Path::new(component),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-        current = Dir::from_std_file(next.into());
-    }
-    Ok(current)
-}
-
-#[cfg(unix)]
-fn open_relative_file_no_follow(directory: &Dir, path: &Path) -> std::io::Result<File> {
-    use rustix::fs::{Mode, OFlags, openat};
-    use std::os::fd::AsFd as _;
-
-    let parent = path.parent().unwrap_or_else(|| Path::new(""));
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "file path has no name")
-    })?;
-    let parent = open_relative_directory_no_follow(directory, parent)?;
-    let file = openat(
-        parent.as_fd(),
-        Path::new(name),
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    Ok(file.into())
-}
-
-#[cfg(unix)]
-fn is_link_rejection(error: &std::io::Error) -> bool {
-    error
-        .raw_os_error()
-        .is_some_and(|code| code == libc::ELOOP || code == libc::ENOTDIR)
-}
-
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatter {
     name: String,
@@ -367,16 +290,8 @@ impl WorkspaceContext for LocalWorkspaceContext {
     async fn snapshot(
         &self,
         header: &SessionHeader,
-        messages: &[&AgentMessage],
+        requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        if messages.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
-            || messages.iter().any(|message| {
-                message.content.len()
-                    > rsi_agent_session_protocol::MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS
-            })
-        {
-            return Err(WorkspaceContextError::Capacity);
-        }
         let lease = self.owner.acquire().await?;
         let config = Arc::clone(&self.config);
         let budget = SnapshotBudget::new(
@@ -386,7 +301,7 @@ impl WorkspaceContext for LocalWorkspaceContext {
         )?;
         let cwd = PathBuf::from(header.canonical_cwd());
         let workspace_trust = header.workspace_trust();
-        let invocations = invoked_names(messages);
+        let invocations = requests.names().to_vec();
         lease
             .run(move || snapshot_with_budget(&config, &cwd, workspace_trust, &invocations, budget))
             .await
@@ -943,34 +858,6 @@ fn utf8_prefix(text: &str, maximum_bytes: usize) -> &str {
     &text[..end]
 }
 
-fn invoked_names(messages: &[&AgentMessage]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut names = Vec::new();
-    for message in messages {
-        if !matches!(message.source, AgentMessageSource::Human) {
-            continue;
-        }
-        for content in &message.content {
-            let AgentMessageContent::Text { text } = content else {
-                continue;
-            };
-            let Some(first) = text.lines().find(|line| !line.trim().is_empty()) else {
-                continue;
-            };
-            let Some(token) = first.split_whitespace().next() else {
-                continue;
-            };
-            let Some(name) = token.strip_prefix('/') else {
-                continue;
-            };
-            if valid_skill_name(name) && seen.insert(name.to_owned()) {
-                names.push(name.to_owned());
-            }
-        }
-    }
-    names
-}
-
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -1234,7 +1121,9 @@ mod capacity_tests {
                 options: MessageOptions::default(),
             })
             .collect::<Vec<_>>();
-        let names = invoked_names(&messages.iter().collect::<Vec<_>>());
+        let requests =
+            WorkspaceSkillRequests::from_messages(&messages.iter().collect::<Vec<_>>()).unwrap();
+        let names = requests.names();
         assert_eq!(names.len(), 4096);
         let snapshot = snapshot_blocking(
             &WorkspaceContextConfig {
@@ -1243,7 +1132,7 @@ mod capacity_tests {
             },
             root.path(),
             WorkspaceTrust::Untrusted,
-            &names,
+            names,
         )
         .unwrap();
         assert!(snapshot.complete);

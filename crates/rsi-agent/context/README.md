@@ -5,6 +5,32 @@ deterministic compaction. It consumes validated session Facts and emits bounded
 provider-neutral Language messages. It never reads a Workspace implicitly and
 never stores a second transcript.
 
+Entered plugin context is durable text with developer role. A pre-start Tool
+rejection becomes an error response for its exact model call, without inventing
+Tool execution or consulting a current plugin during replay.
+
+`ModelContextBuilder` is a synchronous, process-local Local capability. It opens
+one mutable `ModelContextCursor` from a validated immutable Header, retention
+limits, and an optional bounded provider checkpoint payload. Cursors consume
+framework-supplied canonical pages, claim-visible pages with their scan horizon,
+fork seed pages, and explicit seed completion as distinct inputs. They build
+provider-neutral requests from the Tool definitions supplied by the same Agent
+composition pin. Builders and cursors perform no external I/O or implicit clock
+sampling. The ordinary `DefaultContextBuilderFactory` provides the existing
+ContextFold behavior and accepts only null configuration; selecting it is an
+explicit Agent Profile choice.
+
+`ModelContextState` owns the selected builder, cursor, and version-6 cache
+envelope. The envelope binds the builder ID, semantic version and normalized
+configuration digest, Header fingerprint, exact limits, cursor and Fact prefix
+to the raw bounded provider payload. Restore validates this envelope before
+calling the builder and requires the restored cursor's position to agree.
+Rejected or mismatched caches are rebuilt from Facts; a failed restore leaves
+the current cursor intact. The Store's single Session cache slot and durable
+schema do not change. The envelope writes metadata and raw payload once without
+deep-cloning projected messages. The default provider uses the version-5 fold
+encoding below as its opaque payload; other providers own their payload schema.
+
 Exact Fact prefixes with no active model assembler may be encoded as the
 version-5 Context checkpoint. Retained nonterminal turns are encoded with their
 lifecycle state, so accepted queued turns do not prevent a checkpoint. Context

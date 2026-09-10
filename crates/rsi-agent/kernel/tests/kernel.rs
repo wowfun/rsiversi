@@ -5,14 +5,14 @@ use rsi_agent_composition_protocol::{
     AgentSessionDraft, PreparedFreshSession,
 };
 use rsi_agent_kernel::{
-    Clock, DEFAULT_MAXIMUM_ACTIVE_OBSERVERS, KernelFactory, KernelLimits, MAXIMUM_ACTIVE_SESSIONS,
-    MAXIMUM_PENDING_FACT_BYTES, SessionKernel,
+    AgentKernel, Clock, DEFAULT_MAXIMUM_ACTIVE_OBSERVERS, KernelFactory, KernelLimits,
+    MAXIMUM_ACTIVE_SESSIONS, MAXIMUM_PENDING_FACT_BYTES,
 };
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecordBody, AgentMessage, AgentMessageContent, AgentMessageSource,
     AgentPath, AgentPresetId, BudgetDimension, EffectId, EffectKind, ForkTurnSelection,
     FrozenAgentSettings, MAXIMUM_AGENT_DIAGNOSTIC_BYTES, MAXIMUM_FACTS_PER_READ,
-    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_TURN_GENERATED_FACT_BYTES, MAXIMUM_TURN_TEXT_BYTES,
+    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_TURN_GENERATED_RECORD_BYTES, MAXIMUM_TURN_TEXT_BYTES,
     MessageId, MessageOptions, MessageTarget, SessionFact, SessionFactBody, SessionHeader,
     SessionId, StepId, TurnBudget, TurnId, TurnOutcome, WaitResumeCause, fact_prefix_sha256,
 };
@@ -29,9 +29,6 @@ use rsi_agent_turn_protocol::{
     TurnFinalizationContext, TurnFinalizationError, TurnFinalizationReport, TurnFinalizer,
     TurnService, TurnUpdate,
 };
-use rsi_agent_workspace_context::{
-    WorkspaceContext, WorkspaceContextError, WorkspaceContextFactory, WorkspaceContextSnapshot,
-};
 use rsi_ai_protocol::{
     AiCapability, ContentDelta, ContentStart, LanguageEvent, MAX_LANGUAGE_OUTPUT_BYTES, ModelRef,
     PreparedCallSnapshot, RetryPolicy,
@@ -46,7 +43,6 @@ use rsi_tools_protocol::{
     ToolRuntime,
 };
 use serde_json::Value;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
@@ -84,6 +80,8 @@ enum WaitResumeFault {
 #[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
+    stale_domain_read: AtomicBool,
+    preparation_gate: Mutex<Option<Arc<mutations::GatedPreparation>>>,
     block_header_reads: AtomicBool,
     blocked_header_session: Mutex<Option<SessionId>>,
     header_read_attempts: AtomicUsize,
@@ -93,6 +91,16 @@ struct FactReadRaceStore {
     read_captured: Notify,
     release_read: Notify,
     read_error: Mutex<Option<String>>,
+    fact_page_override: Mutex<Option<StoreFactPage>>,
+    control_page_override: Mutex<Option<rsi_agent_store_protocol::StoreControlPage>>,
+    fail_agent_creation_after_apply: AtomicBool,
+    fail_domain_after_apply: AtomicBool,
+    fail_terminal_after_apply: AtomicBool,
+    fail_terminal_lookup_after_apply: AtomicBool,
+    terminal_lookup_fails: AtomicBool,
+    fail_domain_lookup_after_apply: AtomicBool,
+    domain_lookup_fails: AtomicBool,
+    fail_append_creation_after_apply: AtomicBool,
     pause_open_turn_read: AtomicBool,
     open_turn_read_attempts: AtomicUsize,
     open_turn_read_captured: Notify,
@@ -138,6 +146,8 @@ impl FactReadRaceStore {
     fn new(inner: Arc<MemoryStore>) -> Self {
         Self {
             inner,
+            stale_domain_read: AtomicBool::new(false),
+            preparation_gate: Mutex::new(None),
             block_header_reads: AtomicBool::new(false),
             blocked_header_session: Mutex::new(None),
             header_read_attempts: AtomicUsize::new(0),
@@ -147,6 +157,16 @@ impl FactReadRaceStore {
             read_captured: Notify::new(),
             release_read: Notify::new(),
             read_error: Mutex::new(None),
+            fact_page_override: Mutex::new(None),
+            control_page_override: Mutex::new(None),
+            fail_agent_creation_after_apply: AtomicBool::new(false),
+            fail_domain_after_apply: AtomicBool::new(false),
+            fail_terminal_after_apply: AtomicBool::new(false),
+            fail_terminal_lookup_after_apply: AtomicBool::new(false),
+            terminal_lookup_fails: AtomicBool::new(false),
+            fail_domain_lookup_after_apply: AtomicBool::new(false),
+            domain_lookup_fails: AtomicBool::new(false),
+            fail_append_creation_after_apply: AtomicBool::new(false),
             pause_open_turn_read: AtomicBool::new(false),
             open_turn_read_attempts: AtomicUsize::new(0),
             open_turn_read_captured: Notify::new(),
@@ -380,6 +400,37 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn read_domain_states(
+        &self,
+        session_id: &SessionId,
+        horizon: Option<u64>,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        if self.stale_domain_read.load(Ordering::Acquire) {
+            return self.inner.read_domain_states(session_id, Some(1)).await;
+        }
+        self.inner.read_domain_states(session_id, horizon).await
+    }
+
+    async fn read_domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_session_protocol::AgentControlRecord>>
+    {
+        if self.domain_lookup_fails.load(Ordering::Acquire) {
+            return Err(StoreError::Io(
+                "injected domain request lookup failure".into(),
+            ));
+        }
+        self.inner.read_domain_request(session_id, request_id).await
+    }
+    async fn read_turn_domain_usage(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreTurnDomainUsage> {
+        self.inner.read_turn_domain_usage(session_id, turn_id).await
+    }
     async fn append(&self, batch: AppendBatch) -> rsi_agent_store_protocol::Result<AppendCommit> {
         let attempt = self.append_attempts.fetch_add(1, Ordering::AcqRel) + 1;
         if self.pause_append_at.load(Ordering::Acquire) == attempt {
@@ -397,13 +448,37 @@ impl SessionStore for FactReadRaceStore {
                 "injected permanent append failure".into(),
             ));
         }
-        self.inner.append(batch).await
+        let creates_session = batch.header.is_some();
+        let result = self.inner.append(batch).await;
+        if creates_session
+            && result.is_ok()
+            && self
+                .fail_append_creation_after_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected lost append acknowledgement".into(),
+            ));
+        }
+        result
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Fault injection order must surround one authoritative Store apply."
+    )]
     async fn commit_agent(
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
+        let creates_session = commit.sessions.iter().any(|append| append.header.is_some());
+        let ends_turn = commit
+            .sessions
+            .iter()
+            .flat_map(|append| &append.facts)
+            .any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }));
+        let domain_request = commit.sessions.iter().flat_map(|append| &append.controls).any(|control|
+            matches!(control.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.request_id().is_some()));
         let parks_wait = commit
             .sessions
             .iter()
@@ -437,6 +512,44 @@ impl SessionStore for FactReadRaceStore {
             self.release_agent_commit_before_apply.notified().await;
         }
         let result = self.inner.commit_agent(commit).await;
+        if result.is_ok()
+            && ends_turn
+            && self.fail_terminal_after_apply.swap(false, Ordering::AcqRel)
+        {
+            if self
+                .fail_terminal_lookup_after_apply
+                .swap(false, Ordering::AcqRel)
+            {
+                self.terminal_lookup_fails.store(true, Ordering::Release);
+            }
+            return Err(StoreError::Io(
+                "injected lost terminal acknowledgement".into(),
+            ));
+        }
+        if result.is_ok()
+            && domain_request
+            && self.fail_domain_after_apply.swap(false, Ordering::AcqRel)
+        {
+            if self
+                .fail_domain_lookup_after_apply
+                .swap(false, Ordering::AcqRel)
+            {
+                self.domain_lookup_fails.store(true, Ordering::Release);
+            }
+            return Err(StoreError::Io(
+                "injected lost domain acknowledgement".into(),
+            ));
+        }
+        if result.is_ok()
+            && creates_session
+            && self
+                .fail_agent_creation_after_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected lost creation acknowledgement".into(),
+            ));
+        }
         if result.is_ok()
             && parks_wait
             && self
@@ -508,6 +621,9 @@ impl SessionStore for FactReadRaceStore {
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<StoreFactPage> {
         self.read_attempts.fetch_add(1, Ordering::AcqRel);
+        if let Some(page) = self.fact_page_override.lock().unwrap().take() {
+            return Ok(page);
+        }
         if let Some(message) = self
             .read_error
             .lock()
@@ -530,6 +646,9 @@ impl SessionStore for FactReadRaceStore {
         after_seq: u64,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreControlPage> {
+        if let Some(page) = self.control_page_override.lock().unwrap().take() {
+            return Ok(page);
+        }
         self.inner.read_controls(session_id, after_seq, limit).await
     }
 
@@ -561,6 +680,9 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         turn_id: &TurnId,
     ) -> rsi_agent_store_protocol::Result<StoreTurnBoundary> {
+        if self.terminal_lookup_fails.load(Ordering::Acquire) {
+            return Err(StoreError::Io("injected terminal lookup failure".into()));
+        }
         self.turn_boundary_read_attempts
             .fetch_add(1, Ordering::AcqRel);
         self.turn_boundary_read_started.notify_waiters();
@@ -629,6 +751,10 @@ impl SessionStore for FactReadRaceStore {
         after: Option<&rsi_agent_store_protocol::StoreReadyMessageCursor>,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreReadyMessagePage> {
+        let gate = self.preparation_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.wait(root_session_id).await;
+        }
         let mut page = self
             .inner
             .list_ready_messages(root_session_id, after, limit)
@@ -656,14 +782,6 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailboxSummary> {
         self.inner.read_agent_mailbox_summary(session_id).await
-    }
-
-    async fn read_workspace_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreWorkspaceContextState>
-    {
-        self.inner.read_workspace_context_state(session_id).await
     }
 
     async fn list_ready_roots(
@@ -937,6 +1055,9 @@ fn test_pin_with_digest(preset_id: &AgentPresetId, digit: char) -> AgentComposit
         preset_id.clone(),
         digit.to_string().repeat(64),
         Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
         Arc::new(()),
     )
     .unwrap()
@@ -990,6 +1111,9 @@ impl AgentComposition for DropTrackingComposition {
             preset_id.clone(),
             "a".repeat(64),
             Arc::new(EmptyTools),
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
+            rsi_agent_composition_protocol::ContributionCatalog::default(),
             Arc::new(DropOwner(Arc::clone(&self.drops))),
         )
     }
@@ -1085,7 +1209,7 @@ fn fresh(header: SessionHeader) -> SubmitSession {
     SubmitSession::Fresh(PreparedFreshSession::new(header, pin).unwrap())
 }
 
-async fn resume(kernel: &SessionKernel, session_id: SessionId) -> SubmitSession {
+async fn resume(kernel: &AgentKernel, session_id: SessionId) -> SubmitSession {
     SubmitSession::Resume(kernel.prepare_resume(&session_id).await.unwrap())
 }
 
@@ -1204,33 +1328,11 @@ fn budget_fact(
     .unwrap()
 }
 
-async fn kernel(store: Arc<MemoryStore>) -> SessionKernel {
+async fn kernel(store: Arc<MemoryStore>) -> AgentKernel {
     let store: Arc<dyn SessionStore> = store;
-    SessionKernel::recover_with_clock(store, composition(), Arc::new(FixedClock))
+    AgentKernel::recover_with_clock(store, composition(), Arc::new(FixedClock))
         .await
         .unwrap()
-}
-
-#[derive(Debug)]
-struct QueuedWorkspaceContext {
-    snapshots: Mutex<VecDeque<WorkspaceContextSnapshot>>,
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl WorkspaceContext for QueuedWorkspaceContext {
-    async fn snapshot(
-        &self,
-        _header: &SessionHeader,
-        _messages: &[&AgentMessage],
-    ) -> std::result::Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.snapshots
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| WorkspaceContextError::Failed("snapshot queue exhausted".into()))
-    }
 }
 
 async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: usize) {
@@ -1267,21 +1369,23 @@ async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: u
     }
     let mut expected_seq = 0;
     for (batch_index, batch_facts) in facts.chunks(512).enumerate() {
-        store
-            .append(AppendBatch {
+        rsi_agent_testkit::append_history_fixture(
+            store,
+            AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq,
                 header: (batch_index == 0).then(|| header(session_id.as_str())),
-                facts: batch_facts.to_vec(),
-            })
-            .await
-            .unwrap();
+                facts: batch_facts.iter().cloned().map(Into::into).collect(),
+            },
+        )
+        .await
+        .unwrap();
         expected_seq = batch_facts.last().unwrap().seq();
     }
 }
 
 async fn submit(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     session_id: &str,
     text: &str,
 ) -> rsi_agent_turn_protocol::SubmittedTurn {
@@ -1312,6 +1416,12 @@ fn mailbox_message(message_id: &str) -> AgentMessage {
 mod agent_lifecycle;
 #[path = "kernel/capacity_and_observation.rs"]
 mod capacity_and_observation;
+#[path = "kernel/commands.rs"]
+mod commands;
+#[path = "kernel/contributions.rs"]
+mod contributions;
+#[path = "kernel/domains.rs"]
+mod domains;
 #[path = "kernel/fork_and_scheduler.rs"]
 mod fork_and_scheduler;
 #[path = "kernel/recovery_and_finalization.rs"]

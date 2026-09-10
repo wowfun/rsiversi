@@ -71,6 +71,83 @@ jobs:
         run: cargo xtask rsi-meta conformance
         timeout-minutes: 45
 
+  rsi-meta-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
+        with:
+          toolchain: 1.97.0
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: |
+            fixtures/rsi-meta/browser-probe/package-lock.json
+            fixtures/rsi-api/browser-probe/package-lock.json
+            fixtures/rsi-api/browser-fetch/package-lock.json
+            fixtures/rsi/client-probe/package-lock.json
+            fixtures/rsi/web-product/package-lock.json
+      - name: Install matching bindings generator
+        timeout-minutes: 15
+        run: cargo install wasm-bindgen-cli --locked --version 0.2.127
+      - name: Install browser harness and engines
+        timeout-minutes: 10
+        working-directory: fixtures/rsi-meta/browser-probe
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium firefox
+      - name: Exercise real Worker conformance
+        timeout-minutes: 10
+        working-directory: fixtures/rsi-meta/browser-probe
+        run: npm test
+      - name: Exercise API ownership inside real Workers
+        timeout-minutes: 10
+        working-directory: fixtures/rsi-api/browser-probe
+        run: |
+          npm ci --ignore-scripts
+          npm test
+      - name: Exercise actual browser Fetch and cookie cleanup
+        timeout-minutes: 10
+        working-directory: fixtures/rsi-api/browser-fetch
+        run: |
+          npm ci --ignore-scripts
+          npm test
+      - name: Exercise shared application controllers inside real Workers
+        timeout-minutes: 10
+        working-directory: fixtures/rsi/client-probe
+        run: |
+          npm ci --ignore-scripts
+          npm test
+
+      - name: Install native Web product dependencies
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config
+      - name: Exercise the product Web application over TLS and HTTP/2
+        timeout-minutes: 30
+        working-directory: fixtures/rsi/web-product
+        run: |
+          declare -A previous_policy
+          restore_policy() {
+            for key in "${!previous_policy[@]}"; do
+              sudo sysctl -w "$key=${previous_policy[$key]}"
+            done
+          }
+          trap restore_policy EXIT
+          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
+            key=${setting%%=*}
+            if [[ -e /proc/sys/${key//.//} ]]; then
+              previous_policy[$key]=$(sysctl -n "$key")
+              sudo sysctl -w "$setting"
+            fi
+          done
+          npm ci --ignore-scripts
+          npm test
+
   rsi-base:
     strategy:
       fail-fast: false
@@ -99,10 +176,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Lint Base services
-        run: cargo clippy --locked -p rsi-host -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p rsi-workspace --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
-        run: cargo test --locked -p rsi-host -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p rsi-workspace --all-targets
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' --all-targets
         timeout-minutes: 30
       - name: Exercise Linux Bubblewrap enforcement
         if: runner.os == 'Linux'
@@ -203,7 +280,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -216,15 +293,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
-          components: clippy
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: . -> target
+      - name: Fetch native addon build fixture dependencies
+        run: cargo fetch --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml
+      - name: Check independent native addon fixture
+        run: |
+          cargo fmt --manifest-path fixtures/rsi/native-addon/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets --all-features -- -D warnings
+        timeout-minutes: 10
       - name: Lint standard rsi
-        run: cargo clippy --locked -p rsi -p 'rsi-session*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
+      - name: Check independent terminal presentation
+        run: |
+          cargo fmt --manifest-path crates/rsi/terminal-native/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --all-targets --all-features -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --no-deps --all-features
+        timeout-minutes: 15
       - name: Compile standard rsi tests
-        run: cargo test --locked -p rsi -p 'rsi-session*' --all-targets --no-run
+        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: runner.os == 'Linux'
@@ -245,11 +337,16 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p 'rsi-session*' --all-targets
-        timeout-minutes: 20
+          cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets
+          cargo xtask dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
+            smoke_status=$?
+            tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
+            exit "$smoke_status"
+          }
+        timeout-minutes: 35
       - name: Exercise standard rsi on macOS
         if: runner.os == 'macOS'
-        run: cargo test --locked -p rsi -p 'rsi-session*' --all-targets
+        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- --nocapture
         timeout-minutes: 20
 
   repository-tools:
@@ -320,6 +417,7 @@ jobs:
     needs:
       - documentation
       - rsi-meta-conformance
+      - rsi-meta-browser
       - rsi-base
       - rsi-ai
       - rsi-agent
@@ -333,6 +431,7 @@ jobs:
         env:
           DOCUMENTATION: ${{ needs.documentation.result }}
           RSI_META_CONFORMANCE: ${{ needs.rsi-meta-conformance.result }}
+          RSI_META_BROWSER: ${{ needs.rsi-meta-browser.result }}
           RSI_BASE: ${{ needs.rsi-base.result }}
           RSI_AI: ${{ needs.rsi-ai.result }}
           RSI_AGENT: ${{ needs.rsi-agent.result }}
@@ -343,6 +442,7 @@ jobs:
         run: |
           test "$DOCUMENTATION" = success
           test "$RSI_META_CONFORMANCE" = success
+          test "$RSI_META_BROWSER" = success
           test "$RSI_BASE" = success
           test "$RSI_AI" = success
           test "$RSI_AGENT" = success

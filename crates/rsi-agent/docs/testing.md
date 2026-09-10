@@ -20,7 +20,11 @@ tampering with header or Fact rows above their framing bounds. Checkpoint-row
 tampering also proves reads reject a mismatched immutable-header fingerprint
 or a cursor beyond the durable session tail before returning opaque bytes.
 Cancelled blocking waiters retain the writer lease through actual reader,
-writer and CAS completion. Metadata scans above the validation-cache capacity
+writer and CAS completion. Tests that cancel readers during Kernel shutdown
+wait for that final lease before offline verification: a bounded wait may retry
+only `WriterLocked`, while any other verification error fails immediately.
+Kernel worker completion alone does not prove a cancelled SQLite job has closed.
+Metadata scans above the validation-cache capacity
 must not validate history. Large Fact page boundaries and count lookahead
 assert that the next JSON body is not materialized. Subtree snapshots reject
 cycles and oversized lineage; transaction guards detect children inserted after
@@ -31,6 +35,18 @@ pages before their next JSON body is materialized.
 The report-only Store benchmark measures metadata and first validation before
 any mixed writes. Each mixed sample appends to a different session at the same
 initial Fact count, so a growing target history does not confound that phase.
+Separate operational matrices traverse every member of 257- and 512-session
+working sets over repeated cycles and read a fixed one-Fact page against long
+control histories. Report latency distributions and actual API call counts;
+unit tests own exact decode counts and deterministic lane-blocking assertions.
+Concurrent warm reads are sampled during cold validation without a pass/fail
+timing threshold or a claim that process memory is OS-cold.
+
+Headless child-process tests drain bounded stdout and stderr from spawn, record
+durable acceptance, provider entry, and signal stages, and race stage waits
+against child exit and the existing deadline. A timeout captures diagnostics
+before killing and reaping the child; partial output is never lost by dropping
+an `output()` future. Captured-output overflow fails the test explicitly.
 
 Kernel tests use deterministic clocks and a controllable Store. They cover lazy
 empty sessions, live-before-durable observation, the 200 ms batching boundary,
@@ -62,7 +78,7 @@ resumes prove that one session has at most one in-flight control-state load.
 Agent-control regressions exercise the complete running/parked/resumed/waiting
 Store vocabulary, recovery from shutdown during a durable park, Fresh mailbox
 admission racing a write-behind Header, exact idempotent claim receipts with
-workspace background Facts, serialized cancellation against direct commits,
+cold recovery, serialized cancellation against direct commits,
 post-activation claim handoff, and idle-session capacity reclamation.
 The shared Store contract also proves typed activation/quiescence guard failures
 and backend-equivalent rejection of duplicate task, message, and activation
@@ -91,6 +107,23 @@ resident state, resume tokens preserve resident pins, token failure/drop
 releases cold pins, and every claim returns the exact admitted pin. Standard
 application tests also prove generation preparation precedes durable Workspace
 registration for both fresh and resumed sessions.
+Composition snapshot tests replace only the executable catalog while leaving the
+Profile unchanged, check nominal/isolation/update-mode cache identities, and
+replace a snapshot during blocked activation. They prove failure does not return
+a stale cache hit, old pins retain their complete catalog through Scope cleanup,
+and overlapping Portable providers bind consumers inside the same generation.
+Composition tests also run beneath explicit service Local isolation. Generation
+contributions must inherit that mapping while their pins remain independent of
+composition-provider retirement; acquiring a fresh Runtime root would violate it.
+
+Context builder tests compare the default provider's requests with the existing
+fold, reject cross-builder/config/version/header/limit caches before provider
+restore, and preserve state after failed restoration. A second provider adds a
+distinct deterministic request marker and its own checkpoint payload framing;
+the executor test replaces the composition catalog after Session admission and
+proves both execution and delayed maintenance retain the admitted builder.
+Composition tests reject an absent builder despite an ancestor supply, reject
+duplicates with complete candidate cleanup, and preserve the prior pin.
 
 Context tests fold real Facts and prove deterministic compaction, complete-turn
 removal, tool call/result adjacency, Media references, and hard byte/message
@@ -109,6 +142,12 @@ not the executor suite, own durable interruption repair and cancellation races.
 Executor Tool tests use two different immutable catalogs and prove schema
 projection, prepare, retained query/wait/commit, delayed retirement, and
 elapsed-budget cleanup never cross their claim generation.
+Files Tool integration uses the ordinary Files provider and contribution through
+the sealed catalog, Kernel and Executor. For every Sandbox mode it distinguishes
+header-required approval, contribution-required approval and policy denial.
+Denied reads cannot reach the Sandbox read planner or publish a Tool start;
+allowed reads retain exact bytes and no process enforcement stamp. A contribution
+catalog changed after Session admission cannot relax that Session's pinned policy.
 The deadline selector has a deterministic simultaneous-readiness regression:
 an already-terminal drive result wins over elapsed cancellation in the same
 scheduler poll.
@@ -137,6 +176,9 @@ as interrupted rather than dispatching another model effect.
 Default tests are isolated from credentials, real user state, and live network
 services. Native Windows and macOS behavior is reported only by their native
 runners; Linux validation does not imply that coverage.
+Fixtures pass canonical temporary workspace authorities to production code;
+platform temporary-directory aliases must not accidentally become the symlink
+under test. Explicit malicious-link cases retain their original test paths.
 
 Human-interaction tests park a real Kernel activation, advance its injected clock
 by a day, and block executor admission during resume. They fill the released

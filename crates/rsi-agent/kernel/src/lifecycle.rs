@@ -1,6 +1,57 @@
 use super::*;
 
-impl SessionKernel {
+pub(super) fn initial_domain_control(
+    header: &SessionHeader,
+    baseline: &rsi_agent_composition_protocol::DomainBaseline,
+) -> TurnResult<Option<AgentControlRecord>> {
+    baseline
+        .commit()
+        .map(|commit| {
+            AgentControlRecord::new(
+                1,
+                header.created_at_ms(),
+                AgentControlRecordBody::DomainStateCommitted {
+                    commit: commit.clone(),
+                },
+            )
+            .map_err(|error| TurnError::Invalid(error.to_string()))
+        })
+        .transpose()
+}
+
+impl AgentKernel {
+    pub(super) async fn validate_fresh_baseline(
+        &self,
+        prepared: &PreparedFreshSession,
+    ) -> TurnResult<()> {
+        let page =
+            observation::read_controls_bounded(&self.inner, prepared.header().session_id(), 0, 1)
+                .await
+                .map_err(turn_store_error)?;
+        let stored = page.records.first().and_then(|record| match record.body() {
+            AgentControlRecordBody::DomainStateCommitted { commit }
+                if matches!(
+                    commit.source(),
+                    rsi_agent_session_protocol::DomainMutationSource::Baseline
+                ) =>
+            {
+                Some(commit.request_sha256())
+            }
+            _ => None,
+        });
+        if stored
+            != prepared
+                .baseline()
+                .commit()
+                .map(rsi_agent_session_protocol::DomainStateCommit::request_sha256)
+        {
+            return Err(TurnError::Invalid(
+                "fresh submission baseline disagrees with the durable session".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Recovers every durable session and repairs unfinished tails before return.
     pub async fn recover(
         store: Arc<dyn SessionStore>,
@@ -26,25 +77,22 @@ impl SessionKernel {
         clock: Arc<dyn Clock>,
         limits: KernelLimits,
     ) -> Result<Self> {
-        Self::recover_with_context_clock_and_limits(
+        Self::recover_with_validated_limits(
             store,
             composition,
-            Arc::new(EmptyWorkspaceContext),
             clock,
-            limits,
+            ValidatedKernelLimits::new(limits)?,
         )
         .await
     }
 
-    /// Recovers with an explicit process-local workspace context source, clock, and limits.
-    pub async fn recover_with_context_clock_and_limits(
+    pub(super) async fn recover_with_validated_limits(
         store: Arc<dyn SessionStore>,
         composition: Arc<dyn AgentComposition>,
-        workspace_context: Arc<dyn WorkspaceContext>,
         clock: Arc<dyn Clock>,
-        limits: KernelLimits,
+        limits: ValidatedKernelLimits,
     ) -> Result<Self> {
-        limits.validate()?;
+        let limits = limits.0;
         let mut after = None;
         loop {
             let page = store
@@ -67,7 +115,6 @@ impl SessionKernel {
                 tasks: TaskTracker::new(),
                 store,
                 composition,
-                workspace_context,
                 resume_issuer: ResumeAdmissionIssuer::new(),
                 claim_issuer: TurnClaimIssuer::new(),
                 clock,
@@ -78,17 +125,18 @@ impl SessionKernel {
                     fresh_reservations: BTreeSet::new(),
                     executors: BTreeMap::new(),
                     next_executor_registration: 0,
-                    finalizers: BTreeMap::new(),
-                    finalizer_names: BTreeSet::new(),
-                    next_finalizer_registration: 0,
+                    finalizers: finalization::Registry::default(),
                     tree_lanes: BTreeMap::new(),
                     next_claim: 0,
                     claim_queue: VecDeque::new(),
                     queued: BTreeSet::new(),
                 }),
                 submission_admission: SubmissionAdmission::new(),
+                commands: commands::CommandRequests::default(),
+                projection_admission: Arc::new(Semaphore::new(projection::MAXIMUM_CAPTURES)),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
+                session_changes: SessionWatchHub::default(),
                 flush_requested: Notify::new(),
                 settlement_requested: Notify::new(),
                 settlement_health: Mutex::new(SettlementHealth::default()),
@@ -98,6 +146,10 @@ impl SessionKernel {
                 process_pending_bytes: AtomicUsize::new(0),
                 process_pending_changed: Notify::new(),
                 active_observers: AtomicUsize::new(0),
+                observation_retention: ObservationRetention::new(
+                    limits.maximum_retained_observation_bytes,
+                )
+                .expect("validated Kernel retention limits"),
                 store_read_admission: Arc::new(Semaphore::new(limits.maximum_store_read_bytes)),
             }),
         };
@@ -163,7 +215,6 @@ impl SessionKernel {
             let finalizers = std::mem::take(&mut state.finalizers);
             state.fresh_reservations.clear();
             state.executors.clear();
-            state.finalizer_names.clear();
             state.claim_queue.clear();
             state.queued.clear();
             (sessions, loads, finalizers)
@@ -204,10 +255,91 @@ impl SessionKernel {
             let Some(prepared) = self.prepare_flush_batch(&session_id) else {
                 continue;
             };
-            let batch = prepared.into_store_batch();
-            let result = self.inner.store.append(batch).await;
+            let (batch, baseline) = prepared.into_store_batch();
+            let created_root = batch.header.as_ref().map(|header| {
+                header
+                    .fork_origin()
+                    .map_or(header.session_id(), |origin| &origin.root_session_id)
+                    .clone()
+            });
+            let result =
+                if baseline.is_some() || batch.facts.iter().any(|fact| is_terminal_fact(fact)) {
+                    self.flush_control_batch(batch, baseline).await
+                } else {
+                    self.inner.store.append(batch).await
+                };
+            if result.is_ok() {
+                self.inner.session_changes.committed(&session_id);
+            }
+            // Creation may have committed before its acknowledgement was lost.
+            // Membership notifications carry only a requery hint, as in commit_agent.
+            if let Some(root) = created_root {
+                self.inner.session_changes.created_in_tree(&root);
+            }
             self.complete_flush(&session_id, result);
         }
+    }
+
+    async fn flush_control_batch(
+        &self,
+        batch: AppendBatch,
+        baseline: Option<AgentControlRecord>,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AppendCommit> {
+        // Control writers hold submission admission and fence queued terminals before sampling
+        // their control cursor. The flusher must not acquire that admission while they wait.
+        let control_seq = if batch.header.is_some() {
+            0
+        } else {
+            read_controls_bounded(&self.inner, &batch.session_id, 0, 1)
+                .await?
+                .durable_seq
+        };
+        let committed = self
+            .inner
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: batch.session_id.clone(),
+                    expected_fact_seq: batch.expected_seq,
+                    expected_control_seq: control_seq,
+                    header: batch.header,
+                    facts: batch.facts,
+                    controls: baseline.into_iter().collect(),
+                }],
+                required_active_activations: Vec::new(),
+                quiescent_descendants_of: None,
+            })
+            .await?;
+        let watermark = committed
+            .sessions
+            .first()
+            .filter(|watermark| watermark.session_id == batch.session_id)
+            .ok_or_else(|| {
+                StoreError::Corrupt("terminal commit returned no exact Session watermark".into())
+            })?;
+        Ok(rsi_agent_store_protocol::AppendCommit {
+            durable_seq: watermark.durable_fact_seq,
+        })
+    }
+
+    /// Caller holds this Session's submission admission through its ensuing control commit.
+    pub(super) async fn fence_pending_terminal(&self, session_id: &SessionId) -> TurnResult<()> {
+        let wait = {
+            let state = lock_state(&self.inner);
+            state.sessions.get(session_id).and_then(|session| {
+                session
+                    .pending
+                    .iter()
+                    .rev()
+                    .find(|fact| is_terminal_fact(fact))
+                    .map(|terminal| DurabilityWait::new(session, terminal.seq()))
+            })
+        };
+        if let Some(wait) = wait {
+            self.wait_for_durable(wait)
+                .await
+                .map_err(turn_kernel_error)?;
+        }
+        Ok(())
     }
 
     pub(super) fn prepare_flush_batch(&self, session_id: &SessionId) -> Option<PreparedFlushBatch> {
@@ -223,17 +355,34 @@ impl SessionKernel {
             return None;
         }
         let mut facts = Vec::new();
-        let mut bytes = 0_usize;
+        let baseline = session
+            .header_pending
+            .then(|| session.pending_domain_baseline.clone())
+            .flatten();
+        let mut bytes = baseline.as_ref().map_or(0, AgentControlRecord::encoded_len);
         for fact in &session.pending {
             if facts.len() == MAXIMUM_STORE_BATCH_FACTS {
                 break;
             }
             let encoded = fact.encoded_len();
-            if !facts.is_empty() && bytes.saturating_add(encoded) > MAXIMUM_STORE_BATCH_BYTES {
+            let marker_bytes = if is_terminal_fact(fact) {
+                notifications::terminal_boundary_record(u64::MAX, fact)
+                    .expect("bounded typed terminal identity fits its control envelope")
+                    .encoded_len()
+            } else {
+                0
+            };
+            if !facts.is_empty()
+                && bytes.saturating_add(encoded).saturating_add(marker_bytes)
+                    > MAXIMUM_STORE_BATCH_BYTES
+            {
                 break;
             }
             bytes = bytes.saturating_add(encoded);
             facts.push(Arc::clone(fact));
+            if is_terminal_fact(fact) {
+                break;
+            }
         }
         session.flush_inflight = true;
         Some(PreparedFlushBatch {
@@ -243,6 +392,7 @@ impl SessionKernel {
                 .header_pending
                 .then(|| session.header.as_ref().clone()),
             facts,
+            baseline,
         })
     }
 
@@ -378,48 +528,22 @@ impl SessionKernel {
         Ok(())
     }
 
-    pub(super) async fn wait_for_durable(
-        &self,
-        session_id: &SessionId,
-        through_seq: u64,
-    ) -> Result<u64> {
-        let status = {
-            let state = lock_state(&self.inner);
-            flush_status_receiver(&state, session_id)?
-        };
+    pub(super) async fn wait_for_durable(&self, wait: DurabilityWait) -> Result<u64> {
         self.inner.flush_requested.notify_one();
-        self.wait_on_flush_status(status, through_seq).await
+        wait.wait(&self.inner.stop_worker).await
     }
 
     pub(super) async fn wait_on_flush_status(
         &self,
-        mut status: watch::Receiver<FlushStatus>,
+        status: watch::Receiver<FlushStatus>,
         through_seq: u64,
     ) -> Result<u64> {
-        let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
-        loop {
-            let current = status.borrow().clone();
-            if current.durable_seq >= through_seq {
-                return Ok(current.durable_seq);
-            }
-            if let Some(error) = current.permanent_error {
-                return Err(KernelError::Flush(error));
-            }
-            tokio::select! {
-                changed = status.changed() => {
-                    changed.map_err(|_| KernelError::Shutdown("flush status closed".into()))?;
-                }
-                () = self.inner.stop_worker.cancelled() => {
-                    return Err(KernelError::Shutdown("flush worker stopped".into()));
-                }
-                () = tokio::time::sleep_until(deadline) => {
-                    return Err(KernelError::Flush(format!(
-                        "durability wait timed out after {} seconds",
-                        DURABILITY_WAIT_TIMEOUT.as_secs()
-                    )));
-                }
-            }
+        DurabilityWait {
+            status,
+            through_seq,
         }
+        .wait(&self.inner.stop_worker)
+        .await
     }
 
     /// Retries one atomic Agent commit after draining only resident, Fact-less
@@ -431,7 +555,7 @@ impl SessionKernel {
         &self,
         mut commit: AtomicAgentCommit,
     ) -> TurnResult<std::result::Result<AtomicAgentCommitResult, StoreError>> {
-        let first = self.inner.store.commit_agent(commit.clone()).await;
+        let first = self.inner.commit_agent(commit.clone()).await;
         let Err(conflict @ StoreError::Conflict { .. }) = first else {
             return Ok(first);
         };
@@ -441,20 +565,19 @@ impl SessionKernel {
             if !append.facts.is_empty() || append.header.is_some() {
                 continue;
             }
-            let live_seq = {
+            let wait = {
                 let state = lock_state(&self.inner);
-                state
-                    .sessions
-                    .get(&append.session_id)
-                    .map(SessionRuntime::live_seq)
-                    .transpose()
-                    .map_err(turn_kernel_error)?
-            };
-            let Some(live_seq) = live_seq.filter(|seq| *seq > append.expected_fact_seq) else {
-                continue;
+                let Some(session) = state.sessions.get(&append.session_id) else {
+                    continue;
+                };
+                let through_seq = session.live_seq().map_err(turn_kernel_error)?;
+                if through_seq <= append.expected_fact_seq {
+                    continue;
+                }
+                DurabilityWait::new(session, through_seq)
             };
             append.expected_fact_seq = self
-                .wait_for_durable(&append.session_id, live_seq)
+                .wait_for_durable(wait)
                 .await
                 .map_err(turn_kernel_error)?;
             refreshed = true;
@@ -462,7 +585,7 @@ impl SessionKernel {
         if !refreshed {
             return Ok(Err(conflict));
         }
-        Ok(self.inner.store.commit_agent(commit).await)
+        Ok(self.inner.commit_agent(commit).await)
     }
 
     pub(super) async fn read_ready_roots(
@@ -607,7 +730,7 @@ impl SessionKernel {
             .ok_or(TurnError::StaleClaim)?;
         match &turn.claim {
             Some(owner)
-                if !owner.mutations.retiring.load(Ordering::Acquire)
+                if !owner.mutations.is_retiring()
                     && owner.executor == claim.executor_id()
                     && owner.registration == registration_id
                     && owner.claim == claim.claim_id()
@@ -627,7 +750,11 @@ impl SessionKernel {
 
     pub(super) fn validate_agent_caller(&self, caller: &AgentCallerAuthority) -> TurnResult<()> {
         let state = lock_state(&self.inner);
-        self.validate_claim(&state, caller.claim()).map(|_| ())
+        self.validate_claim(&state, caller.claim())?;
+        if let Some(error) = &state.sessions[caller.session_id()].permanent_flush_error {
+            return Err(TurnError::Flush(error.clone()));
+        }
+        Ok(())
     }
 
     pub(super) fn validate_issued_claim(&self, claim: &TurnClaim) -> TurnResult<()> {
@@ -681,6 +808,31 @@ impl SessionKernel {
         }
     }
 
+    async fn prepare_cold_composition(
+        &self,
+        header: &SessionHeader,
+    ) -> TurnResult<AgentCompositionPin> {
+        let composition = self
+            .inner
+            .composition
+            .pin(header.agent_preset_id())
+            .await
+            .map_err(turn_composition_error)?;
+        let page = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)
+            .await
+            .map_err(turn_store_error)?;
+        let states: Vec<_> = page
+            .states
+            .into_iter()
+            .map(|state| state.snapshot)
+            .collect();
+        composition
+            .domains()
+            .validate_complete_states(&states)
+            .map_err(|error| turn_composition_error(error.into()))?;
+        Ok(composition)
+    }
+
     pub(super) async fn prepare_resume_session(
         &self,
         session_id: &SessionId,
@@ -712,7 +864,7 @@ impl SessionKernel {
             let header = read_validated_header_bounded(&self.inner, session_id)
                 .await
                 .map_err(turn_store_error)?;
-            let composition = match self.inner.composition.pin(header.agent_preset_id()).await {
+            let composition = match self.prepare_cold_composition(&header).await {
                 Ok(composition) => composition,
                 Err(error) => {
                     let concurrent_load = {
@@ -737,7 +889,7 @@ impl SessionKernel {
                         load.wait().await?;
                         continue;
                     }
-                    return Err(turn_composition_error(error));
+                    return Err(error);
                 }
             };
 
@@ -824,12 +976,11 @@ impl SessionKernel {
             } else {
                 match loaded {
                     Err(error) => Err(error),
-                    Ok((durable_seq, turns, turn_order, workspace_context)) => {
+                    Ok((durable_seq, turns, turn_order)) => {
                         let mut session =
                             SessionRuntime::new(header, composition, durable_seq, false);
                         session.turns = turns;
                         session.turn_order = turn_order;
-                        session.workspace_context = workspace_context;
                         let queued = session.turn_order.clone();
                         state.sessions.insert(session_id.clone(), session);
                         for turn_id in queued {
@@ -882,8 +1033,14 @@ impl SessionKernel {
         session_selection: SubmitSession,
         turn_id: TurnId,
         body: SessionFactBody,
-    ) -> TurnResult<SubmittedTurn> {
+    ) -> TurnResult<(SubmittedTurn, DurabilityWait)> {
         let session_id = session_selection.session_id().clone();
+        let baseline = match &session_selection {
+            SubmitSession::Fresh(prepared) => {
+                initial_domain_control(prepared.header(), prepared.baseline())?
+            }
+            SubmitSession::Resume(_) => None,
+        };
         let mut state = lock_state(&self.inner);
         if !state.accepting {
             if matches!(&session_selection, SubmitSession::Fresh(_)) {
@@ -894,7 +1051,7 @@ impl SessionKernel {
         let inserted_fresh = matches!(&session_selection, SubmitSession::Fresh(_));
         match session_selection {
             SubmitSession::Fresh(prepared) => {
-                let (header, composition) = prepared.into_parts();
+                let (header, composition, _baseline) = prepared.into_parts();
                 if state.sessions.contains_key(&session_id)
                     || !state.fresh_reservations.remove(&session_id)
                 {
@@ -902,10 +1059,9 @@ impl SessionKernel {
                         "fresh submission lacks its exact resident reservation".into(),
                     ));
                 }
-                state.sessions.insert(
-                    session_id.clone(),
-                    SessionRuntime::new(header, composition, 0, true),
-                );
+                let mut resident = SessionRuntime::new(header, composition, 0, true);
+                resident.pending_domain_baseline = baseline;
+                state.sessions.insert(session_id.clone(), resident);
             }
             SubmitSession::Resume(prepared) => {
                 let _parts = self.inner.resume_issuer.consume(prepared)?;
@@ -959,14 +1115,18 @@ impl SessionKernel {
         );
         session.turn_order.push(turn_id.clone());
         publish_live_watermarks(session);
+        let wait = DurabilityWait::new(session, accepted_seq);
         enqueue(&mut state, session_id.clone(), turn_id.clone());
         drop(state);
         self.inner.claim_changed.notify_waiters();
-        Ok(SubmittedTurn {
-            session_id,
-            turn_id,
-            accepted_seq,
-        })
+        Ok((
+            SubmittedTurn {
+                session_id,
+                turn_id,
+                accepted_seq,
+            },
+            wait,
+        ))
     }
 
     pub(super) async fn existing_submission(
@@ -975,7 +1135,7 @@ impl SessionKernel {
         turn_id: &TurnId,
         body: &SessionFactBody,
         header_is_durable: bool,
-    ) -> TurnResult<(Option<(SubmittedTurn, bool)>, bool)> {
+    ) -> TurnResult<(Option<(SubmittedTurn, Option<DurabilityWait>)>, bool)> {
         let session_id = header.session_id();
         {
             let state = lock_state(&self.inner);
@@ -1006,7 +1166,7 @@ impl SessionKernel {
                                 turn_id: turn_id.clone(),
                                 accepted_seq: turn.accepted_seq,
                             },
-                            true,
+                            Some(DurabilityWait::new(session, turn.accepted_seq)),
                         )),
                         true,
                     ));
@@ -1043,7 +1203,7 @@ impl SessionKernel {
                     turn_id: turn_id.clone(),
                     accepted_seq,
                 },
-                false,
+                None,
             )),
             true,
         ))
@@ -1072,10 +1232,13 @@ impl SessionKernel {
             .await?;
         if let Some((receipt, pending)) = existing {
             drop(submission_admission);
-            if pending {
-                self.wait_for_durable(&receipt.session_id, receipt.accepted_seq)
+            if let Some(wait) = pending {
+                self.wait_for_durable(wait)
                     .await
                     .map_err(turn_kernel_error)?;
+            }
+            if let SubmitSession::Fresh(prepared) = &session {
+                self.validate_fresh_baseline(prepared).await?;
             }
             return Ok(receipt);
         }
@@ -1096,27 +1259,39 @@ impl SessionKernel {
         drop(fresh_reservation);
         drop(resume_admission);
         drop(submission_admission);
-        let receipt = result?;
-        self.wait_for_durable(&receipt.session_id, receipt.accepted_seq)
+        let (receipt, wait) = result?;
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         Ok(receipt)
     }
 }
 
-pub(super) fn flush_status_receiver(
-    state: &KernelState,
-    session_id: &SessionId,
-) -> Result<watch::Receiver<FlushStatus>> {
-    if let Some(session) = state.sessions.get(session_id) {
-        return Ok(session.flush_status.subscribe());
+impl DurabilityWait {
+    pub(super) async fn wait(mut self, stopping: &CancellationToken) -> Result<u64> {
+        let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
+        loop {
+            let current = self.status.borrow().clone();
+            if current.durable_seq >= self.through_seq {
+                return Ok(current.durable_seq);
+            }
+            if let Some(error) = current.permanent_error {
+                return Err(KernelError::Flush(error));
+            }
+            tokio::select! {
+                changed = self.status.changed() => {
+                    changed.map_err(|_| KernelError::Shutdown("flush status closed".into()))?;
+                }
+                () = stopping.cancelled() => {
+                    return Err(KernelError::Shutdown("flush worker stopped".into()));
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(KernelError::Flush(format!(
+                        "durability wait timed out after {} seconds",
+                        DURABILITY_WAIT_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+        }
     }
-    if !state.accepting {
-        return Err(KernelError::Shutdown(
-            "session was released while the Kernel was shutting down".into(),
-        ));
-    }
-    Err(KernelError::Invariant(
-        "session disappeared during flush".into(),
-    ))
 }

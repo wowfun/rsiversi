@@ -2,6 +2,7 @@ use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, FrozenAgentSettings,
     MessageId, MessageOptions, SessionHeader, SessionId, WorkspaceTrust,
 };
+use rsi_agent_workspace_context::WorkspaceSkillRequests;
 use rsi_agent_workspace_context::{
     LocalWorkspaceContext, MAXIMUM_WORKSPACE_CONTEXT_SOURCE_BYTES,
     MAXIMUM_WORKSPACE_INSTRUCTION_FILES, MAXIMUM_WORKSPACE_SKILL_ENTRIES, WorkspaceContext,
@@ -13,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn header(cwd: &Path, trust: WorkspaceTrust) -> SessionHeader {
+    let cwd = fs::canonicalize(cwd).unwrap();
     SessionHeader::new(
         SessionId::new("workspace-context-session").unwrap(),
         1,
@@ -94,7 +96,10 @@ async fn untrusted_workspace_omits_every_project_controlled_source() {
     let source = context(Some(user.join("AGENTS.md")), vec![user.join("skills")]);
 
     let snapshot = source
-        .snapshot(&header(&cwd, WorkspaceTrust::Untrusted), &[])
+        .snapshot(
+            &header(&cwd, WorkspaceTrust::Untrusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -135,7 +140,10 @@ async fn trusted_project_instructions_are_root_to_cwd_and_user_skill_wins_name_c
     let source = context(None, vec![user_skills]);
 
     let snapshot = source
-        .snapshot(&header(&cwd, WorkspaceTrust::Trusted), &[&human("/shared")])
+        .snapshot(
+            &header(&cwd, WorkspaceTrust::Trusted),
+            &WorkspaceSkillRequests::from_messages(&[&human("/shared")]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -169,12 +177,13 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
     let agent_snapshot = source
         .snapshot(
             &header(temporary.path(), WorkspaceTrust::Untrusted),
-            &[&message(
+            &WorkspaceSkillRequests::from_messages(&[&message(
                 AgentMessageSource::Agent {
                     source_session_id: session,
                 },
                 "/manual",
-            )],
+            )])
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -184,7 +193,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
     let human_snapshot = source
         .snapshot(
             &header(temporary.path(), WorkspaceTrust::Untrusted),
-            &[&human("\n /manual argument")],
+            &WorkspaceSkillRequests::from_messages(&[&human("\n /manual argument")]).unwrap(),
         )
         .await
         .unwrap();
@@ -202,12 +211,21 @@ async fn catalog_discovers_a_large_skill_from_metadata_and_loads_its_body_only_w
     let source = context(None, vec![skills]);
     let session = header(temporary.path(), WorkspaceTrust::Untrusted);
 
-    let catalog = source.snapshot(&session, &[]).await.unwrap();
+    let catalog = source
+        .snapshot(
+            &session,
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(catalog.skill_catalog.unwrap().contains("large body skill"));
     assert!(catalog.invocations.is_empty());
 
     let invoked = source
-        .snapshot(&session, &[&human("/large")])
+        .snapshot(
+            &session,
+            &WorkspaceSkillRequests::from_messages(&[&human("/large")]).unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(invoked.invocations.len(), 1);
@@ -234,7 +252,7 @@ async fn crlf_skill_frontmatter_is_discovered_and_invoked() {
     let snapshot = source
         .snapshot(
             &header(temporary.path(), WorkspaceTrust::Untrusted),
-            &[&human("/crlf")],
+            &WorkspaceSkillRequests::from_messages(&[&human("/crlf")]).unwrap(),
         )
         .await
         .unwrap();
@@ -259,11 +277,17 @@ async fn oversized_optional_sources_are_omitted_from_a_complete_empty_snapshot()
     let source = context(Some(instruction), vec![skills]);
 
     let first = source
-        .snapshot(&header(temporary.path(), WorkspaceTrust::Untrusted), &[])
+        .snapshot(
+            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
     let second = source
-        .snapshot(&header(temporary.path(), WorkspaceTrust::Untrusted), &[])
+        .snapshot(
+            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -292,7 +316,7 @@ async fn session_unsafe_instruction_and_skill_sources_are_omitted() {
     let snapshot = source
         .snapshot(
             &header(temporary.path(), WorkspaceTrust::Untrusted),
-            &[&human("/unsafe")],
+            &WorkspaceSkillRequests::from_messages(&[&human("/unsafe")]).unwrap(),
         )
         .await
         .unwrap();
@@ -330,7 +354,10 @@ async fn trusted_project_sources_never_follow_links_outside_the_project() {
     .unwrap();
 
     let snapshot = context(None, Vec::new())
-        .snapshot(&header(&project, WorkspaceTrust::Trusted), &[])
+        .snapshot(
+            &header(&project, WorkspaceTrust::Trusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -353,7 +380,10 @@ async fn symlinked_project_skill_root_is_a_complete_omission() {
     symlink(&outside, project.join(".agents/skills")).unwrap();
 
     let snapshot = context(None, Vec::new())
-        .snapshot(&header(&project, WorkspaceTrust::Trusted), &[])
+        .snapshot(
+            &header(&project, WorkspaceTrust::Trusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -376,7 +406,10 @@ async fn skill_entry_scan_stops_at_the_declared_bound() {
     }
 
     let snapshot = context(None, vec![skills])
-        .snapshot(&header(temporary.path(), WorkspaceTrust::Untrusted), &[])
+        .snapshot(
+            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -400,7 +433,10 @@ async fn later_skill_root_overflow_is_not_mistaken_for_a_complete_catalog() {
     write_skill(&second, "extra", "extra", "extra", "BODY");
 
     let snapshot = context(None, vec![first, second])
-        .snapshot(&header(temporary.path(), WorkspaceTrust::Untrusted), &[])
+        .snapshot(
+            &header(temporary.path(), WorkspaceTrust::Untrusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -423,7 +459,7 @@ async fn project_skill_invocation_exposes_only_a_project_relative_source() {
     let snapshot = context(None, Vec::new())
         .snapshot(
             &header(&project, WorkspaceTrust::Trusted),
-            &[&human("/relative")],
+            &WorkspaceSkillRequests::from_messages(&[&human("/relative")]).unwrap(),
         )
         .await
         .unwrap();
@@ -457,7 +493,10 @@ async fn instruction_bounds_retain_the_most_specific_project_policy() {
     fs::write(cwd.join("AGENTS.md"), "MOST SPECIFIC POLICY").unwrap();
 
     let snapshot = context(None, Vec::new())
-        .snapshot(&header(&cwd, WorkspaceTrust::Trusted), &[])
+        .snapshot(
+            &header(&cwd, WorkspaceTrust::Trusted),
+            &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -483,7 +522,10 @@ async fn skills_above_the_source_limit_are_omitted_from_the_catalog() {
     let source = context(None, vec![skills]);
     let session = header(temporary.path(), WorkspaceTrust::Untrusted);
     let snapshot = source
-        .snapshot(&session, &[&human("/oversized")])
+        .snapshot(
+            &session,
+            &WorkspaceSkillRequests::from_messages(&[&human("/oversized")]).unwrap(),
+        )
         .await
         .unwrap();
     assert!(snapshot.complete);

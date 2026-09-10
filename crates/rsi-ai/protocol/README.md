@@ -10,6 +10,9 @@ invariants remain enforced by this package.
 Exact model-capacity facts are stored in `LanguageModelProfiles`, a bounded
 map shared by concrete adapters. Model identifiers must be explicit; an
 unknown model has no inferred or family-based fallback capacity.
+Remote model catalogs retain connection failures through `ModelsError::Api`.
+Their bounded pages validate count, strict order and exclusive continuation at
+the client boundary without acquiring provider invocation authority.
 
 `rsi-tools-protocol` owns freeform grammar and `rsi-media-protocol` owns
 locator-free image/audio metadata validation. This package imports those
@@ -62,3 +65,51 @@ invalid typed values.
 An Image request with a mask is an edit and therefore also contains at least
 one image input. Adapters reject unsupported edits during Prepare and never
 silently route a mask-bearing request to generation.
+
+
+## Portable provider transport
+
+The `portable` module owns framing for versioned native provider business
+protocols. A logical JSON control packet or binary body is fragmented across
+Meta Messages of at most 64 KiB payload plus a 9-byte header: kind (0 JSON, 1
+binary), little-endian u32 total length and u32 offset. Fragments have exact
+contiguous offsets, unchanged kind/length, no zero progress except a sole empty
+packet, and no trailing bytes. JSON packets admit at most MAX_REQUEST_BYTES plus
+256 KiB of provider metadata; binary packets use MAX_BINARY_CHUNK_BYTES. Receiving
+can narrow its JSON ceiling for metadata-only phases, and reserves the complete
+declared packet against the caller's explicit ByteBudget
+before allocation. Each decoder owns one incomplete packet; malformed input
+permanently closes that decoder and releases unfinished storage. Completed
+packets retain byte ownership through clones until the final owner drops.
+
+The framing preserves full validated request sizes without increasing Meta's
+per-Message limit. Credential values and Media bodies use binary packets and
+never enter JSON envelopes. Packet Debug reports only kind and retained byte
+length. Frame lengths are byte-retention bounds, not RSS promises. Semantic
+Language/Image DTO and terminal validation remain with their existing owners.
+
+
+The version-1 `rsi.ai.portable` control protocol uses closed Describe,
+PrepareLanguage/PrepareImage and StartLanguage/StartImage requests. Describe
+provides exact bounded model declarations, including the features usable during
+synchronous compatibility checks. Unsupported declared features are rejected
+before credential/media access. Prepare sends the caller's redacted snapshot
+and validated request; its response preserves that entire snapshot and returns
+at most 64 KiB of transient provider state. Start receives that frozen request
+and state exactly once through the consuming provider adapter. No native token
+table or pointer is persisted by this contract.
+
+Only Start admits Credential and Media requests. Their replies are binary
+packets. A Media request identifies a descriptor already present in the frozen
+input and a bounded offset/length; the bridge uses the original PrepareContext
+resolver, so complete request-weight admission and digest validation remain
+unchanged. Native errors carry only kind and dispatch status, without arbitrary
+provider diagnostic strings. Language events use their existing typed schema;
+Image headers carry output index/sequence/MIME and are followed by a separate
+binary packet for each output chunk. A final semantic event and clean Portable
+terminal are both required; extra events or EOF without terminal fail closed.
+
+Control JSON must preserve its typed serialization shape. This rejects unknown
+fields silently ignored by nested serde unit variants without changing the
+existing Language/Image public Rust shapes. Opaque provider state stays bounded
+by the normal AI JSON structure limits as well as its smaller byte ceiling.

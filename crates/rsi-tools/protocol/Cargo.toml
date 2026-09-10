@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
 async-trait.workspace = true
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-jobs = { path = "../../rsi-jobs/core" }

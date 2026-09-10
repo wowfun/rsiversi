@@ -14,6 +14,7 @@ doctest = false
 async-trait.workspace = true
 hex.workspace = true
 rsi-ai-openai-compatible = { path = "../openai-compatible" }
+rsi-ai-openai = { path = "../openai" }
 rsi-ai-protocol = { path = "../protocol" }
 rsi-ai-provider = { path = "../provider" }
 rsi-ai-transport = { path = "../transport" }
@@ -26,7 +27,7 @@ sha2.workspace = true
 [dev-dependencies]
 axum.workspace = true
 rsi-ai-testkit = { path = "../testkit" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [lints]
 workspace = true

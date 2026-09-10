@@ -1,278 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn fresh_empty_workspace_snapshot_publishes_no_replacement_or_tombstone() {
-    let store = Arc::new(MemoryStore::new());
-    let context = Arc::new(QueuedWorkspaceContext {
-        snapshots: Mutex::new(VecDeque::from([WorkspaceContextSnapshot {
-            complete: true,
-            instructions_sha256: "a".repeat(64),
-            instructions: None,
-            skill_catalog_sha256: "b".repeat(64),
-            skill_catalog: None,
-            invocations: Vec::new(),
-        }])),
-        calls: AtomicUsize::new(0),
-    });
-    let kernel = SessionKernel::recover_with_context_clock_and_limits(
-        store.clone(),
-        composition(),
-        context.clone(),
-        Arc::new(FixedClock),
-        KernelLimits::default(),
-    )
-    .await
-    .unwrap();
-    let worker = kernel.start_workers();
-    let session_id = SessionId::new("session-empty-workspace").unwrap();
-    let message_id = MessageId::new("message-empty-workspace").unwrap();
-    kernel
-        .submit_message(SubmitMessage {
-            session: fresh(header(session_id.as_str())),
-            message: mailbox_message(message_id.as_str()),
-            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
-        })
-        .await
-        .unwrap();
-    kernel
-        .claim_message(ClaimMessage {
-            session: kernel.prepare_resume(&session_id).await.unwrap(),
-            message_id,
-            activation_id: ActivationId::new("activation-empty-workspace").unwrap(),
-            path: AgentPath::root(),
-            turn_id: TurnId::new("turn-empty-workspace").unwrap(),
-            step_id: StepId::new("step-empty-workspace").unwrap(),
-        })
-        .await
-        .unwrap();
-
-    let page = store.read_facts(&session_id, 0, 16).await.unwrap();
-    assert_eq!(context.calls.load(Ordering::SeqCst), 1);
-    assert!(!page.facts.iter().any(|fact| matches!(
-        fact.body(),
-        SessionFactBody::InputMessageEntered {
-            source: rsi_agent_session_protocol::InputMessageSource::AgentInstructions { .. }
-                | rsi_agent_session_protocol::InputMessageSource::SkillCatalog { .. },
-            ..
-        }
-    )));
-    kernel.shutdown(worker).await.unwrap();
-}
-
-#[tokio::test]
-#[allow(clippy::too_many_lines)] // The refresh regression shows the complete replacement, tombstone, and deduplication sequence.
-async fn workspace_refresh_durably_tombstones_removed_instructions_and_suppresses_repeats() {
-    let store = Arc::new(MemoryStore::new());
-    let empty_catalog_digest = "c".repeat(64);
-    let context = Arc::new(QueuedWorkspaceContext {
-        snapshots: Mutex::new(VecDeque::from([
-            WorkspaceContextSnapshot {
-                complete: true,
-                instructions_sha256: "a".repeat(64),
-                instructions: Some("ACTIVE WORKSPACE INSTRUCTIONS".into()),
-                skill_catalog_sha256: empty_catalog_digest.clone(),
-                skill_catalog: None,
-                invocations: Vec::new(),
-            },
-            WorkspaceContextSnapshot {
-                complete: true,
-                instructions_sha256: "b".repeat(64),
-                instructions: None,
-                skill_catalog_sha256: empty_catalog_digest.clone(),
-                skill_catalog: None,
-                invocations: Vec::new(),
-            },
-            WorkspaceContextSnapshot {
-                complete: true,
-                instructions_sha256: "b".repeat(64),
-                instructions: None,
-                skill_catalog_sha256: empty_catalog_digest,
-                skill_catalog: None,
-                invocations: Vec::new(),
-            },
-        ])),
-        calls: AtomicUsize::new(0),
-    });
-    let kernel = SessionKernel::recover_with_context_clock_and_limits(
-        store.clone(),
-        composition(),
-        context.clone(),
-        Arc::new(FixedClock),
-        KernelLimits::default(),
-    )
-    .await
-    .unwrap();
-    let worker = kernel.start_workers();
-    let session_id = SessionId::new("session-workspace-refresh").unwrap();
-    let message_id = MessageId::new("message-workspace-refresh").unwrap();
-    kernel
-        .submit_message(SubmitMessage {
-            session: fresh(header(session_id.as_str())),
-            message: mailbox_message(message_id.as_str()),
-            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
-        })
-        .await
-        .unwrap();
-    kernel
-        .claim_message(ClaimMessage {
-            session: kernel.prepare_resume(&session_id).await.unwrap(),
-            message_id,
-            activation_id: ActivationId::new("activation-workspace-refresh").unwrap(),
-            path: AgentPath::root(),
-            turn_id: TurnId::new("turn-workspace-refresh").unwrap(),
-            step_id: StepId::new("step-workspace-refresh").unwrap(),
-        })
-        .await
-        .unwrap();
-    let _lease = kernel
-        .register("executor-workspace-refresh".into())
-        .unwrap();
-    let claim = kernel
-        .claim("executor-workspace-refresh", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(kernel.refresh_workspace_context(&claim).await.unwrap(), 1);
-    assert_eq!(kernel.refresh_workspace_context(&claim).await.unwrap(), 0);
-    assert_eq!(context.calls.load(Ordering::SeqCst), 3);
-
-    let page = store.read_facts(&session_id, 0, 16).await.unwrap();
-    let instruction_facts = page
-        .facts
-        .iter()
-        .filter_map(|fact| match fact.body() {
-            SessionFactBody::InputMessageEntered {
-                source:
-                    rsi_agent_session_protocol::InputMessageSource::AgentInstructions {
-                        sha256,
-                        tombstone,
-                        ..
-                    },
-                content,
-                ..
-            } => Some((sha256, tombstone, content)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(instruction_facts.len(), 2);
-    assert_eq!(instruction_facts[0].0, &"a".repeat(64));
-    assert!(!instruction_facts[0].1);
-    assert_eq!(instruction_facts[1].0, &"b".repeat(64));
-    assert!(instruction_facts[1].1);
-    assert!(matches!(
-        instruction_facts[1].2.as_slice(),
-        [AgentMessageContent::Text { text }]
-            if text.contains("earlier workspace instructions no longer apply")
-    ));
-    kernel.shutdown(worker).await.unwrap();
-}
-
-#[tokio::test]
-#[allow(clippy::too_many_lines)] // One restart sequence compares the complete persisted workspace projection.
-async fn cold_resume_restores_workspace_digests_without_duplicate_replacements() {
-    let store = Arc::new(MemoryStore::new());
-    let snapshot = WorkspaceContextSnapshot {
-        complete: true,
-        instructions_sha256: "a".repeat(64),
-        instructions: Some("STABLE WORKSPACE INSTRUCTIONS".into()),
-        skill_catalog_sha256: "b".repeat(64),
-        skill_catalog: Some("<available_skills>stable</available_skills>".into()),
-        invocations: Vec::new(),
-    };
-    let first_context = Arc::new(QueuedWorkspaceContext {
-        snapshots: Mutex::new(VecDeque::from([snapshot.clone()])),
-        calls: AtomicUsize::new(0),
-    });
-    let first = SessionKernel::recover_with_context_clock_and_limits(
-        store.clone(),
-        composition(),
-        first_context,
-        Arc::new(FixedClock),
-        KernelLimits::default(),
-    )
-    .await
-    .unwrap();
-    let first_worker = first.start_workers();
-    let session_id = SessionId::new("session-workspace-cold-digests").unwrap();
-    first
-        .submit_message(SubmitMessage {
-            session: fresh(header(session_id.as_str())),
-            message: mailbox_message("message-workspace-cold-first"),
-            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
-        })
-        .await
-        .unwrap();
-    let _first_lease = first
-        .register("executor-workspace-cold-first".into())
-        .unwrap();
-    let first_claim = first
-        .claim("executor-workspace-cold-first", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    first
-        .finish_activation_turn(&first_claim, &TurnOutcome::Completed)
-        .await
-        .unwrap()
-        .unwrap();
-    first.shutdown(first_worker).await.unwrap();
-
-    let second_context = Arc::new(QueuedWorkspaceContext {
-        snapshots: Mutex::new(VecDeque::from([snapshot])),
-        calls: AtomicUsize::new(0),
-    });
-    let second = SessionKernel::recover_with_context_clock_and_limits(
-        store.clone(),
-        composition(),
-        second_context,
-        Arc::new(FixedClock),
-        KernelLimits::default(),
-    )
-    .await
-    .unwrap();
-    let second_worker = second.start_workers();
-    second
-        .submit_message(SubmitMessage {
-            session: resume(&second, session_id.clone()).await,
-            message: mailbox_message("message-workspace-cold-second"),
-            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
-        })
-        .await
-        .unwrap();
-    let _second_lease = second
-        .register("executor-workspace-cold-second".into())
-        .unwrap();
-    let second_claim = second
-        .claim("executor-workspace-cold-second", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    second
-        .finish_activation_turn(&second_claim, &TurnOutcome::Completed)
-        .await
-        .unwrap()
-        .unwrap();
-
-    let facts = store.read_facts(&session_id, 0, 64).await.unwrap().facts;
-    assert_eq!(
-        facts
-            .iter()
-            .filter(|fact| matches!(
-                fact.body(),
-                SessionFactBody::InputMessageEntered {
-                    source: rsi_agent_session_protocol::InputMessageSource::AgentInstructions { .. }
-                        | rsi_agent_session_protocol::InputMessageSource::SkillCatalog { .. },
-                    ..
-                }
-            ))
-            .count(),
-        2
-    );
-    second.shutdown(second_worker).await.unwrap();
-}
-
-#[tokio::test]
 async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
     let store = Arc::new(MemoryStore::new());
     let first = kernel(store.clone()).await;
@@ -475,9 +203,8 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
         .unwrap()
         .unwrap();
     initial
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(
         initial
@@ -487,9 +214,8 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
         1
     );
     initial
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     initial.shutdown(initial_worker).await.unwrap();
 
@@ -588,9 +314,8 @@ async fn only_a_live_ancestor_can_interrupt_a_descendant_turn() {
         Err(TurnError::Invalid(message)) if message.contains("live ancestor caller")
     ));
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let _leaf_lease = kernel.register("executor-interrupt-leaf".into()).unwrap();
     let leaf_claim = kernel
@@ -680,6 +405,8 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                 resolved_after_seq: 0,
                 resolved_terminal_seq: 0,
                 terminal_prefix_sha256: empty_fact_prefix.clone(),
+                resolved_terminal_control_seq: 0,
+                terminal_control_prefix_sha256: "0".repeat(64),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
             };

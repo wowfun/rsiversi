@@ -133,10 +133,7 @@ pub(super) fn user_indexes(connection: &Connection) -> Result<BTreeSet<String>> 
         .map_err(sql_error)
 }
 
-pub(super) fn validate_session(
-    connection: &Connection,
-    session_id: &SessionId,
-) -> Result<SessionHeader> {
+pub(super) fn validate_session(connection: &Connection, session_id: &SessionId) -> Result<u64> {
     let (header, durable_seq) = read_session_header_row(connection, session_id)?;
 
     let (fact_count, maximum_sequence) = connection
@@ -235,16 +232,20 @@ pub(super) fn validate_session(
             "active activation parent disagrees with Header lineage".into(),
         ));
     }
-    validate_agent_message_index(connection, session_id)?;
-    validate_ready_index(connection, session_id)?;
-    validate_active_activation_index(connection, session_id)?;
-    Ok(header)
+    validate_agent_indexes(connection, &header)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static HEADER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) fn read_session_header_row(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<(SessionHeader, u64)> {
+    #[cfg(test)]
+    HEADER_READS.set(HEADER_READS.get() + 1);
     let (
         created_at_ms,
         durable_seq,
@@ -323,7 +324,7 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
                WHERE fact.session_id = ?1 AND (
                     turn.turn_id IS NULL
                     OR (fact.fact_kind = 'accepted' AND turn.accepted_seq != fact.seq)
-                    OR (fact.fact_kind = 'terminal' AND turn.terminal_seq != fact.seq)
+                    OR (fact.fact_kind = 'terminal' AND turn.terminal_seq IS NOT fact.seq)
                     OR (fact.fact_kind = 'event' AND (
                          fact.seq <= turn.accepted_seq
                          OR (turn.terminal_seq IS NOT NULL AND fact.seq >= turn.terminal_seq)
@@ -333,10 +334,14 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
                SELECT 1
                FROM turns AS turn
                WHERE turn.session_id = ?1 AND (
-                    (turn.terminal_seq IS NULL AND turn.terminal_prefix_sha256 IS NOT NULL)
+                    (turn.terminal_seq IS NULL AND (turn.terminal_prefix_sha256 IS NOT NULL
+                        OR turn.terminal_control_seq IS NOT NULL OR turn.terminal_control_prefix_sha256 IS NOT NULL))
                     OR (turn.terminal_seq IS NOT NULL AND
                         (turn.terminal_prefix_sha256 IS NULL
-                         OR length(turn.terminal_prefix_sha256) != 64))
+                         OR length(turn.terminal_prefix_sha256) != 64
+                         OR turn.terminal_control_seq IS NULL
+                         OR turn.terminal_control_prefix_sha256 IS NULL
+                         OR length(turn.terminal_control_prefix_sha256) != 64))
                     OR
                     NOT EXISTS (
                       SELECT 1 FROM facts AS accepted
@@ -424,46 +429,25 @@ pub(super) fn validate_database(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)] // One streaming verifier keeps canonical control order beside each indexed-row comparison.
-pub(super) fn validate_agent_message_index(
-    connection: &Connection,
-    selected: &SessionId,
-) -> Result<()> {
-    let mut accepted_messages = 0_u64;
-    let mut expected_messages = BTreeMap::new();
-    let mut statement = connection
-        .prepare(
-            "SELECT session_id, length(CAST(control_json AS BLOB)),
-                    CASE WHEN length(CAST(control_json AS BLOB)) <= ?1
-                         THEN control_json END
-             FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
-        )
-        .map_err(sql_error)?;
-    let rows = statement
-        .query_map(
-            params![
-                i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                    .expect("Agent control bound fits SQLite INTEGER"),
-                selected.as_str()
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .map_err(sql_error)?;
-    for row in rows {
-        let (encoded_session_id, length, json) = row.map_err(sql_error)?;
-        let session_id = SessionId::new(encoded_session_id)
-            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        let record: AgentControlRecord = decode_projected_json(
-            "Agent control record",
-            (length, json),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
+#[derive(Default)]
+struct MailboxProjection {
+    accepted_messages: u64,
+    expected_messages: BTreeMap<(SessionId, MessageId), StoreAgentMessage>,
+}
+
+impl MailboxProjection {
+    #[allow(clippy::too_many_lines)] // Keep each ordered control transition projection together.
+    fn apply(
+        &mut self,
+        connection: &Connection,
+        header: &SessionHeader,
+        record: &AgentControlRecord,
+    ) -> Result<()> {
+        let session_id = header.session_id();
+        let Self {
+            accepted_messages,
+            expected_messages,
+        } = self;
         match record.body() {
             AgentControlRecordBody::MessageAccepted {
                 message,
@@ -473,12 +457,16 @@ pub(super) fn validate_agent_message_index(
                 target,
                 wake_required,
             } => {
-                if derived_session_root(connection, &session_id)? != *root_session_id {
+                if header
+                    .fork_origin()
+                    .map_or(session_id, |origin| &origin.root_session_id)
+                    != root_session_id
+                {
                     return Err(StoreError::Corrupt(
                         "canonical Agent message names a foreign root".into(),
                     ));
                 }
-                accepted_messages = accepted_messages.checked_add(1).ok_or_else(|| {
+                *accepted_messages = accepted_messages.checked_add(1).ok_or_else(|| {
                     StoreError::Corrupt("canonical mailbox count overflowed".into())
                 })?;
                 if expected_messages
@@ -570,7 +558,9 @@ pub(super) fn validate_agent_message_index(
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
         if let AgentControlRecordBody::MessageClaimed { message_id, .. }
         | AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
@@ -578,7 +568,7 @@ pub(super) fn validate_agent_message_index(
             let expected = expected_messages
                 .remove(&(session_id.clone(), message_id.clone()))
                 .expect("validated closing message");
-            if read_indexed_agent_message(connection, &session_id, message_id)? != expected {
+            if read_indexed_agent_message(connection, session_id, message_id)? != expected {
                 return Err(StoreError::Corrupt(
                     "mailbox index final projection differs from canonical controls".into(),
                 ));
@@ -589,29 +579,36 @@ pub(super) fn validate_agent_message_index(
                 "canonical pending mailbox exceeds its count bound".into(),
             ));
         }
+        Ok(())
     }
-    drop(statement);
-    for ((session_id, message_id), expected) in expected_messages {
-        if read_indexed_agent_message(connection, &session_id, &message_id)? != expected {
+    fn finish(self, connection: &Connection, selected: &SessionId) -> Result<()> {
+        let Self {
+            accepted_messages,
+            expected_messages,
+        } = self;
+
+        for ((session_id, message_id), expected) in expected_messages {
+            if read_indexed_agent_message(connection, &session_id, &message_id)? != expected {
+                return Err(StoreError::Corrupt(
+                    "mailbox index final projection differs from canonical controls".into(),
+                ));
+            }
+        }
+        let indexed_messages = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_messages WHERE session_id = ?1",
+                [selected.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sql_error)
+            .and_then(|count| decode_u64("indexed mailbox count", count))?;
+        if indexed_messages != accepted_messages {
             return Err(StoreError::Corrupt(
-                "mailbox index final projection differs from canonical controls".into(),
+                "mailbox index cardinality differs from canonical controls".into(),
             ));
         }
+        Ok(())
     }
-    let indexed_messages = connection
-        .query_row(
-            "SELECT COUNT(*) FROM agent_messages WHERE session_id = ?1",
-            [selected.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(sql_error)
-        .and_then(|count| decode_u64("indexed mailbox count", count))?;
-    if indexed_messages != accepted_messages {
-        return Err(StoreError::Corrupt(
-            "mailbox index cardinality differs from canonical controls".into(),
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn read_indexed_agent_message(
@@ -648,45 +645,16 @@ pub(super) fn read_indexed_agent_message(
         })
 }
 
-#[allow(clippy::too_many_lines)] // Offline verification keeps every activation transition in one ordered projection scan.
-pub(super) fn validate_active_activation_index(
-    connection: &Connection,
-    selected: &SessionId,
-) -> Result<()> {
-    let mut expected = BTreeMap::<SessionId, StoreActiveActivation>::new();
-    let mut statement = connection
-        .prepare(
-            "SELECT session_id, length(CAST(control_json AS BLOB)),
-                    CASE WHEN length(CAST(control_json AS BLOB)) <= ?1
-                         THEN control_json END
-             FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
-        )
-        .map_err(sql_error)?;
-    let rows = statement
-        .query_map(
-            params![
-                i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                    .expect("control record bound fits SQLite INTEGER"),
-                selected.as_str()
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .map_err(sql_error)?;
-    for row in rows {
-        let (encoded_session_id, encoded_len, json) = row.map_err(sql_error)?;
-        let session_id = SessionId::new(encoded_session_id)
-            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        let record = decode_projected_json::<AgentControlRecord>(
-            "Agent control record",
-            (encoded_len, json),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
+#[derive(Default)]
+struct ActivationProjection {
+    expected: BTreeMap<SessionId, StoreActiveActivation>,
+}
+
+impl ActivationProjection {
+    #[allow(clippy::too_many_lines)] // Keep each ordered control transition projection together.
+    fn apply(&mut self, header: &SessionHeader, record: &AgentControlRecord) -> Result<()> {
+        let session_id = header.session_id().clone();
+        let Self { expected } = self;
         match record.body() {
             AgentControlRecordBody::ActivationStarted {
                 activation_id,
@@ -694,9 +662,8 @@ pub(super) fn validate_active_activation_index(
                 root_session_id,
                 path,
             } => {
-                let (header, _) = read_session_header_row(connection, &session_id)?;
                 rsi_agent_store_protocol::validate_activation_lineage(
-                    &header,
+                    header,
                     root_session_id,
                     parent_session_id.as_ref(),
                     path,
@@ -839,75 +806,81 @@ pub(super) fn validate_active_activation_index(
                 ..
             }
             | AgentControlRecordBody::MessagePromoted { .. }
-            | AgentControlRecordBody::MessageDiscarded { .. } => {}
+            | AgentControlRecordBody::MessageDiscarded { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
+        Ok(())
     }
+    fn finish(self, connection: &Connection, selected: &SessionId) -> Result<()> {
+        let Self { expected } = self;
 
-    let mut actual = BTreeMap::new();
-    let mut statement = connection
-        .prepare(
-            "SELECT session_id, activation_id, parent_session_id, turn_id, phase,
+        let mut actual = BTreeMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id, activation_id, parent_session_id, turn_id, phase,
                     completion_reserved_bytes
              FROM active_activations WHERE session_id = ?1",
-        )
-        .map_err(sql_error)?;
-    let rows = statement
-        .query_map([selected.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-            ))
-        })
-        .map_err(sql_error)?;
-    for row in rows {
-        let row = row.map_err(sql_error)?;
-        let session_id =
-            SessionId::new(row.0).map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        let phase = match row.4.as_str() {
-            "running" => StoreActivationPhase::Running,
-            "parked" => StoreActivationPhase::Parked,
-            "waiting" => StoreActivationPhase::WaitingForDescendants,
-            _ => {
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([selected.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        for row in rows {
+            let row = row.map_err(sql_error)?;
+            let session_id =
+                SessionId::new(row.0).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let phase = match row.4.as_str() {
+                "running" => StoreActivationPhase::Running,
+                "parked" => StoreActivationPhase::Parked,
+                "waiting" => StoreActivationPhase::WaitingForDescendants,
+                _ => {
+                    return Err(StoreError::Corrupt(
+                        "active activation phase is invalid".into(),
+                    ));
+                }
+            };
+            let active = StoreActiveActivation {
+                activation_id: rsi_agent_session_protocol::ActivationId::new(row.1)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                parent_session_id: row
+                    .2
+                    .map(SessionId::new)
+                    .transpose()
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                turn_id: row
+                    .3
+                    .map(TurnId::new)
+                    .transpose()
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                phase,
+                completion_reserved_bytes: row
+                    .5
+                    .map(|value| decode_u64("completion reservation", value))
+                    .transpose()?,
+            };
+            if actual.insert(session_id, active).is_some() {
                 return Err(StoreError::Corrupt(
-                    "active activation phase is invalid".into(),
+                    "active activation index repeats a session".into(),
                 ));
             }
-        };
-        let active = StoreActiveActivation {
-            activation_id: rsi_agent_session_protocol::ActivationId::new(row.1)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-            parent_session_id: row
-                .2
-                .map(SessionId::new)
-                .transpose()
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-            turn_id: row
-                .3
-                .map(TurnId::new)
-                .transpose()
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-            phase,
-            completion_reserved_bytes: row
-                .5
-                .map(|value| decode_u64("completion reservation", value))
-                .transpose()?,
-        };
-        if actual.insert(session_id, active).is_some() {
+        }
+        if actual != expected {
             return Err(StoreError::Corrupt(
-                "active activation index repeats a session".into(),
+                "active activation index differs from canonical controls".into(),
             ));
         }
+        Ok(())
     }
-    if actual != expected {
-        return Err(StoreError::Corrupt(
-            "active activation index differs from canonical controls".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_lines)] // One canonical scan compares the complete Fact-derived session projection.
@@ -915,28 +888,13 @@ pub(super) fn validate_canonical_fact_prefix(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<()> {
-    let (expected_digest, instructions_sha256, skill_catalog_sha256) = connection
+    let expected_digest = connection
         .query_row(
-            "SELECT fact_prefix_sha256, workspace_instructions_sha256,
-                    workspace_skill_catalog_sha256
-             FROM sessions WHERE session_id = ?1",
+            "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
             [session_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
+            |row| row.get::<_, String>(0),
         )
         .map_err(sql_error)?;
-    let expected_workspace_context = StoreWorkspaceContextState {
-        instructions_sha256,
-        skill_catalog_sha256,
-        durable_fact_seq: 0,
-    };
-    expected_workspace_context.validate()?;
-    let mut actual_workspace_context = StoreWorkspaceContextState::default();
     let mut digest = EMPTY_FACT_PREFIX_DIGEST;
     let mut next_sequence = 1_u64;
     let mut statement = connection
@@ -979,20 +937,6 @@ pub(super) fn validate_canonical_fact_prefix(
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
         })?;
-        if let SessionFactBody::InputMessageEntered { source, .. } = fact.body() {
-            match source {
-                InputMessageSource::AgentInstructions { sha256, .. } => {
-                    actual_workspace_context.instructions_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::SkillCatalog { sha256 } => {
-                    actual_workspace_context.skill_catalog_sha256 = Some(sha256.clone());
-                }
-                InputMessageSource::Human { .. }
-                | InputMessageSource::Agent { .. }
-                | InputMessageSource::Completion { .. }
-                | InputMessageSource::UserSkillInvocation { .. } => {}
-            }
-        }
         if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
             let terminal_digest = connection
                 .query_row(
@@ -1005,7 +949,9 @@ pub(super) fn validate_canonical_fact_prefix(
                     ],
                     |row| row.get::<_, Option<String>>(0),
                 )
+                .optional()
                 .map_err(sql_error)?
+                .flatten()
                 .ok_or_else(|| {
                     StoreError::Corrupt("terminal turn lacks its prefix digest".into())
                 })?;
@@ -1022,15 +968,6 @@ pub(super) fn validate_canonical_fact_prefix(
     if hex::encode(digest) != expected_digest {
         return Err(StoreError::Corrupt(
             "Fact-prefix digest differs from the canonical Fact stream".into(),
-        ));
-    }
-    if actual_workspace_context.instructions_sha256
-        != expected_workspace_context.instructions_sha256
-        || actual_workspace_context.skill_catalog_sha256
-            != expected_workspace_context.skill_catalog_sha256
-    {
-        return Err(StoreError::Corrupt(
-            "workspace-context digest index differs from the canonical Fact stream".into(),
         ));
     }
     Ok(())
@@ -1081,6 +1018,7 @@ pub(super) fn validate_canonical_control_prefix(
         digest = advance_control_prefix_digest(digest, &record).map_err(|error| {
             StoreError::Corrupt(format!("stored Agent control record is invalid: {error}"))
         })?;
+        validate_terminal_control(connection, session_id, &record, digest)?;
         next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
             StoreError::Corrupt("Agent control sequence overflowed during audit".into())
         })?;
@@ -1093,10 +1031,10 @@ pub(super) fn validate_canonical_control_prefix(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)] // Offline verification derives and compares the complete ready index atomically.
-pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId) -> Result<()> {
-    let mut expected = BTreeMap::<(String, String), (String, u64, u64, String)>::new();
-    let mut accepted_roots = BTreeMap::<
+#[derive(Default)]
+struct ReadyProjection {
+    expected: BTreeMap<(String, String), (String, u64, u64, String)>,
+    accepted_roots: BTreeMap<
         (String, String),
         (
             String,
@@ -1104,38 +1042,16 @@ pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId
             u64,
             u64,
         ),
-    >::new();
-    let mut statement = connection
-        .prepare(
-            "SELECT session_id, length(CAST(control_json AS BLOB)),
-                    CASE WHEN length(CAST(control_json AS BLOB)) <= ?1
-                         THEN control_json END
-             FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
-        )
-        .map_err(sql_error)?;
-    let rows = statement
-        .query_map(
-            params![
-                i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                    .expect("control bound fits SQLite INTEGER"),
-                selected.as_str()
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .map_err(sql_error)?;
-    for row in rows {
-        let (session_id, length, json) = row.map_err(sql_error)?;
-        let record: AgentControlRecord = decode_projected_json(
-            "Agent control record",
-            (length, json),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
+    >,
+}
+
+impl ReadyProjection {
+    #[allow(clippy::too_many_lines)] // Keep each ordered control transition projection together.
+    fn apply(&mut self, session_id: &str, record: &AgentControlRecord) -> Result<()> {
+        let Self {
+            expected,
+            accepted_roots,
+        } = self;
         match record.body() {
             AgentControlRecordBody::MessageAccepted {
                 message,
@@ -1145,7 +1061,7 @@ pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId
                 target,
                 wake_required,
             } => {
-                let key = (session_id.clone(), message.message_id.to_string());
+                let key = (session_id.to_owned(), message.message_id.to_string());
                 if accepted_roots
                     .insert(
                         key.clone(),
@@ -1163,7 +1079,7 @@ pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId
                     ));
                 }
                 if !wake_required {
-                    continue;
+                    return Ok(());
                 }
                 if expected
                     .insert(
@@ -1183,7 +1099,7 @@ pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId
                 }
             }
             AgentControlRecordBody::MessagePromoted { message_id } => {
-                let key = (session_id.clone(), message_id.to_string());
+                let key = (session_id.to_owned(), message_id.to_string());
                 let root_session_id = accepted_roots.get(&key).ok_or_else(|| {
                     StoreError::Corrupt("ready promotion has no accepted message".into())
                 })?;
@@ -1212,7 +1128,7 @@ pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId
             }
             AgentControlRecordBody::MessageClaimed { message_id, .. }
             | AgentControlRecordBody::MessageDiscarded { message_id, .. } => {
-                let key = (session_id.clone(), message_id.to_string());
+                let key = (session_id.to_owned(), message_id.to_string());
                 expected.remove(&key);
                 accepted_roots.remove(&key);
             }
@@ -1221,49 +1137,156 @@ pub(super) fn validate_ready_index(connection: &Connection, selected: &SessionId
             | AgentControlRecordBody::ActivationSettled { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::CompletionReserved { .. } => {}
+            | AgentControlRecordBody::CompletionReserved { .. }
+            | AgentControlRecordBody::TurnBoundaryRecorded { .. }
+            | AgentControlRecordBody::DomainStateCommitted { .. } => {}
         }
+        Ok(())
     }
+    fn finish(self, connection: &Connection, selected: &SessionId) -> Result<()> {
+        let Self { expected, .. } = self;
 
-    let actual = {
-        let mut statement = connection
-            .prepare(
-                "SELECT session_id, message_id, root_session_id, ready_control_seq,
+        let actual = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT session_id, message_id, root_session_id, ready_control_seq,
                         timestamp_ms, target
                  FROM ready_messages WHERE session_id = ?1 ORDER BY message_id",
-            )
-            .map_err(sql_error)?;
-        statement
-            .query_map([selected.as_str()], |row| {
-                Ok((
-                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-                    (
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
-                    ),
-                ))
-            })
-            .map_err(sql_error)?
-            .map(|row| {
-                let (key, (root, sequence, timestamp, target)) = row.map_err(sql_error)?;
-                Ok((
-                    key,
-                    (
-                        root,
-                        decode_u64("ready control sequence", sequence)?,
-                        decode_u64("ready timestamp", timestamp)?,
-                        target,
-                    ),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?
-    };
-    if actual != expected {
+                )
+                .map_err(sql_error)?;
+            statement
+                .query_map([selected.as_str()], |row| {
+                    Ok((
+                        (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                        (
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
+                        ),
+                    ))
+                })
+                .map_err(sql_error)?
+                .map(|row| {
+                    let (key, (root, sequence, timestamp, target)) = row.map_err(sql_error)?;
+                    Ok((
+                        key,
+                        (
+                            root,
+                            decode_u64("ready control sequence", sequence)?,
+                            decode_u64("ready timestamp", timestamp)?,
+                            target,
+                        ),
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?
+        };
+        if actual != expected {
+            return Err(StoreError::Corrupt(
+                "ready-message index differs from the canonical control streams".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Decode each bounded canonical control once and feed all index projections.
+pub(super) fn validate_agent_indexes(
+    connection: &Connection,
+    header: &SessionHeader,
+) -> Result<u64> {
+    let selected = header.session_id();
+    let mut mailbox = MailboxProjection::default();
+    let mut ready = ReadyProjection::default();
+    let mut activation = ActivationProjection::default();
+    let mut domains = super::domain::Projection::default();
+    let mut decoded = 0_u64;
+    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
+    let mut terminals = 0_u64;
+    let mut statement = connection
+        .prepare(
+            "SELECT length(CAST(control_json AS BLOB)),
+                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq
+         FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
+        )
+        .map_err(sql_error)?;
+    let mut rows = statement
+        .query(params![
+            i64::try_from(MAXIMUM_SESSION_FACT_BYTES).expect("control bound fits SQLite INTEGER"),
+            selected.as_str(),
+        ])
+        .map_err(sql_error)?;
+    while let Some(row) = rows.next().map_err(sql_error)? {
+        let record: AgentControlRecord = decode_projected_json(
+            "Agent control record",
+            (
+                row.get(0).map_err(sql_error)?,
+                row.get(1).map_err(sql_error)?,
+            ),
+            MAXIMUM_SESSION_FACT_BYTES,
+        )?;
+        decoded += 1;
+        if record.seq() != decoded
+            || decode_u64("control row sequence", row.get(2).map_err(sql_error)?)? != decoded
+        {
+            return Err(StoreError::Corrupt(
+                "control JSON sequence differs from its canonical row".into(),
+            ));
+        }
+        digest = advance_control_prefix_digest(digest, &record)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if validate_terminal_control(connection, selected, &record, digest)? {
+            terminals += 1;
+        }
+        mailbox.apply(connection, header, &record)?;
+        ready.apply(selected.as_str(), &record)?;
+        activation.apply(header, &record)?;
+        domains.apply(connection, selected, &record)?;
+    }
+    let indexed_terminals = connection
+        .query_row(
+            "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL",
+            [selected.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(sql_error)?;
+    if terminals != decode_u64("terminal index count", indexed_terminals)? {
         return Err(StoreError::Corrupt(
-            "ready-message index differs from the canonical control streams".into(),
+            "terminal index has no unique canonical control marker".into(),
         ));
     }
-    Ok(())
+    mailbox.finish(connection, selected)?;
+    ready.finish(connection, selected)?;
+    activation.finish(connection, selected)?;
+    domains.finish(connection, selected)?;
+    Ok(decoded)
+}
+
+/// Checks each marker against the sole derived index; counts detect indexed terminals without a marker.
+fn validate_terminal_control(
+    connection: &Connection,
+    session_id: &SessionId,
+    record: &AgentControlRecord,
+    digest: [u8; 32],
+) -> Result<bool> {
+    let AgentControlRecordBody::TurnBoundaryRecorded {
+        turn_id,
+        terminal_fact_seq,
+    } = record.body()
+    else {
+        return Ok(false);
+    };
+    let matches = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1 AND turn_id = ?2
+            AND terminal_seq = ?3 AND terminal_control_seq = ?4 AND terminal_control_prefix_sha256 = ?5)",
+        params![session_id.as_str(), turn_id.as_str(), sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?,
+            sqlite_u64("terminal control sequence", record.seq())?, hex::encode(digest)],
+        |row| row.get::<_, bool>(0),
+    ).map_err(sql_error)?;
+    if !matches {
+        return Err(StoreError::Corrupt(
+            "terminal index differs from the canonical Fact/control boundary".into(),
+        ));
+    }
+    Ok(true)
 }

@@ -1,28 +1,15 @@
 use super::*;
 
 pub(super) async fn run_host(command: HostCommand) -> u8 {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = command;
-        return report_error(&RsiError::Boot(
-            "Session Host daemon mode requires Linux process-generation fencing; named applications use embedded mode on this platform"
-                .into(),
-        ));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let result = match command.operation {
-            HostOperation::Serve => {
-                serve_host_daemon(&command.profile, command.detached_child).await
-            }
-            HostOperation::Start => start_host_daemon(&command.profile).await,
-            HostOperation::Restart => restart_host_daemon(&command.profile, command.force).await,
-            HostOperation::Stop => stop_host_daemon(command.force).await,
-            HostOperation::Status => status_host_daemon().await,
-            HostOperation::Reload => reload_host_daemon(),
-        };
-        result.map_or_else(|error| report_error(&error), |()| 0)
-    }
+    let result = match command.operation {
+        HostOperation::Serve => serve_host_daemon(&command.profile, command.detached_child).await,
+        HostOperation::Start => start_host_daemon(&command.profile).await,
+        HostOperation::Restart => restart_host_daemon(&command.profile, command.force).await,
+        HostOperation::Stop => stop_host_daemon(command.force).await,
+        HostOperation::Status => status_host_daemon().await,
+        HostOperation::Reload => reload_host_daemon(),
+    };
+    result.map_or_else(|error| report_error(&error), |()| 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -56,7 +43,7 @@ pub(super) async fn stop_reload_task(task: &mut Option<JoinHandle<()>>) {
     {
         let _ = writeln!(
             std::io::stderr(),
-            "Session Host reload task failed during shutdown: {error}"
+            "Service Host reload task failed during shutdown: {error}"
         );
     }
 }
@@ -88,12 +75,12 @@ where
 fn acquire_daemon_owner(
     paths: &rsi_host::HostPaths,
     detached_child: bool,
-) -> rsi::Result<rsi_session_host::HostOwnerLease> {
+) -> rsi::Result<rsi_service_host::HostOwnerLease> {
     if detached_child {
         rustix::process::setsid()
-            .map_err(|error| RsiError::Boot(format!("detach Session Host daemon: {error}")))?;
+            .map_err(|error| RsiError::Boot(format!("detach Service Host daemon: {error}")))?;
     }
-    let host_paths = SessionHostPaths::from_host_paths(paths)
+    let host_paths = ServiceHostPaths::from_host_paths(paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     if detached_child {
         use std::os::fd::AsFd as _;
@@ -104,9 +91,9 @@ fn acquire_daemon_owner(
             .as_fd()
             .try_clone_to_owned()
             .map_err(|error| RsiError::Boot(format!("inherit owner lease: {error}")))?;
-        rsi_session_host::HostOwnerLease::adopt_startup_file(host_paths, file.into())
+        rsi_service_host::HostOwnerLease::adopt_startup_file(host_paths, file.into())
     } else {
-        rsi_session_host::HostOwnerLease::try_acquire(host_paths)
+        rsi_service_host::HostOwnerLease::try_acquire(host_paths)
     }
     .map_err(|error| RsiError::Boot(error.to_string()))
 }
@@ -129,8 +116,8 @@ pub(super) async fn serve_host_daemon(
     let profile = ProfileCatalog::new(paths.clone())
         .host(profile_id)
         .map_err(profile_management_error)?;
-    let (composition, presets) = prepare_standard_composition(paths).await?;
-    let daemon = match StandardSessionDaemon::start(composition, &profile, owner_lease).await {
+    let (composition, presets) = prepare_standard_composition(None, paths).await?;
+    let daemon = match StandardServiceDaemon::start(composition, &profile, owner_lease).await {
         Ok(daemon) => daemon,
         Err(error) => {
             let _ = presets.shutdown().await;
@@ -141,7 +128,7 @@ pub(super) async fn serve_host_daemon(
     let diagnostics = daemon.diagnostics();
     let cancellation = CancellationToken::new();
     let diagnostics_stop = CancellationToken::new();
-    let diagnostics_task = tokio::spawn(log_session_host_diagnostics(
+    let diagnostics_task = tokio::spawn(log_service_host_diagnostics(
         diagnostics,
         diagnostics_stop.clone(),
     ));
@@ -161,9 +148,7 @@ pub(super) async fn serve_host_daemon(
         .await
         {
             DaemonControlEvent::Daemon(result) => {
-                break result.map_err(|error| {
-                    RsiError::Boot(format!("Session Host task failed: {error}"))
-                })?;
+                break result;
             }
             DaemonControlEvent::Stop => {
                 reload_open = false;
@@ -172,7 +157,7 @@ pub(super) async fn serve_host_daemon(
             }
             DaemonControlEvent::ReloadSignal(signal) => {
                 if signal.is_none() {
-                    let _ = writeln!(std::io::stderr(), "Session Host SIGHUP listener closed");
+                    let _ = writeln!(std::io::stderr(), "Service Host SIGHUP listener closed");
                     reload_open = false;
                 } else {
                     reload_task = Some(tokio::spawn(reload_host_profile(Arc::clone(&running))));
@@ -182,50 +167,74 @@ pub(super) async fn serve_host_daemon(
                 if let Err(error) = result {
                     let _ = writeln!(
                         std::io::stderr(),
-                        "Session Host reload task failed: {error}"
+                        "Service Host reload task failed: {error}"
                     );
                 }
                 reload_task = None;
             }
         }
     };
-    stop_reload_task(&mut reload_task).await;
+    finish_daemon_shutdown(
+        daemon_result,
+        &mut reload_task,
+        diagnostics_stop,
+        diagnostics_task,
+        async {
+            let shutdown = presets.shutdown().await;
+            if !shutdown.is_clean() {
+                return Err(RsiError::Boot(format!(
+                    "Agent-preset daemon shutdown reported {} cleanup failures",
+                    shutdown.report().total_failures()
+                )));
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn finish_daemon_shutdown(
+    daemon_result: std::result::Result<rsi::Result<()>, tokio::task::JoinError>,
+    reload_task: &mut Option<JoinHandle<()>>,
+    diagnostics_stop: CancellationToken,
+    diagnostics_task: JoinHandle<()>,
+    presets: impl std::future::Future<Output = rsi::Result<()>>,
+) -> rsi::Result<()> {
+    stop_reload_task(reload_task).await;
     diagnostics_stop.cancel();
     if let Err(error) = diagnostics_task.await {
         let _ = writeln!(
             std::io::stderr(),
-            "Session Host diagnostics task failed during shutdown: {error}"
+            "Service Host diagnostics task failed during shutdown: {error}"
         );
     }
-    let shutdown = presets.shutdown().await;
-    daemon_result?;
-    if !shutdown.is_clean() {
-        return Err(RsiError::Boot(format!(
-            "Agent-preset daemon shutdown reported {} cleanup failures",
-            shutdown.report().total_failures()
-        )));
-    }
-    Ok(())
+    let shutdown = presets.await;
+    daemon_result
+        .map_err(|error| RsiError::Boot(format!("Service Host task failed: {error}")))??;
+    shutdown
 }
 
 #[cfg(target_os = "linux")]
 async fn reload_host_profile(running: Arc<rsi::RunningRsi>) {
     match running.reload().await {
         Ok(outcome) => {
-            let _ = writeln!(std::io::stderr(), "Session Host reload: {outcome:?}");
+            let _ = writeln!(std::io::stderr(), "Service Host reload: {outcome:?}");
         }
         Err(error) => {
-            let _ = writeln!(std::io::stderr(), "Session Host reload failed: {error}");
+            let _ = writeln!(std::io::stderr(), "Service Host reload failed: {error}");
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn log_session_host_diagnostics(
-    diagnostics: SessionHostDiagnostics,
+pub(super) async fn log_service_host_diagnostics(
+    mut generations: tokio::sync::watch::Receiver<ServiceHostDiagnostics>,
     stop: CancellationToken,
 ) {
-    let mut previous = SessionHostDiagnosticsSnapshot::default();
+    let mut diagnostics = generations.borrow_and_update().clone();
+    let mut generations_open = true;
+    let mut previous = ServiceHostDiagnosticsSnapshot::default();
     let mut interval = tokio::time::interval_at(
         tokio::time::Instant::now() + HOST_DIAGNOSTICS_INTERVAL,
         HOST_DIAGNOSTICS_INTERVAL,
@@ -234,9 +243,19 @@ pub(super) async fn log_session_host_diagnostics(
     loop {
         tokio::select! {
             biased;
+            changed = generations.changed(), if generations_open => {
+                if changed.is_err() {
+                    generations_open = false;
+                    continue;
+                }
+                let delta = diagnostics.snapshot().saturating_delta_since(previous);
+                let _ = writeln!(std::io::stderr(), "{}", format_service_host_diagnostics(delta, true));
+                diagnostics = generations.borrow_and_update().clone();
+                previous = ServiceHostDiagnosticsSnapshot::default();
+            }
             () = stop.cancelled() => {
                 let delta = diagnostics.snapshot().saturating_delta_since(previous);
-                let _ = writeln!(std::io::stderr(), "{}", format_session_host_diagnostics(delta, true));
+                let _ = writeln!(std::io::stderr(), "{}", format_service_host_diagnostics(delta, true));
                 return;
             }
             _ = interval.tick() => {
@@ -244,7 +263,7 @@ pub(super) async fn log_session_host_diagnostics(
                 let delta = current.saturating_delta_since(previous);
                 previous = current;
                 if delta.has_anomaly() {
-                    let _ = writeln!(std::io::stderr(), "{}", format_session_host_diagnostics(delta, false));
+                    let _ = writeln!(std::io::stderr(), "{}", format_service_host_diagnostics(delta, false));
                 }
             }
         }
@@ -252,21 +271,22 @@ pub(super) async fn log_session_host_diagnostics(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn format_session_host_diagnostics(
-    delta: SessionHostDiagnosticsSnapshot,
+pub(super) fn format_service_host_diagnostics(
+    delta: ServiceHostDiagnosticsSnapshot,
     final_delta: bool,
 ) -> String {
     format!(
-        "Session Host diagnostics final={final_delta} accepted_connections={} accept_errors={} peer_credential_errors={} foreign_uid_rejections={} capacity_rejections={} handshake_rejections={} handshake_failures={} request_failures={} response_failures={} connection_task_panics={} drain_aborted_connections={}",
+        "Service Host diagnostics final={final_delta} accepted_connections={} accept_errors={} peer_credential_errors={} foreign_uid_rejections={} capacity_rejections={} service_failures={} api_rejected_requests={} api_failed_requests={} api_connection_failures={} api_tls_failures={} connection_task_panics={} drain_aborted_connections={}",
         delta.accepted_connections,
         delta.accept_errors,
         delta.peer_credential_errors,
         delta.foreign_uid_rejections,
         delta.capacity_rejections,
-        delta.handshake_rejections,
-        delta.handshake_failures,
-        delta.request_failures,
-        delta.response_failures,
+        delta.service_failures,
+        delta.api.rejected_requests,
+        delta.api.failed_requests,
+        delta.api.connection_failures,
+        delta.api.tls_failures,
         delta.connection_task_panics,
         delta.drain_aborted_connections,
     )
@@ -280,7 +300,7 @@ pub(super) async fn expected_host_launch(
     let profile = ProfileCatalog::new(paths.clone())
         .host(profile_id)
         .map_err(profile_management_error)?;
-    let (composition, presets) = prepare_standard_composition(paths.clone()).await?;
+    let (composition, presets) = prepare_standard_composition(None, paths.clone()).await?;
     let preview = composition.preview_host(&profile)?;
     let shutdown = presets.shutdown().await;
     if !shutdown.is_clean() {
@@ -292,7 +312,7 @@ pub(super) async fn expected_host_launch(
 }
 
 #[cfg(target_os = "linux")]
-fn open_daemon_log(host_paths: &SessionHostPaths) -> rsi::Result<std::fs::File> {
+fn open_daemon_log(host_paths: &ServiceHostPaths) -> rsi::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     options
@@ -300,25 +320,25 @@ fn open_daemon_log(host_paths: &SessionHostPaths) -> rsi::Result<std::fs::File> 
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let log = options
         .open(host_paths.owner_log())
-        .map_err(|error| RsiError::Boot(format!("open Session Host log: {error}")))?;
+        .map_err(|error| RsiError::Boot(format!("open Service Host log: {error}")))?;
     if !log
         .metadata()
         .map_err(|error| RsiError::Boot(error.to_string()))?
         .is_file()
     {
         return Err(RsiError::Boot(
-            "Session Host log is not a regular file".into(),
+            "Service Host log is not a regular file".into(),
         ));
     }
     log.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| RsiError::Boot(format!("chmod Session Host log: {error}")))?;
+        .map_err(|error| RsiError::Boot(format!("chmod Service Host log: {error}")))?;
     Ok(log)
 }
 
 #[cfg(target_os = "linux")]
 pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result<()> {
     let (paths, expected_key) = expected_host_launch(profile_id).await?;
-    let host_paths = SessionHostPaths::from_host_paths(&paths)
+    let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     if let Some(metadata) = host_paths
         .read_metadata()
@@ -326,16 +346,16 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
         && owner_process_is_current(&metadata).map_err(|error| RsiError::Boot(error.to_string()))?
     {
         return Err(RsiError::Boot(format!(
-            "Session Host owner is already active in {:?} mode",
+            "Service Host owner is already active in {:?} mode",
             metadata.mode
         )));
     }
-    let owner_lease = rsi_session_host::HostOwnerLease::try_acquire(host_paths.clone())
+    let owner_lease = rsi_service_host::HostOwnerLease::try_acquire(host_paths.clone())
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let log = open_daemon_log(&host_paths)?;
     let stderr = log
         .try_clone()
-        .map_err(|error| RsiError::Boot(format!("clone Session Host log: {error}")))?;
+        .map_err(|error| RsiError::Boot(format!("clone Service Host log: {error}")))?;
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| RsiError::Boot(format!("resolve current executable: {error}")))?;
@@ -355,17 +375,17 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|error| RsiError::Boot(format!("spawn Session Host daemon: {error}")))?;
+        .map_err(|error| RsiError::Boot(format!("spawn Service Host daemon: {error}")))?;
     let mut child = DaemonChildGuard::new(child);
     let deadline = tokio::time::Instant::now() + DAEMON_READINESS_TIMEOUT;
     loop {
         if let Some(status) = child
             .child_mut()
             .try_wait()
-            .map_err(|error| RsiError::Boot(format!("wait for Session Host daemon: {error}")))?
+            .map_err(|error| RsiError::Boot(format!("wait for Service Host daemon: {error}")))?
         {
             return Err(RsiError::Boot(format!(
-                "Session Host daemon exited before readiness with {status}; inspect {}",
+                "Service Host daemon exited before readiness with {status}; inspect {}",
                 host_paths.owner_log().display()
             )));
         }
@@ -379,24 +399,17 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
             && owner_process_is_current(&metadata)
                 .map_err(|error| RsiError::Boot(error.to_string()))?
         {
-            tokio::time::timeout_at(
-                deadline,
-                UdsSessionApplication::connect(
-                    host_paths.socket(),
-                    &expected_key,
-                    metadata.host_epoch,
-                ),
-            )
-            .await
-            .map_err(|_| daemon_readiness_timeout_error())?
-            .map_err(|error| RsiError::Boot(format!("daemon readiness probe: {error}")))?;
+            tokio::time::timeout_at(deadline, probe_service_host(&metadata))
+                .await
+                .map_err(|_| daemon_readiness_timeout_error())?
+                .map_err(|error| RsiError::Boot(format!("daemon readiness probe: {error}")))?;
             println!("started\t{}", child.id());
             child.disarm();
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(RsiError::Boot(format!(
-                "Session Host daemon did not become ready within {} seconds; inspect {}",
+                "Service Host daemon did not become ready within {} seconds; inspect {}",
                 DAEMON_READINESS_TIMEOUT.as_secs(),
                 host_paths.owner_log().display()
             )));
@@ -440,15 +453,15 @@ impl Drop for DaemonChildGuard {
 #[cfg(target_os = "linux")]
 pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
     let paths = standard_paths()?;
-    let host_paths = SessionHostPaths::from_host_paths(&paths)
+    let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let metadata = host_paths
         .read_metadata()
         .map_err(|error| RsiError::Boot(error.to_string()))?
-        .ok_or_else(|| RsiError::Boot("no Session Host owner metadata exists".into()))?;
+        .ok_or_else(|| RsiError::Boot("no Service Host owner metadata exists".into()))?;
     if metadata.mode != HostOwnerMode::Daemon {
         return Err(RsiError::Boot(
-            "the active Session Host is embedded and cannot be stopped as a daemon".into(),
+            "the active Service Host is embedded and cannot be stopped as a daemon".into(),
         ));
     }
     signal_owner(
@@ -471,7 +484,7 @@ pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(RsiError::Boot(format!(
-                "Session Host did not stop within {} seconds; retry with `rsi host stop --force`",
+                "Service Host did not stop within {} seconds; retry with `rsi host stop --force`",
                 wait.as_secs()
             )));
         }
@@ -484,7 +497,7 @@ pub(super) fn host_stop_timeout(force: bool) -> Duration {
     if force {
         FORCE_HOST_STOP_TIMEOUT
     } else {
-        SESSION_HOST_DRAIN_TIMEOUT + HOST_SHUTDOWN_MARGIN
+        SERVICE_HOST_DRAIN_TIMEOUT + HOST_SHUTDOWN_MARGIN
     }
 }
 
@@ -494,7 +507,7 @@ pub(super) async fn restart_host_daemon(
     force: bool,
 ) -> rsi::Result<()> {
     let paths = standard_paths()?;
-    let host_paths = SessionHostPaths::from_host_paths(&paths)
+    let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     if let Some(metadata) = host_paths
         .read_metadata()
@@ -509,7 +522,7 @@ pub(super) async fn restart_host_daemon(
 #[cfg(target_os = "linux")]
 pub(super) async fn status_host_daemon() -> rsi::Result<()> {
     let paths = standard_paths()?;
-    let host_paths = SessionHostPaths::from_host_paths(&paths)
+    let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let Some(metadata) = host_paths
         .read_metadata()
@@ -524,16 +537,7 @@ pub(super) async fn status_host_daemon() -> rsi::Result<()> {
         .is_compatible_with_current()
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let responsive = if current && compatible && metadata.mode == HostOwnerMode::Daemon {
-        UdsSessionApplication::connect(
-            metadata
-                .socket_path
-                .as_deref()
-                .ok_or_else(|| RsiError::Boot("daemon metadata has no socket".into()))?,
-            &metadata.launch_key,
-            metadata.host_epoch.clone(),
-        )
-        .await
-        .is_ok()
+        probe_service_host(&metadata).await.is_ok()
     } else {
         false
     };
@@ -559,12 +563,12 @@ pub(super) async fn status_host_daemon() -> rsi::Result<()> {
 #[cfg(target_os = "linux")]
 pub(super) fn reload_host_daemon() -> rsi::Result<()> {
     let paths = standard_paths()?;
-    let host_paths = SessionHostPaths::from_host_paths(&paths)
+    let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let metadata = host_paths
         .read_metadata()
         .map_err(|error| RsiError::Boot(error.to_string()))?
-        .ok_or_else(|| RsiError::Boot("no Session Host owner exists".into()))?;
+        .ok_or_else(|| RsiError::Boot("no Service Host owner exists".into()))?;
     signal_owner(&metadata, HostSignal::Reload)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     println!("reload-requested\t{}", metadata.pid);

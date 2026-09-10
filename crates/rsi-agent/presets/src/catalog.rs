@@ -298,6 +298,14 @@ pub struct AgentPresetCatalog {
 }
 
 impl AgentPresetCatalog {
+    /// Replaces the frozen compiler while preserving discovery, default and
+    /// shared authoring authority. Existing clones keep their own compiler.
+    #[must_use]
+    pub fn with_compiler(mut self, compiler: AgentPresetProfileCompiler) -> Self {
+        self.compiler = compiler;
+        self
+    }
+
     /// Freezes root precedence without touching the filesystem.
     ///
     /// # Errors

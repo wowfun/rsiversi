@@ -21,7 +21,7 @@ async fn local_object_survives_reactivation_and_tampering_fails_closed() {
     image::DynamicImage::ImageRgba8(image)
         .write_to(&mut Cursor::new(&mut source), ImageFormat::Png)
         .unwrap();
-    let source: Arc<[u8]> = Arc::from(source);
+    let source: bytes::Bytes = bytes::Bytes::from(source);
     let runtime = Runtime::default();
     let backend = runtime
         .root()
@@ -37,11 +37,11 @@ async fn local_object_survives_reactivation_and_tampering_fails_closed() {
         .await
         .unwrap();
     let media = runtime.root().lookup_local::<MediaContract>().unwrap();
-    let reference = media.import_image(Arc::clone(&source)).await.unwrap();
+    let reference = media.import_image(source.clone()).await.unwrap();
     let mut concurrent = Vec::new();
     for _ in 0..16 {
         let media = Arc::clone(&media);
-        let source = Arc::clone(&source);
+        let source = source.clone();
         concurrent.push(tokio::spawn(
             async move { media.import_image(source).await },
         ));
@@ -112,7 +112,10 @@ async fn object_symlink_is_rejected_without_reading_its_target() {
         .await
         .unwrap();
     let media = runtime.root().lookup_local::<MediaContract>().unwrap();
-    let reference = media.import_image(Arc::from(source)).await.unwrap();
+    let reference = media
+        .import_image(bytes::Bytes::from(source))
+        .await
+        .unwrap();
     let path = root
         .join("objects")
         .join(&reference.id.as_str()[..2])

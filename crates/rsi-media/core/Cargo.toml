@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+bytes.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 image.workspace = true
@@ -15,7 +16,7 @@ rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rsi-media-testkit = { path = "../testkit" }

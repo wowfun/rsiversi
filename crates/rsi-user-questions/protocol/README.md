@@ -20,3 +20,8 @@ Request and answer deserialization runs the same validation as service admission
 Prompt, suggestion, and answer content remains verbatim data; terminal consumers
 own control-character filtering. The standard CLI applies its terminal renderer
 to all these fields, while JSONL preserves them as escaped JSON strings.
+
+Live control clients may subscribe to coalesced changes for a bounded set of
+Session identities, then collect a bounded snapshot in one registry pass.
+Subscribe before collecting to avoid a lost update. Notifications carry no
+payload history; dropping the subscription releases its registrations.

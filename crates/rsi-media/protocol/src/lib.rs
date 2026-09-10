@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use rsi_meta_contract::LocalContract;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
 use thiserror::Error;
 
 /// Maximum accepted source image bytes.
@@ -342,7 +341,7 @@ pub struct StoredMedia {
     /// Validated immutable reference.
     pub reference: MediaRef,
     /// Exact canonical bytes.
-    pub bytes: Arc<[u8]>,
+    pub bytes: bytes::Bytes,
 }
 
 /// Durable bytes paired with their locator-free descriptor.
@@ -351,7 +350,7 @@ pub struct MediaBody {
     /// Validated descriptor requested by the caller.
     pub descriptor: MediaDescriptor,
     /// Exact verified durable bytes.
-    pub bytes: Arc<[u8]>,
+    pub bytes: bytes::Bytes,
 }
 
 impl fmt::Debug for MediaBody {
@@ -377,6 +376,9 @@ impl fmt::Debug for StoredMedia {
 /// Closed Media failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum MediaError {
+    /// Common API failure, including uncertain publication outcomes.
+    #[error(transparent)]
+    Api(rsi_api_protocol::ApiError),
     /// Malformed or out-of-bounds caller input.
     #[error("invalid media input: {0}")]
     InvalidInput(String),
@@ -422,7 +424,7 @@ impl LocalContract for MediaBackendContract {
 #[async_trait]
 pub trait Media: fmt::Debug + Send + Sync + 'static {
     /// Decodes, canonicalizes, and durably publishes one raster image.
-    async fn import_image(&self, source: Arc<[u8]>) -> Result<MediaRef>;
+    async fn import_image(&self, source: bytes::Bytes) -> Result<MediaRef>;
     /// Loads canonical bytes for one exact reference.
     async fn read(&self, reference: &MediaRef) -> Result<StoredMedia>;
 }

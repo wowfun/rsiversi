@@ -13,13 +13,13 @@ rsi-meta = { path = "../../rsi-meta/core" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rsi-jobs-local = { path = "../local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-tools = { path = "../../rsi-tools/core" }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 tokio-util.workspace = true
 
 [lints]

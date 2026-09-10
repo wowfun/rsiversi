@@ -3,6 +3,9 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)] // Closed error types carry the machine-readable conditions.
 
+/// Bounded framing for explicit Portable provider business protocols.
+pub mod portable;
+
 mod error;
 mod language;
 mod media;
@@ -30,9 +33,10 @@ pub use rsi_tools_protocol::{
 pub use runtime::{
     AiCapability, AiContractError, DeferredLanguageBatch, DeferredLanguageCall,
     DeferredLanguageCheckpoint, DeferredLanguageStream, DeferredStatus, ImageCall,
-    ImageCallContract, ImageStream, LanguageCall, LanguageCallContract, LanguageStream, ModelRef,
-    PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedImageCall, PreparedLanguageCall,
-    RetryPolicy, deferred_unsupported,
+    ImageCallContract, ImageStream, LanguageCall, LanguageCallContract, LanguageModelPage,
+    LanguageModels, LanguageModelsContract, LanguageStream, MAX_LANGUAGE_MODEL_PAGE, ModelRef,
+    ModelsError, PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedImageCall,
+    PreparedLanguageCall, RetryPolicy, deferred_unsupported,
 };
 pub use semantic::{
     HostedTool, ImageToolResultCapability, ImageToolResultMode, LanguageModelLimits,

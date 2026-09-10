@@ -54,6 +54,52 @@ fn test_compiler() -> AgentPresetProfileCompiler {
     )
 }
 
+#[tokio::test]
+async fn replacing_a_compiler_keeps_root_and_default_authority_without_changing_the_old_catalog() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    write_preset(
+        &root,
+        "standard",
+        Some("format = 1\n[[steps]]\nkind = 'plugin'\nid = 'leaf'\nplugin = 'test.child'\n"),
+        None,
+    );
+    write_preset(&root, "other", Some("format = 1\n"), None);
+    let defaults = Arc::new(TestDefaults::default());
+    let original = PresetCatalog::with_default_store(
+        AgentPresetCatalogConfig::new(AgentPresetId::new("standard").unwrap())
+            .with_user_root(&root),
+        defaults,
+        test_compiler(),
+    )
+    .unwrap();
+    let replacement = AgentPresetProfileCompiler::new(
+        ProfileCompiler::new(
+            ProfileEnvironment::new("/config", "/state", "/cache", "test", BTreeMap::new())
+                .unwrap(),
+            ProfileLimits::default(),
+        ),
+        ["test.replacement"],
+    );
+    let rebound = original.clone().with_compiler(replacement);
+    assert_eq!(original.launch_identity(), rebound.launch_identity());
+    assert!(
+        original
+            .compile(&AgentPresetId::new("standard").unwrap())
+            .is_ok()
+    );
+    assert!(
+        rebound
+            .compile(&AgentPresetId::new("standard").unwrap())
+            .is_err()
+    );
+    rebound
+        .set_default(&AgentPresetId::new("other").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(original.default_id().await.unwrap().as_str(), "other");
+}
+
 #[test]
 fn preset_id_is_a_bounded_directory_segment() {
     assert_eq!(

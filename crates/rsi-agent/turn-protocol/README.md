@@ -1,5 +1,28 @@
 # rsi-agent-turn-protocol
 
+`SessionCommands` is an independent Local service published by the same Kernel.
+Listing and execution consume Kernel-issued resume authority, retaining the
+resident or validated cold generation. Query reads the canonical request receipt
+without executing a callback. Execution joins an identical in-flight request,
+checks a committed receipt before callback dispatch, captures the exact control
+revision and complete typed states, then runs the callback outside framework
+locks. Preparation and callback execution share a 30-second deadline, with at
+most 64 concurrent distinct requests per Kernel. A changed invocation using the same request ID is
+a conflict; callbacks are never automatically retried after revision conflicts.
+After validation, the Kernel owns the state-only commit through reconciliation
+even if the caller disconnects. Commands do not create Turns, execution Facts,
+Workspace registrations or external effects.
+
+`SessionProjections` independently captures disposable extension views. It selects
+the resident composition pin or a current cold read generation, waits for an
+already admitted resident load, and rechecks concurrent publication. It never
+hydrates a Session or issues execution authority. Cold projection does not require
+unrelated domain codecs; a unit's semantic decode failure affects that unit only.
+The Store supplies a simultaneous Fact/control cut and complete current domain
+states. At most 16 captures run per Kernel, with a 30-second deadline covering
+admission, generation selection, Store capture and projection. Shutdown cancels
+captures; dropping a read drops its callback and resource leases.
+
 `SubmitMessage.delivery` is immutable ingress intent: fixed next Turn, fixed
 next Step, or Human steering. The Kernel resolves steering atomically while
 holding Session submission admission. A receipt means durable acceptance; it
@@ -35,6 +58,20 @@ from model JSON. Final source admission and retained commit ownership follow the
 [Kernel contract](../kernel/README.md). `settlement_health` reads bounded runtime
 settlement diagnostics without Store I/O.
 
+`commit_domains` accepts exact-generation typed proposals and optional Fact
+bodies without a caller-selected source or charging category. Kernel assigns
+the claimed Turn, validates the mixed candidate and retains commit ownership.
+Its canonical receipt supports exact idempotent retry and read-only query after
+a lost acknowledgement. Opaque state/history reads do not require execution
+codecs. An indeterminate commit whose receipt also cannot be read closes Session
+execution until durable recovery establishes its state.
+
+`finish_turn` owns the durable ending transaction for direct and mailbox Turns,
+including any open-Step closure, required budget marker and tree settlement.
+The executor supplies the resolved outcome and waits for that terminal receipt;
+it does not independently publish an intermediate ending prefix. Ordinary
+`close_current_step` remains charged business publication.
+
 Mailbox admission, message state, dual-stream reconnectable observation, and
 the six source-authorized Agent operations share this seam. Spawn creates a
 durable continuable fork child; send/followup address only a direct parent-child
@@ -68,6 +105,11 @@ receipt. Together with the acceptance control cursor, it is a reconnectable
 starting point that lets a caller subscribe for the later claim without
 replaying old Facts or polling message status. A claimed receipt proves its
 model-visible input Fact is at or before that observed tail.
+
+Message receipts/states, observation cursors and cancellation values have closed
+Serde representations for domain adapters. Decoders still validate cross-field
+receipt and stream invariants at their owning boundary; these values do not
+change the durable Session or Store format.
 Each claim exposes only borrowed getters and carries a private Kernel-issued
 seal plus the resident session's shared immutable Header allocation. Live
 operations require that seal, current claim identity, and the exact resident
@@ -82,9 +124,20 @@ at publication. The sole terminal Fact and `outcome` become visible only after
 the terminal Fact's complete prefix is durable. A permanent flush failure ends
 an attached observation with `TurnError::Flush`; observation cannot wait
 forever for a terminal that the Store can no longer commit.
-Every process-local Fact seam uses `Arc<SessionFact>`: publication, claim
-pages, and observation share one immutable allocation while the Store remains
-the serialization owner.
+Publication, claim pages, and Store append suffixes share immutable
+`Arc<SessionFact>` allocations. Observations use concrete `ObservedFact` and
+`ObservedControl` handles, exposing borrowed records without an escaping bare
+Arc. Clones share both payload and retained-byte reservation; only the last
+clone releases that item's reservation, even after its stream has been dropped.
+An adapter's `ObservationRetention` pool admits each complete page atomically
+and returns `Capacity` immediately when it cannot retain the page. More than
+the protocol's 512 records is `Invalid`, because releasing capacity cannot make
+that page valid. Failed admission advances no delivered cursor. Consumers reconnect from their last
+actually delivered cursor after releasing earlier items. Encoded canonical
+payload bytes are charged conservatively per observation; this is independent
+of Store-read materialization and does not claim a total heap or RSS limit.
+The standard pool is 64 MiB and can only be tightened while admitting one
+maximum Fact. Transport decoding and renderer queues preserve these handles.
 Publication consumes owned Fact bodies. `Published` returns shared Facts only
 after live commit; `FlushRequired` returns the canonical unpublished bodies for
 an explicit durability flush and retry. Terminal canonicalization may therefore
@@ -106,11 +159,22 @@ misses and rejected writes are explicitly non-fatal. The seam carries the
 Context-computed Fact-prefix digest separately from the opaque bytes so restore
 can require both views to agree.
 
-The Kernel-owned finalization registry snapshots effect-owned hooks in
-registration order and starts the complete snapshot concurrently. A hook
+The Kernel-owned finalization registry accepts an exact-generation
+`RegistrationContext` and installs undo before publication. Loading registrations
+join setup rollback; Active registrations own dynamic effects. At most 64 hooks
+may be registered. The Kernel factory binds the registry to its Runtime; a
+standalone Kernel binds on its first successful registration. This identity
+persists until Kernel shutdown and never combines different Runtimes.
+
+The registry reuses an immutable membership/order snapshot while both are
+unchanged. Child declaration positions determine precedence; rebuilding at the
+same position preserves precedence, and reorder changes no Fiber generation.
+Retirement removes a hook from new snapshots; an already captured invocation
+keeps its complete snapshot. Hooks run without registry or lifecycle locks.
+The registry starts that complete snapshot concurrently. A hook
 receives the exact turn identities and its opaque Jobs scope authority. Each
 hook returns an optional completion blocker; panics and errors are isolated,
-and the registry selects the first cleanup error or blocker by registration
+and the registry selects the first cleanup error or blocker by declaration
 order only after every hook settles. The executor applies one deadline to the
 complete snapshot. Timeout outranks cleanup error, which outranks a completion
 blocker, which outranks the original outcome. Cleanup failure replaces every
@@ -137,3 +201,10 @@ final flush. A terminal Turn cannot start a human wait.
 `ready_health` reports cumulative ready-scheduler failures and the latest bounded
 diagnostic without Store I/O. The diagnostic remains available after recovery;
 transient enumeration and per-root failures retry without withdrawing executors.
+
+`SessionProjections::watch_projection_changes` subscribes to coalesced Session
+commit hints before capture, including an unpublished identity. Hints contain no
+Facts, domain values or execution authority. They share the Kernel observer
+count bound, terminate on shutdown, and release their registry entry on final
+drop. Consumers requery a complete snapshot and compare both durable cursors;
+duplicate hints never establish progress by themselves.

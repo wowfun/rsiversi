@@ -1,0 +1,37 @@
+[package]
+name = "rsi-session-files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-session-protocol = { path = "../session-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+rsi-api = { path = "../../rsi-api/core" }
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-api-http-client = { path = "../../rsi-api/http-client" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-files = { path = "../../rsi-files/core" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net", "test-util"] }
+
+[lints]
+workspace = true

@@ -1,15 +1,15 @@
-use crate::builder::{HostLimits, LinkedRegistration};
+use crate::builder::HostLimits;
 use crate::{
     HostError, HostPaths, Profile, ProfileControl, ProfileControlContract, ProfileFragment,
     ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus, ReloadOutcome, Result,
 };
 use rsi_meta::{
-    ConfigValue, Context, FiberHandle, FiberState, LocalContract, LocalContractKey, LocalEvent,
-    LocalEventKey, PluginId, ResolvedFactory, Runtime, RuntimeSnapshot, ShutdownOutcome,
-    UpdateMode,
+    ConfigValue, Context, FactoryIdentity, FiberHandle, FiberState, LocalContract,
+    LocalContractKey, LocalEvent, LocalEventKey, PluginId, ResolvedFactory, Runtime,
+    RuntimeSnapshot, ShutdownOutcome, UpdateMode,
 };
 use rsi_meta_profile::{
-    IsolationSpec, ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileResolver,
+    ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileInput, ProfileResolver,
 };
 use sha2::{Digest as _, Sha256};
 use std::any::TypeId;
@@ -33,71 +33,101 @@ pub struct HostProfilePreview {
 pub struct HostProfilePreviewLeaf {
     /// Stable all-tree instance identity.
     pub instance_id: String,
-    /// Exact linked plugin identity.
+    /// Stable catalog key.
     pub plugin_id: String,
+    /// Exact resolver-owned provenance; configuration has not been prepared.
+    pub identity: FactoryIdentity,
+}
+
+/// Prospective source edit compiled and resolved without preparing any factory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostProfileEditPreview {
+    /// Prior compiled tree, absent when the current source cannot compile.
+    pub previous: Option<ProfileSnapshot>,
+    /// Complete redacted proposed tree, at pure-preview revision zero.
+    pub proposed: ProfileSnapshot,
+    /// Redacted changes, absent when the prior tree is unavailable.
+    pub changes: Option<Vec<rsi_meta_profile::NodeChange>>,
+    /// Exact resolved enabled factories in proposed executable order.
+    pub leaves: Vec<HostProfilePreviewLeaf>,
+    /// Captured native source identities, including the prospective root bytes.
+    pub sources: Vec<HostProfileSourceFingerprint>,
+}
+
+/// One native source fingerprint captured by pure compilation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostProfileSourceFingerprint {
+    /// Exact canonical source path.
+    pub path: std::path::PathBuf,
+    /// SHA-256 of the bytes evaluated at that path.
+    pub sha256: [u8; 32],
 }
 
 pub(crate) const PROFILE_PLUGIN_ID: &str = "rsi.meta.profile";
 
 #[derive(Debug)]
-pub(crate) struct LinkedCatalog {
-    pub(crate) linked: BTreeMap<PluginId, LinkedRegistration>,
+pub(crate) struct FrozenCatalog {
+    pub(crate) factories: BTreeMap<PluginId, ResolvedFactory>,
     pub(crate) fragments: Vec<ProfileFragment>,
     pub(crate) local_contracts: BTreeMap<LocalContractKey, TypeId>,
     pub(crate) local_events: BTreeMap<LocalEventKey, TypeId>,
     pub(crate) launch_patches: Vec<ProfilePatch>,
 }
 
-impl ProfileResolver for LinkedCatalog {
+impl ProfileResolver for FrozenCatalog {
+    fn validate_successor(&self, successor: &dyn ProfileResolver) -> rsi_meta_profile::Result<()> {
+        for (key, marker) in &self.local_contracts {
+            if successor.local_contract_type(key.as_str()).ok() != Some(*marker) {
+                return Err(rsi_meta_profile::ProfileError::IncompatibleInput(format!(
+                    "Local contract `{key}` changed nominal identity"
+                )));
+            }
+        }
+        for (key, marker) in &self.local_events {
+            if successor.local_event_type(key.as_str()).ok() != Some(*marker) {
+                return Err(rsi_meta_profile::ProfileError::IncompatibleInput(format!(
+                    "Local event `{key}` changed nominal identity"
+                )));
+            }
+        }
+        Ok(())
+    }
     fn resolve(&self, plugin: &PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
-        let registration = self.linked.get(plugin).ok_or_else(|| {
+        let registration = self.factories.get(plugin).ok_or_else(|| {
             rsi_meta_profile::ProfileError::UnknownPlugin {
                 plugin: plugin.clone(),
             }
         })?;
-        Ok(ResolvedFactory::linked(
-            plugin.clone(),
-            registration.revision.clone(),
-            registration.update_mode,
-            Arc::clone(&registration.implementation),
-        ))
+        Ok(registration.clone())
     }
 
-    fn isolate(
-        &self,
-        mut context: Context,
-        isolation: &IsolationSpec,
-    ) -> rsi_meta_profile::Result<Context> {
-        for key in isolation.local() {
-            let stable = LocalContractKey::new(key.clone());
-            let contract = self.local_contracts.get(&stable).copied().ok_or_else(|| {
-                rsi_meta_profile::ProfileError::UnknownLocalContract { key: key.clone() }
-            })?;
-            context = context.isolate_local_type_fresh(contract, key)?.0;
-        }
-        for key in isolation.events() {
-            let stable = LocalEventKey::new(key.clone());
-            let event = self.local_events.get(&stable).copied().ok_or_else(|| {
-                rsi_meta_profile::ProfileError::UnknownLocalEvent { key: key.clone() }
-            })?;
-            context = context.isolate_event_type_fresh(event, key)?.0;
-        }
-        for key in isolation.portable() {
-            context = context.isolate_fresh(key)?.0;
-        }
-        Ok(context)
+    fn local_contract_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
+        self.local_contracts
+            .get(&LocalContractKey::new(key))
+            .copied()
+            .ok_or_else(|| rsi_meta_profile::ProfileError::UnknownLocalContract {
+                key: key.to_owned(),
+            })
+    }
+
+    fn local_event_type(&self, key: &str) -> rsi_meta_profile::Result<TypeId> {
+        self.local_events
+            .get(&LocalEventKey::new(key))
+            .copied()
+            .ok_or_else(|| rsi_meta_profile::ProfileError::UnknownLocalEvent {
+                key: key.to_owned(),
+            })
     }
 }
 
 /// Frozen generic Host before its single top-level Profile starts.
 pub struct Host {
-    paths: HostPaths,
-    platform: String,
-    defines: BTreeMap<String, ConfigValue>,
+    paths: Option<HostPaths>,
+    environment: ProfileEnvironment,
     limits: HostLimits,
     runtime_limits: rsi_meta::RuntimeLimits,
-    runtime: Runtime,
-    catalog: Arc<LinkedCatalog>,
+    execution: Option<rsi_meta::Execution>,
+    catalog: Arc<FrozenCatalog>,
 }
 
 impl std::fmt::Debug for Host {
@@ -105,50 +135,48 @@ impl std::fmt::Debug for Host {
         formatter
             .debug_struct("Host")
             .field("paths", &self.paths)
-            .field("platform", &self.platform)
-            .field("defines", &self.defines.keys())
-            .field("plugins", &self.catalog.linked.keys())
+            .field("platform", &self.environment.platform())
+            .field("defines", &self.environment.defines().keys())
+            .field("plugins", &self.catalog.factories.keys())
             .finish_non_exhaustive()
     }
 }
 
 impl Host {
     pub(crate) fn new(
-        paths: HostPaths,
-        platform: String,
-        defines: BTreeMap<String, ConfigValue>,
+        paths: Option<HostPaths>,
+        environment: ProfileEnvironment,
         limits: HostLimits,
         runtime_limits: rsi_meta::RuntimeLimits,
-        runtime: Runtime,
-        catalog: LinkedCatalog,
+        execution: Option<rsi_meta::Execution>,
+        catalog: FrozenCatalog,
     ) -> Self {
         Self {
             paths,
-            platform,
-            defines,
+            environment,
             limits,
             runtime_limits,
-            runtime,
+            execution,
             catalog: Arc::new(catalog),
         }
     }
 
     /// Returns the frozen filesystem authority.
-    pub const fn paths(&self) -> &HostPaths {
-        &self.paths
+    pub const fn paths(&self) -> Option<&HostPaths> {
+        self.paths.as_ref()
     }
 
     /// Returns a canonical digest of the generic Host inputs frozen by its builder.
     ///
     /// The digest includes paths, platform, defines, compiler and Runtime limits,
-    /// linked factory revisions and update modes, registered marker keys, linked
+    /// resolved factory identities and update modes, registered marker keys, linked
     /// fragments, and launch patches. It deliberately has no top-level Profile
     /// source, current Profile digest, application argument, session identity, or
     /// credential-store value.
     pub fn composition_digest(&self) -> Result<String> {
         let preview = self.preview(Profile::default())?;
         let mut digest = Sha256::new();
-        hash_component(&mut digest, b"domain", b"rsi.host.composition.v1");
+        hash_component(&mut digest, b"domain", b"rsi.host.composition.v2");
         hash_component(
             &mut digest,
             b"compiled-empty-program",
@@ -156,13 +184,22 @@ impl Host {
         );
         hash_host_limits(&mut digest, &self.limits);
         hash_runtime_limits(&mut digest, &self.runtime_limits);
-        for (plugin, registration) in &self.catalog.linked {
+        for (plugin, registration) in &self.catalog.factories {
             hash_component(&mut digest, b"plugin", plugin.as_str().as_bytes());
-            hash_component(&mut digest, b"revision", registration.revision.as_bytes());
+            match registration.identity() {
+                FactoryIdentity::Linked { revision, .. } => {
+                    hash_component(&mut digest, b"identity-kind", b"linked");
+                    hash_component(&mut digest, b"revision", revision.as_bytes());
+                }
+                FactoryIdentity::Native { sha256, .. } => {
+                    hash_component(&mut digest, b"identity-kind", b"native");
+                    hash_component(&mut digest, b"sha256", sha256.as_bytes());
+                }
+            }
             hash_component(
                 &mut digest,
                 b"update-mode",
-                match registration.update_mode {
+                match registration.update_mode() {
                     UpdateMode::Replayable => b"replayable",
                     UpdateMode::RestartRequired => b"restart-required",
                 },
@@ -201,36 +238,81 @@ impl Host {
     }
 
     /// Purely compiles and resolves one Profile file without Runtime mutation.
+    #[cfg(not(target_family = "wasm"))]
     pub fn preview_file(&self, path: impl Into<std::path::PathBuf>) -> Result<HostProfilePreview> {
         self.preview_program(ProfileProgram::from_file(path))
     }
 
-    fn preview_program(&self, program: ProfileProgram) -> Result<HostProfilePreview> {
-        let environment = ProfileEnvironment::new(
-            self.paths.config().to_path_buf(),
-            self.paths.state().to_path_buf(),
-            self.paths.cache().to_path_buf(),
-            self.platform.clone(),
-            self.defines.clone(),
-        )?;
-        let program = program
-            .with_linked_fragments(self.catalog.fragments.clone())
-            .with_launch_patches(self.catalog.launch_patches.clone());
-        let candidate =
-            ProfileCompiler::new(environment, self.limits.profile.clone()).compile(&program)?;
-        let mut leaves = Vec::with_capacity(candidate.leaves().len());
-        for leaf in candidate.leaves() {
-            let _resolved = self.catalog.resolve(leaf.plugin())?;
-            leaves.push(HostProfilePreviewLeaf {
-                instance_id: leaf.id().as_str().to_owned(),
-                plugin_id: leaf.plugin().as_str().to_owned(),
-            });
-        }
+    /// Purely compiles and resolves one explicit immutable source program.
+    pub fn preview_program(&self, program: ProfileProgram) -> Result<HostProfilePreview> {
+        let program = self.configured_program(program);
+        let candidate = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone())
+            .compile(&program)?;
         Ok(HostProfilePreview {
             source_digest: candidate.source_digest().to_owned(),
             source_paths: candidate.watch_paths().to_vec(),
-            leaves,
+            leaves: self.resolve_preview_leaves(&candidate)?,
         })
+    }
+
+    /// Compiles one prospective native root edit against every frozen Host input.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn preview_file_edit(
+        &self,
+        path: impl Into<std::path::PathBuf>,
+        contents: &[u8],
+    ) -> Result<HostProfileEditPreview> {
+        let program = self.configured_program(ProfileProgram::from_file(path));
+        let compiler = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone());
+        let previous = compiler.compile(&program).ok();
+        let candidate = compiler.preview_file_edit(&program, contents)?;
+        let leaves = self.resolve_preview_leaves(&candidate)?;
+        let sources = candidate
+            .watch_paths()
+            .iter()
+            .map(|path| {
+                let sha256 = candidate.source_fingerprint(path).ok_or_else(|| {
+                    rsi_meta_profile::ProfileError::Source {
+                        message: "compiled native source has no fingerprint".to_owned(),
+                    }
+                })?;
+                Ok(HostProfileSourceFingerprint {
+                    path: path.clone(),
+                    sha256: *sha256,
+                })
+            })
+            .collect::<rsi_meta_profile::Result<Vec<_>>>()?;
+        Ok(HostProfileEditPreview {
+            changes: previous
+                .as_ref()
+                .map(|previous| candidate.changes_from(previous)),
+            previous: previous.map(|previous| previous.snapshot()),
+            proposed: candidate.snapshot(),
+            leaves,
+            sources,
+        })
+    }
+
+    fn configured_program(&self, program: ProfileProgram) -> ProfileProgram {
+        program
+            .with_linked_fragments(self.catalog.fragments.clone())
+            .with_launch_patches(self.catalog.launch_patches.clone())
+    }
+
+    fn resolve_preview_leaves(
+        &self,
+        candidate: &rsi_meta_profile::ProfileCandidate,
+    ) -> Result<Vec<HostProfilePreviewLeaf>> {
+        let mut leaves = Vec::with_capacity(candidate.leaves().len());
+        for leaf in candidate.leaves() {
+            let resolved = self.catalog.resolve(leaf.plugin())?;
+            leaves.push(HostProfilePreviewLeaf {
+                instance_id: leaf.id().as_str().to_owned(),
+                plugin_id: leaf.plugin().as_str().to_owned(),
+                identity: resolved.identity().clone(),
+            });
+        }
+        Ok(leaves)
     }
 
     /// Starts one immutable in-memory root after the linked prefix.
@@ -240,33 +322,79 @@ impl Host {
     }
 
     /// Starts one required root file with transitive source watching.
+    #[cfg(not(target_family = "wasm"))]
     pub async fn start_file(self, path: impl Into<std::path::PathBuf>) -> Result<RunningHost> {
         self.start_program(ProfileProgram::from_file(path)).await
     }
 
+    /// Prepares this frozen composition for an existing Runtime without starting another.
+    /// The caller applies the bootstrap in an owned, explicitly isolated child Context
+    /// and retains its control handle. Supplied Runtime execution and limits govern work.
+    pub async fn prepare_in(
+        &self,
+        runtime: &Runtime,
+        program: ProfileProgram,
+    ) -> Result<ProfileBootstrap> {
+        self.prepare_profile(runtime, program).await
+    }
+
+    /// Captures this frozen Host's complete Profile input without changing a running Host.
+    pub fn profile_input(&self, program: ProfileProgram) -> Result<ProfileInput> {
+        Ok(ProfileInput::new(
+            Arc::clone(&self.catalog) as Arc<dyn ProfileResolver>,
+            self.configured_program(program),
+            self.environment.clone(),
+            self.limits.profile.clone(),
+        ))
+    }
+
+    /// Derives fresh Local identities for this catalog and Profile control, without Fibers.
+    /// Unregistered and Portable mappings remain inherited from the supplied Context.
+    /// This is not an authority allowlist: callers must supply a least-authority
+    /// parent or explicitly isolate additional inherited capabilities.
+    pub fn isolate_local_context(&self, mut context: Context) -> Result<Context> {
+        context = context.isolate_local_fresh::<ProfileControlContract>()?.0;
+        for (key, contract) in &self.catalog.local_contracts {
+            context = context.isolate_local_type_fresh(*contract, key.as_str())?.0;
+        }
+        for (key, event) in &self.catalog.local_events {
+            context = context.isolate_event_type_fresh(*event, key.as_str())?.0;
+        }
+        Ok(context)
+    }
+
+    async fn prepare_profile(
+        &self,
+        runtime: &Runtime,
+        program: ProfileProgram,
+    ) -> Result<ProfileBootstrap> {
+        let input = self.profile_input(program)?;
+        let preparation_runtime = runtime.clone();
+        runtime
+            .execution()
+            .prepare(move || ProfileBootstrap::prepare_input(&preparation_runtime, input))
+            .await
+            .map_err(|_| HostError::Bootstrap("Profile preparation task failed".to_owned()))?
+            .map_err(Into::into)
+    }
+
     /// Starts the one direct Profile bootstrap from an explicit source program.
     pub async fn start_program(self, program: ProfileProgram) -> Result<RunningHost> {
-        let environment = ProfileEnvironment::new(
-            self.paths.config().to_path_buf(),
-            self.paths.state().to_path_buf(),
-            self.paths.cache().to_path_buf(),
-            self.platform.clone(),
-            self.defines.clone(),
-        )?;
-        let program = program
-            .with_linked_fragments(self.catalog.fragments.clone())
-            .with_launch_patches(self.catalog.launch_patches.clone());
-        let runtime = self.runtime.clone();
-        let resolver = Arc::clone(&self.catalog) as Arc<dyn ProfileResolver>;
-        let limits = self.limits.profile.clone();
-        let bootstrap = tokio::task::spawn_blocking(move || {
-            ProfileBootstrap::prepare(&runtime, resolver, program, environment, limits)
-        })
-        .await
-        .map_err(|_| HostError::Bootstrap("Profile preparation task failed".to_owned()))??;
+        let runtime = match self.execution.clone() {
+            Some(execution) => Runtime::with_execution(self.runtime_limits.clone(), execution)?,
+            #[cfg(not(target_family = "wasm"))]
+            None => Runtime::new(self.runtime_limits.clone())?,
+            #[cfg(target_family = "wasm")]
+            None => {
+                return Err(HostError::Bootstrap(
+                    "explicit browser execution is required".into(),
+                ));
+            }
+        };
+        let bootstrap = self.prepare_profile(&runtime, program).await?;
         let control = bootstrap.control();
-        let applied = self
-            .runtime
+        let updater = bootstrap.updater();
+        let applied = runtime
             .root()
             .apply(
                 ResolvedFactory::linked(
@@ -282,22 +410,23 @@ impl Host {
             Ok(handle) if matches!(handle.snapshot().state, FiberState::Active) => handle,
             Ok(handle) => {
                 let state = handle.snapshot().state;
-                let _ = self.runtime.shutdown().await;
+                let _ = runtime.shutdown().await;
                 return Err(HostError::Bootstrap(format!(
                     "Profile Fiber settled as {state:?}"
                 )));
             }
             Err(error) => {
-                let _ = self.runtime.shutdown().await;
+                let _ = runtime.shutdown().await;
                 return Err(error.into());
             }
         };
         Ok(RunningHost {
             paths: self.paths,
-            runtime: self.runtime,
+            runtime,
             catalog: self.catalog,
             profile_fiber,
             control,
+            updater,
         })
     }
 }
@@ -331,7 +460,7 @@ fn hash_duration(digest: &mut Sha256, name: &[u8], value: std::time::Duration) {
 fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
     let HostLimits {
         profile,
-        maximum_linked_plugins,
+        maximum_factories,
         maximum_fragments,
         maximum_local_contracts,
         maximum_local_events,
@@ -345,6 +474,7 @@ fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
         maximum_steps,
         maximum_nodes,
         maximum_group_depth,
+        maximum_isolation_bindings,
         maximum_identifier_bytes: maximum_profile_identifier_bytes,
         maximum_expression_operations,
         maximum_expression_depth,
@@ -363,6 +493,10 @@ fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
         (b"profile.maximum-nodes", *maximum_nodes),
         (b"profile.maximum-group-depth", *maximum_group_depth),
         (
+            b"profile.maximum-isolation-bindings",
+            *maximum_isolation_bindings,
+        ),
+        (
             b"profile.maximum-identifier-bytes",
             *maximum_profile_identifier_bytes,
         ),
@@ -375,7 +509,7 @@ fn hash_host_limits(digest: &mut Sha256, limits: &HostLimits) {
             b"profile.maximum-diagnostic-bytes",
             *maximum_diagnostic_bytes,
         ),
-        (b"host.maximum-linked-plugins", *maximum_linked_plugins),
+        (b"host.maximum-factories", *maximum_factories),
         (b"host.maximum-fragments", *maximum_fragments),
         (b"host.maximum-local-contracts", *maximum_local_contracts),
         (b"host.maximum-local-events", *maximum_local_events),
@@ -413,6 +547,7 @@ fn hash_runtime_limits(digest: &mut Sha256, limits: &rsi_meta::RuntimeLimits) {
 fn hash_runtime_topology_limits(digest: &mut Sha256, topology: &rsi_meta::TopologyLimits) {
     let &rsi_meta::TopologyLimits {
         maximum_fibers,
+        maximum_composition_positions,
         maximum_fiber_depth,
         maximum_services,
         maximum_dependency_edges,
@@ -430,6 +565,10 @@ fn hash_runtime_topology_limits(digest: &mut Sha256, topology: &rsi_meta::Topolo
     } = topology;
     for (name, value) in [
         (b"runtime.maximum-fibers".as_slice(), maximum_fibers),
+        (
+            b"runtime.maximum-composition-positions",
+            maximum_composition_positions,
+        ),
         (b"runtime.maximum-fiber-depth", maximum_fiber_depth),
         (b"runtime.maximum-services", maximum_services),
         (
@@ -558,11 +697,12 @@ fn hash_runtime_execution_limits(digest: &mut Sha256, execution: &rsi_meta::Exec
 
 /// Running single-Profile Host with typed observation and deterministic shutdown.
 pub struct RunningHost {
-    paths: HostPaths,
+    paths: Option<HostPaths>,
     runtime: Runtime,
-    catalog: Arc<LinkedCatalog>,
+    catalog: Arc<FrozenCatalog>,
     profile_fiber: FiberHandle,
     control: Arc<dyn ProfileControl>,
+    updater: rsi_meta_profile::ProfileUpdateHandle,
 }
 
 impl std::fmt::Debug for RunningHost {
@@ -576,9 +716,13 @@ impl std::fmt::Debug for RunningHost {
 }
 
 impl RunningHost {
+    /// Grants the owner input submission for this Profile without Runtime mutation authority.
+    pub fn updater(&self) -> rsi_meta_profile::ProfileUpdateHandle {
+        self.updater.clone()
+    }
     /// Returns the frozen filesystem authority.
-    pub const fn paths(&self) -> &HostPaths {
-        &self.paths
+    pub const fn paths(&self) -> Option<&HostPaths> {
+        self.paths.as_ref()
     }
 
     /// Returns bounded status from typed Profile control.
@@ -631,8 +775,17 @@ impl RunningHost {
         self.runtime.snapshot()
     }
 
+    /// Reads bounded redacted Meta ownership metadata without mutable Runtime authority.
+    pub fn inspect(
+        &self,
+        request: rsi_meta::InspectionRequest,
+    ) -> rsi_meta::Result<rsi_meta::RuntimeInspection> {
+        self.runtime.inspect(request)
+    }
+
     /// Starts or joins deterministic Runtime teardown.
     pub async fn shutdown(&self) -> ShutdownOutcome {
+        self.updater.close_admission();
         self.runtime.shutdown().await
     }
 }

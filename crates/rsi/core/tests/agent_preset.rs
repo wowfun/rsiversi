@@ -13,6 +13,60 @@ fn write_preset(root: &Path, id: &str, composition: &str) {
 }
 
 #[tokio::test]
+async fn scoped_catalog_plugins_share_parent_runtime_and_retire_their_settings_ownership() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = rsi_meta::Runtime::default();
+    let mut managers = Vec::new();
+    for label in ["first", "second"] {
+        let root = temporary.path().join(label);
+        let paths =
+            HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+        let system = root.join("presets");
+        write_preset(&system, "standard", "format = 1\n");
+        let manager = AgentPresetManager::open_standard_in(
+            &runtime.root(),
+            &rsi::StandardComposition::new(paths, std::collections::BTreeMap::new(), None),
+            system,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.catalog().default_id().await.unwrap().as_str(),
+            "standard"
+        );
+        managers.push(manager);
+    }
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_settings_protocol::SettingsContract>()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .root()
+            .lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
+            .is_none()
+    );
+    assert_eq!(runtime.snapshot().fibers.iter().filter(|fiber| {
+        matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == "rsi.agent.preset-catalog")
+            && fiber.state == rsi_meta::FiberState::Active
+    }).count(), 2);
+    let first = managers.remove(0);
+    let escaped = first.catalog().clone();
+    assert!(first.shutdown().await.is_clean());
+    assert!(escaped.default_id().await.is_err());
+    let second = managers.remove(0);
+    assert_eq!(
+        second.catalog().default_id().await.unwrap().as_str(),
+        "standard"
+    );
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(second.catalog().default_id().await.is_err());
+    assert!(second.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn manager_derives_settings_roots_user_root_and_default_override() {
     let temporary = tempfile::tempdir().unwrap();
     let config = temporary.path().join("config");
@@ -38,9 +92,12 @@ async fn manager_derives_settings_roots_user_root_and_default_override() {
     .unwrap();
     let paths = HostPaths::new(config.clone(), state, cache).unwrap();
 
-    let manager = AgentPresetManager::open(paths, [system.clone()], false)
-        .await
-        .unwrap();
+    let manager = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths, std::collections::BTreeMap::new(), None),
+        [system.clone()],
+    )
+    .await
+    .unwrap();
     let roster = manager.catalog().roster().await.unwrap();
     assert_eq!(
         roster
@@ -113,12 +170,18 @@ async fn independent_managers_detect_a_concurrent_default_write_without_clobberi
         write_preset(&system, id, &format!("format = 1\n# {id}\n"));
     }
     let paths = HostPaths::new(config, state, cache).unwrap();
-    let first = AgentPresetManager::open(paths.clone(), [system.clone()], false)
-        .await
-        .unwrap();
-    let second = AgentPresetManager::open(paths.clone(), [system.clone()], false)
-        .await
-        .unwrap();
+    let first = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths.clone(), std::collections::BTreeMap::new(), None),
+        [system.clone()],
+    )
+    .await
+    .unwrap();
+    let second = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths.clone(), std::collections::BTreeMap::new(), None),
+        [system.clone()],
+    )
+    .await
+    .unwrap();
     let minimal = AgentPresetId::new("minimal").unwrap();
     let review = AgentPresetId::new("review").unwrap();
 
@@ -142,9 +205,12 @@ async fn independent_managers_detect_a_concurrent_default_write_without_clobberi
     assert!(first.shutdown().await.is_clean());
     assert!(second.shutdown().await.is_clean());
 
-    let reopened = AgentPresetManager::open(paths, [system], false)
-        .await
-        .unwrap();
+    let reopened = AgentPresetManager::open(
+        &rsi::StandardComposition::new(paths, std::collections::BTreeMap::new(), None),
+        [system],
+    )
+    .await
+    .unwrap();
     let selected = reopened.catalog().default_id().await.unwrap();
     assert!(matches!(selected.as_str(), "minimal" | "review"));
     assert!(reopened.shutdown().await.is_clean());
@@ -261,10 +327,10 @@ fn built_binary_rejects_a_non_absolute_configured_root() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
     assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("roots[].path` must be absolute")
+        diagnostic.contains("roots[].path` must be absolute"),
+        "{diagnostic}"
     );
 }
 
@@ -314,11 +380,12 @@ max_output_reserve_tokens = 16384
 "#,
         )
         .unwrap();
-        let application = config.join("application-profiles/test-headless/application.toml");
+        let application =
+            config.join("application-profiles/test-headless/application.profile.toml");
         fs::create_dir_all(application.parent().unwrap()).unwrap();
         fs::write(
             application,
-            "format = 1\napplication = \"headless\"\nhost_profile = \"test\"\n",
+            "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"connection\"\nplugin = \"rsi.application.connection\"\nconfig = { host_profile = \"test\" }\n[[steps]]\nkind = \"plugin\"\nid = \"application\"\nplugin = \"rsi.application.headless\"\n",
         )
         .unwrap();
         write_preset(
@@ -620,10 +687,70 @@ fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
         ];
         arguments.extend(preset_arguments);
         let run = fixture.command(&arguments);
-        assert_eq!(run.status.code(), Some(2));
+        assert_eq!(
+            run.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         assert!(run.stdout.is_empty());
         let error = String::from_utf8(run.stderr).unwrap();
         assert!(error.contains("future-agent"), "error: {error}");
         assert!(error.contains("unavailable"), "error: {error}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn application_preflight_rejects_nested_config_symlinks_without_creating_a_store() {
+    let mut fixture = CliFixture::new();
+    let alias = fixture.xdg_config.parent().unwrap().join("config-alias");
+    std::os::unix::fs::symlink(&fixture.xdg_config, &alias).unwrap();
+    fixture.xdg_config = alias;
+    let output = fixture.command(&[
+        "--profile",
+        "test-headless",
+        "task",
+        "--cwd",
+        fixture.workspace.to_str().unwrap(),
+        "--agent-preset",
+        "future-agent",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("native addon filesystem operation failed"),
+        "{error}"
+    );
+    assert!(!fixture.config.join("native-addons").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn application_bootstrap_accepts_the_system_config_alias_for_preset_validation() {
+    let mut fixture = CliFixture::new();
+    if cfg!(target_os = "macos") {
+        let config = fixture.xdg_config.canonicalize().unwrap();
+        fixture.xdg_config = Path::new("/").join(config.strip_prefix("/private").unwrap());
+        assert!(fixture.xdg_config.starts_with("/var"));
+    }
+    let output = fixture.command(&[
+        "--profile",
+        "test-headless",
+        "task",
+        "--cwd",
+        fixture.workspace.to_str().unwrap(),
+        "--agent-preset",
+        "future-agent",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("future-agent"), "{error}");
+    assert!(error.contains("unavailable"), "{error}");
+}
+
+#[cfg(unix)]
+#[path = "agent_preset/native.rs"]
+mod native;

@@ -102,9 +102,8 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         1
     );
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(
         kernel
@@ -114,9 +113,8 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         1
     );
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
 }
@@ -184,7 +182,7 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -246,11 +244,10 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
 
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        kernel.finish_activation_turn(&root_claim, &TurnOutcome::Completed),
+        kernel.finish_turn(&root_claim, &TurnOutcome::Completed),
     )
     .await
     .expect("root terminal must not stall")
-    .unwrap()
     .unwrap();
     assert_eq!(
         store
@@ -269,11 +266,10 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
 
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        kernel.finish_activation_turn(&child_claim, &TurnOutcome::Completed),
+        kernel.finish_turn(&child_claim, &TurnOutcome::Completed),
     )
     .await
     .expect("child terminal must not stall")
-    .unwrap()
     .unwrap();
     assert!(store.active_activation(&child_id).await.unwrap().is_none());
     wait_for_settlement(store.as_ref(), &root_id).await;
@@ -340,9 +336,8 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
         0
     );
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let before_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
     assert!(before_terminal.pending.iter().any(|entry| {
@@ -352,9 +347,8 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
     }));
 
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
 
     let after_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
@@ -549,9 +543,8 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     .expect("second wait must durably park before completion");
 
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(
         completion_waiter.await.unwrap().unwrap(),
@@ -570,9 +563,8 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     }));
 
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel.shutdown(worker).await.unwrap();
 }
@@ -696,7 +688,7 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
     let service: Arc<dyn SessionStore> = observed.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -819,9 +811,8 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
         .await
         .unwrap();
     kernel
-        .finish_activation_turn(&child_claim, &TurnOutcome::Completed)
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     observed.release_descendant_snapshot();
 
@@ -953,21 +944,18 @@ async fn assert_tree_capacity(direct: bool) {
     assert_eq!(independent_claim.session_id(), &independent);
 
     kernel
-        .finish_activation_turn(&independent_claim, &TurnOutcome::Completed)
+        .finish_turn(&independent_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     for claim in &child_claims {
         kernel
-            .finish_activation_turn(claim, &TurnOutcome::Completed)
+            .finish_turn(claim, &TurnOutcome::Completed)
             .await
-            .unwrap()
             .unwrap();
     }
     kernel
-        .finish_activation_turn(&root_claim, &TurnOutcome::Completed)
+        .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     drop((root_lease, child_leases, independent_lease));
     kernel.shutdown(worker).await.unwrap();
@@ -1000,9 +988,8 @@ async fn one_ready_root_store_failure_does_not_terminate_or_hide_later_work() {
         .unwrap();
     assert_eq!(healthy.session_id().as_str(), "session-z-healthy-root");
     kernel
-        .finish_activation_turn(&healthy, &TurnOutcome::Completed)
+        .finish_turn(&healthy, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let recovered = kernel
         .claim("executor-root-isolation", CancellationToken::new())
@@ -1011,9 +998,8 @@ async fn one_ready_root_store_failure_does_not_terminate_or_hide_later_work() {
         .unwrap();
     assert_eq!(recovered.session_id().as_str(), "session-a-failing-root");
     kernel
-        .finish_activation_turn(&recovered, &TurnOutcome::Completed)
+        .finish_turn(&recovered, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     drop(lease);
     kernel.shutdown(worker).await.unwrap();
@@ -1024,7 +1010,7 @@ async fn a_corrupt_ready_index_is_not_silently_reported_as_no_work() {
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = observed.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -1053,16 +1039,15 @@ async fn a_corrupt_ready_index_is_not_silently_reported_as_no_work() {
         .unwrap()
         .unwrap();
     kernel
-        .finish_activation_turn(&claim, &TurnOutcome::Completed)
+        .finish_turn(&claim, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     drop(lease);
     kernel.shutdown(worker).await.unwrap();
 }
 
 pub(super) async fn active_parent_and_child(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
 ) -> (
     rsi_agent_turn_protocol::TurnClaim,
     rsi_agent_turn_protocol::TurnClaim,
@@ -1176,9 +1161,8 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
     let worker = kernel.start_workers();
     let (parent, child, _lease) = active_parent_and_child(&kernel).await;
     kernel
-        .finish_activation_turn(&parent, &TurnOutcome::Completed)
+        .finish_turn(&parent, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     kernel
         .submit(SubmitTurn {
@@ -1211,9 +1195,8 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
         0
     );
     kernel
-        .finish_activation_turn(&child, &TurnOutcome::Completed)
+        .finish_turn(&child, &TurnOutcome::Completed)
         .await
-        .unwrap()
         .unwrap();
     let mailbox = store
         .read_agent_mailbox(parent.session_id(), None)
@@ -1232,7 +1215,7 @@ async fn later_ready_page_failures_back_off_even_when_other_claims_wake_the_sche
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let kernel =
-        SessionKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
     let workers = kernel.start_workers();
@@ -1288,11 +1271,11 @@ async fn later_ready_page_failures_back_off_even_when_other_claims_wake_the_sche
         .unwrap();
     assert_eq!(second.session_id().as_str(), "ready-b");
     kernel
-        .finish_activation_turn(&first, &TurnOutcome::Completed)
+        .finish_turn(&first, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel
-        .finish_activation_turn(&second, &TurnOutcome::Completed)
+        .finish_turn(&second, &TurnOutcome::Completed)
         .await
         .unwrap();
     kernel.shutdown(workers).await.unwrap();
@@ -1303,7 +1286,7 @@ async fn transient_ready_root_enumeration_failure_keeps_the_executor_registered(
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
     let service: Arc<dyn SessionStore> = store.clone();
-    let kernel = SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+    let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
         .await
         .unwrap();
     let worker = kernel.start_workers();
@@ -1343,10 +1326,9 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
         let memory = Arc::new(MemoryStore::new());
         let store = Arc::new(FactReadRaceStore::new(memory.clone()));
         let service: Arc<dyn SessionStore> = store.clone();
-        let kernel =
-            SessionKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
-                .await
-                .unwrap();
+        let kernel = AgentKernel::recover_with_clock(service, composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
         let worker = kernel.start_workers();
         let (parent, _child, _lease) = active_parent_and_child(&kernel).await;
         store.pause_second_next_descendant_snapshot();
@@ -1405,7 +1387,7 @@ async fn parked_parent_reacquires_tree_capacity_or_cancels_without_waiting_for_a
             assert_eq!(waiter.await.unwrap(), Err(TurnError::Cancelled));
         } else {
             kernel
-                .finish_activation_turn(&extras[0], &TurnOutcome::Completed)
+                .finish_turn(&extras[0], &TurnOutcome::Completed)
                 .await
                 .unwrap();
             assert_eq!(waiter.await.unwrap().unwrap(), AgentWaitResult::Changed);

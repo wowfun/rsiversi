@@ -20,6 +20,77 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn named_isolation_accepts_all_lanes_and_bounds_the_complete_disabled_tree() {
+    use rsi_meta_profile::{IsolationLane, IsolationSpec};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("named.toml");
+    let source = r#"format = 1
+[[steps]]
+kind = "group"
+id = "g"
+[steps.isolation]
+local = ["fresh", { key = "shared", label = "label" }]
+events = [{ key = "shared", label = "label" }]
+portable = [{ key = "shared", label = "label" }]
+[[steps.nodes]]
+kind = "plugin"
+id = "leaf"
+plugin = "probe"
+"#;
+    std::fs::write(&path, source).unwrap();
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let program = ProfileProgram::from_file(&path);
+    let candidate = compiler.compile(&program).unwrap();
+    let spec = &candidate.leaves()[0].isolations()[0];
+    assert_eq!(spec.local(), ["fresh"]);
+    assert_eq!(
+        spec.named()
+            .iter()
+            .map(rsi_meta_profile::NamedIsolation::lane)
+            .collect::<Vec<_>>(),
+        [
+            IsolationLane::Local,
+            IsolationLane::Event,
+            IsolationLane::Portable
+        ]
+    );
+    for invalid in [
+        source.replace("key = \"shared\", label", "key = \"fresh\", label"),
+        source.replace("label = \"label\"", "label = \"\""),
+        source.replace("label = \"label\"", "label = \"label\", unknown = true"),
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        assert!(compiler.compile(&program).is_err());
+    }
+    let disabled = ProfileProgram::from_profile(Profile::default()).with_linked_fragments(vec![
+        ProfileFragment::program(
+            "disabled",
+            ["a", "b"].map(|id| {
+                ProfileStep::Node(ProfileNode::Group(
+                    ProfileGroup::new(id, []).enabled(false).isolation(
+                        IsolationSpec::default().with_named(IsolationLane::Local, "key", "label"),
+                    ),
+                ))
+            }),
+        ),
+    ]);
+    let bounded = ProfileCompiler::new(
+        environment(temp.path()),
+        ProfileLimits {
+            maximum_isolation_bindings: 1,
+            ..ProfileLimits::default()
+        },
+    );
+    assert!(matches!(
+        bounded.compile(&disabled),
+        Err(ProfileError::CapacityExceeded {
+            resource: "isolation bindings",
+            maximum: 1
+        })
+    ));
+}
+
+#[test]
 fn rhai_defines_accept_exact_i64_and_reject_every_inexact_json_number() {
     let temp = tempfile::tempdir().unwrap();
     for value in [
@@ -624,4 +695,195 @@ fn included_profile_symlink_is_rejected_at_the_same_reader_boundary() {
             .compile(&ProfileProgram::from_file(&root)),
         Err(ProfileError::Source { .. })
     ));
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn root_edit_preview_preserves_file_identity_includes_and_linked_order_without_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root.toml");
+    let include = temp.path().join("included.toml");
+    let before = b"format = 1\n[[steps]]\nkind = 'include'\npath = 'included.toml'\n";
+    std::fs::write(&root, before).unwrap();
+    std::fs::write(
+        &include,
+        b"format = 1\n[[steps]]\nkind = 'plugin'\nid = 'included'\nplugin = 'test'\n",
+    )
+    .unwrap();
+    let after = [
+        before.as_slice(),
+        b"[[steps]]\nkind = 'plugin'\nid = 'added'\nplugin = 'test'\n".as_slice(),
+    ]
+    .concat();
+    let program =
+        ProfileProgram::from_file(&root).with_linked_fragments(vec![ProfileFragment::new(
+            "linked",
+            [ProfileEntry::new("linked", "test", Value::Null)],
+        )]);
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let current = compiler.compile(&program).unwrap();
+    let preview = compiler.preview_file_edit(&program, &after).unwrap();
+    assert_eq!(std::fs::read(&root).unwrap(), before);
+    assert_ne!(current.source_digest(), preview.source_digest());
+    let root_identity = root.canonicalize().unwrap();
+    let include_identity = include.canonicalize().unwrap();
+    assert_ne!(
+        current.source_fingerprint(&root_identity),
+        preview.source_fingerprint(&root_identity)
+    );
+    assert_eq!(
+        current.source_fingerprint(&include_identity),
+        preview.source_fingerprint(&include_identity)
+    );
+    assert!(preview.source_fingerprint(&include_identity).is_some());
+    #[cfg(unix)]
+    {
+        let alias = temp.path().join("root-link.toml");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        assert!(
+            compiler
+                .preview_file_edit(&ProfileProgram::from_file(alias), &after)
+                .is_err()
+        );
+    }
+
+    assert_eq!(
+        preview
+            .leaves()
+            .iter()
+            .map(|leaf| leaf.id().as_str())
+            .collect::<Vec<_>>(),
+        ["linked", "included", "added"]
+    );
+    std::fs::write(&root, &after).unwrap();
+    assert_eq!(
+        compiler.compile(&program).unwrap().source_digest(),
+        preview.source_digest()
+    );
+    assert!(
+        compiler
+            .preview_file_edit(&ProfileProgram::from_profile(Profile::default()), &after)
+            .is_err()
+    );
+    let oversized = vec![b' '; ProfileLimits::default().maximum_document_bytes + 1];
+    assert!(matches!(
+        compiler.preview_file_edit(&program, &oversized),
+        Err(ProfileError::CapacityExceeded {
+            resource: "document bytes",
+            ..
+        })
+    ));
+    assert!(
+        !compiler
+            .preview_file_edit(&program, b"secret-value invalid TOML")
+            .unwrap_err()
+            .to_string()
+            .contains("secret-value")
+    );
+}
+
+#[test]
+fn candidate_preview_reports_complete_tree_and_changes_without_configuration_values() {
+    use rsi_meta_profile::{NodeChangeAspect, NodeChangeKind};
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let candidate = |config, enabled| {
+        compiler
+            .compile(&ProfileProgram::from_profile(Profile::program([
+                ProfileStep::Node(ProfileNode::Group(
+                    ProfileGroup::new(
+                        "group",
+                        [ProfileNode::Plugin(ProfileEntry::new(
+                            "leaf", "test", config,
+                        ))],
+                    )
+                    .enabled(enabled),
+                )),
+            ])))
+            .unwrap()
+    };
+    let before = candidate(json!({"secret":"before-secret"}), true);
+    let after = candidate(json!({"secret":"after-secret"}), false);
+    let snapshot = after.snapshot();
+    assert_eq!(snapshot.revision(), 0);
+    assert!(!snapshot.nodes()[0].enabled());
+    assert_eq!(snapshot.nodes()[0].children()[0].id(), "leaf");
+    assert!(after.leaves().is_empty());
+    let changes = after.changes_from(&before);
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].id, "group");
+    assert_eq!(
+        changes[0].kind,
+        NodeChangeKind::Modified(vec![NodeChangeAspect::Enabled])
+    );
+    assert_eq!(
+        changes[1].kind,
+        NodeChangeKind::Modified(vec![NodeChangeAspect::Configuration])
+    );
+    let text = format!("{snapshot:?} {changes:?}");
+    assert!(!text.contains("before-secret") && !text.contains("after-secret"));
+    assert!(after.changes_from(&after).is_empty());
+    let empty = compiler
+        .compile(&ProfileProgram::from_profile(Profile::default()))
+        .unwrap();
+    assert!(
+        after
+            .changes_from(&empty)
+            .iter()
+            .all(|change| change.kind == NodeChangeKind::Added)
+    );
+    assert!(
+        empty
+            .changes_from(&after)
+            .iter()
+            .all(|change| change.kind == NodeChangeKind::Removed)
+    );
+}
+
+#[test]
+fn candidate_changes_distinguish_identity_placement_kind_and_isolation() {
+    use rsi_meta_profile::{IsolationSpec, NodeChangeAspect as A, NodeChangeKind as K};
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let group = |id, children| ProfileNode::Group(ProfileGroup::new(id, children));
+    let plugin = |id, key| ProfileNode::Plugin(ProfileEntry::new(id, key, Value::Null));
+    let before = compiler
+        .compile(&ProfileProgram::from_profile(Profile::program(
+            [
+                group("a", vec![plugin("x", "old")]),
+                group("b", vec![]),
+                group("kind", vec![]),
+            ]
+            .map(ProfileStep::Node),
+        )))
+        .unwrap();
+    let after = compiler
+        .compile(&ProfileProgram::from_profile(Profile::program(
+            [
+                ProfileNode::Group(
+                    ProfileGroup::new("b", [plugin("x", "new")]).isolation(IsolationSpec::new(
+                        ["local".into()],
+                        [],
+                        [],
+                    )),
+                ),
+                group("a", vec![]),
+                plugin("kind", "test"),
+            ]
+            .map(ProfileStep::Node),
+        )))
+        .unwrap();
+    let changes = after.changes_from(&before);
+    assert_eq!(
+        changes
+            .iter()
+            .map(|c| (c.id.as_str(), c.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a", K::Modified(vec![A::Order])),
+            ("b", K::Modified(vec![A::Order, A::Isolation])),
+            ("kind", K::Modified(vec![A::Kind])),
+            ("x", K::Modified(vec![A::Plugin, A::Parent])),
+        ]
+    );
 }

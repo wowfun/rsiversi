@@ -14,7 +14,44 @@ doctest = false
 name = "rsi"
 path = "src/main.rs"
 
+[[example]]
+name = "workbench-addon"
+path = "../../../fixtures/rsi/addon-workbench/main.rs"
+
 [dependencies]
+rsi-native-addons-api = { path = "../native-addons-api" }
+rsi-inspector = { path = "../inspector" }
+rsi-session-tree-ui = { path = "../session-tree-ui" }
+rsi-client-preferences = { path = "../client-preferences" }
+rsi-session-files-ui = { path = "../session-files-ui" }
+rsi-files = { path = "../../rsi-files/core" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
+rsi-files-tools = { path = "../../rsi-files/tools" }
+rsi-session-files = { path = "../session-files" }
+rsi-ui = { path = "../ui" }
+rsi-ui-api = { path = "../ui-api" }
+rsi-ui-portable = { path = "../ui-portable" }
+rsi-session-ui = { path = "../session-ui" }
+rsi-client-composition = { path = "../client-composition" }
+rsi-web-assets = { path = "../web-assets" }
+rsi-api-http-client = { path = "../../rsi-api/http-client" }
+rsi-api-device-api = { path = "../../rsi-api/device-api" }
+rsi-terminal = { path = "../terminal" }
+rsi-application = { path = "../application" }
+rsi-serve = { path = "../serve" }
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-client = { path = "../client" }
+rsi-api = { path = "../../rsi-api/core" }
+rsi-api-auth = { path = "../../rsi-api/auth" }
+rsi-ai-models-api = { path = "../../rsi-ai/models-api" }
+rsi-workspace-api = { path = "../../rsi-workspace/api" }
+rsi-settings-api = { path = "../../rsi-settings/api" }
+rsi-media-api = { path = "../../rsi-media/api" }
+rsi-process-output-api = { path = "../../rsi-process/output-api" }
+rsi-session-api = { path = "../session-api" }
+bytes.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
@@ -22,6 +59,7 @@ getrandom.workspace = true
 hex.workspace = true
 rsi-agent-executor = { path = "../../rsi-agent/executor" }
 rsi-agent-composition = { path = "../../rsi-agent/composition" }
+rsi-agent-context = { path = "../../rsi-agent/context" }
 rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
 rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
 rsi-agent-presets = { path = "../../rsi-agent/presets" }
@@ -31,7 +69,11 @@ rsi-agent-store-sqlite = { path = "../../rsi-agent/store-sqlite" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-tools = { path = "../../rsi-agent/tools" }
 rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
+rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
+rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
+rsi-agent-repeat-tool-reminder = { path = "../../rsi-agent/repeat-tool-reminder" }
 rsi-ai = { path = "../../rsi-ai/core" }
+rsi-ai-portable = { path = "../../rsi-ai/portable" }
 rsi-ai-deepseek = { path = "../../rsi-ai/deepseek" }
 rsi-ai-image = { path = "../../rsi-ai/image" }
 rsi-ai-openai = { path = "../../rsi-ai/openai" }
@@ -62,7 +104,7 @@ rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
 rsi-session = { path = "../session" }
-rsi-session-host = { path = "../session-host" }
+rsi-service-host = { path = "../service-host" }
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-settings-local = { path = "../../rsi-settings/local" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
@@ -72,23 +114,36 @@ rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
 rsi-tools = { path = "../../rsi-tools/core" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 rsi-workspace = { path = "../../rsi-workspace/core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
+vt100.workspace = true
+rusqlite.workspace = true
+base64.workspace = true
+rsi-session-testkit = { path = "../session-testkit" }
+rsi-settings-testkit = { path = "../../rsi-settings/testkit" }
+portable-pty.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 axum.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+cap-std.workspace = true
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rsi-api-uds-client = { path = "../../rsi-api/uds-client" }
 libc.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["process"] }
 
 [lints]
 workspace = true

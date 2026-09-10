@@ -658,6 +658,76 @@ pub trait PreparedImageCall: fmt::Debug + Send + 'static {
 }
 
 /// Exact-route Language router service.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageModelPage {
+    /// Exact models in strict ascending order, after the requested exclusive cursor.
+    pub models: Vec<ModelRef>,
+    /// Whether another model existed at enumeration time.
+    pub has_more: bool,
+}
+
+/// Maximum model references returned by one Language enumeration call.
+pub const MAX_LANGUAGE_MODEL_PAGE: usize = 256;
+
+impl LanguageModelPage {
+    /// Revalidates a page at a transport boundary against its original request.
+    pub fn validate(&self, after: Option<&ModelRef>, limit: usize) -> Result<(), AiContractError> {
+        if !(1..=MAX_LANGUAGE_MODEL_PAGE).contains(&limit)
+            || self.models.len() > limit
+            || self.has_more && self.models.len() != limit
+            || self.models.windows(2).any(|pair| pair[0] >= pair[1])
+            || after.is_some_and(|after| self.models.first().is_some_and(|first| first <= after))
+        {
+            return Err(AiContractError::invalid("invalid Language model page"));
+        }
+        for model in &self.models {
+            model.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Failure to read a live model catalog, independent of provider invocation.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ModelsError {
+    /// API connection failure retained by a remote model catalog.
+    #[error(transparent)]
+    Api(rsi_api_protocol::ApiError),
+    /// Malformed cursor or page limit.
+    #[error("invalid model catalog request: {0}")]
+    Invalid(String),
+    /// Catalog transport or response admission is exhausted.
+    #[error("model catalog capacity is exhausted")]
+    Capacity,
+    /// The service owner has stopped admission.
+    #[error("model catalog is shutting down")]
+    ShuttingDown,
+    /// The catalog or its transport failed.
+    #[error("model catalog failed: {0}")]
+    Backend(String),
+}
+
+/// Read-only committed Language model catalog; confers no invocation authority.
+#[async_trait]
+pub trait LanguageModels: fmt::Debug + Send + Sync + 'static {
+    /// Lists committed configured routes without credentials or provider I/O.
+    async fn list_models(
+        &self,
+        after: Option<&ModelRef>,
+        limit: usize,
+    ) -> Result<LanguageModelPage, ModelsError>;
+}
+
+/// Nominal Local contract for the read-only Language model catalog.
+#[derive(Debug)]
+pub struct LanguageModelsContract;
+impl LocalContract for LanguageModelsContract {
+    const KEY: &'static str = "rsi.ai.language.models";
+    type Service = dyn LanguageModels;
+}
+
+/// Exact-route Language router invocation service.
 #[async_trait]
 pub trait LanguageCall: fmt::Debug + Send + Sync + 'static {
     /// Describes one route without credentials, media reads, or provider I/O.

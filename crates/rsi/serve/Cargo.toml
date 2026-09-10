@@ -1,0 +1,27 @@
+[package]
+name = "rsi-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-web-assets = { path = "../web-assets" }
+rsi-web-assets-api = { path = "../web-assets-api" }
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-application = { path = "../application" }
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "signal"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

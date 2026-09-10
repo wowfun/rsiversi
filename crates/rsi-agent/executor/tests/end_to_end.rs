@@ -4,7 +4,7 @@ use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
     PreparedFreshSession,
 };
-use rsi_agent_context::{ContextFold, ContextLimits};
+use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_executor::ExecutorFactory;
 use rsi_agent_kernel::KernelFactory;
 use rsi_agent_session_protocol::{
@@ -19,9 +19,6 @@ use rsi_agent_turn_protocol::{
     TurnCompletionBlocker, TurnError, TurnExecution, TurnExecutionContract, TurnFinalization,
     TurnFinalizationContext, TurnFinalizationContract, TurnFinalizationError,
     TurnFinalizationReport, TurnFinalizer, TurnFinalizerLease, TurnServiceContract,
-};
-use rsi_agent_workspace_context::{
-    WorkspaceContext, WorkspaceContextContract, WorkspaceContextError, WorkspaceContextSnapshot,
 };
 use rsi_ai_protocol::{
     AiCapability, AiError, ContentDelta, ContentStart, DispatchStatus, ErrorKind, ErrorPhase,
@@ -92,17 +89,17 @@ async fn activate_configured_fixture(
 }
 
 #[derive(Debug)]
-struct AllowApproval;
+struct FixtureApproval(ApprovalDecision);
 
 #[async_trait]
-impl Approval for AllowApproval {
+impl Approval for FixtureApproval {
     async fn ask(
         &self,
         _request: ApprovalRequest,
         _cancellation: CancellationToken,
     ) -> rsi_approval_protocol::Result<ApprovalOutcome> {
         Ok(ApprovalOutcome {
-            decision: ApprovalDecision::AllowOnce,
+            decision: self.0,
             answerer: "test".into(),
             reason: None,
         })
@@ -114,6 +111,12 @@ struct TestSandbox;
 
 #[async_trait]
 impl Sandbox for TestSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        Err(rsi_sandbox::SandboxError::Unsupported(request.mode))
+    }
     async fn confine(&self, request: ProcessRequest) -> rsi_sandbox::Result<ConfinedProcess> {
         let (backend, filesystem, scratch) = match request.mode {
             SandboxMode::ReadOnly => (
@@ -153,54 +156,7 @@ impl Sandbox for TestSandbox {
 }
 
 #[derive(Debug)]
-struct SecurityFixtureFactory;
-
-#[derive(Debug)]
-struct EmptyWorkspaceContextFixture;
-
-#[async_trait]
-impl WorkspaceContext for EmptyWorkspaceContextFixture {
-    async fn snapshot(
-        &self,
-        _header: &SessionHeader,
-        _messages: &[&rsi_agent_session_protocol::AgentMessage],
-    ) -> std::result::Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        Ok(WorkspaceContextSnapshot {
-            complete: false,
-            instructions_sha256: String::new(),
-            instructions: None,
-            skill_catalog_sha256: String::new(),
-            skill_catalog: None,
-            invocations: Vec::new(),
-        })
-    }
-}
-
-#[derive(Debug)]
-struct WorkspaceContextFixtureFactory;
-
-#[async_trait]
-impl PluginFactory for WorkspaceContextFixtureFactory {
-    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        Ok(PreparedActivation::new(desired.clone()))
-    }
-
-    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let service: Arc<dyn WorkspaceContext> = Arc::new(EmptyWorkspaceContextFixture);
-        let supply = plan
-            .context()
-            .provide_local::<WorkspaceContextContract>(service)?;
-        plan.defer(
-            "withdraw test workspace context",
-            Box::new(move || {
-                Box::pin(async move {
-                    drop(supply);
-                    Ok(())
-                })
-            }),
-        )
-    }
-}
+struct SecurityFixtureFactory(ApprovalDecision);
 
 #[async_trait]
 impl PluginFactory for SecurityFixtureFactory {
@@ -211,7 +167,7 @@ impl PluginFactory for SecurityFixtureFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let approval = plan
             .context()
-            .provide_local::<ApprovalContract>(Arc::new(AllowApproval))?;
+            .provide_local::<ApprovalContract>(Arc::new(FixtureApproval(self.0)))?;
         let sandbox = plan
             .context()
             .provide_local::<SandboxContract>(Arc::new(TestSandbox))?;
@@ -310,13 +266,6 @@ impl TurnExecution for FailingClaimFixture {
         unreachable!("the failing claim fixture never enters messages")
     }
 
-    async fn refresh_workspace_context(
-        &self,
-        _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<usize> {
-        unreachable!("the failing claim fixture never refreshes workspace context")
-    }
-
     async fn close_current_step(
         &self,
         _claim: &TurnClaim,
@@ -325,11 +274,11 @@ impl TurnExecution for FailingClaimFixture {
         unreachable!("the failing claim fixture never closes a Step")
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
         _claim: &TurnClaim,
         _outcome: &TurnOutcome,
-    ) -> rsi_agent_turn_protocol::Result<Option<Arc<SessionFact>>> {
+    ) -> rsi_agent_turn_protocol::Result<Arc<SessionFact>> {
         unreachable!("the failing claim fixture never settles an activation")
     }
 
@@ -374,6 +323,7 @@ impl TurnExecution for FailingClaimFixture {
 impl TurnFinalization for FailingClaimFixture {
     fn register(
         &self,
+        _credential: &rsi_meta::RegistrationContext,
         _name: String,
         _finalizer: Arc<dyn TurnFinalizer>,
     ) -> FinalizationResult<TurnFinalizerLease> {
@@ -645,7 +595,7 @@ struct MediaFixture {
 
 #[async_trait]
 impl Media for MediaFixture {
-    async fn import_image(&self, source: Arc<[u8]>) -> rsi_media_protocol::Result<MediaRef> {
+    async fn import_image(&self, source: bytes::Bytes) -> rsi_media_protocol::Result<MediaRef> {
         let index = self.imports.fetch_add(1, Ordering::AcqRel);
         if index > 0 {
             assert_latest_is(&self.store, |body| {
@@ -1132,6 +1082,8 @@ struct CompositionFixture {
     pin: Mutex<Option<AgentCompositionPin>>,
     owner_drops: Arc<AtomicUsize>,
     panic_on_commit: Mutex<Option<Arc<Notify>>>,
+    context_builder: Mutex<Arc<dyn rsi_agent_context::ModelContextBuilder>>,
+    contributions: Mutex<rsi_agent_composition_protocol::ContributionCatalog>,
 }
 
 #[async_trait]
@@ -1177,6 +1129,9 @@ impl AgentComposition for CompositionFixture {
             preset_id.clone(),
             "b".repeat(64),
             tools,
+            self.context_builder.lock().unwrap().clone(),
+            rsi_agent_composition_protocol::DomainCatalog::default(),
+            self.contributions.lock().unwrap().clone(),
             Arc::new(GenerationOwner(Arc::clone(&self.owner_drops))),
         )?;
         *current = Some(pin.clone());
@@ -1208,6 +1163,10 @@ impl PluginFactory for CompositionFixtureFactory {
             pin: Mutex::new(None),
             owner_drops: Arc::new(AtomicUsize::new(0)),
             panic_on_commit: Mutex::new(None),
+            context_builder: Mutex::new(Arc::new(
+                rsi_agent_context::DefaultContextBuilder::default(),
+            )),
+            contributions: Mutex::default(),
         });
         *self.installed.lock().unwrap() = Some(Arc::clone(&fixture));
         let service: Arc<dyn AgentComposition> = fixture;
@@ -1238,7 +1197,6 @@ struct BaseStack {
     kernel_fiber: FiberHandle,
     tools_fiber: FiberHandle,
     composition_fiber: FiberHandle,
-    workspace_context_fiber: FiberHandle,
     composition: Arc<CompositionFixture>,
     tool_registrar: Arc<dyn ToolRegistrar>,
     jobs_fiber: FiberHandle,
@@ -1247,8 +1205,12 @@ struct BaseStack {
 }
 
 impl BaseStack {
-    #[allow(clippy::too_many_lines)] // The fixture keeps the complete dependency-order activation visible.
     async fn activate() -> Self {
+        Self::activate_with_approval(ApprovalDecision::AllowOnce).await
+    }
+
+    #[allow(clippy::too_many_lines)] // The fixture keeps the complete dependency-order activation visible.
+    async fn activate_with_approval(decision: ApprovalDecision) -> Self {
         static TEST_STACK_ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let test_admission =
             Arc::clone(TEST_STACK_ADMISSION.get_or_init(|| Arc::new(Semaphore::new(8))))
@@ -1305,19 +1267,6 @@ impl BaseStack {
             .clone()
             .expect("composition fixture activated");
         let tool_registrar = Arc::clone(&composition.registrar);
-        let workspace_context_fiber = runtime
-            .root()
-            .apply(
-                ResolvedFactory::linked(
-                    "test.workspace-context",
-                    "workspace-context",
-                    UpdateMode::Replayable,
-                    Arc::new(WorkspaceContextFixtureFactory),
-                ),
-                Value::Null,
-            )
-            .await
-            .unwrap();
         let kernel_fiber = runtime
             .root()
             .apply(
@@ -1351,7 +1300,7 @@ impl BaseStack {
                     "test.security",
                     "security",
                     UpdateMode::Replayable,
-                    Arc::new(SecurityFixtureFactory),
+                    Arc::new(SecurityFixtureFactory(decision)),
                 ),
                 Value::Null,
             )
@@ -1391,7 +1340,6 @@ impl BaseStack {
             kernel_fiber,
             tools_fiber,
             composition_fiber,
-            workspace_context_fiber,
             composition,
             tool_registrar,
             jobs_fiber,
@@ -1575,7 +1523,6 @@ impl BaseStack {
         assert!(self.security_fiber.dispose().await.is_clean());
         assert!(self.jobs_fiber.dispose().await.is_clean());
         assert!(self.kernel_fiber.dispose().await.is_clean());
-        assert!(self.workspace_context_fiber.dispose().await.is_clean());
         assert!(self.composition_fiber.dispose().await.is_clean());
         assert!(self.tools_fiber.dispose().await.is_clean());
         assert!(self.store_fiber.dispose().await.is_clean());
@@ -1600,6 +1547,13 @@ impl TurnFinalizer for HangingFinalizer {
 
 #[path = "end_to_end/budgets_and_recovery.rs"]
 mod budgets_and_recovery;
+#[path = "end_to_end/context_builder.rs"]
+mod context_builder;
+#[path = "end_to_end/contributions.rs"]
+mod contributions;
+#[cfg(unix)]
+#[path = "end_to_end/files.rs"]
+mod files;
 #[path = "end_to_end/image_and_shutdown.rs"]
 mod image_and_shutdown;
 #[path = "end_to_end/pool.rs"]

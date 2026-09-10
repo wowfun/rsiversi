@@ -1,20 +1,20 @@
 use super::super::{
     CleanupReport, EffectHandle, EffectRecord, OwnedEffect, Owner, Runtime, RuntimeInner,
 };
-use super::EventRemoval;
+use super::RegistrationRemoval;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
 #[derive(Clone)]
-pub(crate) struct EventOwnership {
-    pub(super) removal: Arc<EventRemoval>,
-    pub(super) effect: EventEffect,
+pub(crate) struct RegistrationOwnership {
+    pub(in crate::runtime) removal: Arc<RegistrationRemoval>,
+    pub(super) effect: RegistrationEffect,
     pub(super) once_claimed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
-pub(in crate::runtime) enum EventEffect {
+pub(in crate::runtime) enum RegistrationEffect {
     Setup(OwnedEffect),
     Dynamic(EffectHandle),
     RegistryDynamic(RegistryEffectHandle),
@@ -26,7 +26,7 @@ pub(in crate::runtime) struct RegistryEffectHandle {
     owner: Owner,
     id: u64,
     record: Arc<EffectRecord>,
-    executor: tokio::runtime::Handle,
+    executor: crate::Execution,
 }
 
 impl RegistryEffectHandle {
@@ -53,8 +53,11 @@ impl RegistryEffectHandle {
     }
 }
 
-impl EventOwnership {
-    pub(in crate::runtime) fn new(removal: Arc<EventRemoval>, effect: EventEffect) -> Self {
+impl RegistrationOwnership {
+    pub(in crate::runtime) fn new(
+        removal: Arc<RegistrationRemoval>,
+        effect: RegistrationEffect,
+    ) -> Self {
         Self {
             removal,
             effect,
@@ -62,13 +65,29 @@ impl EventOwnership {
         }
     }
 
+    pub(in crate::runtime) fn retire_registration(&self, executor: &crate::Execution) {
+        self.removal.start();
+        match &self.effect {
+            RegistrationEffect::RegistryDynamic(effect) => {
+                if let Some(effect) = effect.upgrade() {
+                    executor.spawn(async move {
+                        effect.dispose().await;
+                    });
+                }
+            }
+            _ => self.rollback_failed_publication(executor),
+        }
+    }
+
     pub(in crate::runtime) fn registry_clone(&self) -> Self {
         let effect = match &self.effect {
-            EventEffect::Setup(effect) => EventEffect::Setup(effect.clone()),
-            EventEffect::Dynamic(effect) => {
-                EventEffect::RegistryDynamic(RegistryEffectHandle::new(effect))
+            RegistrationEffect::Setup(effect) => RegistrationEffect::Setup(effect.clone()),
+            RegistrationEffect::Dynamic(effect) => {
+                RegistrationEffect::RegistryDynamic(RegistryEffectHandle::new(effect))
             }
-            EventEffect::RegistryDynamic(effect) => EventEffect::RegistryDynamic(effect.clone()),
+            RegistrationEffect::RegistryDynamic(effect) => {
+                RegistrationEffect::RegistryDynamic(effect.clone())
+            }
         };
         Self {
             removal: Arc::clone(&self.removal),
@@ -79,7 +98,7 @@ impl EventOwnership {
 
     pub(crate) async fn dispose(&self) -> (CleanupReport, bool) {
         match &self.effect {
-            EventEffect::Setup(effect) => {
+            RegistrationEffect::Setup(effect) => {
                 let retention = effect.detach();
                 if retention.is_some() {
                     self.removal.claim_detached_report();
@@ -89,12 +108,12 @@ impl EventOwnership {
                 drop(retention);
                 (self.removal.report(&result), result.unwrap_or(false))
             }
-            EventEffect::Dynamic(effect) => {
+            RegistrationEffect::Dynamic(effect) => {
                 let report = effect.dispose().await;
                 let removed = self.removal.join().await.unwrap_or(false);
                 (report, removed)
             }
-            EventEffect::RegistryDynamic(effect) => {
+            RegistrationEffect::RegistryDynamic(effect) => {
                 let report = if let Some(effect) = effect.upgrade() {
                     effect.dispose().await
                 } else {
@@ -108,12 +127,9 @@ impl EventOwnership {
         }
     }
 
-    pub(in crate::runtime) fn rollback_failed_publication(
-        &self,
-        executor: &tokio::runtime::Handle,
-    ) {
+    pub(in crate::runtime) fn rollback_failed_publication(&self, executor: &crate::Execution) {
         match &self.effect {
-            EventEffect::Setup(effect) => {
+            RegistrationEffect::Setup(effect) => {
                 let retention = effect.detach();
                 if retention.is_some() {
                     self.removal.claim_detached_report();
@@ -121,23 +137,23 @@ impl EventOwnership {
                 self.removal.start();
                 drop(retention);
             }
-            EventEffect::Dynamic(_) => {
+            RegistrationEffect::Dynamic(_) => {
                 let ownership = self.clone();
                 executor.spawn(async move {
                     ownership.dispose().await;
                 });
             }
-            EventEffect::RegistryDynamic(_) => {
+            RegistrationEffect::RegistryDynamic(_) => {
                 self.removal.start();
             }
         }
     }
 }
 
-impl fmt::Debug for EventOwnership {
+impl fmt::Debug for RegistrationOwnership {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("EventOwnership")
+            .debug_struct("RegistrationOwnership")
             .field("owner", &self.removal.owner())
             .finish_non_exhaustive()
     }

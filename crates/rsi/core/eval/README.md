@@ -25,7 +25,8 @@ task-wide totals and the actual per-Turn settings. There is no task resampling.
 The Agent process also runs in a fresh Bubblewrap PID and mount namespace.
 Only its private task directory, the built executable, read-only system files
 and toolchain are mounted. The repository, harness, expected answers, key file,
-reports and real user HOME are absent. A private HOME and Cargo environment
+reports and real user HOME are absent. Cargo children receive an explicit
+`CARGO_BUILD_JOBS=2` alongside offline dependency access. A private HOME and Cargo environment
 exclude ambient configuration. Network access supports the provider; the key
 is supplied only in the Agent environment and product Tools scrub it from
 their children. Nested restricted Tool sandboxes remain enabled. The outer

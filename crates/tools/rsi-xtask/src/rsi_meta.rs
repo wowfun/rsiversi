@@ -7,8 +7,9 @@ use std::process::Command;
 use crate::cargo_step::{self, CargoStep};
 use crate::repository_root;
 
-const CONFORMANCE_PACKAGES: [&str; 6] = [
+const CONFORMANCE_PACKAGES: [&str; 7] = [
     "rsi-meta-contract",
+    "rsi-meta-execution",
     "rsi-meta",
     "rsi-meta-scope",
     "rsi-meta-profile",
@@ -38,7 +39,7 @@ impl Host {
     }
 }
 
-fn conformance_packages() -> [&'static str; 6] {
+fn conformance_packages() -> [&'static str; 7] {
     CONFORMANCE_PACKAGES
 }
 
@@ -358,6 +359,7 @@ mod tests {
             conformance_packages(),
             [
                 "rsi-meta-contract",
+                "rsi-meta-execution",
                 "rsi-meta",
                 "rsi-meta-scope",
                 "rsi-meta-profile",
@@ -368,13 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn linux_conformance_plan_has_one_exact_twenty_one_step_authority() {
+    fn linux_conformance_plan_has_one_exact_twenty_three_step_authority() {
         let steps = conformance_steps(Host::Linux, "test-host");
         assert_eq!(
             labels(&steps),
             [
                 "clippy rsi-meta-contract",
                 "test rsi-meta-contract",
+                "clippy rsi-meta-execution",
+                "test rsi-meta-execution",
                 "clippy rsi-meta",
                 "test rsi-meta",
                 "clippy rsi-meta-scope",

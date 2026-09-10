@@ -150,6 +150,47 @@ fn run(repository: &Path, arguments: &[&str]) -> Output {
         .expect("rsi-xtask should run")
 }
 
+#[test]
+fn fixture_readmes_follow_their_existing_product_namespace() {
+    let repository = valid_repository();
+    let root = repository.path();
+    write(root, "crates/rsi-api/AGENTS.md", "Govern the API family.\n");
+    write(
+        root,
+        "crates/rsi-api/README.md",
+        "# API family\n\nOwn API contracts.\n",
+    );
+    write(
+        root,
+        "fixtures/rsi-api/AGENTS.md",
+        "Verify public API behavior.\n",
+    );
+    write(
+        root,
+        "fixtures/rsi-api/browser-probe/Cargo.toml",
+        &manifest("api-probe"),
+    );
+    write(
+        root,
+        "fixtures/rsi-api/browser-probe/README.md",
+        &readme("api-probe", "Exercises the API inside a real Worker."),
+    );
+    let output = run(root, &["verify-docs"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    write(
+        root,
+        "fixtures/rsi-api/browser-probe/README.md",
+        &readme("wrong", "Still authored fixture documentation."),
+    );
+    let output = run(root, &["verify-docs"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("api-probe"));
+}
+
 fn verify(repository: &Path) -> Output {
     run(repository, &["verify-docs"])
 }
@@ -473,4 +514,38 @@ fn unexpected_docs_taxonomy_and_missing_governance_are_rejected() {
     assert!(errors.contains("product namespace must define AGENTS.md"));
     assert!(errors.contains("unsupported docs taxonomy directory `rfcs`"));
     assert!(errors.contains("legacy decision or specification home is forbidden"));
+}
+
+#[test]
+fn package_owned_docs_receive_taxonomy_and_link_validation() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "crates/rsi-meta/core/docs/development.md",
+        "# Development\n\nUse the [package](../README.md).\n",
+    );
+    assert!(verify(repository.path()).status.success());
+    write(
+        repository.path(),
+        "crates/rsi-meta/core/docs/broken.md",
+        "[missing](absent.md)\n",
+    );
+    let broken = verify(repository.path());
+    assert!(!broken.status.success());
+    assert!(stderr(&broken).contains("absent.md"));
+    fs::remove_file(
+        repository
+            .path()
+            .join("crates/rsi-meta/core/docs/broken.md"),
+    )
+    .unwrap();
+    write(
+        repository.path(),
+        "crates/rsi-meta/core/docs/specs/protocol.md",
+        "# Misplaced contract\n",
+    );
+    let output = verify(repository.path());
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("crates/rsi-meta/core/docs/specs"));
+    assert!(stderr(&output).contains("legacy decision or specification home is forbidden"));
 }

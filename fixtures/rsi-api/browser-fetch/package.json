@@ -1,0 +1,8 @@
+{
+  "name": "rsi-api-browser-fetch",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node verify-all.mjs" },
+  "engines": { "node": ">=22" },
+  "devDependencies": { "playwright": "1.63.0" }
+}

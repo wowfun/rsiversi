@@ -1,8 +1,15 @@
 use super::super::{Cleanup, EventListenerId, MetaError, Owner, Result, Runtime, RuntimeInner};
 use futures_util::FutureExt as _;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::Notify;
+
+type LocalUndo = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
+enum RemovalAction {
+    Listener(EventListenerId),
+    Local(Mutex<Option<LocalUndo>>),
+}
 
 type RemovalResult = std::result::Result<bool, String>;
 
@@ -17,10 +24,11 @@ struct RemovalState {
     result: Option<RemovalResult>,
 }
 
-pub(crate) struct EventRemoval {
+pub(crate) struct RegistrationRemoval {
     runtime: Weak<RuntimeInner>,
     owner: Owner,
-    id: EventListenerId,
+    action: RemovalAction,
+    admitting: AtomicBool,
     cleanup_label: String,
     maximum_diagnostic_entries: usize,
     maximum_diagnostic_bytes: usize,
@@ -32,7 +40,7 @@ pub(crate) struct EventRemoval {
     complete: Notify,
 }
 
-impl EventRemoval {
+impl RegistrationRemoval {
     pub(in crate::runtime) fn new(
         runtime: &Runtime,
         owner: Owner,
@@ -42,13 +50,37 @@ impl EventRemoval {
         Arc::new(Self {
             runtime: Arc::downgrade(&runtime.inner),
             owner,
-            id,
+            action: RemovalAction::Listener(id),
+            admitting: AtomicBool::new(true),
             cleanup_label,
             maximum_diagnostic_entries: runtime.inner.limits.payloads.maximum_diagnostic_entries,
             maximum_diagnostic_bytes: runtime.inner.limits.payloads.maximum_diagnostic_bytes,
             state: Mutex::new(RemovalState::default()),
             complete: Notify::new(),
         })
+    }
+
+    pub(in crate::runtime) fn for_local(
+        runtime: &Runtime,
+        owner: Owner,
+        cleanup_label: String,
+        undo: LocalUndo,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            runtime: Arc::downgrade(&runtime.inner),
+            owner,
+            action: RemovalAction::Local(Mutex::new(Some(undo))),
+            admitting: AtomicBool::new(true),
+            cleanup_label,
+            maximum_diagnostic_entries: runtime.inner.limits.payloads.maximum_diagnostic_entries,
+            maximum_diagnostic_bytes: runtime.inner.limits.payloads.maximum_diagnostic_bytes,
+            state: Mutex::new(RemovalState::default()),
+            complete: Notify::new(),
+        })
+    }
+
+    pub(in crate::runtime) fn is_admitting(&self) -> bool {
+        self.admitting.load(Ordering::Acquire)
     }
 
     pub(super) fn owner(&self) -> Owner {
@@ -104,12 +136,11 @@ impl EventRemoval {
     }
 }
 
-impl fmt::Debug for EventRemoval {
+impl fmt::Debug for RegistrationRemoval {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("EventRemoval")
+            .debug_struct("RegistrationRemoval")
             .field("owner", &self.owner)
-            .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }

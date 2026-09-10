@@ -1,0 +1,34 @@
+[package]
+name = "rsi-api-http-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+http.workspace = true
+reqwest.workspace = true
+rsi-api-client = { path = "../client" }
+rsi-api-protocol = { path = "../protocol" }
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "net", "time", "rt-multi-thread"] }
+tokio-util.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../core" }
+rsi-api-http = { path = "../http" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -61,7 +61,7 @@ static MEDIA_RESIDENT_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
 
 #[derive(Clone)]
 struct ValidatedMedia {
-    bytes: Arc<[u8]>,
+    bytes: bytes::Bytes,
     admission: Arc<tokio::sync::OwnedSemaphorePermit>,
 }
 
@@ -337,8 +337,8 @@ fn validate_resolved_media(descriptor: &MediaDescriptor, bytes: &[u8]) -> Result
 
 async fn validate_resolved_media_blocking(
     descriptor: MediaDescriptor,
-    bytes: Arc<[u8]>,
-) -> Result<Arc<[u8]>, AiError> {
+    bytes: bytes::Bytes,
+) -> Result<bytes::Bytes, AiError> {
     tokio::task::spawn_blocking(move || {
         validate_resolved_media(&descriptor, &bytes)?;
         Ok(bytes)
@@ -419,7 +419,7 @@ impl PrepareContext {
         &self,
         descriptor: &MediaDescriptor,
         abort: AbortSignal,
-    ) -> Result<Arc<[u8]>, AiError> {
+    ) -> Result<bytes::Bytes, AiError> {
         let resolution = self
             .resolved_media
             .for_descriptor(descriptor, Arc::clone(&self.media));
@@ -462,7 +462,7 @@ pub trait MediaResolver: fmt::Debug + Send + Sync {
         &self,
         descriptor: MediaDescriptor,
         abort: AbortSignal,
-    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>>;
+    ) -> AdapterFuture<Result<bytes::Bytes, AiError>>;
 }
 
 /// Default resolver used when a router call has no durable Media reader.
@@ -474,7 +474,7 @@ impl MediaResolver for MissingMediaResolver {
         &self,
         _descriptor: MediaDescriptor,
         _abort: AbortSignal,
-    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
+    ) -> AdapterFuture<Result<bytes::Bytes, AiError>> {
         Box::pin(async {
             Err(AiError::new(
                 ErrorKind::Artifact,
@@ -506,7 +506,7 @@ impl MediaResolver for DurableMediaResolver {
         &self,
         descriptor: MediaDescriptor,
         abort: AbortSignal,
-    ) -> AdapterFuture<Result<Arc<[u8]>, AiError>> {
+    ) -> AdapterFuture<Result<bytes::Bytes, AiError>> {
         let reader = Arc::clone(&self.reader);
         Box::pin(async move {
             tokio::select! {
@@ -614,6 +614,8 @@ impl<T> fmt::Debug for Prepared<T> {
 
 /// Language provider seam.
 pub trait LanguageAdapter: fmt::Debug + Send + Sync {
+    /// Returns bounded configured declarations without credentials or provider I/O.
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles;
     /// Describes one model without credentials, network, filesystem, or other provider I/O.
     fn describe(&self, model: &str) -> Result<LanguageProfile, AiError>;
 

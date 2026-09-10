@@ -1,7 +1,10 @@
 # rsi-approval
 
 This ordinary plugin owns one ordered answerer registry and the corresponding
-approval resolver. It snapshots answerer `Arc`s before await, short-circuits on
+approval resolver. Registrations borrow an exact Meta RegistrationContext;
+Loading rollback, lease disposal and generation retirement share the same undo.
+The registry uses stable composition order and caches immutable sorted snapshots
+until membership or order changes. It snapshots answerer `Arc`s before await, short-circuits on
 the first valid answer, and fails closed to a stable default deny when all
 answerers abstain.
 

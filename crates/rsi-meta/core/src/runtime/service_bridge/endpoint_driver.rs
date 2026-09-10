@@ -23,7 +23,7 @@ pub(super) struct EndpointDriver<'call> {
     pub(super) callback_lease: Arc<CallbackLease>,
     pub(super) runtime: &'call Runtime,
     pub(super) cancellation: &'call CancellationToken,
-    pub(super) deadline: tokio::time::Instant,
+    pub(super) deadline: crate::Deadline,
 }
 
 impl EndpointDriver<'_> {
@@ -62,7 +62,7 @@ impl EndpointDriver<'_> {
                 CallTerminationSource::RuntimeTerminal,
                 None,
             ),
-            () = tokio::time::sleep_until(deadline) => (
+            () = deadline.wait() => (
                 Err(MetaError::Timeout("service call")),
                 CallTerminationSource::Deadline,
                 None,

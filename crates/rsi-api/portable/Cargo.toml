@@ -1,0 +1,30 @@
+[package]
+name = "rsi-api-portable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-protocol = { path = "../protocol" }
+rsi-api-client = { path = "../client" }
+rsi-meta = { path = "../../rsi-meta/core" }
+async-trait.workspace = true
+async-stream.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

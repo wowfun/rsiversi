@@ -13,6 +13,12 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod description;
+pub use description::{
+    MAXIMUM_SETTINGS_METADATA_BYTES, MAXIMUM_SETTINGS_PAGE, SettingsApply, SettingsDescription,
+    SettingsMetadata, SettingsPage, validate_settings_page,
+};
+
 /// Maximum namespace identifier bytes.
 pub const MAXIMUM_SETTINGS_NAMESPACE_BYTES: usize = 256;
 /// Maximum encoded bytes in one raw namespace section.
@@ -24,6 +30,12 @@ pub type SettingsDocument = BTreeMap<String, Value>;
 /// Closed Settings failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SettingsError {
+    /// API connection failure retained by a remote Settings projection.
+    #[error(transparent)]
+    Api(rsi_api_protocol::ApiError),
+    /// No active owner has registered the requested namespace.
+    #[error("settings namespace `{0}` has no active registration")]
+    UnknownNamespace(String),
     /// A caller supplied malformed or out-of-bounds data.
     #[error("invalid settings input: {0}")]
     InvalidInput(String),
@@ -116,18 +128,104 @@ pub struct SettingsSpec {
     pub defaults: Value,
     /// Composition-owned base value.
     pub base: Value,
+    /// Bounded schema and presentation declaration from this namespace's owner.
+    pub metadata: SettingsMetadata,
     /// Pure validator for the fully merged value.
     pub validator: Arc<dyn SettingsValidator>,
+}
+
+/// Opaque identity of one namespace registration, distinct across service restarts.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct SettingsScopeId(String);
+
+impl SettingsScopeId {
+    /// Validates an external registration identity.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(SettingsError::InvalidInput(
+                "settings scope identity must be 32 lowercase hex digits".into(),
+            ));
+        }
+        Ok(Self(value))
+    }
+    /// Borrows the exact opaque identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SettingsScopeId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Complete optimistic write version for an explicit namespace projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsVersion {
+    /// Exact namespace registration whose value the caller observed.
+    pub scope_id: SettingsScopeId,
+    /// Revision within that registration.
+    pub revision: u64,
 }
 
 /// Current resolved namespace value and CAS revision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsSnapshot {
+    /// Exact namespace registration that produced this snapshot.
+    pub scope_id: SettingsScopeId,
     /// Monotonic revision of this namespace's raw user section.
     pub revision: u64,
     /// Frozen resolved value.
     pub value: Value,
+}
+
+impl SettingsSnapshot {
+    /// Captures both identity and revision for a subsequent remote write.
+    pub fn version(&self) -> SettingsVersion {
+        SettingsVersion {
+            scope_id: self.scope_id.clone(),
+            revision: self.revision,
+        }
+    }
+}
+
+/// Asynchronous client access to registered namespaces without registration authority.
+#[async_trait]
+pub trait SettingsAccess: fmt::Debug + Send + Sync + 'static {
+    /// Lists active names after an exclusive lexical cursor, within the protocol page bound.
+    async fn list(&self, after: Option<&str>, limit: usize) -> Result<SettingsPage>;
+    /// Describes one active registration without exposing raw provider sections.
+    async fn describe(&self, namespace: &str) -> Result<SettingsDescription>;
+    /// Reads one currently registered namespace projection.
+    async fn read(&self, namespace: &str) -> Result<SettingsSnapshot>;
+    /// Replaces that namespace under registration and revision CAS.
+    async fn replace(
+        &self,
+        namespace: &str,
+        expected: &SettingsVersion,
+        value: Value,
+    ) -> Result<SettingsSnapshot>;
+    /// Clears that namespace under registration and revision CAS.
+    async fn clear(&self, namespace: &str, expected: &SettingsVersion) -> Result<SettingsSnapshot>;
+}
+
+/// Nominal Local contract for asynchronous Settings projections.
+#[derive(Debug)]
+pub struct SettingsAccessContract;
+impl LocalContract for SettingsAccessContract {
+    const KEY: &'static str = "rsi.settings.access";
+    type Service = dyn SettingsAccess;
 }
 
 /// One active namespace scope.
@@ -191,6 +289,9 @@ impl Drop for SettingsLease {
 pub trait Settings: fmt::Debug + Send + Sync + 'static {
     /// Registers one exact namespace until the returned lease is dropped.
     fn register(&self, spec: SettingsSpec) -> Result<SettingsRegistration>;
+    /// Looks up one active namespace without creating it or transferring its lease.
+    /// The returned scope remains fenced to that exact registration generation.
+    fn scope(&self, namespace: &str) -> Result<Arc<dyn SettingsScope>>;
 }
 
 /// Nominal Local contract for [`Settings`].
@@ -219,12 +320,9 @@ pub fn validate_namespace(namespace: &str) -> Result<()> {
 
 /// Validates and returns the encoded size of one raw section.
 pub fn validate_section(value: &Value) -> Result<usize> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
-    if bytes.len() > MAXIMUM_SETTINGS_SECTION_BYTES {
-        return Err(SettingsError::InvalidInput(format!(
-            "settings section exceeds {MAXIMUM_SETTINGS_SECTION_BYTES} bytes"
-        )));
-    }
-    Ok(bytes.len())
+    rsi_api_protocol::measure_json(value, MAXIMUM_SETTINGS_SECTION_BYTES).map_err(|_| {
+        SettingsError::InvalidInput(format!(
+            "settings section cannot encode within {MAXIMUM_SETTINGS_SECTION_BYTES} bytes"
+        ))
+    })
 }

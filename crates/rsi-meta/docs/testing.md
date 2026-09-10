@@ -12,6 +12,15 @@ expected baseline.
 
 ## Preparation and lifecycle
 
+Execution tests also construct a Runtime with an explicit backend and poll its
+operations outside an ambient Tokio context. Cover empty shutdown, transfer of
+cleanup after dropping a waiter, owned preparation, and absolute deadlines. Run
+the shared lifecycle cases in a real browser Worker before claiming browser
+support; a successful target build alone does not establish lifecycle behavior.
+The [browser probe](../../../fixtures/rsi-meta/browser-probe/README.md) owns the
+locked Chromium/Firefox Worker, Profile bundle, and fatal-trap harness. Its CI
+job is required independently of native conformance.
+
 Evidence covers:
 
 - bounded, Runtime-bound, single-use preparation with no Context or dependency
@@ -240,6 +249,9 @@ contention returning `BUSY`, unregister/call races, and timeout retention until
 foreign return. Completion also requires public callback, instance, module,
 staging, cache, capability, effect, destruction, and Runtime resource snapshots
 to reach zero only after actual teardown.
+Callback-count assertions begin only after setup callbacks have quiesced. A
+published capability or completed application waiter does not prove that the
+foreign worker has released its callback reservation.
 
 Table unit evidence distinguishes a duplicate release in the still-current
 consumed epoch (`PROTOCOL_ERROR`) from an old token after slot reuse (`STALE`),
@@ -281,7 +293,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --lib --no-deps
 cargo test --locked --workspace --doc
 ```
 
-`cargo xtask rsi-meta conformance` owns the contract, core, scope, Profile,
+`cargo xtask rsi-meta conformance` owns the contract, Execution, core, scope, Profile,
 native ABI, native-loader, and
 standalone-fixture sequence so local and CI evidence cannot silently diverge.
 After its root package checks have materialized the shared locked dependencies,
@@ -292,8 +304,8 @@ artifact must export only `rsi_meta_plugin_entry_v3`. The ABI package tests own
 C11/C++17 compilation of the maintained public header. Repository CI
 additionally runs independent rsi-ai, rsi-agent, repository-tool,
 documentation, dependency-audit, and Windows rsi-meta failure domains; the
-conformance command remains the only CI authority that enumerates rsi-meta
-packages and fixtures. CI runs the full native suite on Linux and macOS, while
+native conformance command remains the CI authority that enumerates native
+Meta packages and fixtures. CI runs the full native suite on Linux and macOS, while
 the Windows job exercises rsi-meta conformance only.
 
 The final implementation report lists every command actually exercised,

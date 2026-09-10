@@ -8,7 +8,10 @@ snapshots, dispatch evidence, and finite retry facts. `rsi-ai-provider` owns
 provider-author adapter seams. `rsi-ai` and `rsi-ai-image` own the independent
 Language and Image routers. Concrete provider plugins translate to their
 private wire through `rsi-ai-transport` and register exact deployments with one
-or both routers.
+or both routers. The ordinary [Portable provider](../portable/README.md) instead
+translates the versioned native business protocol through an explicitly injected
+Portable capability, using those same registrars and publication gate. It does
+not add a privileged Meta adapter.
 
 Credential resolution belongs to `rsi-credentials`; media bytes belong to
 `rsi-media`; Tool schemas belong to `rsi-tools-protocol`. There is no AI-owned
@@ -18,7 +21,8 @@ fallback route.
 ## Ordinary plugins
 
 Routers publish `LanguageCallContract` and `ImageCallContract` as Local
-services. Provider plugins require the registrar contracts they enable and the
+services. The Language router also publishes the read-only
+`LanguageModelsContract` from the same route registry. Provider plugins require the registrar contracts they enable and the
 Base contracts needed by their adapters. Their registrations are bound to the
 provider Fiber generation. Removing or replacing that Fiber withdraws the
 registrations after generation-local prepared calls drain.

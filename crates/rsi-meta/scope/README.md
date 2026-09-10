@@ -30,6 +30,11 @@ failure evidence does not replace exact undo, reclamation, or notification.
 Change futures are explicitly destroyed inside the same boundary before their
 result is published, including when a Pending mutation waiter is cancelled.
 
+`ScopedContributions` is the separate bounded table for declaration-ordered
+hooks. Its narrow registration credential owns exact undo, and explicit scope
+keys select visibility. It returns immutable Arc snapshots and retains only the
+last query selection. Named tables retain their existing overlay semantics.
+
 The authoritative behavior contract is the
 [scoped-contributions section](../docs/architecture.md#scoped-contributions).
 Required public, lifecycle, failure, and concurrency evidence is specified by

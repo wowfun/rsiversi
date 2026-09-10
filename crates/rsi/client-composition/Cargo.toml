@@ -1,0 +1,29 @@
+[package]
+name = "rsi-client-composition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-session-files = { path = "../session-files" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-session-api = { path = "../session-api" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-ai-models-api = { path = "../../rsi-ai/models-api" }
+rsi-process = { path = "../../rsi-process/core" }
+rsi-process-output-api = { path = "../../rsi-process/output-api" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
+rsi-settings-api = { path = "../../rsi-settings/api" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+rsi-workspace-api = { path = "../../rsi-workspace/api" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-media-api = { path = "../../rsi-media/api" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

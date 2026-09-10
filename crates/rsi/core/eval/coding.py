@@ -178,6 +178,7 @@ def clean_environment():
     # change which sources or oracle flags get compiled.
     keep = {name: os.environ[name] for name in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "LANG"] if name in os.environ}
     keep["CARGO_NET_OFFLINE"] = "true"
+    keep["CARGO_BUILD_JOBS"] = "2"
     return keep
 
 
@@ -894,7 +895,7 @@ def configure(root, model, turn_count):
     settings = {"rsi.agent": {"default_model": {"deployment": "live-deepseek", "model": model},
         "system_prompt": "You are a coding agent. Inspect source, make the requested implementation, and run checks. Follow the task's file constraints. Report command failures truthfully.",
         "turn_budget": {"maximum_elapsed_ms": 480000, "maximum_provider_attempts": PROVIDER_ATTEMPTS_PER_TURN, "maximum_tool_calls": 48 // turn_count,
-                        "maximum_generated_facts": 65536, "maximum_generated_fact_bytes": 67108864}}}
+                        "maximum_generated_records": 65536, "maximum_generated_record_bytes": 67108864}}}
     (config / "settings.json").write_text(json.dumps(settings))
     profile = config / "host-profiles/live/host.profile.toml"
     profile.parent.mkdir(parents=True)
@@ -906,15 +907,16 @@ plugin = "rsi.ai.provider.deepseek"
 [steps.config]
 deployment = "live-deepseek"
 endpoint = "https://api.deepseek.com"
+protocol = "responses"
 credential = {{ owner = "rsi.ai.provider.deepseek", slot = "default" }}
 [steps.config.language_models.{model}]
 context_window_tokens = 128000
 default_output_reserve_tokens = 8192
 max_output_reserve_tokens = 16384
 ''')
-    app = config / "application-profiles/live/application.toml"
+    app = config / "application-profiles/live/application.profile.toml"
     app.parent.mkdir(parents=True)
-    app.write_text('format = 1\napplication = "headless"\nhost_profile = "live"\n')
+    app.write_text('format = 1\n[[steps]]\nkind = "plugin"\nid = "connection"\nplugin = "rsi.application.connection"\nconfig = { host_profile = "live" }\n[[steps]]\nkind = "plugin"\nid = "application"\nplugin = "rsi.application.headless"\n')
     return settings
 
 

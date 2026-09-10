@@ -22,6 +22,18 @@ effect-owned contribution to that authority.
 
 ## Context and ownership
 
+Execution is an explicit bootstrap dependency, defined below core, for owned
+tasks, preparation jobs and monotonic deadlines. Core does not select an executor
+per Fiber or per caller. Platform adapters supply native Tokio or browser Worker
+execution; neither adapter adds a composition graph. Native constructors may
+capture an explicitly entered Tokio runtime as a convenience. Drop paths and an
+empty Runtime retain the same execution authority as ordinary active Fibers.
+
+The browser adapter accepts only trusted bounded synchronous preparation. The
+deadline includes that work but cannot interrupt it; stale results cannot publish
+after control returns. Native unwind containment remains intact. On panic-abort
+WASM, a trap destroys the Worker and cannot report cleanup or shutdown completion.
+
 A `Runtime` owns all mutable registries, admission, scheduling, resource
 accounting, persistent cleanup, and shutdown. A `Context` is a cloned
 capability value that retains its Runtime and optional owning Fiber generation.
@@ -34,10 +46,19 @@ generation at its linearization point. A stale Context can be inspected but
 cannot publish, open a call, register an effect, or create a child. Root
 Contexts can apply root plugins but cannot impersonate a plugin generation.
 
+`Context::retirement_observer` captures an observation-only signal for the exact
+live generation, or Runtime admission for a root Context. It fires when that
+owner closes admission, before draining calls, children, or deferred cleanup.
+It retains neither execution admission nor the Runtime. Local adapters use it
+to release suspended outbound calls that their later deferred cleanup must join;
+the signal grants no cleanup authority and does not replace owned cleanup.
+
 ## Preparation, injection, and activation
 
 `ResolvedFactory` contains one already bounded `FactoryIdentity`, static
-`UpdateMode`, and the `PluginFactory` implementation. The Runtime validates and
+`UpdateMode`, and the `PluginFactory` implementation. `into_parts` lets a trusted resolver consume that value to wrap its implementation
+while retaining provenance and policy; it performs no execution or attestation.
+The Runtime validates and
 accounts the captured identity for the Fiber lifetime but never asks executable
 plugin code to report it. The Runtime validates each desired
 configuration at its owning input boundary, then retains that bounded value as
@@ -125,6 +146,9 @@ generation or spinning a retry intent.
 Caller cancellation or deadline expiry detaches only the waiter; admitted
 preparation, activation rollback, retirement, and shutdown remain owned and
 joinable.
+An inserted apply retains its disposal guard through the final deadline check.
+Only acceptance of the result transfers that responsibility to the returned
+Fiber handle; a late successful activation is still disposed when its result is rejected.
 
 ## Transactional effects
 
@@ -146,6 +170,24 @@ failed commit then closes the setup window. Closed and stale transactions reject
 further mutation. The transaction can reverse only mutations whose undo was
 successfully registered; code that performs an external side effect before
 registering cleanup remains responsible for that unowned interval.
+
+`Context::registration_context` issues a narrow Local registrar credential for
+one exact non-root generation. It cannot apply children, resolve dependencies,
+provide services, or impersonate another Context. Local registrars install exact
+undo through this credential before publishing a contribution. Loading joins
+the existing setup transaction; Active uses one dynamic effect. Publication
+validates the current generation and serializes with exact removal. The bounded
+publication closure only mutates the owning registrar and never invokes plugin
+callbacks or waits. Business callbacks run after capturing a snapshot and
+releasing all registrar and lifecycle locks.
+
+The returned registration lease closes new admission immediately when disposed
+or dropped. Generation retirement uses the same exact removal, and retained
+registration tokens observe that closure. Registrars check token liveness when
+capturing new work; an already captured dispatch keeps its documented snapshot
+semantics. Synchronous undo is contained and owned by the same effect record,
+including failure reporting. Registration order tokens retain position and an
+owner-local ordering tie-break, without granting mutation authority.
 
 `InvocationContext::caller_effect` lets a service implement an operation on
 behalf of its exact caller generation. Contributions made through that handle
@@ -295,9 +337,32 @@ disposed; disposal removes it from future snapshots. A once binding still
 requires its exact atomic claim and cannot run twice across concurrent
 dispatches.
 
-The registry preserves append/prepend order with stable internal ordering keys;
-exact-handle removal uses the listener identity's indexed location and never
-shifts the remaining slot membership.
+The registry orders listeners by their owning composition position, then by
+registration order within that exact position. The prepend lane precedes append
+and reverses declaration order; append follows declaration order. One dispatch
+captures immutable membership and ranks before calling any listener. Unchanged
+membership/order reuses the same sorted snapshot. Exact-handle removal remains
+indexed by listener identity.
+
+`Context::child_position` reserves an opaque stable identity for one direct
+child. `with_child_position` derives a Context selecting that identity for apply;
+an ordinary apply reserves its position at admission. At most one live Fiber may
+occupy a position. Rebuilding after disposal may reuse it. Positions belong to
+one Runtime and exact parent generation; another parent or stale generation
+cannot apply or reorder them. `reorder_children` atomically publishes ranks for
+that parent's positions, placing explicitly listed positions first and retaining
+the relative order of omitted positions afterward. It never changes Fiber or
+registration generations. Descendant order follows the complete position path.
+Ordinary concurrent child admission or registration inside a single plugin does
+not promise deterministic order across runs.
+
+The Runtime bounds simultaneously retained position identities separately from
+Fiber capacity. A position retains only bounded composition metadata and its
+ancestor positions, not execution admission or a Runtime reference. Explicit
+position handles can therefore outlive shutdown as stale metadata. Last-owner
+release removes the exact order entry; there is no historical position table.
+Candidate and compensation handles may coexist without reserving candidate
+Fibers. Rank publication does not introduce another lifecycle graph.
 
 Local callbacks execute directly. Runtime does not add a common deadline,
 spawn, cancellation token, call identity, or dispatch resource tracker. Errors,
@@ -339,6 +404,23 @@ entries. Overlay resolution retains shared entry values and clones only the
 final visible owned snapshot. Exact `peek` validates only root identity and does not walk ancestry;
 reads never create a layer. `NamedEntries` and
 `AnonymousEntries` preserve insertion order and exact independent ownership.
+Explicit ordered contributions use `ScopedContributions` instead. Its owner
+supplies one Runtime identity, one ScopeRoot and a total live-entry bound.
+Registration takes the caller's narrow `RegistrationContext` and an explicit
+optional scope key; the key selects visibility and grants no generation
+authority. Both Runtime and scope-root mismatches reject before publication.
+Loading joins setup undo and Active owns a dynamic effect. Each entry is
+removed by its exact lease or generation retirement.
+
+An ordered contribution snapshot includes global entries, then matching
+ancestors from farthest to nearest. Each layer follows current composition
+declaration order; this does not change named overlay replacement. Snapshot
+capture retains one immutable Arc, and business callbacks run after capture.
+The table caches only its last bounded selection, avoiding a history of queried
+scope keys. Unchanged membership, ancestry and effective order reuse that Arc,
+including after an unrelated order publication. Reparenting affects the next
+capture; existing snapshots keep their selected values. Entry removal also
+releases its exact scope reference, and query-only reads create no layer.
 Each product store declares its maximum simultaneously retained exact-scope
 layers. An existing key remains usable at saturation, while a new key fails
 before factory execution; a cleanup failure may consume capacity but cannot
@@ -371,6 +453,31 @@ when the mutation waiter is cancelled while polling; the dropped open
 Built-in entry stores publish each new exact undo to the surrounding action
 transaction before returning it to product code, so an action error or panic
 after insertion cannot strand an unowned visible entry.
+
+## Read-only inspection
+
+`Runtime::inspect` returns a bounded, owned page of redacted Fiber metadata;
+`Context::inspect` restricts membership to its owning Fiber and descendants and
+fences a retired generation. A root Context observes the Runtime. Neither entry
+point prepares plugins, invokes callbacks, mutates registries, or exposes config,
+opaque state, service values, effect labels or raw failure/terminal diagnostics.
+The page includes exact factory provenance, lifecycle kind, parent generation,
+actual composition order, prepared requirements with captured provider bindings,
+owned supplies, effect state/counts and listener/child counts. Only whole-Runtime
+inspection includes the existing global resource snapshot.
+
+Inspection accepts at most 64 Fibers and 128 items per Fiber collection. Each
+collection reports its total as well as its retained prefix. An exclusive Fiber
+ID cursor pages membership in ID order; clients use the captured order paths for
+contribution order. Registry membership is captured under its lock, Fiber data
+outside that lock, and effect/order observations outside Fiber locks. This is an
+operational observation across those boundaries, not a transactional graph or a
+proof of cleanup quiescence. Callers own retention of returned pages. Bounded
+identifiers and provenance remain observable metadata, not secret storage.
+Effect-table counts exclude records already transferred to the cleanup driver;
+the generation's existing effect budgets and cleanup phase report that retained
+work separately. A supply records whether its generation reached publication,
+not a guarantee that an observed supply remains callable.
 
 ## Native adapter
 

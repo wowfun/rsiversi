@@ -1,0 +1,219 @@
+# rsi-web
+
+When its selected API connection negotiates the UI operations, each pane can open
+Service extensions. The Worker pages the remote catalog for that pane's actual
+Session and retains one remote observation for the open detail. It derives scope,
+presentation identity, source revision and one-use action tickets from retained
+server responses; the document supplies only a displayed selection or action name.
+Remote models use the same admitted document renderers as local models. Changing
+details or detaching the pane closes the observation, without reconnect or replay.
+Unknown mutation outcomes remain explicit; only a new server model can restore
+input admission. This path can display newly installed Service UI contributions
+without adding a linked Worker factory or rebuilding the Worker.
+
+Assistant text may carry a restricted Markdown event stream alongside its exact
+retained source. The Worker uses at most 64 KiB input, 4,096 events and 32 nested
+elements per block. Encoded events may occupy at most four times source bytes
+plus 256 bytes; exceeding any bound preserves the complete retained plain text.
+This limits aggregate frame expansion with the existing transcript budget.
+Headings, paragraphs, lists, quotes, emphasis, code and absolute HTTP(S) links
+are supported. Raw HTML is text; Markdown images show their alt text without
+fetching a URL. Tool/file/source contents keep their plain-text presentations.
+The document constructs only the closed element set with text nodes, and links
+open with no opener or referrer. Markdown does not grant script or media access.
+Input composition suppresses keyboard submission until composition has ended.
+Composer Enter behavior comes from the ordinary [client preferences](../client-preferences/README.md)
+Settings contribution and is captured when the application connects.
+
+The application imports browser-selected raster files through its composed Media
+capability. One non-queued image operation is admitted per application, at most
+16 MiB source bytes per import. Each saved draft retains at most eight ordered
+Media references, separately from its text budget. Imports captured before a pane
+switch finish against that saved draft; they never attach to the replacement.
+Removing or reordering references edits only the draft. A submitted request freezes
+text followed by its ordered images, including image-only input. Unknown outcomes
+retain those exact references and identity; edited drafts survive reconciliation.
+An empty edited draft does not block resolving an already frozen valid request.
+Slash-command dispatch applies only to text-only drafts. Image import is durable
+independently of Session submission and is never rolled back or automatically
+replayed after reply loss.
+
+Preview reads select either a current draft reference or a current exact-source
+detail ticket. Media owns canonical PNG validation and byte identity; arbitrary
+URLs and filenames are never read capabilities. Binary input and output travel
+separately from JSON views. Source bytes are bounded before copying into WASM;
+canonical response receive leases remain owned until the document transfer is
+created. The document retains at most eight object URLs / 32 MiB of canonical
+bytes, evicts least-recently-used previews and revokes all URLs on disconnect.
+Only a requested preview is decoded for display. Closing/replacing that display
+fences late responses; application retirement cancels and drains image work.
+These are presentation retention limits, not total browser decoder or RSS limits.
+
+Each pane displays the latest complete extension-state snapshot, including fresh
+drafts and idle control changes without a model request. Producer values and
+failures are rendered as text. Snapshot replacement releases the prior retention;
+attachment withdrawal releases the latest value. Projection-stream failure leaves
+core history observation independent and marks extension state unavailable.
+
+Fact, interaction and extension-state observation notices are independent.
+An accepted update clears only its own stream's previous notice. Withdrawal
+releases all retained renderer snapshots and projections, even if another owner
+still holds the renderer handle; late deliveries cannot reacquire that retention.
+
+Each conversation exposes its discovered Session commands and saved command
+receipt. Registered slash names execute through the shared controller; unknown
+names remain Human input for workspace skills. One unresolved invocation per
+saved Session retains its full arguments, original request ID and predecessor
+across pane replacement. Refresh only queries that identity. Sending a new
+message waits until the pending command is resolved; edited input remains saved.
+Command state uses the existing 64 saved-Session bound (at most 16 KiB of arguments
+per Session) independently of message-text retention.
+
+The Web coding application runs the same Rust Meta, ordered Profile compiler,
+domain clients and Session controllers in a Dedicated Worker. The document
+thread renders views and forwards input. JavaScript does not own session
+submission, reconciliation, observation cursors, credentials or Profile state.
+
+One authenticated connection supplies independent domain capabilities. The Web
+application owns two independently selectable panes; a Session-free Shell owns
+their ordinary renderer/controller child Profiles. Each pane has its own draft,
+model, transcript, history page and interactions. Replacing one attachment does
+not discard its saved input: each pane retains at most 64 Session drafts with
+2 MiB of aggregate UTF-8 text, rejecting excess changes before replacing input.
+Replacing one attachment does not dispose the other. The Shell permits four surfaces only to allow both old
+and replacement generations during simultaneous switches; each pane admits one
+switch at a time. The current draft remains registered even when empty, until
+attachment replacement succeeds; a failed navigation cannot invalidate its input.
+History is a bounded separate page, preserving live observation.
+
+Inputs enter a closed Rust command grammar with non-queued admission. The application
+admits at most eight commands globally and one submission awaiting a receipt per
+saved Session draft; input documents are limited to 1 MiB plus their small command envelope.
+Encoded views use a separate 32 MiB reservation. Submissions use caller identities
+and the shared reconciliation owner. Each saved draft retains its immutable
+unresolved request across attachment replacement, under a separate 2 MiB
+aggregate request-text bound per pane. Send retries resolve that request first;
+only an authoritative NotFound permits replay with the same identity and bytes.
+Edited draft text remains saved until a subsequent new submission. Unknown
+outcomes never allocate replacement identities. Cancellation targets the active Turn and this
+pane's accepted pending messages. Question and approval actions preserve exact
+request/owner identities. Settings writes preserve the read scope and revision.
+The single detail view has its own generation: late settings reads and settled
+answers cannot replace or close a newer view. History reads admit one operation
+per pane; returning to live view fences a history result still in flight and resets
+backward paging to the earliest Fact represented by the current live projection.
+Workspace paths describe the selected server, not the browser filesystem.
+
+Settings opens a bounded page of registered namespaces and shows the selected
+owner's schema, default layer, application timing and sensitive-field markers.
+Metadata and the editable snapshot must share a registration identity. The editor
+retains the actual snapshot's version for CAS and reports provider writability.
+Closing or replacing a Settings read cancels its local future; late success and
+failure cannot replace another detail. Saving remains an admitted mutation under
+the existing Settings owner even if the editor closes.
+Pretty JSON output stops at 8 MiB before growing beyond the editor's rendering
+bound. If indentation exceeds that bound, the editor uses complete compact JSON
+from the Settings-validated value (at most 4 MiB). Values exceeding the command
+input limit remain readable with saving disabled; no displayed prefix is writable.
+
+Tool argument and result details use closed exact Fact sources, with decimal
+string sequences preserved opaquely in JavaScript. Rust reads one exact Fact
+through the shared controller and retains a 64 KiB UTF-8 field window. Paging
+requires the current detail ticket; stale buttons cannot replace a newer view.
+Closing or replacing details and replacing their pane cancel the old read.
+Both success and failure are fenced by pane and detail generation; unavailable
+sources are reported within their own detail. No full Fact or observation lease
+is retained by a detail, and detail cancellation does not cancel the Turn.
+
+Every retained non-Tool block exposes a source list. Opening it captures at most
+the shared block-index bound in one metadata-only detail; each page displays at
+most 64 references. Page tickets and pane generation prevent stale buttons from
+replacing another detail. The captured list remains stable during streaming or
+history eviction; a later exact read can still report unavailable. Only the page
+is encoded into the document view. Media cards retain metadata and exact sources;
+neither these identifiers nor a displayed URL confer Media read authority.
+Source-list rows scroll inside their own bounded region, keeping the detail title,
+close button and page controls visible across page replacement.
+
+Each transcript retains at most 128 blocks, 128 KiB per block, 1 MiB of owned
+text capacity and 512 KiB of metadata capacity;
+omission is visible. A history page has the same projection bounds. The view
+uses shared [conversation semantics](../conversation/README.md) for Tool outcome
+classification and bounded JSON previews; it does not serialize complete large
+arguments or result values before truncating them. The view keeps a Tool's name and argument preview when its result arrives, with distinct
+intent and result Fact sequences. Arguments and results each occupy at most half the block; this also reserves
+room for an intent loaded after its result. Clipping never removes its exact source.
+History beginning after intent displays an explicitly missing intent rather than
+inventing a Tool name or arguments. It also marks a page whose durable prefix
+was not loaded, including the initial
+attachment tail; a page can begin in the middle of streamed model output.
+Rendering acknowledges an observation after its bounded Rust projection is retained.
+Coalesced view notifications cannot advance or replace domain cursors. The DOM
+bridge permits one view delivery at a time, acknowledged after rendering. Whole
+valid API Facts and history pages remain possible transient allocations under
+their independent domain/transport budgets; UI text limits are not RSS limits.
+
+Text spans use the shared bounded exact-source index. Duplicate delivery is
+ignored only while that source is retained; missing interior text is inserted in
+source order. Evicting a span removes its source membership and byte-length
+metadata together. A bounded single-field preview stays UTF-8 aligned; admitting
+newer or older spans evicts from the opposite end and marks omitted content.
+Accepted control previews reconcile to their entered Message fields, while direct
+Turn input keeps a distinct identity. Older backfill cannot regress the current
+Turn's status. The highest Fact sequence remains a cursor, not a duplicate set.
+
+Login consumes a device registration receipt; the token is exchanged through
+the existing same-origin HttpOnly cookie owner and is not persisted in browser
+storage. Closing an application drains Worker-owned requests and surfaces and
+does not stop the remote service. A WASM trap is a failed Worker, not proof of
+clean Rust shutdown. Production uses TLS/H2; loopback HTTP is explicitly for
+development transport debugging.
+
+
+UI contributions use the independently composed `rsi-ui` registry. Each actual
+pane Profile has a `rsi-session-ui` target depending on its exact controller.
+The document renders generic contributed menus, cards, fields, forms and buttons;
+Rust validates target and detail generations plus bundle-local action references.
+Registry changes request a new view. Closing a contributed detail cancels its
+read presentation; admitted actions stay tracked by their original owners.
+
+The standard Worker composes the independent [Files UI](../session-files-ui/README.md)
+contribution. Each actual pane supplies its own browser state over the connected
+Files client, with an isolated Local mapping and no additional observer or pane.
+The shared declarative inspector renders its directory and text/hex pages.
+The independent [Agent tree UI](../session-tree-ui/README.md) uses that same
+registry and detail slot for finite child-tree/history/source inspection.
+
+The incremental presentation stream carries closed snapshot/patch frames with
+canonical decimal frame IDs. A patch names its exact base frame, replaces only
+changed top-level sections, and carries per-pane field changes plus stable block
+upserts, removals and order. First delivery, pane-generation replacement and a
+missing or mismatched base produce a complete snapshot. Each stream retains only
+its latest projected baseline, bounded to 32 MiB of serialized JSON; output uses
+the existing independent 32 MiB frame reservation. These are logical buffer
+bounds, not RSS limits. Unaffected pane revisions reuse their projection without
+re-encoding it. Domain cursors still advance when the Rust sink accepts updates.
+
+The document acknowledges the exact frame only after successful DOM rendering.
+A base mismatch requests a fresh snapshot. One pending frame and one acknowledgement
+wait are retained; a 30-second stalled acknowledgement closes the Worker
+connection and drains the application, requiring explicit reconnection. No queue
+of frames or domain records is retained behind a stalled document. Application
+withdrawal drops the baseline even while an external handle remains alive.
+
+An ordinary Worker plugin owns `web-assets.observe`, its application nonce and
+its pending renderer offer. Asset changes wake the existing frame producer; they
+do not start another document frame queue. The frame includes only validated
+renderer admission metadata. The document completes asynchronous rendering and
+old-module disposal before its acknowledgement settles the exact offer. Worker
+withdrawal cancels observation and joins its task before connection cleanup.
+Executable admission and DOM mounting grant no Session or credential authority.
+
+Surface details hold the UI owner's asynchronous PresentationLease and an exact
+SnapshotPin. Their watcher updates only captured model data; document rendering
+performs no business reads. Closing or replacing the detail cancels its watcher,
+joins lease cleanup, and fences escaped input. Source requests name the displayed
+detail ticket and model-local source, with windows of at most 64 KiB. Actions name
+only displayed membership; the Worker derives target identity and revision from
+its retained snapshot. Standard block cards retain their independently bound
+block action contract and are converted to the neutral standard model.

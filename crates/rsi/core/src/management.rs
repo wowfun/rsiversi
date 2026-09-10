@@ -3,9 +3,12 @@ use super::{
     AgentPresetRow, AgentPresetSource, AgentPresetTrust, AgentStoreCommand, ApplicationProfileId,
     BTreeMap, HostProfileId, ManagementOutput, PresetError, ProfileCatalog, ProfileCommand,
     ProfileKind, ProfileOperationKind, ProfileSource, RsiError, Serialize, SqliteStore,
-    StandardComposition, Write, report_error, standard_agent_preset_root, standard_coding_tools,
-    standard_paths,
+    StandardComposition, Write, report_error, standard_agent_preset_root, standard_paths,
 };
+use rsi_terminal::write_text_line;
+
+#[cfg(unix)]
+mod profile_edit;
 
 pub(super) async fn run_agent_store(command: AgentStoreCommand) -> u8 {
     let root = match command.root {
@@ -41,6 +44,13 @@ pub(super) async fn run_agent_store(command: AgentStoreCommand) -> u8 {
 
 #[allow(clippy::too_many_lines)] // One closed Profile command matrix owns all output variants.
 pub(super) async fn run_profile(command: &ProfileCommand) -> u8 {
+    #[cfg(unix)]
+    if matches!(
+        command.operation,
+        ProfileOperationKind::PreviewEdit | ProfileOperationKind::CommitEdit
+    ) {
+        return profile_edit::run(command).await;
+    }
     if matches!(
         (command.kind, command.operation),
         (ProfileKind::Host, ProfileOperationKind::Preview)
@@ -76,7 +86,7 @@ pub(super) async fn run_profile(command: &ProfileCommand) -> u8 {
             (ProfileKind::Application, ProfileOperationKind::Show) => {
                 let id = application_profile_id(&command.ids[0])?;
                 let document = catalog.application(&id).map_err(profile_management_error)?;
-                let contents = toml::to_string_pretty(&document.profile)
+                let contents = String::from_utf8(document.contents)
                     .map_err(|error| RsiError::Boot(error.to_string()))?;
                 write_profile_document(
                     command.output,
@@ -162,6 +172,10 @@ pub(super) async fn run_profile(command: &ProfileCommand) -> u8 {
             (ProfileKind::Host | ProfileKind::Application, ProfileOperationKind::Preview) => {
                 unreachable!()
             }
+            #[cfg(unix)]
+            (_, ProfileOperationKind::PreviewEdit | ProfileOperationKind::CommitEdit) => {
+                unreachable!("source editing is dispatched before catalog operations")
+            }
         }
     })();
     result.map_or_else(|error| report_error(&error), |()| 0)
@@ -180,18 +194,21 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
         Ok(document) => document,
         Err(error) => return report_error(&profile_management_error(error)),
     };
-    let coding = match standard_coding_tools() {
+    #[cfg(target_os = "linux")]
+    let coding = match super::standard_coding_tools() {
         Ok(coding) => coding,
         Err(error) => return report_error(&error),
     };
-    let presets =
-        match AgentPresetManager::open_standard_preview(paths.clone(), coding.is_some()).await {
-            Ok(presets) => presets,
-            Err(error) => return report_error(&error),
-        };
-    let preview = StandardComposition::new(paths, BTreeMap::new(), coding)
-        .with_agent_presets(presets.catalog().clone())
-        .preview_host(&document);
+    #[cfg(not(target_os = "linux"))]
+    let coding = None;
+    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let presets = match AgentPresetManager::open_standard_preview(&composition).await {
+        Ok(presets) => presets,
+        Err(error) => return report_error(&error),
+    };
+    let preview = composition
+        .with_agent_presets(&presets)
+        .and_then(|composition| composition.preview_host(&document));
     let shutdown = presets.shutdown().await;
     let result = preview.and_then(|preview| {
         if !shutdown.is_clean() {
@@ -207,6 +224,8 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
                 "launch_key": preview.launch_key.as_str(),
                 "source_digest": preview.profile.source_digest,
                 "source_paths": preview.profile.source_paths,
+                "configuration_validation": "not_prepared",
+                "factories": preview.factories,
                 "leaves": preview.profile.leaves.iter().map(|leaf| serde_json::json!({
                     "instance_id": leaf.instance_id,
                     "plugin_id": leaf.plugin_id,
@@ -346,17 +365,32 @@ pub(super) async fn run_agent_preset(command: AgentPresetCommand) -> u8 {
         Ok(root) => root,
         Err(error) => return report_error(&RsiError::Boot(error.to_string())),
     };
-    let manager = match AgentPresetManager::open_standard(
-        paths,
-        system_root,
-        cfg!(target_os = "linux"),
-    )
-    .await
-    {
+    #[cfg(target_os = "linux")]
+    let coding = match super::standard_coding_tools() {
+        Ok(coding) => coding,
+        Err(error) => return report_error(&error),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let coding = None;
+    let composition = StandardComposition::new(paths, BTreeMap::new(), coding);
+    let manager = match AgentPresetManager::open_standard(&composition, system_root).await {
         Ok(manager) => manager,
         Err(error) => return report_error(&error),
     };
-    let result = execute_agent_preset(&manager, command).await;
+    let catalog = if matches!(
+        &command.operation,
+        AgentPresetOperation::List
+            | AgentPresetOperation::Show(_)
+            | AgentPresetOperation::Copy { .. }
+    ) {
+        manager.authoring_catalog(&composition)
+    } else {
+        Ok(manager.catalog().clone())
+    };
+    let result = match catalog {
+        Ok(catalog) => execute_agent_preset(&catalog, command).await,
+        Err(error) => Err(error),
+    };
     let exit = match result {
         Ok(()) => 0,
         Err(error) => report_error(&error),
@@ -384,57 +418,48 @@ pub(super) async fn shutdown_agent_preset_manager(
 }
 
 pub(super) async fn execute_agent_preset(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     command: AgentPresetCommand,
 ) -> rsi::Result<()> {
     match command.operation {
-        AgentPresetOperation::List => list_agent_presets(manager, command.output).await,
-        AgentPresetOperation::Show(id) => show_agent_preset(manager, command.output, id).await,
-        AgentPresetOperation::Path(id) => path_agent_preset(manager, command.output, &id),
+        AgentPresetOperation::List => list_agent_presets(catalog, command.output).await,
+        AgentPresetOperation::Show(id) => show_agent_preset(catalog, command.output, id).await,
+        AgentPresetOperation::Path(id) => path_agent_preset(catalog, command.output, &id),
         AgentPresetOperation::Copy {
             source,
             target,
             name,
         } => {
-            manager
-                .catalog()
+            catalog
                 .copy(&source, target.clone(), name)
                 .await
                 .map_err(preset_management_error)?;
             write_action(command.output, "copied", &target)
         }
         AgentPresetOperation::Delete(id) => {
-            manager
-                .catalog()
-                .delete(&id)
-                .await
-                .map_err(preset_management_error)?;
+            catalog.delete(&id).await.map_err(preset_management_error)?;
             write_action(command.output, "deleted", &id)
         }
         AgentPresetOperation::DefaultGet => {
-            let id = manager
-                .catalog()
+            let id = catalog
                 .default_id()
                 .await
                 .map_err(preset_management_error)?;
             write_default(command.output, "get", &id)
         }
         AgentPresetOperation::DefaultSet(id) => {
-            manager
-                .catalog()
+            catalog
                 .set_default(&id)
                 .await
                 .map_err(preset_management_error)?;
             write_default(command.output, "set", &id)
         }
         AgentPresetOperation::DefaultClear => {
-            manager
-                .catalog()
+            catalog
                 .clear_default()
                 .await
                 .map_err(preset_management_error)?;
-            let id = manager
-                .catalog()
+            let id = catalog
                 .default_id()
                 .await
                 .map_err(preset_management_error)?;
@@ -444,14 +469,10 @@ pub(super) async fn execute_agent_preset(
 }
 
 pub(super) async fn list_agent_presets(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     output: ManagementOutput,
 ) -> rsi::Result<()> {
-    let roster = manager
-        .catalog()
-        .roster()
-        .await
-        .map_err(preset_management_error)?;
+    let roster = catalog.roster().await.map_err(preset_management_error)?;
     let presets = roster
         .presets
         .into_iter()
@@ -469,15 +490,11 @@ pub(super) async fn list_agent_presets(
 }
 
 pub(super) async fn show_agent_preset(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     output: ManagementOutput,
     id: AgentPresetId,
 ) -> rsi::Result<()> {
-    let roster = manager
-        .catalog()
-        .roster()
-        .await
-        .map_err(preset_management_error)?;
+    let roster = catalog.roster().await.map_err(preset_management_error)?;
     let available = roster
         .presets
         .iter()
@@ -495,8 +512,7 @@ pub(super) async fn show_agent_preset(
         })?;
     let composition = if row.health == AgentPresetHealth::Healthy {
         Some(
-            manager
-                .catalog()
+            catalog
                 .document(&id)
                 .map_err(preset_management_error)?
                 .content,
@@ -517,14 +533,11 @@ pub(super) async fn show_agent_preset(
 }
 
 pub(super) fn path_agent_preset(
-    manager: &AgentPresetManager,
+    catalog: &rsi_agent_presets::AgentPresetCatalog,
     output: ManagementOutput,
     id: &AgentPresetId,
 ) -> rsi::Result<()> {
-    let path = manager
-        .catalog()
-        .location(id)
-        .map_err(preset_management_error)?;
+    let path = catalog.location(id).map_err(preset_management_error)?;
     let path = path
         .to_str()
         .ok_or_else(|| RsiError::Boot("Agent preset path cannot be represented as UTF-8".into()))?;
@@ -735,14 +748,6 @@ pub(super) fn write_json(value: &impl Serialize) -> rsi::Result<()> {
         .map_err(|error| RsiError::Boot(format!("stdout JSON write failed: {error}")))?;
     stdout
         .write_all(b"\n")
-        .and_then(|()| stdout.flush())
-        .map_err(output_error)
-}
-
-pub(super) fn write_text_line(value: &str) -> rsi::Result<()> {
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    writeln!(stdout, "{value}")
         .and_then(|()| stdout.flush())
         .map_err(output_error)
 }

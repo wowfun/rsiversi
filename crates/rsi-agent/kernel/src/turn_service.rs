@@ -2,7 +2,7 @@ use super::*;
 use rsi_agent_session_protocol::MessageDelivery;
 
 #[async_trait]
-impl TurnService for SessionKernel {
+impl TurnService for AgentKernel {
     fn settlement_health(&self) -> SettlementHealth {
         self.inner
             .settlement_health
@@ -224,56 +224,48 @@ impl TurnService for SessionKernel {
         self.claim_message_with_lane(request, None, None).await
     }
 
+    fn watch_tree_membership(
+        &self,
+        root: &SessionId,
+    ) -> TurnResult<rsi_agent_turn_protocol::TreeMembershipChanges> {
+        let observer = ObserverLease::acquire(&self.inner)?;
+        let watch = self.inner.session_changes.tree(root);
+        let inner = Arc::downgrade(&self.inner);
+        Ok(stream::unfold(
+            (watch, inner, observer),
+            |(mut watch, owner, observer)| async move {
+                let inner = owner.upgrade()?;
+                tokio::select! {
+                    () = inner.stop_worker.cancelled() => None,
+                    () = watch.changed() => Some(((), (watch, owner, observer))),
+                }
+            },
+        )
+        .boxed())
+    }
+
     async fn observe_session(
         &self,
         session_id: &SessionId,
         cursor: ObservationCursor,
     ) -> TurnResult<SessionObservationStream> {
         let observer_lease = ObserverLease::acquire(&self.inner)?;
-        let controls = read_controls_bounded(
-            &self.inner,
-            session_id,
-            cursor.control_seq,
-            MAXIMUM_FACTS_PER_READ,
-        )
-        .await
-        .map_err(turn_store_error)?;
-        let facts = read_facts_bounded(
-            &self.inner,
-            session_id,
-            cursor.fact_seq,
-            MAXIMUM_FACTS_PER_READ,
-        )
-        .await
-        .map_err(turn_store_error)?;
-        controls.validate().map_err(turn_store_error)?;
-        facts.validate().map_err(turn_store_error)?;
-        let mut pending = VecDeque::new();
-        let mut control_seq = cursor.control_seq;
-        for record in controls.records {
-            control_seq = record.seq();
-            pending.push_back(SessionObservation::Control {
-                record: Arc::new(record),
-                durable_control_seq: controls.durable_seq,
-            });
-        }
-        let mut fact_seq = cursor.fact_seq;
-        for fact in facts.facts {
-            fact_seq = fact.seq();
-            pending.push_back(SessionObservation::Fact {
-                fact: Arc::new(fact),
-                durable_fact_seq: facts.durable_seq,
-            });
-        }
-        let state = DurableObservationState {
+        let mut watch = self.inner.session_changes.session(session_id);
+        watch.mark_seen();
+        let mut state = DurableObservationState {
             inner: Arc::downgrade(&self.inner),
             session_id: session_id.clone(),
-            control_seq,
-            fact_seq,
-            pending,
+            control_seq: cursor.control_seq,
+            fact_seq: cursor.fact_seq,
+            pending: VecDeque::new(),
+            watch,
+            next_page: ObservationPageKind::Control,
+            read_controls: true,
+            read_facts: true,
             stopped: false,
             _observer_lease: observer_lease,
         };
+        fill_observation_page(&self.inner, &mut state).await?;
         Ok(stream::unfold(state, durable_observation_next).boxed())
     }
 
@@ -295,6 +287,7 @@ impl TurnService for SessionKernel {
             ));
         }
         let admission = self.inner.submission_admission.acquire(session_id).await?;
+        self.fence_pending_terminal(session_id).await?;
         let scan = scan_durable_messages(&self.inner, session_id, Some(&message_id)).await?;
         let entry = scan.selected.ok_or_else(|| {
             TurnError::Invalid(format!(
@@ -452,7 +445,7 @@ impl TurnService for SessionKernel {
                 )),
             };
         }
-        let (cancel_seq, cancellation) = {
+        let (wait, cancellation) = {
             let mut state = lock_state(&self.inner);
             let session = state
                 .sessions
@@ -487,10 +480,10 @@ impl TurnService for SessionKernel {
                 .expect("validated turn exists")
                 .cancel_requested = true;
             publish_live_watermarks(session);
-            (cancel_seq, cancellation)
+            (DurabilityWait::new(session, cancel_seq), cancellation)
         };
         drop(submission_admission);
-        self.wait_for_durable(session_id, cancel_seq)
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         cancellation.cancel();
@@ -523,17 +516,9 @@ impl TurnService for SessionKernel {
                     VecDeque::new(),
                 )
             } else {
-                let page =
-                    read_facts_bounded(&self.inner, session_id, after_seq, MAXIMUM_FACTS_PER_READ)
-                        .await
-                        .map_err(|error| match error {
-                            StoreError::Invalid(_) => TurnError::Invalid(
-                                "observation cursor exceeds the durable tail".into(),
-                            ),
-                            other => turn_store_error(other),
-                        })?;
-                let page_durable_seq = page.durable_seq;
-                let durable_facts = page.facts.into_iter().map(Arc::new).collect();
+                let (facts, page_durable_seq) =
+                    read_observed_facts(&self.inner, session_id, after_seq).await?;
+                let durable_facts = facts.into();
                 let state = lock_state(&self.inner);
                 if let Some(session) = state.sessions.get(session_id) {
                     (
@@ -588,7 +573,11 @@ impl TurnService for SessionKernel {
     ) -> TurnResult<Option<TurnOutcome>> {
         {
             let state = lock_state(&self.inner);
-            if let Some(session) = state.sessions.get(session_id) {
+            if let Some(session) = state
+                .sessions
+                .get(session_id)
+                .filter(|session| session.permanent_flush_error.is_none())
+            {
                 if let Some(turn) = session.turns.get(turn_id) {
                     return Ok(turn
                         .terminal_seq
@@ -615,10 +604,33 @@ impl TurnService for SessionKernel {
             .await
             .map_err(turn_store_error)
     }
+    async fn domain_states(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<Vec<rsi_agent_session_protocol::DomainStateView>> {
+        let page = observation::read_domain_states_bounded(&self.inner, session_id, None)
+            .await
+            .map_err(turn_store_error)?;
+        Ok(page
+            .states
+            .into_iter()
+            .map(|state| rsi_agent_session_protocol::DomainStateView {
+                revision: state.head.revision,
+                snapshot: state.snapshot,
+            })
+            .collect())
+    }
+    async fn domain_request(
+        &self,
+        session_id: &SessionId,
+        request_id: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> TurnResult<Option<rsi_agent_turn_protocol::DomainMutationReceipt>> {
+        observation::read_domain_request_bounded(&self.inner, session_id, request_id).await
+    }
 }
 
 pub(super) async fn append_retained_wait_control(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     caller: &AgentCallerAuthority,
     lease: &mutation::AgentMutationLease,
     activation_id: &rsi_agent_session_protocol::ActivationId,
@@ -658,12 +670,13 @@ pub(super) async fn append_retained_wait_control(
 }
 
 async fn commit_wait_control(
-    kernel: &SessionKernel,
+    kernel: &AgentKernel,
     caller: &AgentCallerAuthority,
     activation_id: &rsi_agent_session_protocol::ActivationId,
     body: AgentControlRecordBody,
 ) -> std::result::Result<(), super::human_wait::WaitControlError> {
     let session_id = caller.session_id().clone();
+    kernel.fence_pending_terminal(&session_id).await?;
     let expected_fact_seq = read_facts_bounded(&kernel.inner, &session_id, 0, 1)
         .await?
         .durable_seq;
@@ -698,7 +711,7 @@ async fn commit_wait_control(
     Ok(())
 }
 
-impl SessionKernel {
+impl AgentKernel {
     async fn submit_message_authorized(
         &self,
         request: SubmitMessage,
@@ -738,6 +751,7 @@ impl SessionKernel {
             return Err(TurnError::Flush(error));
         }
 
+        self.fence_pending_terminal(&session_id).await?;
         let durable_header = match read_validated_header_bounded(&self.inner, &session_id).await {
             Ok(header) => Some(header),
             Err(StoreError::NotFound(_)) if matches!(&request.session, SubmitSession::Fresh(_)) => {
@@ -773,6 +787,9 @@ impl SessionKernel {
             }
         };
         if let Some(entry) = scan.selected {
+            if let SubmitSession::Fresh(prepared) = &request.session {
+                self.validate_fresh_baseline(prepared).await?;
+            }
             if entry.message != request.message
                 || entry.root_session_id != root_session_id
                 || entry.delivery != request.delivery
@@ -828,9 +845,15 @@ impl SessionKernel {
             MessageDelivery::Steer if bound_turn_id.is_some() => MessageTarget::NextStep,
             MessageDelivery::NextTurn | MessageDelivery::Steer => MessageTarget::NextTurn,
         };
+        let baseline = match &request.session {
+            SubmitSession::Fresh(prepared) => {
+                lifecycle::initial_domain_control(prepared.header(), prepared.baseline())?
+            }
+            SubmitSession::Resume(_) => None,
+        };
         let control_seq = scan
             .durable_control_seq
-            .checked_add(1)
+            .checked_add(1 + u64::from(baseline.is_some()))
             .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
         let control = AgentControlRecord::new(
             control_seq,
@@ -847,7 +870,7 @@ impl SessionKernel {
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let header = match request.session {
             SubmitSession::Fresh(prepared) => {
-                let (header, _composition) = prepared.into_parts();
+                let (header, _composition, _baseline) = prepared.into_parts();
                 Some(header)
             }
             SubmitSession::Resume(prepared) => {
@@ -870,7 +893,10 @@ impl SessionKernel {
                         expected_control_seq: scan.durable_control_seq,
                         header,
                         facts: Vec::new(),
-                        controls: vec![control],
+                        controls: baseline
+                            .into_iter()
+                            .chain(std::iter::once(control))
+                            .collect(),
                     }],
                     required_active_activations: Vec::new(),
                     quiescent_descendants_of: None,
@@ -899,7 +925,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     #[allow(clippy::too_many_lines)] // Claim materializes Activation, Turn, Step, context, reservation, and indexes in one transaction.
     pub(super) async fn claim_message_with_lane(
         &self,
@@ -922,16 +948,15 @@ impl SessionKernel {
             .await?;
         let resume_admission = self.reserve_resume_submission(&request.session).await?;
 
-        let live_seq = {
+        let wait = {
             let state = lock_state(&self.inner);
-            state
+            let session = state
                 .sessions
                 .get(&session_id)
-                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-                .live_seq()
-                .map_err(turn_kernel_error)?
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
+            DurabilityWait::new(session, session.live_seq().map_err(turn_kernel_error)?)
         };
-        self.wait_for_durable(&session_id, live_seq)
+        self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
         {
@@ -1010,25 +1035,6 @@ impl SessionKernel {
         let require_approval = header.settings().require_approval()
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
         let timestamp_ms = self.inner.clock.now_ms().max(1);
-        let current_context = lock_state(&self.inner)
-            .sessions
-            .get(&session_id)
-            .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-            .workspace_context
-            .clone();
-        let context_snapshot = self
-            .inner
-            .workspace_context
-            .snapshot(&header, &[&entry.message])
-            .await
-            .map_err(turn_workspace_error)?;
-        let (background, invocations, next_context) = workspace_context_bodies(
-            &request.turn_id,
-            &request.step_id,
-            &current_context,
-            context_snapshot,
-        );
-        let background_len = background.len();
         let mut fact_bodies = vec![
             SessionFactBody::MessageTurnAccepted {
                 turn_id: request.turn_id.clone(),
@@ -1043,14 +1049,12 @@ impl SessionKernel {
                 step_id: request.step_id.clone(),
             },
         ];
-        fact_bodies.extend(background);
         fact_bodies.push(SessionFactBody::InputMessageEntered {
             turn_id: request.turn_id.clone(),
             step_id: request.step_id.clone(),
             source: entered_message_source(&entry.message),
             content: entry.message.content.clone(),
         });
-        fact_bodies.extend(invocations);
         let facts = fact_bodies
             .into_iter()
             .enumerate()
@@ -1065,18 +1069,14 @@ impl SessionKernel {
             })
             .collect::<TurnResult<Vec<_>>>()?;
         let entered_fact_seq = expected_fact_seq
-            .checked_add(
-                u64::try_from(background_len)
-                    .map_err(|_| TurnError::Invariant("context Fact count exceeds u64".into()))?
-                    .checked_add(3)
-                    .ok_or_else(|| TurnError::Invariant("message Fact offset exhausted".into()))?,
-            )
+            .checked_add(3)
             .ok_or_else(|| TurnError::Invariant("message Fact sequence exhausted".into()))?;
         let final_fact_seq = facts
             .last()
             .expect("message claim always creates Facts")
             .seq();
         let parent_activation = if let Some(parent_session_id) = &parent_session_id {
+            self.fence_pending_terminal(parent_session_id).await?;
             let active = self
                 .inner
                 .store
@@ -1160,13 +1160,13 @@ impl SessionKernel {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(TurnError::Cancelled);
         }
+        let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
         let _parts = self.inner.resume_issuer.consume(request.session)?;
         let kernel = self.clone();
         self.owned_commit(async move {
             let _admissions = admissions;
             kernel
                 .inner
-                .store
                 .commit_agent(AtomicAgentCommit {
                     sessions: vec![AtomicSessionAppend {
                         session_id: session_id.clone(),
@@ -1215,7 +1215,6 @@ impl SessionKernel {
                     .get_mut(&request.turn_id)
                     .expect("committed Turn is installed")
                     .prepared_lane = lane;
-                session.workspace_context = next_context;
                 session.durable_seq = final_fact_seq;
                 session.flush_status.send_replace(FlushStatus {
                     durable_seq: final_fact_seq,
@@ -1236,7 +1235,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     #[allow(clippy::too_many_lines)] // Child identity, lineage, source admission and initial message form one preparation protocol.
     async fn spawn_agent_prepared(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         self.validate_agent_caller(&request.caller)?;
@@ -1326,6 +1325,8 @@ impl SessionKernel {
             resolved_after_seq: boundary.resolved_after_seq,
             resolved_terminal_seq: boundary.resolved_terminal_seq,
             terminal_prefix_sha256: boundary.terminal_prefix_sha256,
+            resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             requested_turns: request.fork_turns,
             effective_turns: boundary.effective_turns,
         };
@@ -1342,14 +1343,35 @@ impl SessionKernel {
             .pin(child_header.agent_preset_id())
             .await
             .map_err(turn_composition_error)?;
+        let mut prepared =
+            PreparedFreshSession::new(child_header, composition).map_err(turn_composition_error)?;
+        if boundary.resolved_terminal_control_seq > 0 {
+            let states = observation::read_domain_states_bounded(
+                &self.inner,
+                &parent_session_id,
+                Some(boundary.resolved_terminal_control_seq),
+            )
+            .await
+            .map_err(turn_store_error)?;
+            let mut baseline = prepared.baseline().clone();
+            baseline
+                .inherit(
+                    &states
+                        .states
+                        .into_iter()
+                        .map(|state| state.snapshot)
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|error| turn_composition_error(error.into()))?;
+            prepared = prepared
+                .with_baseline(baseline)
+                .map_err(turn_composition_error)?;
+        }
         self.validate_agent_caller(&request.caller)?;
         let receipt = self
             .submit_message_admitted(
                 SubmitMessage {
-                    session: SubmitSession::Fresh(
-                        PreparedFreshSession::new(child_header, composition)
-                            .map_err(turn_composition_error)?,
-                    ),
+                    session: SubmitSession::Fresh(prepared),
                     message,
                     delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 },
@@ -1410,11 +1432,19 @@ impl SessionKernel {
             Some(&request.message_id),
         )
         .await?;
+        let initial = observation::read_domain_states_bounded(
+            &self.inner,
+            &request.child_session_id,
+            Some(1),
+        )
+        .await
+        .map_err(turn_store_error)?;
+        let acceptance_seq = 1 + u64::from(!initial.states.is_empty());
         let entry = scan
             .selected
             .filter(|entry| {
                 &entry.message == message
-                    && entry.accepted_control_seq == 1
+                    && entry.accepted_control_seq == acceptance_seq
                     && entry.root_session_id == origin.root_session_id
                     && entry.target == MessageTarget::NextTurn
                     && entry.wake_required
@@ -1432,7 +1462,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     async fn send_agent_message_prepared(
         &self,
         request: SendAgentMessage,
@@ -1491,7 +1521,7 @@ impl SessionKernel {
     }
 }
 
-impl SessionKernel {
+impl AgentKernel {
     async fn interrupt_agent_prepared(
         &self,
         caller: &AgentCallerAuthority,

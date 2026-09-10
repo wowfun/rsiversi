@@ -41,16 +41,16 @@ use rsi_agent_turn_protocol::{
     TurnFinalizationError, TurnFinalizationReport, TurnFinalizer, TurnFinalizerLease,
     TurnObservation, TurnService, TurnServiceContract, TurnUpdate,
 };
-use rsi_agent_turn_protocol::{SettlementHealth, SettlementSessionError};
-use rsi_agent_workspace_context::{
-    WorkspaceContext, WorkspaceContextContract, WorkspaceContextSnapshot,
+use rsi_agent_turn_protocol::{
+    DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES, ObservationRetention, ObservedControl, ObservedFact,
 };
+use rsi_agent_turn_protocol::{SettlementHealth, SettlementSessionError};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -100,6 +100,9 @@ pub struct KernelLimits {
     /// Total maximum-page reservations across concurrent Store reads.
     #[serde(default = "default_store_read_bytes")]
     pub maximum_store_read_bytes: usize,
+    /// Canonical payload bytes retained by observation items and all their clones.
+    #[serde(default = "default_retained_observation_bytes")]
+    pub maximum_retained_observation_bytes: usize,
     /// Simultaneously attached live observations.
     #[serde(default = "default_active_observers")]
     pub maximum_active_observers: usize,
@@ -113,6 +116,10 @@ const fn default_store_read_bytes() -> usize {
     DEFAULT_MAXIMUM_STORE_READ_BYTES
 }
 
+const fn default_retained_observation_bytes() -> usize {
+    DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES
+}
+
 const fn default_active_observers() -> usize {
     DEFAULT_MAXIMUM_ACTIVE_OBSERVERS
 }
@@ -123,6 +130,7 @@ impl Default for KernelLimits {
             maximum_process_pending_fact_bytes: default_process_pending_fact_bytes(),
             maximum_store_read_bytes: default_store_read_bytes(),
             maximum_active_observers: default_active_observers(),
+            maximum_retained_observation_bytes: default_retained_observation_bytes(),
         }
     }
 }
@@ -142,6 +150,11 @@ impl KernelLimits {
                 DEFAULT_MAXIMUM_STORE_READ_BYTES,
             ),
             (
+                "maximum_retained_observation_bytes",
+                self.maximum_retained_observation_bytes,
+                DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES,
+            ),
+            (
                 "maximum_active_observers",
                 self.maximum_active_observers,
                 DEFAULT_MAXIMUM_ACTIVE_OBSERVERS,
@@ -153,12 +166,26 @@ impl KernelLimits {
                 )));
             }
         }
+        if self.maximum_retained_observation_bytes < MAXIMUM_SESSION_FACT_BYTES {
+            return Err(KernelError::Capacity(
+                "observation retention must admit one maximum Fact".into(),
+            ));
+        }
         if self.maximum_store_read_bytes < MAXIMUM_SESSION_FACT_BYTES {
             return Err(KernelError::Capacity(format!(
                 "maximum_store_read_bytes must admit one maximum Fact ({MAXIMUM_SESSION_FACT_BYTES} bytes)"
             )));
         }
         Ok(())
+    }
+}
+
+struct ValidatedKernelLimits(KernelLimits);
+
+impl ValidatedKernelLimits {
+    fn new(limits: KernelLimits) -> Result<Self> {
+        limits.validate()?;
+        Ok(Self(limits))
     }
 }
 
@@ -185,14 +212,14 @@ impl Clock for SystemClock {
 
 /// Cloneable in-process Kernel service.
 #[derive(Clone)]
-pub struct SessionKernel {
+pub struct AgentKernel {
     inner: Arc<KernelInner>,
 }
 
-impl fmt::Debug for SessionKernel {
+impl fmt::Debug for AgentKernel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("SessionKernel")
+            .debug_struct("AgentKernel")
             .finish_non_exhaustive()
     }
 }
@@ -201,14 +228,16 @@ struct KernelInner {
     tasks: TaskTracker,
     store: Arc<dyn SessionStore>,
     composition: Arc<dyn AgentComposition>,
-    workspace_context: Arc<dyn WorkspaceContext>,
     resume_issuer: ResumeAdmissionIssuer,
     claim_issuer: TurnClaimIssuer,
     clock: Arc<dyn Clock>,
     state: Mutex<KernelState>,
     submission_admission: SubmissionAdmission,
+    commands: commands::CommandRequests,
+    projection_admission: Arc<Semaphore>,
     ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
+    session_changes: SessionWatchHub,
     flush_requested: Notify,
     settlement_requested: Notify,
     settlement_health: Mutex<SettlementHealth>,
@@ -218,6 +247,7 @@ struct KernelInner {
     process_pending_bytes: AtomicUsize,
     process_pending_changed: Notify,
     active_observers: AtomicUsize,
+    observation_retention: ObservationRetention,
     store_read_admission: Arc<Semaphore>,
 }
 
@@ -323,9 +353,7 @@ struct KernelState {
     fresh_reservations: BTreeSet<SessionId>,
     executors: BTreeMap<String, u64>,
     next_executor_registration: u64,
-    finalizers: BTreeMap<u64, FinalizerEntry>,
-    finalizer_names: BTreeSet<String>,
-    next_finalizer_registration: u64,
+    finalizers: finalization::Registry,
     tree_lanes: BTreeMap<SessionId, Weak<Semaphore>>,
     next_claim: u64,
     claim_queue: VecDeque<(SessionId, TurnId)>,
@@ -470,12 +498,6 @@ impl SessionLoad {
     }
 }
 
-#[derive(Clone)]
-struct FinalizerEntry {
-    name: String,
-    finalizer: Arc<dyn TurnFinalizer>,
-}
-
 struct SessionRuntime {
     header: Arc<SessionHeader>,
     composition: AgentCompositionPin,
@@ -483,6 +505,7 @@ struct SessionRuntime {
     pending: VecDeque<Arc<SessionFact>>,
     pending_bytes: usize,
     header_pending: bool,
+    pending_domain_baseline: Option<AgentControlRecord>,
     turns: BTreeMap<TurnId, TurnControl>,
     turn_order: Vec<TurnId>,
     updates: watch::Sender<LiveWatermarks>,
@@ -492,37 +515,6 @@ struct SessionRuntime {
     retry_not_before: Option<Instant>,
     permanent_flush_error: Option<String>,
     admission_reservations: usize,
-    workspace_context: WorkspaceContextState,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct WorkspaceContextState {
-    instructions_sha256: Option<String>,
-    skill_catalog_sha256: Option<String>,
-}
-
-#[derive(Debug)]
-struct EmptyWorkspaceContext;
-
-#[async_trait]
-impl WorkspaceContext for EmptyWorkspaceContext {
-    async fn snapshot(
-        &self,
-        _header: &SessionHeader,
-        _messages: &[&AgentMessage],
-    ) -> std::result::Result<
-        WorkspaceContextSnapshot,
-        rsi_agent_workspace_context::WorkspaceContextError,
-    > {
-        Ok(WorkspaceContextSnapshot {
-            complete: false,
-            instructions_sha256: String::new(),
-            instructions: None,
-            skill_catalog_sha256: String::new(),
-            skill_catalog: None,
-            invocations: Vec::new(),
-        })
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -531,25 +523,39 @@ struct FlushStatus {
     permanent_error: Option<String>,
 }
 
+struct DurabilityWait {
+    status: watch::Receiver<FlushStatus>,
+    through_seq: u64,
+}
+
+impl DurabilityWait {
+    fn new(session: &SessionRuntime, through_seq: u64) -> Self {
+        Self {
+            status: session.flush_status.subscribe(),
+            through_seq,
+        }
+    }
+}
+
 struct PreparedFlushBatch {
     session_id: SessionId,
     expected_seq: u64,
     header: Option<SessionHeader>,
     facts: Vec<Arc<SessionFact>>,
+    baseline: Option<AgentControlRecord>,
 }
 
 impl PreparedFlushBatch {
-    fn into_store_batch(self) -> AppendBatch {
-        AppendBatch {
-            session_id: self.session_id,
-            expected_seq: self.expected_seq,
-            header: self.header,
-            facts: self
-                .facts
-                .into_iter()
-                .map(|fact| fact.as_ref().clone())
-                .collect(),
-        }
+    fn into_store_batch(self) -> (AppendBatch, Option<AgentControlRecord>) {
+        (
+            AppendBatch {
+                session_id: self.session_id,
+                expected_seq: self.expected_seq,
+                header: self.header,
+                facts: self.facts,
+            },
+            self.baseline,
+        )
     }
 }
 
@@ -600,8 +606,8 @@ struct DurableMessageScan {
 struct BudgetUsage {
     provider_attempts: u64,
     tool_calls: u64,
-    generated_facts: u64,
-    generated_fact_bytes: u64,
+    generated_records: u64,
+    generated_record_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -681,6 +687,7 @@ impl SessionRuntime {
             pending: VecDeque::new(),
             pending_bytes: 0,
             header_pending,
+            pending_domain_baseline: None,
             turns: BTreeMap::new(),
             turn_order: Vec::new(),
             updates,
@@ -690,7 +697,6 @@ impl SessionRuntime {
             retry_not_before: None,
             permanent_flush_error: None,
             admission_reservations: 0,
-            workspace_context: WorkspaceContextState::default(),
         }
     }
 
@@ -748,6 +754,7 @@ fn apply_committed_flush(
     }
     session.durable_seq = commit.durable_seq;
     session.header_pending = false;
+    session.pending_domain_baseline = None;
     session.retry_failures = 0;
     session.retry_not_before = None;
     let _previous = session.flush_status.send_replace(FlushStatus {
@@ -777,10 +784,18 @@ fn apply_committed_flush(
 }
 
 mod admission;
+mod commands;
+mod contributions;
+mod domains;
 mod elapsed;
+mod ending;
 mod execution;
+mod finalization;
 mod human_wait;
 mod lifecycle;
+mod notifications;
+mod projection;
+use notifications::{SessionWatch, SessionWatchHub};
 mod observation;
 mod recovery;
 mod turn_service;
@@ -788,13 +803,13 @@ mod turn_state;
 
 use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path,
-    apply_workspace_context_state, bounded_step_message_prefix, completion_message,
-    completion_message_id, context_checkpoints_enabled, control_tail, descendant_session_ids,
-    durable_observation_next, entered_message_source, list_agent_descendants,
+    bounded_step_message_prefix, completion_message, completion_message_id,
+    context_checkpoints_enabled, control_tail, descendant_session_ids, durable_observation_next,
+    entered_message_source, fill_observation_page, list_agent_descendants,
     list_direct_agent_children, message_receipt, observation_next, observe_agent_wait_change,
     read_controls_bounded, read_facts_bounded, read_fork_page_from_header, read_header_bounded,
-    read_turn_boundary_bounded, read_turn_facts_bounded, read_validated_header_bounded,
-    scan_durable_messages, workspace_context_bodies,
+    read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
+    read_validated_header_bounded, scan_durable_messages,
 };
 use recovery::{
     is_terminal_fact, load_control_state, read_stored_outcome, repair_unfinished_session,
@@ -805,7 +820,7 @@ use turn_state::{
     clone_turn_control, deregister_executor, enforce_turn_budget, enqueue, kernel_turn_error,
     lock_state, next_fact, publish_live_watermarks, push_pending, reserve_atomic_capacity,
     submission_conflict, turn_composition_error, turn_kernel_error, turn_not_found,
-    turn_store_error, turn_workspace_error,
+    turn_store_error,
 };
 
 struct ObservationState {
@@ -816,9 +831,14 @@ struct ObservationState {
     live_target: u64,
     receiver: watch::Receiver<LiveWatermarks>,
     flush_status: Option<watch::Receiver<FlushStatus>>,
-    durable_facts: VecDeque<Arc<SessionFact>>,
+    durable_facts: VecDeque<ObservedFact>,
     ended: bool,
     _observer_lease: ObserverLease,
+}
+
+enum ObservationPageKind {
+    Control,
+    Fact,
 }
 
 struct DurableObservationState {
@@ -827,6 +847,10 @@ struct DurableObservationState {
     control_seq: u64,
     fact_seq: u64,
     pending: VecDeque<SessionObservation>,
+    watch: SessionWatch,
+    next_page: ObservationPageKind,
+    read_controls: bool,
+    read_facts: bool,
     stopped: bool,
     _observer_lease: ObserverLease,
 }
@@ -914,30 +938,30 @@ impl PluginFactory for KernelFactory {
             serde_json::from_value::<KernelLimits>(desired.clone())
                 .map_err(|error| MetaError::InvalidInput(error.to_string()))?
         };
-        limits
-            .validate()
+        let validated = ValidatedKernelLimits::new(limits)
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
         let config = serde_json::to_value(limits)
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        Ok(PreparedActivation::new(config)
-            .requiring_local::<SessionStoreContract>()
-            .requiring_local::<AgentCompositionContract>()
-            .requiring_local::<WorkspaceContextContract>())
+        Ok(PreparedActivation::with_state(
+            config,
+            validated,
+            std::mem::size_of::<ValidatedKernelLimits>(),
+        )
+        .requiring_local::<SessionStoreContract>()
+        .requiring_local::<AgentCompositionContract>())
     }
 
-    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let limits: KernelLimits = serde_json::from_value(plan.config().as_ref().clone())
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
-        let workspace_context = plan.local::<WorkspaceContextContract>()?;
-        let kernel = SessionKernel::recover_with_context_clock_and_limits(
+    async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let limits = plan.take_state::<ValidatedKernelLimits>()?;
+        let kernel = AgentKernel::recover_with_validated_limits(
             plan.local::<SessionStoreContract>()?,
             plan.local::<AgentCompositionContract>()?,
-            workspace_context,
             Arc::new(SystemClock),
             limits,
         )
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
+        lock_state(&kernel.inner).finalizers.runtime = Some(plan.context().runtime_identity());
         let worker = kernel.start_workers();
         let turns: Arc<dyn TurnService> = Arc::new(kernel.clone());
         let execution: Arc<dyn TurnExecution> = Arc::new(kernel.clone());
@@ -972,10 +996,41 @@ impl PluginFactory for KernelFactory {
                 return Err(error);
             }
         };
+        let commands_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionCommandsContract>(Arc::new(
+                kernel.clone(),
+            )) {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
+        let projections_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionProjectionsContract>(
+            Arc::new(kernel.clone()),
+        ) {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(commands_supply);
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
         plan.defer(
             "shutdown Agent Kernel",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(projections_supply);
+                    drop(commands_supply);
                     drop(finalization_supply);
                     drop(execution_supply);
                     drop(turns_supply);

@@ -287,13 +287,6 @@ impl TurnExecution for CheckpointFixture {
         unreachable!("checkpoint writer does not enter messages")
     }
 
-    async fn refresh_workspace_context(
-        &self,
-        _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<usize> {
-        unreachable!("checkpoint writer does not refresh workspace context")
-    }
-
     async fn close_current_step(
         &self,
         _claim: &TurnClaim,
@@ -302,11 +295,11 @@ impl TurnExecution for CheckpointFixture {
         unreachable!("checkpoint writer does not close Steps")
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
         _claim: &TurnClaim,
         _outcome: &TurnOutcome,
-    ) -> rsi_agent_turn_protocol::Result<Option<Arc<SessionFact>>> {
+    ) -> rsi_agent_turn_protocol::Result<Arc<SessionFact>> {
         unreachable!("checkpoint writer does not settle activations")
     }
 
@@ -446,13 +439,6 @@ impl TurnExecution for FullBeforePublish {
         unreachable!("terminal publication test does not enter messages")
     }
 
-    async fn refresh_workspace_context(
-        &self,
-        _claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<usize> {
-        unreachable!("terminal publication test does not refresh workspace context")
-    }
-
     async fn close_current_step(
         &self,
         _claim: &TurnClaim,
@@ -461,12 +447,25 @@ impl TurnExecution for FullBeforePublish {
         Ok(())
     }
 
-    async fn finish_activation_turn(
+    async fn finish_turn(
         &self,
-        _claim: &TurnClaim,
-        _outcome: &TurnOutcome,
-    ) -> rsi_agent_turn_protocol::Result<Option<Arc<SessionFact>>> {
-        Ok(None)
+        claim: &TurnClaim,
+        outcome: &TurnOutcome,
+    ) -> rsi_agent_turn_protocol::Result<Arc<SessionFact>> {
+        if self.shutdown_on_publish {
+            return Err(TurnError::ShuttingDown);
+        }
+        Ok(Arc::new(
+            SessionFact::new(
+                2,
+                42,
+                SessionFactBody::TurnTerminal {
+                    turn_id: claim.turn_id().clone(),
+                    outcome: outcome.clone(),
+                },
+            )
+            .unwrap(),
+        ))
     }
 
     async fn read_facts(
@@ -640,6 +639,8 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
         resolved_after_seq: 0,
         resolved_terminal_seq: 2,
         terminal_prefix_sha256: "b".repeat(64),
+        resolved_terminal_control_seq: 1,
+        terminal_control_prefix_sha256: "c".repeat(64),
         requested_turns: ForkTurnSelection::All,
         effective_turns: 1,
     })
@@ -657,7 +658,7 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
 }
 
 #[tokio::test]
-async fn terminal_publication_flushes_and_retries_a_full_speculative_suffix() {
+async fn terminal_publication_delegates_durable_ending_to_kernel() {
     let (claim, accepted) = claim();
     let turns = FullBeforePublish {
         facts: vec![Arc::new(accepted)],
@@ -680,8 +681,8 @@ async fn terminal_publication_flushes_and_retries_a_full_speculative_suffix() {
     publish_terminal(&turns, &config, &claim, TurnOutcome::Completed)
         .await
         .unwrap();
-    assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(turns.flushes.lock().unwrap().as_slice(), [1, 2]);
+    assert_eq!(turns.publish_calls.load(Ordering::SeqCst), 0);
+    assert!(turns.flushes.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -795,7 +796,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     });
     let turns: Arc<dyn TurnExecution> = fixture.clone();
     let scheduler = Arc::new(CheckpointScheduler::new());
-    let request = CheckpointRequest::new(claim.clone(), ContextLimits::default());
+    let request = CheckpointRequest::new(claim.clone(), ContextLimits::default(), context_pin());
     assert_eq!(
         scheduler.schedule(request.clone()),
         checkpoint::ScheduleOutcome::Scheduled
@@ -814,15 +815,16 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     let writes = fixture.writes.lock().unwrap();
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].through_seq, 3);
-    let restored = ContextFold::from_checkpoint(
+    let mut restored = ModelContextState::open(
+        context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
-        &writes[0].bytes,
     )
     .unwrap();
-    assert_eq!(restored.through_seq(), 3);
+    restored.restore(&writes[0].bytes).unwrap();
+    assert_eq!(restored.position().through_seq, 3);
     assert!(
-        serde_json::to_string(&restored.project(ContextLimits::default()).unwrap().messages)
+        serde_json::to_string(&restored.build(Vec::new()).unwrap().messages())
             .unwrap()
             .contains("queued task")
     );
@@ -849,6 +851,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
         scheduler.schedule(CheckpointRequest::new(
             claim.clone(),
             ContextLimits::default(),
+            context_pin(),
         )),
         checkpoint::ScheduleOutcome::Scheduled
     );
@@ -862,15 +865,14 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
     let writes = fixture.writes.lock().unwrap();
     assert_eq!(writes.len(), 1);
     let checkpoint = &writes[0];
-    let restored = ContextFold::from_checkpoint(
+    let mut restored = ModelContextState::open(
+        context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
-        &checkpoint.bytes,
     )
     .unwrap();
-    let messages =
-        serde_json::to_string(&restored.project(ContextLimits::default()).unwrap().messages)
-            .unwrap();
+    restored.restore(&checkpoint.bytes).unwrap();
+    let messages = serde_json::to_string(&restored.build(Vec::new()).unwrap().messages()).unwrap();
     assert!(messages.contains("inherited task"));
     assert!(messages.contains("child task"));
     assert_eq!(checkpoint.through_seq, 2);
@@ -961,4 +963,54 @@ fn retained_tool_deadline_is_bounded_during_factory_preparation() {
             .expect_err("unbounded retained Tool deadline");
         assert!(error.to_string().contains("retained_tool_wait_ms"));
     }
+}
+
+#[derive(Debug)]
+struct EmptyTools;
+
+#[async_trait]
+impl rsi_tools_protocol::ToolRuntime for EmptyTools {
+    fn definitions(&self) -> Vec<rsi_tools_protocol::ToolDefinition> {
+        Vec::new()
+    }
+
+    fn prepare(
+        &self,
+        _invocation_id: &str,
+        call: ToolCall,
+    ) -> rsi_tools_protocol::Result<Box<dyn PreparedToolCall>> {
+        Err(rsi_tools_protocol::ToolError::Unknown(call.name))
+    }
+
+    fn query(
+        &self,
+        _identity: &ToolResultIdentity,
+    ) -> rsi_tools_protocol::Result<RetainedToolResult> {
+        Ok(RetainedToolResult::Absent)
+    }
+
+    async fn wait(
+        &self,
+        _identity: &ToolResultIdentity,
+        _cancellation: CancellationToken,
+    ) -> rsi_tools_protocol::Result<RetainedToolResult> {
+        Ok(RetainedToolResult::Absent)
+    }
+
+    fn commit(&self, _identity: &ToolResultIdentity) -> rsi_tools_protocol::Result<()> {
+        Err(rsi_tools_protocol::ToolError::InvalidInput("absent".into()))
+    }
+}
+
+pub(super) fn context_pin() -> AgentCompositionPin {
+    AgentCompositionPin::new(
+        rsi_agent_session_protocol::AgentPresetId::new("test-agent").unwrap(),
+        "a".repeat(64),
+        Arc::new(EmptyTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
+        Arc::new(()),
+    )
+    .unwrap()
 }
