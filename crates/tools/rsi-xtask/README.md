@@ -1,5 +1,49 @@
 # rsi-xtask
 
+`cargo xtask dev tui` and `cargo xtask dev web` create an isolated development
+directory, build and copy the real `rsi` executable once, configure a deterministic
+native provider, and supervise the selected application. A successful default run
+removes its temporary environment, runtime directory and private native outputs.
+Failures retain those files for diagnosis. `--directory ABSOLUTE_NEW_DIRECTORY`
+selects a persistent environment; `--prepare-only` also retains its environment
+without starting an application. Defaults prefer `/var/tmp` and fall back to the
+host temporary directory (`TMPDIR`) if it is unavailable. `--port PORT` selects
+the Web listener port (default 8787); it is rejected for TUI.
+`--smoke` runs a keyless headless request and exits. No provider credential is read
+or required by these defaults. Execution requires Linux or WSL; native Windows
+and macOS launch are unavailable.
+
+Supervised applications and build subprocesses receive an explicit environment
+allowlist and private HOME/XDG directories. Only build subprocesses receive the
+developer's Cargo and Rustup homes, including Cargo configuration and registry
+credentials. The product and generated `run` launcher omit those variables.
+This separates ambient configuration; it is not a filesystem sandbox.
+Native builds explicitly select the launcher executable's target triple,
+independent of ambient Cargo `build.target`. The initial executable and Web WASM
+builds share the repository Cargo target cache.
+Native addon builds share `target/dev-native/cache`. The Linux `flock` utility
+serializes compilation and copying into private `target/dev-native/artifacts/`
+directories, so concurrent watchers cannot exchange artifacts. SourceRoot requires
+those copies to remain under the repository. Both compilation caches remain after
+exit. For persistent environments, `native-output-path` and `runtime-path` record
+the additional directories to remove when the environment is no longer needed.
+
+TUI development selects its independent native presentation Profile. Its existing
+addon watcher builds and enables successful artifacts from an explicit SourceRoot;
+the application's normal staging owner publishes replacements. Build output goes
+to the development log. The watch set is explicit and does not infer a Cargo
+dependency graph. `--no-watch` leaves a fixed presentation. Web Worker/bootstrap
+changes require rebuilding the Web bundle and restarting its application; renderer
+graphs use their separately owned generation publication. The Web application
+and source watcher each have a separate process group; the launcher supervises
+Ctrl-C shutdown. The TUI also owns a process group, temporarily receives terminal
+foreground ownership, and restores terminal modes under the resident owner.
+The launcher kills remaining group members before reaping each leader and restores
+the previous foreground group when the TUI closes. Cleanup allows 15 seconds
+after TERM and a further two seconds after KILL; either deadline failure names
+the child and preserves the environment for diagnosis. An OS task that cannot
+be killed is reported as incomplete cleanup.
+
 `rsi-xtask` is the private command-line tool for repository policy and cross-workspace verification orchestration. It is invoked through the root Cargo alias as `cargo xtask`; its checks do not edit tracked files unless a caller explicitly selects a documented `--write` mode.
 
 ## Documentation policy

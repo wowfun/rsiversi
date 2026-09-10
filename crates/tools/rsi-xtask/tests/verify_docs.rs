@@ -515,3 +515,37 @@ fn unexpected_docs_taxonomy_and_missing_governance_are_rejected() {
     assert!(errors.contains("unsupported docs taxonomy directory `rfcs`"));
     assert!(errors.contains("legacy decision or specification home is forbidden"));
 }
+
+#[test]
+fn package_owned_docs_receive_taxonomy_and_link_validation() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "crates/rsi-meta/core/docs/development.md",
+        "# Development\n\nUse the [package](../README.md).\n",
+    );
+    assert!(verify(repository.path()).status.success());
+    write(
+        repository.path(),
+        "crates/rsi-meta/core/docs/broken.md",
+        "[missing](absent.md)\n",
+    );
+    let broken = verify(repository.path());
+    assert!(!broken.status.success());
+    assert!(stderr(&broken).contains("absent.md"));
+    fs::remove_file(
+        repository
+            .path()
+            .join("crates/rsi-meta/core/docs/broken.md"),
+    )
+    .unwrap();
+    write(
+        repository.path(),
+        "crates/rsi-meta/core/docs/specs/protocol.md",
+        "# Misplaced contract\n",
+    );
+    let output = verify(repository.path());
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("crates/rsi-meta/core/docs/specs"));
+    assert!(stderr(&output).contains("legacy decision or specification home is forbidden"));
+}

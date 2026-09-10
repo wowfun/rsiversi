@@ -57,3 +57,7 @@ measured closely enough to call it small or bounded; job consolidation requires
 CI timing evidence and must preserve product failure ownership. `ci-required`
 remains a stable protection seam, and its topology test prevents silent
 weakening when the workflow grows.
+Job deadlines cover the sum of explicit step deadlines plus ten minutes of setup
+headroom, including conditionally selected platform steps. Every browser job
+command has an explicit step deadline; setup actions share the headroom. The repository budget
+test enforces this conservative ceiling when steps are added.

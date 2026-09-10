@@ -380,6 +380,7 @@ fn ci_job_deadlines_cover_their_explicit_step_budgets_with_headroom() {
 
     #[derive(Deserialize)]
     struct Step {
+        run: Option<String>,
         #[serde(rename = "timeout-minutes")]
         timeout_minutes: Option<u64>,
     }
@@ -392,6 +393,15 @@ fn ci_job_deadlines_cover_their_explicit_step_budgets_with_headroom() {
             .iter()
             .filter_map(|step| step.timeout_minutes)
             .sum::<u64>();
+        if name == "rsi-meta-browser" {
+            assert!(
+                job.steps
+                    .iter()
+                    .filter(|step| step.run.is_some())
+                    .all(|step| step.timeout_minutes.is_some()),
+                "browser commands require explicit deadlines"
+            );
+        }
         if explicit_step_budget == 0 {
             continue;
         }

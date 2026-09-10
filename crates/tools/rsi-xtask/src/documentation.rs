@@ -382,6 +382,12 @@ fn validate_docs_taxonomy(repository: &Path, diagnostics: &mut Vec<Diagnostic>) 
         if docs.is_dir() {
             doc_roots.push(docs);
         }
+        for package in child_directories(&product, repository, diagnostics) {
+            let docs = package.join("docs");
+            if package.join("Cargo.toml").is_file() && docs.is_dir() {
+                doc_roots.push(docs);
+            }
+        }
     }
 
     for docs in doc_roots {
