@@ -61,7 +61,7 @@ try {
     document.body.append(panel); document.getElementById("workbench").hidden = true;
     const slots = ["root", "pane", "sidebar", "dialog"].map((surface, index) => {
       const root = document.createElement("section"); panel.append(root);
-      return { key: surface, surface, root, binding: surface, host: {}, snapshot: { model: { renderer: "fixture.rust", schema: { name: "fixture.counter", version: 1 }, data: { label: `Rust ${surface} presentation`, count: index + 1 }, actions: [], sources: [], standard_view: null } } };
+      return { key: surface, surface, root, binding: surface, host: {}, snapshot: { model: { renderer: "fixture.rust", schema: { name: "fixture.counter", version: 1 }, data: { label: `Rust ${surface} presentation`, count: index + 1 }, actions: [{ name: "refresh", title: "Refresh" }], sources: [{ name: "raw", title: "Raw bytes", media_type: "application/octet-stream" }], standard_view: null } } };
     });
     await table.render(offer, slots);
     const mounted = module.live_renderers();
@@ -69,15 +69,21 @@ try {
     const changed = slots.map(slot => ({ ...slot, snapshot: { model: { ...slot.snapshot.model, data: { ...slot.snapshot.model.data, count: 42 } } } }));
     await table.render(offer, changed);
     const unchangedNode = node === slots[0].root.querySelector("h2");
+    await table.render(offer, changed.map(slot => ({ ...slot, snapshot: { ...slot.snapshot, busy: true } })));
+    const busyInputsBlocked = slots.every(slot => [...slot.root.querySelectorAll("button")].every(button => button.disabled));
+    await table.render(offer, changed);
+    const readyInputsEnabled = slots.every(slot => [...slot.root.querySelectorAll("button")].every(button => !button.disabled));
     const visible = panel.innerText;
     const invalid = changed.map(slot => ({ ...slot, snapshot: { model: { ...slot.snapshot.model, schema: { name: "fixture.counter", version: 2 } } } }));
     let invalidRejected = false;
     try { await table.render(offer, invalid); } catch { invalidRejected = true; }
     const preserved = visible === panel.innerText;
     window.finishRustFixture = async () => { await table.close(); const alive = module.live_renderers(); panel.remove(); document.getElementById("workbench").hidden = false; return alive; };
-    return { mounted, unchangedNode, invalidRejected, preserved, visible };
+    return { mounted, unchangedNode, busyInputsBlocked, readyInputsEnabled, invalidRejected, preserved, visible };
   });
   assert.equal(result.mounted, 4); assert.equal(result.unchangedNode, true); assert.equal(result.invalidRejected, true); assert.equal(result.preserved, true);
+  assert.equal(result.busyInputsBlocked, true, "source and action input must wait for the refreshed model's usable ticket");
+  assert.equal(result.readyInputsEnabled, true);
   assert.equal((result.visible.match(/Rust\/WASM count: 42/g) ?? []).length, 4);
   await page.screenshot({ path: join(report, "four-rust-wasm-mounts.png") });
   assert.equal(await page.evaluate(() => window.finishRustFixture()), 0);
@@ -113,6 +119,6 @@ try {
   const evidence = { status: "passed", browser: browser.version(), ...result, disposed: 7, providerRequests: service.provider.requests.length, nativeSession: session, nativeCycles: 3, workerStarts: 1, nativeRawBytes: "00 ff 41 42 43", boundary: "four synthetic ABI slots plus actual native UI -> scoped Session API -> authenticated UI API -> Worker -> Rust/WASM DOM" };
   await writeFile(join(report, "result.json"), JSON.stringify(evidence, null, 2)); console.log(JSON.stringify(evidence));
 } catch (error) {
-  if (page) { await page.screenshot({ path: join(report, "failure.png") }); await writeFile(join(report, "failure.txt"), await page.locator("body").innerText()); await writeFile(join(report, "failure-detail.json"), JSON.stringify(await page.evaluate(() => window.nativeDetail ?? null))); }
+  if (page) { await page.screenshot({ path: join(report, "failure.png") }); const body = await page.locator("body").innerText(); await writeFile(join(report, "failure.txt"), body); const detail = JSON.stringify(await page.evaluate(() => window.nativeDetail ?? null)); await writeFile(join(report, "failure-detail.json"), detail); console.error(JSON.stringify({ body, detail })); }
   throw error;
 } finally { await browser.close(); await service?.close(); }
