@@ -2,6 +2,7 @@ use super::*;
 use crate::tests::{UnknownThenAcceptedHandle, UnusedWorkspace};
 
 mod ui;
+mod workspace;
 
 #[tokio::test]
 async fn command_completion_is_discovered_undoable_and_inert_after_draft_change() {

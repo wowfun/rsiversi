@@ -71,6 +71,25 @@ async fn read<T, F: std::future::Future<Output = rsi_session_protocol::Result<T>
         .map_err(error)
 }
 
+async fn select_workspace(
+    workspace: &dyn rsi_workspace_protocol::WorkspaceRegistry,
+    cwd: &std::path::Path,
+) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+    let mut delay = std::time::Duration::from_millis(50);
+    for attempt in 0..5 {
+        match workspace.get_or_create(cwd).await {
+            Err(rsi_workspace_protocol::WorkspaceError::Api(
+                rsi_api_protocol::ApiError::Capacity,
+            )) if attempt < 4 => {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final attempt returns its result")
+}
+
 struct Attachment {
     handle: Arc<dyn SessionHandle>,
     header: SessionHeader,
@@ -770,9 +789,12 @@ impl Client {
                 let workspace = self.workspace.clone();
                 self.spawn(async move {
                     let session_id = super::generated_cli_session_id().map_err(error)?;
-                    let registered = workspace.get_or_create(&cwd).await.map_err(|failure| {
-                        error(format!("Workspace selection failed: {failure}"))
-                    })?;
+                    let registered =
+                        select_workspace(workspace.as_ref(), &cwd)
+                            .await
+                            .map_err(|failure| {
+                                error(format!("Workspace selection failed: {failure}"))
+                            })?;
                     let handle = application
                         .create(CreateSession {
                             workspace_id: registered.id,

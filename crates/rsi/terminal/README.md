@@ -74,6 +74,12 @@ Explicit Retry queries the retained MessageId before sending any mutation. A
 failed query preserves the unresolved request; only NotFound permits resubmission
 of its frozen content and options.
 
+The TUI New action retries API capacity failures from the idempotent Workspace
+`get_or_create` operation with at most five attempts for the same directory and
+50/100/200/400 ms delays inside its owned work. Other failures, including unknown
+mutation outcomes, return immediately. Session creation is attempted only once;
+failure preserves the current attachment and draft.
+
 DevicesFactory owns the finite `register LABEL`, `list`, and `revoke DEVICE_ID`
 terminal grammar over a negotiated local ApiClient. It requires no Session,
 Workspace or model capability. It uses the same exclusive terminal lease and
