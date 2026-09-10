@@ -14,6 +14,8 @@ mod frames;
 mod images;
 #[path = "submission/output.rs"]
 mod output;
+#[path = "submission/remote_ui.rs"]
+mod remote_ui;
 #[path = "submission/settings.rs"]
 mod settings;
 #[path = "submission/sources.rs"]

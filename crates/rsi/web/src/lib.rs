@@ -4,6 +4,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod application;
+#[cfg(target_arch = "wasm32")]
+mod assets;
 mod catalog;
 mod details;
 mod frames;

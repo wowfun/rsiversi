@@ -1,10 +1,14 @@
+import { MountTable } from "/mounts.js";
 const $ = id => document.getElementById(id);
 const pending = new Map();
 let worker;
 let requestId = 0;
 let view;
+let mounts = new MountTable();
+let rendererSlots = [];
 let selected = 0;
 let connected = false;
+let closing = false;
 let catalogKey;
 let dialogKey;
 let lastNotice;
@@ -87,12 +91,19 @@ function notify(message) { $("notice").textContent = message; $("notice").hidden
 async function perform(run) {
   try { await run(); } catch (error) { notify(String(error.message ?? error)); }
 }
-function failWorker(error) {
+function clearView() {
+  view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
   clearImages();
+  for (const pane of panes) pane.reset();
+  $("detail").close();
+}
+function failWorker(error) {
+  void mounts.close().catch(error => notify(`Renderer cleanup failed: ${error.message}`));
   connected = false;
   for (const waiter of pending.values()) waiter.reject(new Error(error));
   pending.clear();
   worker?.terminate(); worker = undefined;
+  clearView();
   $("connection-state").textContent = "Connection failed";
   $("connection-state").classList.remove("connected");
   $("login").hidden = false;
@@ -101,7 +112,7 @@ function failWorker(error) {
   notify(`${error}. Reconnect explicitly to start a new connection.`);
 }
 let frameId;
-function presentFrame(frame) {
+async function presentFrame(frame, assets) {
   if (typeof frame.frame_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(frame.frame_id) || BigInt(frame.frame_id) > 18446744073709551615n) throw new Error("Invalid presentation frame ID");
   let next;
   if (frame.kind === "snapshot") {
@@ -127,29 +138,35 @@ function presentFrame(frame) {
   } else { throw new Error("Unknown presentation frame"); }
   if (!Array.isArray(next?.panes) || next.panes.length !== 2) throw new Error("Invalid presentation snapshot");
   render(next);
+  const renderer = await mounts.render(assets, rendererSlots);
+  if (renderer?.error) notify(`Renderer update failed: ${renderer.error}`);
   frameId = frame.frame_id;
-  return true;
+  return { accepted: true, renderer };
 }
 function makeWorker() {
   frameId = undefined;
+  closing = false;
+  mounts = new MountTable();
   const current = new Worker("/worker.js", { type: "module" });
-  current.onmessage = ({ data }) => {
+  current.onmessage = async ({ data }) => {
     if (worker !== current) return;
     if (data.kind === "view") {
+      if (closing) return;
       try {
         const frame = JSON.parse(data.view);
-        const accepted = presentFrame(frame);
-        if (worker === current) current.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !accepted });
-      } catch (error) { failWorker(`View rendering failed: ${error.message}`); }
+        const presented = await presentFrame(frame, JSON.parse(data.assets));
+        if (!closing && worker === current) current.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !presented?.accepted, renderer: presented?.renderer });
+      } catch (error) { if (worker === current && !closing) failWorker(`View rendering failed: ${error.message}`); }
     } else if (data.kind === "reply") {
       const waiter = pending.get(data.id); pending.delete(data.id);
       if (data.error) waiter?.reject(new Error(data.error)); else waiter?.resolve(data.result);
-    } else if (data.kind === "failed") { failWorker(data.error); }
+    } else if (data.kind === "failed") { if (!closing) failWorker(data.error); }
   };
   current.onerror = event => { event.preventDefault(); if (worker === current) failWorker("Browser Worker stopped"); };
   return current;
 }
 function call(method, payload, transfer = []) {
+  if (closing && method !== "disconnect" && method !== "resources") return Promise.reject(new Error("The application is disconnecting"));
   if (!worker) return Promise.reject(new Error("Connect to your service first"));
   if (pending.size >= 8) return Promise.reject(new Error("Input is busy; wait for the current action"));
   const id = ++requestId;
@@ -190,18 +207,17 @@ $("sign-out").addEventListener("click", () => perform(async () => {
   try {
     await Promise.all(panes.map(pane => pane.flush()));
     let resources;
-    try { resources = await call("disconnect", true); }
+    closing = true;
+    try { [resources] = await Promise.all([call("disconnect", true), mounts.close()]); }
     catch (error) { failWorker(String(error.message ?? error)); return; }
     document.dispatchEvent(new CustomEvent("rsi-disconnected", { detail: resources }));
     connected = false;
     worker.terminate(); worker = undefined;
-    view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
-    clearImages();
-    for (const pane of panes) pane.reset();
+    clearView();
     $("connection-state").textContent = "Disconnected";
     $("connection-state").classList.remove("connected");
     $("workbench").hidden = true; $("login").hidden = false; $("sign-out").hidden = true;
-    $("detail").close(); notify("");
+    notify("");
   } finally { $("sign-out").disabled = false; }
 }));
 
@@ -213,6 +229,7 @@ class Pane {
     this.unsent = false;
     this.draftWork = undefined;
     this.draftError = undefined;
+    this.draftEcho = undefined;
     this.enterSubmit = false;
     this.images = [];
     this.imageEdits = 0;
@@ -287,6 +304,7 @@ class Pane {
     this.draftWork = (async () => {
       while (this.unsent && generation === this.generation) {
         const text = this.input.value;
+        this.draftEcho = text;
         this.unsent = false;
         try { await this.action("draft", { text }); }
         catch (error) { this.unsent = true; this.draftError = error; notify(error.message); break; }
@@ -309,7 +327,9 @@ class Pane {
       const imageEdits = this.imageEdits;
       const submittedImages = JSON.stringify(this.retryImages ?? this.images);
       await this.action("submit", { text, steer });
-      if (this.generation === generation && this.input.value === text && text === submittedText && images === submittedImages && imageEdits === this.imageEdits) this.input.value = "";
+      if (this.generation === generation && this.input.value === text && text === submittedText && images === submittedImages && imageEdits === this.imageEdits) {
+        this.input.value = ""; this.draftEcho = "";
+      }
     } finally { this.submitting = false; this.send.disabled = !this.generation; this.steer.disabled = !this.generation || this.retryText != null; }
   }
   async upload(files) {
@@ -352,7 +372,7 @@ class Pane {
       return row;
     }));
   }
-  reset() { this.generation = undefined; this.unsent = false; this.draftError = undefined; this.input.value = ""; this.render(null, []); }
+  reset() { this.generation = undefined; this.unsent = false; this.draftError = undefined; this.draftEcho = undefined; this.input.value = ""; this.render(null, []); }
   renderCommands(data) {
     this.commands.disabled = !data || this.switching;
     const key = JSON.stringify([data?.generation, data?.commands, data?.command_submission]);
@@ -402,17 +422,19 @@ class Pane {
     if (changed) {
       this.switching = false;
       this.generation = data?.generation;
+      this.draftEcho = undefined;
       this.unsent = false; this.draftError = undefined;
       this.input.value = data?.draft ?? "";
       this.blocks.clear(); this.transcript.replaceChildren();
       this.pendingKey = undefined;
     }
     this.uiCards = !!data?.ui_cards;
-    const uiKey = JSON.stringify([data?.generation, data?.ui_surfaces]);
+    const uiKey = JSON.stringify([data?.generation, data?.ui_surfaces, view?.has_remote_ui]);
     if (uiKey !== this.uiKey) {
       this.uiKey = uiKey;
       this.uiMenu.replaceChildren(...(data?.ui_surfaces ?? []).map(surface => button(surface.title,
         () => this.action("ui_surface", { reference: surface.reference }), "quiet")));
+      if (data && view?.has_remote_ui) this.uiMenu.append(button("Service extensions", () => this.action("remote_ui_list"), "quiet"));
     }
     this.name.textContent = data ? basename(data.path) : "New conversation";
     this.session.textContent = data ? `${data.path} · ${data.session}` : "Select a workspace to begin";
@@ -439,7 +461,8 @@ class Pane {
       }
       this.waiting.replaceChildren(); this.pendingKey = undefined; this.notice.textContent = ""; return;
     }
-    if (!this.unsent && !this.draftWork && !this.submitting && document.activeElement !== this.input && this.input.value !== data.draft) this.input.value = data.draft;
+    if (data.draft === this.draftEcho) this.draftEcho = undefined;
+    if (this.draftEcho === undefined && !this.unsent && !this.draftWork && !this.submitting && document.activeElement !== this.input && this.input.value !== data.draft) this.input.value = data.draft;
     const allModels = models.some(model => sameModel(model, data.model)) ? models : [data.model, ...models];
     const modelKey = JSON.stringify(allModels);
     if (modelKey !== this.modelKey) {
@@ -531,6 +554,7 @@ async function openInSelected(fields) {
   }
 }
 function render(next) {
+  rendererSlots = [];
   view = next;
   if (next.notice !== lastNotice) { lastNotice = next.notice; notify(next.notice); }
   const key = JSON.stringify(next.catalog);
@@ -587,6 +611,20 @@ function renderDetail(next) {
     previewImage(body, detail.media, detail.ticket); return;
   }
   if (next.ui_detail) { renderUiDetail(next.ui_detail); return; }
+  if (next.remote_ui_catalog) {
+    const catalog = next.remote_ui_catalog;
+    const key = JSON.stringify(catalog);
+    if (dialogKey === key) return;
+    const body = element("div", "settings-list");
+    if (catalog.error) body.append(element("p", "settings-error", catalog.error));
+    else if (!catalog.page) body.append(element("p", "", "Loading service extensions…"));
+    else {
+      for (const entry of catalog.page.entries) body.append(button(entry.title, () => command({ action: "remote_ui_surface", ticket: catalog.ticket, bundle: entry.bundle, surface: entry.surface }), "quiet"));
+      if (!catalog.page.entries.length) body.append(element("p", "", "No service extensions."));
+      if (catalog.page.next) body.append(button("More extensions", () => command({ action: "remote_ui_next", ticket: catalog.ticket }), "quiet"));
+    }
+    showDialog(key, "Service extensions", body); return;
+  }
   if (next.settings_catalog) {
     const catalog = next.settings_catalog;
     const key = JSON.stringify(catalog);
@@ -704,36 +742,21 @@ function renderDetail(next) {
 
 
 function renderUiDetail(detail) {
-  const key = JSON.stringify(detail);
-  if (dialogKey === key) return;
-  const bound = detail.view;
-  const formKey = JSON.stringify(bound);
-  const previous = document.querySelector(".ui-contribution");
-  const saved = new Map();
-  if (previous?.dataset.formKey === formKey) {
-    for (const input of previous.querySelectorAll("[data-ui-field]")) saved.set(input.dataset.uiField, input.value);
+  if (!detail.model || !detail.binding) {
+    const body = element("p", "hint", detail.error ?? "Loading…");
+    showDialog(`ui-loading:${detail.ticket}:${detail.error ?? ""}`, "Card details", body);
+    return;
   }
-  const body = element("div", "ui-contribution"); body.dataset.formKey = formKey;
-  const fields = new Map();
-  if (detail.error) body.append(element("p", "source-error", detail.error));
-  for (const item of bound?.view.elements ?? []) {
-    if (item.kind === "text" || item.kind === "code") {
-      body.append(element(item.kind === "code" ? "pre" : "p", "ui-text", item.text));
-    } else if (item.kind === "field") {
-      const row = element("p", "ui-field"); row.append(element("strong", "", `${item.label}: `), document.createTextNode(item.value)); body.append(row);
-    } else if (item.kind === "input") {
-      const label = element("label", "ui-input", item.label);
-      const input = element(item.multiline ? "textarea" : "input");
-      input.setAttribute("aria-label", item.label); input.dataset.uiField = item.name;
-      input.value = saved.get(item.name) ?? item.value; input.disabled = detail.busy;
-      fields.set(item.name, input); label.append(input); body.append(label);
-    } else if (item.kind === "button") {
-      const action = button(item.label, () => command({ action: "ui_invoke", ticket: detail.ticket,
-        reference: bound.actions[item.action], input: { value: item.value,
-          fields: Object.fromEntries([...fields].map(([name, input]) => [name, input.value])) } }));
-      action.disabled = detail.busy; body.append(action);
-    }
-  }
-  if (detail.busy) body.append(element("p", "hint", "Working…"));
-  showDialog(key, bound?.view.title ?? "Card details", body);
+  const binding = JSON.stringify(detail.binding);
+  const key = `ui:${binding}`;
+  let body;
+  if (dialogKey === key) body = $("detail-body").firstElementChild;
+  else { body = element("div", "ui-presentation"); showDialog(key, detail.model.standard_view?.title ?? "Card details", body); }
+  rendererSlots.push({ key: "detail", surface: "dialog", root: body, binding,
+    snapshot: { model: detail.model, busy: detail.busy, error: detail.error },
+    host: { invoke(action, input) {
+      if (detail.busy || !detail.model.actions.some(item => item.name === action)) throw new Error("This action is no longer available");
+      return command({ action: "ui_invoke", ticket: detail.ticket, name: action, input });
+    }, source(name, offset, maximum) { return call("ui_source", JSON.stringify({ ticket: detail.ticket, name, offset, maximum })); } }
+  });
 }

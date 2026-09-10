@@ -22,6 +22,18 @@ pub(crate) fn error(value: impl std::fmt::Display) -> String {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
+    RemoteUiList {
+        pane: u8,
+        generation: String,
+    },
+    RemoteUiNext {
+        ticket: String,
+    },
+    RemoteUiSurface {
+        ticket: String,
+        bundle: String,
+        surface: String,
+    },
     UiSurface {
         pane: u8,
         generation: String,
@@ -34,7 +46,7 @@ pub(crate) enum Command {
     },
     UiInvoke {
         ticket: String,
-        reference: rsi_ui::UiReference,
+        name: String,
         input: rsi_ui::ActionInput,
     },
     Refresh,
@@ -170,6 +182,9 @@ impl Command {
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
             Self::UiSurface { .. }
+            | Self::RemoteUiList { .. }
+            | Self::RemoteUiNext { .. }
+            | Self::RemoteUiSurface { .. }
             | Self::UiBlock { .. }
             | Self::UiInvoke { .. }
             | Self::Refresh
@@ -225,6 +240,7 @@ pub(crate) struct SettingsEditor {
 #[derive(Debug)]
 pub struct WebApplication {
     pub(crate) ui: Arc<rsi_ui::Ui>,
+    pub(crate) remote_ui: Option<rsi_ui_api::UiClient>,
     pub(crate) session: Arc<dyn rsi_session_protocol::SessionService>,
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     pub(crate) models: Arc<dyn rsi_ai_protocol::LanguageModels>,
@@ -242,7 +258,7 @@ pub struct WebApplication {
     pub(crate) execution: Execution,
     changed: watch::Sender<u64>,
     slots: Arc<Semaphore>,
-    tasks: TaskTracker,
+    pub(crate) tasks: TaskTracker,
     stop: CancellationToken,
     frames: ByteBudget,
     stream: Mutex<crate::frames::FrameState>,
@@ -337,6 +353,8 @@ impl WebApplication {
             "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "preferences": self.preferences,
             "ui_detail": details.ui,
+            "remote_ui_catalog": details.remote_catalog,
+            "has_remote_ui": self.remote_ui.is_some(),
             "image_detail": details.image,
             "source_media": details.source.as_ref().and_then(crate::details::SourceDetail::media),
             "media_limits": crate::panes::images::limits(),
@@ -367,23 +385,32 @@ impl WebApplication {
         let id = self.stream.lock().expect("Web frame stream poisoned").id;
         (id > 0).then(|| id.to_string())
     }
-    async fn execute(&self, command: Command) -> Result<()> {
+    async fn execute(self: &Arc<Self>, command: Command) -> Result<()> {
         match command {
             Command::UiSurface {
                 pane,
                 generation,
                 reference,
-            } => self.ui_surface(pane, &generation, &reference),
+            } => self.ui_surface(pane, &generation, &reference).await,
             Command::UiBlock {
                 pane,
                 generation,
                 key,
             } => self.ui_block(pane, &generation, &key),
+            Command::RemoteUiList { pane, generation } => {
+                self.remote_ui_list(pane, &generation, None).await
+            }
+            Command::RemoteUiNext { ticket } => self.remote_ui_next(&ticket).await,
+            Command::RemoteUiSurface {
+                ticket,
+                bundle,
+                surface,
+            } => self.remote_ui_surface(&ticket, &bundle, &surface).await,
             Command::UiInvoke {
                 ticket,
-                reference,
+                name,
                 input,
-            } => self.ui_invoke(&ticket, reference, input).await,
+            } => self.ui_invoke(&ticket, name, input).await,
             Command::Refresh
             | Command::WorkspacesNext
             | Command::SessionsNext
@@ -450,6 +477,10 @@ impl PluginFactory for WebApplicationFactory {
         let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
         let app = Arc::new(WebApplication {
             ui: plan.local::<rsi_ui::UiContract>()?,
+            remote_ui: plan
+                .context()
+                .lookup_local::<rsi_api_protocol::ApiClientContract>()
+                .and_then(|client| rsi_ui_api::UiClient::new(client).ok()),
             session: plan.local::<rsi_session_protocol::SessionContract>()?,
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
@@ -510,6 +541,8 @@ impl PluginFactory for WebApplicationFactory {
                     }
                     drop(supply);
                     app.tasks.wait().await;
+                    *app.details.lock().expect("Web details poisoned") =
+                        crate::details::Details::default();
                     *app.stream.lock().expect("Web frame stream poisoned") =
                         crate::frames::FrameState::default();
                     Ok(())

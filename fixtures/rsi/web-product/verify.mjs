@@ -12,6 +12,8 @@ import { verifyFiles } from "./files.mjs";
 import { verifyImages } from "./images.mjs";
 import { verifyAcknowledgementDeadline } from "./frames.mjs";
 import { verifyTree } from "./tree.mjs";
+import { verifyMountAdmission } from "./mount-admission.mjs";
+import { verifyWorkerLifecycle } from "./worker-lifecycle.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const report = process.env.RSI_WEB_REPORT ?? await mkdtemp(join(tmpdir(), "rsi-web-report-"));
@@ -41,6 +43,8 @@ try {
     const exchanges = [];
     try {
       await verifyDom(browser, root, report, name);
+      await writeFile(join(report, `${name}-worker-lifecycle.json`), JSON.stringify(await verifyWorkerLifecycle(browser, root)));
+      await writeFile(join(report, `${name}-mount-admission.json`), JSON.stringify(await verifyMountAdmission(browser, root)));
       const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
       await context.addInitScript(() => {
         const NativeWorker = window.Worker;
@@ -393,4 +397,28 @@ try {
   await writeFile(join(report, "results.json"), JSON.stringify({ results, provider_requests: providerRequests }, null, 2));
   await service?.close();
   await rm(binaryDirectory, { recursive: true, force: true });
+}
+
+// Each probe owns its own Service and immutable binary; no provider state is shared.
+const rendererAssets = process.env.RSI_RENDERER_ASSETS ?? join(report, "rust-renderer-assets");
+const nativeUiArtifact = process.env.RSI_NATIVE_UI_ARTIFACT ?? join(root, `fixtures/rsi/native-addon/target/debug/librsi_fixture_native_addon.${process.platform === "darwin" ? "dylib" : "so"}`);
+if (!process.env.RSI_NATIVE_UI_ARTIFACT) {
+  const manifest = join(root, "fixtures/rsi/native-addon/Cargo.toml");
+  boundedRun("cargo", ["build", "--locked", "--manifest-path", manifest], { cwd: root, stdio: "inherit", timeout: 600_000 });
+}
+if (!process.env.RSI_RENDERER_ASSETS) {
+  const manifest = join(root, "fixtures/rsi/web-renderer/Cargo.toml");
+  boundedRun("cargo", ["fmt", "--manifest-path", manifest, "--", "--check"], { cwd: root, stdio: "inherit", timeout: 120_000 });
+  boundedRun("cargo", ["clippy", "--locked", "--manifest-path", manifest, "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"], { cwd: root, stdio: "inherit", timeout: 600_000 });
+  boundedRun("cargo", ["build", "--locked", "--manifest-path", manifest, "--target", "wasm32-unknown-unknown"], { cwd: root, stdio: "inherit", timeout: 600_000 });
+  boundedRun(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", ["--target", "web", "--no-typescript", "--out-dir", rendererAssets, join(root, "fixtures/rsi/web-renderer/target/wasm32-unknown-unknown/debug/rsi_web_renderer_fixture.wasm")], { cwd: root, stdio: "inherit", timeout: 120_000 });
+}
+for (const name of ["chromium", "firefox"]) {
+  if (process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER !== name) continue;
+  for (const probe of ["renderers", "rust-renderer"]) {
+    boundedRun("node", [join(root, `fixtures/rsi/web-product/${probe}.mjs`)], {
+      cwd: root, stdio: "inherit", timeout: 180_000,
+      env: { ...process.env, RSI_WEB_ASSETS: assets, RSI_WEB_BINARY: sourceBinary, RSI_WEB_BROWSER: name, RSI_RENDERER_ASSETS: rendererAssets, RSI_NATIVE_UI_ARTIFACT: nativeUiArtifact, RSI_WEB_REPORT: join(report, `${name}-${probe}`) },
+    });
+  }
 }

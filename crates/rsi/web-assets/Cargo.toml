@@ -7,6 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-ui-protocol = { path = "../ui-protocol" }
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 async-trait.workspace = true
 rsi-api-http = { path = "../../rsi-api/http" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }

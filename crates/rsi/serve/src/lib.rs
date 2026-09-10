@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 mod arguments;
 mod service;
+mod web;
 pub use service::{ServingService, ServingServiceContract};
 
 use async_trait::async_trait;
@@ -110,7 +111,9 @@ impl PluginFactory for ServeFactory {
                 .requiring_local::<ConnectionDescriptionContract>()
                 .requiring_local::<ServingServiceContract>();
         Ok(if self.web_assets {
-            prepared.requiring_local::<rsi_api_http::HttpAssetsContract>()
+            prepared
+                .requiring_local::<rsi_api_http::HttpAssetsContract>()
+                .requiring_local::<rsi_web_assets::WebAssetControlContract>()
         } else {
             prepared
         })
@@ -123,6 +126,11 @@ impl PluginFactory for ServeFactory {
             .clone()
             .isolate_local_fresh::<HttpListenerContract>()?
             .0;
+        let context = if self.web_assets {
+            web::prepare(&mut plan, context).await?
+        } else {
+            context
+        };
         let factory: Arc<dyn PluginFactory> = if self.web_assets {
             Arc::new(rsi_api_http::StaticHttpFactory)
         } else {
@@ -140,9 +148,10 @@ impl PluginFactory for ServeFactory {
             )
             .await?;
         if listener.snapshot().state != FiberState::Active {
+            let state = listener.snapshot().state;
             let report = listener.dispose().await;
             return Err(self.failure(format!(
-                "HTTP listener activation failed; {} cleanup failures",
+                "HTTP listener activation failed: {state:?}; {} cleanup failures",
                 report.total_failures()
             )));
         }

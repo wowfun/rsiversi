@@ -23,7 +23,7 @@ more height; transcript and extension content retain their own scrolling regions
 Run `node plugins/rsi/web/build.mjs /absolute/output/directory` from the repository.
 The build uses the installed `wasm32-unknown-unknown` Rust target and a matching
 `wasm-bindgen` executable (`RSI_WASM_BINDGEN` overrides its path). It copies only
-the six explicit production assets consumed by WebAssetsFactory. The directory
+the explicit bootstrap, mount bridge and admitted renderer assets consumed by WebAssetsFactory. The directory
 must be empty, so a previous generation cannot be served as a mixed bundle.
 The default WASM profile is release. Append `--dev` for a debug build with
 development assertions; the build receipt names the selected profile.
@@ -32,8 +32,9 @@ Open the configured Serve Web origin and paste the JSON receipt from
 `rsi --profile devices -- register LABEL`. The receipt is used once and removed
 from the form; only the endpoint identity is saved for an explicit reconnect
 using the HttpOnly cookie. Sign out drains the Worker application and clears the
-cookie. If disconnect fails, the document terminates the failed Worker and returns
-to login for explicit reconnection; it does not acknowledge successful sign-out
+cookie. If disconnect or the renderer connection fails, the document terminates
+the failed Worker, closes modal details and clears its obsolete view bindings,
+then returns to login for explicit reconnection. It does not acknowledge successful sign-out
 or cookie removal. A draft handoff failure instead keeps the editable pane open.
 Closing a browser tab cannot guarantee Rust cleanup; the service's
 transport owners still bound and clean up their disconnected work.
@@ -49,3 +50,57 @@ snapshot; a successful render acknowledges the resulting frame ID. The Worker
 admits one frame at a time, with a 30-second acknowledgement deadline. Expiry
 drains the connection before reporting failure. This presentation handshake never
 owns Fact or control cursors.
+
+Renderer modules export `mount(root, initialSnapshot, boundHost, abortSignal)` and
+return asynchronous `update(snapshot)` and `dispose()` methods. One document mount
+table admits at most 16 root, pane, sidebar or dialog slots. It resolves a nominal
+renderer and exact schema only through the acquired generation catalog. Candidate
+mounts finish in detached containers before replacing displayed roots; failed
+mounts dispose their candidates and preserve the old generation. The frame is
+acknowledged independently of renderer acceptance: an executable offer remains
+pending while no slot exercises it. A failed first mount rejects that offer and
+shows a resident unavailable placeholder for slots unsupported by the retained
+generation; existing supported bindings stay usable; the Worker and ordinary Session remain
+usable until another generation is published. Static-only offers need no module
+execution. Renderer acceptance occurs only after an actual candidate mount.
+A frame is acknowledged only after updates, DOM replacement and old disposal finish. A
+failed disposal or update fails the document connection; a timeout never asserts
+successful cleanup of arbitrary JavaScript.
+During asynchronous updates, the bound host fences new input until the snapshot
+and DOM have both been committed. Already admitted calls retain their original
+host and model binding. A static-only catalog may display ordinary application
+frames; requested renderer slots show an unavailable diagnostic until a catalog
+can supply them. This does not retire the Worker or grant input authority.
+Closing first aborts displayed and unfinished candidate bindings, then joins the
+in-progress render and every asynchronous disposal. A renderer must observe its
+abort signal during asynchronous setup. Closing has a 30-second deadline; expiry
+reports incomplete cleanup and requires a page reload before further renderer
+mounts. Returning to login is not cleanup evidence.
+
+Bound hosts expose only declared action/source membership and requested local
+clipboard/focus capabilities. Their authority retires with the slot. Draft fields
+are bounded document state, independent of renderer code and preserved only for
+the same semantic binding. Modules are operator-admitted trusted same-origin code,
+not a JavaScript sandbox; CSP and a closed manifest do not isolate hostile code.
+The built-in standard dialog renderer is an ordinary dynamically imported module.
+
+The resident composer retains a local draft through its command acknowledgement
+until an ordered application frame echoes it. Moving focus cannot let an older
+frame replace newly saved input. Successful submission similarly retains the
+local clear until it is echoed; unresolved input keeps its normal retry identity.
+
+After the first bundle build, `node plugins/rsi/web/renderers.mjs /absolute/bundle`
+rebuilds only the standard renderer graph. Append `--watch` to observe its explicit
+source file. The directory must belong to a running WebAssets configuration with
+`watch = true` for publication. This renderer build never recompiles the Worker.
+Changes to app.js, mounts.js, worker.js, styles.css, index.html or Worker Rust code
+require a complete new bundle and application restart.
+
+Browser ESM records remain cached for the document lifetime even after a renderer
+releases its DOM and WASM instances. The bridge therefore admits at most 32
+imported catalog revisions per document, including candidates whose imports fail.
+Each revision admits only its catalog-declared renderer entry graphs; offers rejected
+before any import consume no browser module records. Exhaustion
+keeps the displayed generation and requires an explicit page reload for further
+imports. Reconnecting the Worker does not reset this document budget. The server's
+bundle leases and byte pool still release independently of this browser cache.

@@ -26,6 +26,8 @@ struct Owner {
     busy: bool,
     waiting: bool,
     failed: bool,
+    assets: Option<Arc<crate::assets::Assets>>,
+    asset_revision: Option<String>,
 }
 thread_local! { static OWNER: RefCell<Owner> = RefCell::new(Owner::default()); }
 
@@ -190,11 +192,14 @@ pub async fn connect(receipt: String, allow_loopback_http: bool) -> Result<Strin
         return Err(failure("Web Profile did not publish its application"));
     };
     let connection = running.lookup_local::<BrowserConnection>();
+    let assets = running.lookup_local::<crate::assets::AssetsContract>();
     OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         owner.running = Some(running);
         owner.app = Some(app.clone());
         owner.connection = connection;
+        owner.assets = assets;
+        owner.asset_revision = None;
         owner.config = Some(config);
         owner.revision = None;
     });
@@ -295,6 +300,31 @@ fn prepare_profile(
             serde_json::to_value(config).map_err(failure)?,
         ),
     );
+    let mut nonce = [0_u8; 16];
+    js_sys::global()
+        .unchecked_into::<web_sys::WorkerGlobalScope>()
+        .crypto()?
+        .get_random_values_with_u8_array(&mut nonce)?;
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    builder
+        .register_local_contract::<crate::assets::AssetsContract>()
+        .map_err(failure)?;
+    builder
+        .register_linked(
+            "rsi.web.renderer.leases",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(crate::assets::AssetsFactory(nonce)),
+        )
+        .map_err(failure)?;
+    entries.push(ProfileEntry::new(
+        "renderer-leases",
+        "rsi.web.renderer.leases",
+        ConfigValue::Null,
+    ));
     entries.push(ProfileEntry::new(
         "application",
         "rsi.application.web",
@@ -344,6 +374,28 @@ pub async fn read_image(selection: String) -> Result<js_sys::Uint8Array, JsValue
     Ok(js_sys::Uint8Array::from(object.bytes.as_ref()))
 }
 
+/// Reads a bounded model-local source; the Worker derives its exact target and revision.
+#[wasm_bindgen]
+pub async fn ui_source(source: String) -> Result<js_sys::Uint8Array, JsValue> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Source {
+        ticket: String,
+        name: String,
+        offset: u64,
+        maximum: usize,
+    }
+    if source.len() > 1024 {
+        return Err(failure("UI source selection exceeds its limit"));
+    }
+    let source: Source = serde_json::from_str(&source).map_err(failure)?;
+    let bytes = application()?
+        .read_ui_source(&source.ticket, &source.name, source.offset, source.maximum)
+        .await
+        .map_err(failure)?;
+    Ok(js_sys::Uint8Array::from(bytes.as_bytes()))
+}
+
 struct Waiting;
 impl Drop for Waiting {
     fn drop(&mut self) {
@@ -364,13 +416,30 @@ pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
         Ok(owner.revision)
     })?;
     let _waiting = Waiting;
+    let assets = OWNER
+        .with(|owner| owner.borrow().assets.clone())
+        .ok_or_else(|| failure("Renderer lease owner is absent"))?;
+    let mut offers = assets.changes();
+    let previous_offer = OWNER.with(|owner| owner.borrow().asset_revision.clone());
     let mut changed = app.changes();
-    if base.is_some() && base == app.frame_id() && revision == Some(*changed.borrow_and_update()) {
+    let offer = loop {
+        let offer = offers.borrow_and_update().clone();
+        if let Some(offer) = offer {
+            let offer = offer.map_err(failure)?;
+            if base.is_none()
+                || base != app.frame_id()
+                || revision != Some(*changed.borrow_and_update())
+                || previous_offer.as_ref() != Some(&offer.revision)
+            {
+                break offer;
+            }
+        }
         tokio::select! { biased;
             () = app.closed() => return Err(failure("Web application closed")),
+            result = offers.changed() => result.map_err(failure)?,
             result = changed.changed() => result.map_err(failure)?,
         }
-    }
+    };
     let revision = *changed.borrow_and_update();
     let frame = app.next_frame(base.as_deref()).map_err(failure)?;
     let text = std::str::from_utf8(frame.as_bytes()).map_err(failure)?;
@@ -378,8 +447,24 @@ pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
         &JsValue::from_str(&app.frame_id().expect("encoded frame")),
         &JsValue::from_str(text),
     );
-    OWNER.with(|owner| owner.borrow_mut().revision = Some(revision));
+    result.push(&JsValue::from_str(
+        &serde_json::to_string(&offer).map_err(failure)?,
+    ));
+    OWNER.with(|owner| {
+        let mut owner = owner.borrow_mut();
+        owner.revision = Some(revision);
+        owner.asset_revision = Some(offer.revision);
+    });
     Ok(result.into())
+}
+
+/// Settles a renderer generation only after the document finishes its DOM lifecycle.
+#[wasm_bindgen]
+pub async fn commit_renderer(revision: String, accept: bool) -> Result<(), JsValue> {
+    let assets = OWNER
+        .with(|owner| owner.borrow().assets.clone())
+        .ok_or_else(|| failure("Renderer lease owner is absent"))?;
+    assets.commit(revision, accept).await.map_err(failure)
 }
 
 /// Drains the actual Profile and optionally clears this origin's browser credential cookie.
@@ -389,6 +474,8 @@ pub async fn disconnect(sign_out: bool) -> Result<JsValue, JsValue> {
     let (running, config) = OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         owner.app.take();
+        owner.assets.take();
+        owner.asset_revision.take();
         (owner.running.take(), owner.config.take())
     });
     if let Some(running) = running {

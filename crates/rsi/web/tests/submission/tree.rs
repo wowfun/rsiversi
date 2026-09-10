@@ -154,10 +154,10 @@ async fn click(app: &Arc<rsi_web::WebApplication>, label: &str) -> Value {
     detail
 }
 fn shown(detail: &Value) -> String {
-    detail["view"]["view"].to_string()
+    detail["model"]["standard_view"].to_string()
 }
 fn source_text(detail: &Value) -> String {
-    detail["view"]["view"]["elements"]
+    detail["model"]["standard_view"]["elements"]
         .as_array()
         .unwrap()
         .iter()
@@ -232,7 +232,7 @@ async fn tree_actions_reject_wrong_reader_membership_cursors_and_close_exact_rea
     let initial = view(&app)["ui_detail"].clone();
     let mut request = ui::button(&initial, Some("Inspect agent tree"));
     let registry = runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap();
-    let reference = serde_json::from_value(request["reference"].clone()).unwrap();
+    let reference = ui::reference(&initial, &request["name"]);
     let original = request["input"]["value"].clone();
     for value in [
         json!({"revision":"0","operation":original["operation"]}),

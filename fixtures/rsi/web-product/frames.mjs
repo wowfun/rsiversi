@@ -2,27 +2,27 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 
 export async function verifyFrameDom(page, report, browser) {
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate(async () => {
     $("workbench").hidden = false;
     const block = (key, text) => ({ key, text, role: "assistant", title: "Assistant", sources: 0, clipped: false });
     const pane = index => ({ generation: "1", session: `frame-session-${index}`, path: "/workspace", draft: "",
       model: { deployment: "test", model: "model" }, transcript: { blocks: [block("a", "First block"), block("b", "Second block")], status: "Ready" }, pending: [], notice: "" });
     const snapshot = { panes: [pane(0), pane(1)], notice: "", catalog: { workspaces: [], sessions: [], models: [] } };
-    presentFrame({ kind: "snapshot", frame_id: "1", view: snapshot });
+    await presentFrame({ kind: "snapshot", frame_id: "1", view: snapshot }, window.testRendererOffer);
     const first = panes[0].blocks.get("a").node, second = panes[0].blocks.get("b").node;
     const right = panes[1].blocks.get("a").node;
     panes[1].input.focus();
-    const patched = presentFrame({ kind: "patch", frame_id: "2", base_frame_id: "1", sections: {}, panes: [{ index: 0, fields: {}, transcript: { fields: {}, upsert: [block("b", "Updated second")], remove: [] } }] });
+    const patched = await presentFrame({ kind: "patch", frame_id: "2", base_frame_id: "1", sections: {}, panes: [{ index: 0, fields: {}, transcript: { fields: {}, upsert: [block("b", "Updated second")], remove: [] } }] }, window.testRendererOffer);
     const identities = first === panes[0].blocks.get("a").node && second === panes[0].blocks.get("b").node && right === panes[1].blocks.get("a").node;
     const focus = document.activeElement === panes[1].input;
-    const stale = presentFrame({ kind: "patch", frame_id: "4", base_frame_id: "3", sections: { notice: "must not appear" }, panes: [] });
+    const stale = await presentFrame({ kind: "patch", frame_id: "4", base_frame_id: "3", sections: { notice: "must not appear" }, panes: [] }, window.testRendererOffer);
     const retained = frameId === "2" && view.notice === "" && panes[0].blocks.get("b").text.textContent === "Updated second";
-    const reordered = presentFrame({ kind: "patch", frame_id: "3", base_frame_id: "2", sections: {}, panes: [{ index: 0, fields: {}, transcript: { fields: {}, upsert: [block("c", "New block")], remove: ["a"], order: ["c", "b"] } }] });
+    const reordered = await presentFrame({ kind: "patch", frame_id: "3", base_frame_id: "2", sections: {}, panes: [{ index: 0, fields: {}, transcript: { fields: {}, upsert: [block("c", "New block")], remove: ["a"], order: ["c", "b"] } }] }, window.testRendererOffer);
     const order = [...panes[0].transcript.querySelectorAll(".message-text")].map(node => node.textContent);
     const replacement = pane(0); replacement.generation = "2";
-    presentFrame({ kind: "snapshot", frame_id: "5", view: { ...snapshot, panes: [replacement, pane(1)] } });
+    await presentFrame({ kind: "snapshot", frame_id: "5", view: { ...snapshot, panes: [replacement, pane(1)] } }, window.testRendererOffer);
     const replaced = second !== panes[0].blocks.get("b").node;
-    return { patched, identities, focus, stale, retained, reordered, order, replaced };
+    return { patched: patched.accepted, identities, focus, stale, retained, reordered: reordered.accepted, order, replaced };
   });
   assert.deepEqual(result, { patched: true, identities: true, focus: true, stale: false, retained: true, reordered: true, order: ["New block", "Updated second"], replaced: true });
   await page.screenshot({ path: join(report, `${browser}-incremental-frame-dom.png`) });

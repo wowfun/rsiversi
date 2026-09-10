@@ -35,3 +35,13 @@ the separately composed HttpAssets capability. The standard catalog exposes
 this as `rsi.application.serve-web`, with `rsi.web.assets` owning the bundle.
 Its argument and lifecycle contracts match Serve; it does not resolve asset
 paths or read files itself. API-only Serve requires no Web build artifacts.
+
+Serve Web additionally owns the authenticated renderer-generation API. Its scoped
+HTTP dispatch combines the selected Service's live dispatch with an independent
+Application registration owner for asset leases. Only `connection.describe` and
+`connection.operations` are deliberately replaced to negotiate the combined
+catalog; other duplicate operation identities reject activation. The endpoint
+identity and Host epoch remain those of the selected Service. The listener and
+lease registrations retire together; renderer publication preserves both. This
+composition neither exposes the Service's registrar to the document nor changes
+its domain ownership.

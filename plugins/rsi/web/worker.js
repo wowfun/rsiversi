@@ -1,4 +1,4 @@
-import init, { connect, command, import_image, read_image, next_view, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { connect, command, ui_source, import_image, read_image, next_view, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const initialized = init();
 let connected = false;
@@ -12,17 +12,23 @@ async function views() {
     try { frame = await next_view(base); }
     catch (error) { if (connected) throw error; return; }
     if (!connected) return;
-    const [frameId, view] = frame;
-    base = await new Promise((resolve, reject) => {
+    const [frameId, view, assets] = frame;
+    const settled = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => { acknowledgement = undefined; reject(new Error("Document acknowledgement timed out")); }, 30_000);
-      acknowledgement = { frameId, finish(resync) { clearTimeout(timer); resolve(resync ? undefined : frameId); } };
-      postMessage({ kind: "view", view });
+      acknowledgement = { frameId, finish(resync, renderer) { clearTimeout(timer); resolve({ base: resync ? undefined : frameId, renderer }); } };
+      postMessage({ kind: "view", view, assets });
     });
     acknowledgement = undefined;
+    if (!connected) return;
+    if (settled.renderer) {
+      try { await commit_renderer(settled.renderer.revision, settled.renderer.accept); }
+      catch (error) { if (connected) throw error; return; }
+    }
+    base = settled.base;
   }
 }
 self.onmessage = async ({ data }) => {
-  if (data.kind === "ack") { if (data.frame_id === acknowledgement?.frameId) acknowledgement.finish(data.resync === true); return; }
+  if (data.kind === "ack") { if (data.frame_id === acknowledgement?.frameId) acknowledgement.finish(data.resync === true, data.renderer); return; }
   if (data.kind !== "call" || !Number.isSafeInteger(data.id)) return;
   if (calls === 8) { postMessage({ kind: "reply", id: data.id, error: "Browser input is busy" }); return; }
   calls++;
@@ -37,6 +43,8 @@ self.onmessage = async ({ data }) => {
       await command(data.payload);
     } else if (data.method === "import_image") {
       await import_image(data.payload.pane, data.payload.generation, new Uint8Array(data.payload.bytes));
+    } else if (data.method === "ui_source") {
+      result = await ui_source(data.payload);
     } else if (data.method === "read_image") {
       result = await read_image(data.payload);
     } else if (data.method === "disconnect") {

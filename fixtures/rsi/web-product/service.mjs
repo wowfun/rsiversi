@@ -98,7 +98,10 @@ export async function startService({ binary, assets, report, configure, onReques
     let failed;
     if (child && child.exitCode === null) {
       child.kill("SIGTERM");
-      try { await deadline(stopped, "service stop", 20_000); }
+      try {
+        const [code, signal] = await deadline(stopped, "service stop", 20_000);
+        if (code !== 0 || signal !== null) failed = new Error(`Service cleanup failed: exit ${code}, signal ${signal}`);
+      }
       catch { child.kill("SIGKILL"); await stopped; failed = new Error("Service exceeded clean shutdown deadline"); }
     }
     await writeFile(join(report, "service.stderr.log"), stderr);
@@ -114,7 +117,7 @@ export async function startService({ binary, assets, report, configure, onReques
     await writeFile(join(config, "settings.json"), JSON.stringify({ "rsi.agent": { default_model: { deployment: "fixture", model: "fixture-model" } } }));
     await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n`);
     await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "assets"\nplugin = "rsi.web.assets"\nconfig = { directory = ${JSON.stringify(assets)} }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve-web"\n`);
-    await configure?.({ config, workspace });
+    await configure?.({ config, workspace, run });
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
     boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
     const reservation = net.createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");

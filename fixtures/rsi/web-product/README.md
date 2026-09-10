@@ -79,3 +79,25 @@ The product runner also counts real Worker snapshots, patches, block upserts and
 frames without pane changes. It deliberately requests resynchronization for one
 received patch and verifies the subsequent snapshot before continuing the same
 Files workflow. Only frame counts and sizes are retained by this instrumentation.
+
+The default runner also executes renderer admission, real A/B/C module replacement
+and the independent Rust/WASM renderer on both browsers. Admission tests pause
+asynchronous setup and disposal, drain accepted input, reject stale hosts and bound
+document imports across reconnects. Offers with no active slot remain pending;
+failed first mounts retain a resident fallback. Authenticated product scenarios
+also open a cold executable-but-broken bundle and verify Session input, one Worker
+and clean sign-out on both browsers. A real module Worker with gated
+WASM export fixtures separately checks sign-out during acknowledgement and
+renderer commit, while still reporting failures on a connected Worker.
+Replacement preserves a pending turn and both
+resident and form drafts while holding the old lazy-import graph until commit.
+The native UI fixture then reads its actual Session through a scoped Portable API
+grant and sends arbitrary models and binary source windows through authenticated
+UI API into the Rust/WASM DOM renderer. Synthetic four-slot ABI evidence and this
+actual business path are reported separately. The runner builds both standalone
+fixtures with their own lockfiles; `RSI_RENDERER_ASSETS` and `RSI_NATIVE_UI_ARTIFACT`
+can select prebuilt diagnostic artifacts.
+
+Renderer verification also drops the HTTP reply after a real server commit. The
+actual WASM owner closes without replay, explicit reconnect starts a new observer,
+and the new renderer and Session send/cancel actions work before clean sign-out.

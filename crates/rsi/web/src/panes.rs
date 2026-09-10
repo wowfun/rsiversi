@@ -1,5 +1,7 @@
 #[path = "images.rs"]
 pub(crate) mod images;
+#[path = "remote_ui.rs"]
+mod remote_ui;
 #[path = "source_details.rs"]
 mod source_details;
 #[path = "ui_details.rs"]

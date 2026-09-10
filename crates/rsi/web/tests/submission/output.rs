@@ -125,7 +125,7 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         let read = ui::button(&card, Some(label));
         app.command(&read.to_string()).await.unwrap();
         let first = view(&app)["ui_detail"].clone();
-        let code = first["view"]["view"]["elements"][2]["text"]
+        let code = first["model"]["standard_view"]["elements"][2]["text"]
             .as_str()
             .unwrap();
         assert!(code.starts_with(&label[5..].to_uppercase()));

@@ -1,5 +1,16 @@
 # rsi-web
 
+When its selected API connection negotiates the UI operations, each pane can open
+Service extensions. The Worker pages the remote catalog for that pane's actual
+Session and retains one remote observation for the open detail. It derives scope,
+presentation identity, source revision and one-use action tickets from retained
+server responses; the document supplies only a displayed selection or action name.
+Remote models use the same admitted document renderers as local models. Changing
+details or detaching the pane closes the observation, without reconnect or replay.
+Unknown mutation outcomes remain explicit; only a new server model can restore
+input admission. This path can display newly installed Service UI contributions
+without adding a linked Worker factory or rebuilding the Worker.
+
 Assistant text may carry a restricted Markdown event stream alongside its exact
 retained source. The Worker uses at most 64 KiB input, 4,096 events and 32 nested
 elements per block. Encoded events may occupy at most four times source bytes
@@ -189,3 +200,20 @@ wait are retained; a 30-second stalled acknowledgement closes the Worker
 connection and drains the application, requiring explicit reconnection. No queue
 of frames or domain records is retained behind a stalled document. Application
 withdrawal drops the baseline even while an external handle remains alive.
+
+An ordinary Worker plugin owns `web-assets.observe`, its application nonce and
+its pending renderer offer. Asset changes wake the existing frame producer; they
+do not start another document frame queue. The frame includes only validated
+renderer admission metadata. The document completes asynchronous rendering and
+old-module disposal before its acknowledgement settles the exact offer. Worker
+withdrawal cancels observation and joins its task before connection cleanup.
+Executable admission and DOM mounting grant no Session or credential authority.
+
+Surface details hold the UI owner's asynchronous PresentationLease and an exact
+SnapshotPin. Their watcher updates only captured model data; document rendering
+performs no business reads. Closing or replacing the detail cancels its watcher,
+joins lease cleanup, and fences escaped input. Source requests name the displayed
+detail ticket and model-local source, with windows of at most 64 KiB. Actions name
+only displayed membership; the Worker derives target identity and revision from
+its retained snapshot. Standard block cards retain their independently bound
+block action contract and are converted to the neutral standard model.

@@ -1,3 +1,4 @@
+import { buildRenderers } from "./renderers.mjs";
 import { spawnSync } from "node:child_process";
 import { mkdir, readdir, copyFile } from "node:fs/promises";
 import { dirname, resolve, isAbsolute, join } from "node:path";
@@ -19,12 +20,14 @@ function run(command, args) {
   if (result.status !== 0) throw result.error ?? new Error(`${command} failed: ${result.status}`);
 }
 run("cargo", ["build", "--locked", "-p", "rsi-web", "--target", "wasm32-unknown-unknown",
+  "--target-dir", join(root, "target"),
   ...(profile === "release" ? ["--release"] : [])]);
 run(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", [
   "--target", "web", "--no-typescript", "--out-dir", output,
   join(root, `target/wasm32-unknown-unknown/${profile}/rsi_web.wasm`),
 ]);
-for (const file of ["index.html", "app.js", "worker.js", "styles.css"]) {
+for (const file of ["index.html", "app.js", "worker.js", "styles.css", "mounts.js"]) {
   await copyFile(join(source, file), join(output, file));
 }
+await buildRenderers(output);
 console.log(JSON.stringify({ event: "web-built", directory: output, profile }));

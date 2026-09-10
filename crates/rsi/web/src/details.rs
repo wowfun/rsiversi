@@ -88,9 +88,36 @@ pub(crate) struct UiDetail {
     pub pane: u8,
     pub generation: String,
     pub ticket: String,
+    #[serde(skip)]
     pub view: Option<rsi_ui::BoundView>,
+    #[serde(skip)]
+    pub lease: Option<std::sync::Arc<rsi_ui::PresentationLease>>,
+    #[serde(skip)]
+    pub snapshot: Option<rsi_ui::SnapshotPin>,
+    #[serde(skip)]
+    pub remote: Option<RemotePresentation>,
+    pub binding: Option<rsi_ui::UiReference>,
+    pub model: Option<rsi_ui::UiModel>,
     pub error: Option<String>,
     pub busy: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct RemotePresentation {
+    pub application: String,
+    pub item: Option<rsi_ui_api::UiItem>,
+    pub closed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RemoteCatalog {
+    pub pane: u8,
+    pub generation: String,
+    pub ticket: String,
+    pub page: Option<rsi_ui_api::CatalogPage>,
+    pub error: Option<String>,
+    #[serde(skip)]
+    pub scope: rsi_ui_api::ExportScope,
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +125,7 @@ pub(crate) struct Details {
     pub(crate) revision: u64,
     pub stop: CancellationToken,
     pub ui: Option<UiDetail>,
+    pub remote_catalog: Option<RemoteCatalog>,
     pub image: Option<ImageDetail>,
     pub source: Option<SourceDetail>,
     pub block_sources: Option<BlockSources>,
@@ -114,6 +142,7 @@ impl Details {
         self.stop.cancel();
         self.stop = CancellationToken::new();
         self.ui = None;
+        self.remote_catalog = None;
         self.image = None;
         self.source = None;
         self.block_sources = None;
@@ -135,9 +164,13 @@ impl Details {
     }
     pub fn detach(&mut self, pane: u8, generation: &str) -> Result<()> {
         if self
-            .image
+            .remote_catalog
             .as_ref()
             .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
+            || self
+                .image
+                .as_ref()
+                .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
             || self
                 .ui
                 .as_ref()

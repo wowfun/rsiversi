@@ -787,8 +787,10 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "js-sys",
+ "rsi-api-protocol",
  "rsi-conversation",
  "rsi-meta",
+ "rsi-ui-protocol",
  "serde",
  "serde_json",
  "thiserror",
@@ -796,6 +798,15 @@ dependencies = [
  "tokio-util",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "rsi-ui-protocol"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

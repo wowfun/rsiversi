@@ -3,7 +3,11 @@ use crate::details::UiDetail;
 use rsi_ui::{ActionInput, BoundView, UiReference};
 
 impl WebApplication {
-    fn ui_selection(&self, index: u8, generation: &str) -> Result<(Arc<Attachment>, u64)> {
+    pub(super) fn ui_selection(
+        &self,
+        index: u8,
+        generation: &str,
+    ) -> Result<(Arc<Attachment>, u64)> {
         let pane = self.pane(index)?;
         let current = pane.current.lock().expect("Web pane poisoned");
         let attached = current
@@ -18,6 +22,11 @@ impl WebApplication {
             generation: generation.into(),
             ticket: revision.to_string(),
             view: None,
+            lease: None,
+            snapshot: None,
+            remote: None,
+            binding: None,
+            model: None,
             error: None,
             busy: false,
         });
@@ -33,7 +42,18 @@ impl WebApplication {
         };
         detail.busy = false;
         match result {
-            Ok(view) if self.ui.is_current(&view.reference) => detail.view = Some(view),
+            Ok(view) if self.ui.is_current(&view.reference) => {
+                match rsi_ui::UiModel::standard(view.view.clone()) {
+                    Ok(model) => {
+                        detail.model = Some(model);
+                        detail.binding = Some(view.reference.clone());
+                        detail.view = Some(view);
+                    }
+                    Err(failure) => {
+                        detail.error = Some(error(failure));
+                    }
+                }
+            }
             Ok(_) => {
                 let _ = details.begin();
             }
@@ -47,26 +67,116 @@ impl WebApplication {
         if details
             .ui
             .as_ref()
-            .and_then(|detail| detail.view.as_ref())
-            .is_some_and(|view| !self.ui.is_current(&view.reference))
+            .filter(|detail| detail.remote.is_none())
+            .and_then(|detail| detail.binding.as_ref())
+            .is_some_and(|reference| !self.ui.is_current(reference))
         {
             let _ = details.begin();
         }
     }
-    pub(crate) fn ui_surface(
-        &self,
+    pub(crate) async fn ui_surface(
+        self: &Arc<Self>,
         index: u8,
         generation: &str,
         reference: &UiReference,
     ) -> Result<()> {
         let (attached, revision) = self.ui_selection(index, generation)?;
-        let result = if self.ui.matches_target(&attached.ui_target, reference) {
-            self.ui.surface(reference).map_err(error)
-        } else {
-            Err("This UI contribution belongs to another or retired surface".into())
+        if !self.ui.matches_target(&attached.ui_target, reference) {
+            self.ui_result(
+                revision,
+                Err("This UI contribution belongs to another or retired surface".into()),
+            );
+            return Ok(());
+        }
+        let lease = Arc::new(self.ui.present(reference).map_err(error)?);
+        let stop = {
+            let mut details = self.details.lock().expect("Web details poisoned");
+            if details.revision != revision {
+                return Err("UI selection was replaced".into());
+            }
+            let detail = details.ui.as_mut().expect("selected UI detail");
+            detail.binding = Some(reference.clone());
+            detail.lease = Some(lease.clone());
+            details.stop.clone()
         };
-        self.ui_result(revision, result);
+        self.changed();
+        let ready = tokio::select! { biased;
+            () = stop.cancelled() => Err("UI detail closed".into()),
+            result = lease.ready() => result.map_err(error),
+        };
+        self.model_result(&lease, ready, false);
+        let app = self.clone();
+        let task = self.tasks.token();
+        self.execution.spawn(async move {
+            let _task = task;
+            let mut changed = lease.changes();
+            loop {
+                if stop.is_cancelled() {
+                    break;
+                }
+                let status = changed.borrow_and_update().clone();
+                if status.stopped {
+                    break;
+                }
+                match lease.snapshot() {
+                    Ok(Some(snapshot)) => app.model_result(&lease, Ok(snapshot), false),
+                    Err(failure) => {
+                        app.model_result(&lease, Err(error(failure)), false);
+                        break;
+                    }
+                    Ok(None) => {}
+                }
+                tokio::select! { biased;
+                    () = stop.cancelled() => break,
+                    result = changed.changed() => { if result.is_err() { break; } }
+                }
+            }
+            if let Err(failure) = lease.close().await {
+                *app.notice.lock().expect("Web notice poisoned") = error(failure);
+                app.changed();
+            }
+        });
         Ok(())
+    }
+    fn model_result(
+        &self,
+        lease: &Arc<rsi_ui::PresentationLease>,
+        result: Result<rsi_ui::SnapshotPin>,
+        settled: bool,
+    ) {
+        let mut details = self.details.lock().expect("Web details poisoned");
+        if details.stop.is_cancelled() {
+            return;
+        }
+        let Some(detail) = details.ui.as_mut().filter(|detail| {
+            detail
+                .lease
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, lease))
+        }) else {
+            return;
+        };
+        if settled {
+            detail.busy = false;
+        }
+        match result {
+            Ok(snapshot) => {
+                if !settled
+                    && detail
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|previous| previous.revision() == snapshot.revision())
+                {
+                    return;
+                }
+                detail.model = Some(snapshot.model().model);
+                detail.snapshot = Some(snapshot);
+                detail.error = None;
+            }
+            Err(failure) => detail.error = Some(failure),
+        }
+        drop(details);
+        self.changed();
     }
     pub(crate) fn ui_block(&self, index: u8, generation: &str, key: &str) -> Result<()> {
         let (attached, revision) = self.ui_selection(index, generation)?;
@@ -109,9 +219,63 @@ impl WebApplication {
     pub(crate) async fn ui_invoke(
         &self,
         ticket: &str,
-        reference: UiReference,
+        name: String,
         input: ActionInput,
     ) -> Result<()> {
+        if self
+            .details
+            .lock()
+            .expect("Web details poisoned")
+            .ui
+            .as_ref()
+            .is_some_and(|detail| detail.remote.is_some())
+        {
+            return self.remote_ui_invoke(ticket, name, input).await;
+        }
+        self.local_ui_invoke(ticket, name, input).await
+    }
+
+    async fn local_ui_invoke(&self, ticket: &str, name: String, input: ActionInput) -> Result<()> {
+        if let Some((lease, snapshot)) = {
+            let details = self.details.lock().expect("Web details poisoned");
+            details
+                .ui
+                .as_ref()
+                .filter(|detail| detail.ticket == ticket && !detail.busy)
+                .and_then(|detail| Some((detail.lease.clone()?, detail.snapshot.clone()?)))
+        } {
+            let admitted = {
+                let mut details = self.details.lock().expect("Web details poisoned");
+                let next = details
+                    .revision
+                    .checked_add(1)
+                    .ok_or("Detail generation exhausted")?;
+                let Some(detail) = details
+                    .ui
+                    .as_mut()
+                    .filter(|detail| detail.ticket == ticket && !detail.busy)
+                else {
+                    return Ok(());
+                };
+                let invocation = lease.invoke(
+                    &rsi_ui::PresentationAction {
+                        presentation: snapshot.identity().clone(),
+                        revision: snapshot.revision(),
+                        action: name,
+                    },
+                    input,
+                );
+                detail.busy = true;
+                detail.ticket = next.to_string();
+                detail.error = None;
+                details.revision = next;
+                invocation
+            };
+            self.changed();
+            let result = admitted.await.map_err(error);
+            self.model_result(&lease, result, true);
+            return Ok(());
+        }
         let selected = {
             let details = self.details.lock().expect("Web details poisoned");
             let Some(detail) = details
@@ -124,11 +288,14 @@ impl WebApplication {
             let Some(view) = &detail.view else {
                 return Ok(());
             };
-            if view.actions.get(&reference.name) != Some(&reference) {
-                return Err("This action is not part of the displayed card".into());
-            }
-            (detail.pane, detail.generation.clone())
+            let reference = view
+                .actions
+                .get(&name)
+                .cloned()
+                .ok_or("This action is not part of the displayed card")?;
+            (detail.pane, detail.generation.clone(), reference)
         };
+        let reference = selected.2;
         let pane = self.pane(selected.0)?;
         let (revision, stop) = {
             let current = pane.current.lock().expect("Web pane poisoned");
@@ -163,5 +330,47 @@ impl WebApplication {
             .map_err(error);
         self.ui_result(revision, result);
         Ok(())
+    }
+}
+
+impl WebApplication {
+    /// Reads a model-local source from the exact displayed detail snapshot.
+    ///
+    /// # Panics
+    /// Panics if a previous application panic poisoned detail storage.
+    pub fn read_ui_source(
+        &self,
+        ticket: &str,
+        name: &str,
+        offset: u64,
+        maximum: usize,
+    ) -> futures_util::future::BoxFuture<'static, Result<rsi_api_protocol::RetainedBytes>> {
+        if self
+            .details
+            .lock()
+            .expect("Web details poisoned")
+            .ui
+            .as_ref()
+            .is_some_and(|detail| detail.remote.is_some())
+        {
+            return self.remote_ui_source(ticket, name, offset, maximum);
+        }
+        let selected = {
+            let details = self.details.lock().expect("Web details poisoned");
+            details
+                .ui
+                .as_ref()
+                .filter(|detail| {
+                    detail.ticket == ticket && !detail.busy && !details.stop.is_cancelled()
+                })
+                .and_then(|detail| {
+                    Some((detail.lease.clone()?, detail.snapshot.as_ref()?.revision()))
+                })
+        };
+        let Some((lease, revision)) = selected else {
+            return Box::pin(async { Err("This model source has retired".into()) });
+        };
+        let read = lease.source(revision, name, offset, maximum);
+        Box::pin(async move { read.await.map_err(error) })
     }
 }

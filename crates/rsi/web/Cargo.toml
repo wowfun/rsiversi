@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rsi-web-assets-api = { path = "../web-assets-api" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }
 bytes.workspace = true
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
@@ -23,6 +24,7 @@ futures-util.workspace = true
 pulldown-cmark.workspace = true
 url.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-ui-api = { path = "../ui-api" }
 rsi-application = { path = "../application" }
 rsi-client = { path = "../client" }
 rsi-conversation = { path = "../conversation" }
@@ -47,6 +49,7 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { workspace = true, features = ["Crypto", "WorkerGlobalScope"] }
 js-sys.workspace = true
 rsi-api-browser-client = { path = "../../rsi-api/browser-client" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }

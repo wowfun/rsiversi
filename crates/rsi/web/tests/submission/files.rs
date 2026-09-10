@@ -194,7 +194,7 @@ async fn click(app: &Arc<rsi_web::WebApplication>, label: &str) -> Value {
     view(app)["ui_detail"].clone()
 }
 fn shown(detail: &Value) -> String {
-    detail["view"]["view"].to_string()
+    detail["model"]["standard_view"].to_string()
 }
 
 #[tokio::test]
@@ -268,7 +268,7 @@ async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_acti
     assert!(matches!(
         registry
             .invoke(
-                &serde_json::from_value(concurrent["reference"].clone()).unwrap(),
+                &ui::reference(&view(&app)["ui_detail"], &concurrent["name"]),
                 serde_json::from_value(concurrent["input"].clone()).unwrap(),
             )
             .await,
@@ -299,6 +299,7 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
     let old = ui::button(&view(&app)["ui_detail"], Some("Next page"));
+    let reference = ui::reference(&view(&app)["ui_detail"], &old["name"]);
     assert!(files.dispose().await.is_clean());
     let replacement = Arc::new(Reader::default());
     let supplied = runtime
@@ -324,7 +325,6 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
         }
     }).await.unwrap();
     let registry = runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap();
-    let reference = serde_json::from_value(old["reference"].clone()).unwrap();
     assert!(
         registry.is_current(&reference),
         "the actual Session UI target did not change"

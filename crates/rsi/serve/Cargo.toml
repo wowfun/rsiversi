@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-web-assets = { path = "../web-assets" }
+rsi-web-assets-api = { path = "../web-assets-api" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-application = { path = "../application" }
