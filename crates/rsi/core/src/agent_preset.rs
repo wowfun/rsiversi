@@ -252,7 +252,12 @@ pub(crate) fn native_agent_profile_compiler(
         base.descriptions()
             .filter(|entry| entry.scope == crate::AddonScope::Agent)
             .map(|entry| entry.plugin.clone())
-            .chain(selected.iter().map(|entry| entry.plugin().to_owned())),
+            .chain(
+                selected
+                    .iter()
+                    .filter(|entry| entry.scope() == crate::AddonScope::Agent)
+                    .map(|entry| entry.plugin().to_owned()),
+            ),
     ))
 }
 

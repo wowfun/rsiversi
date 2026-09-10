@@ -25,6 +25,17 @@ Its read-only `inspect` observes only that scope's owning generation and descend
 with no global resource counters; `profile_snapshot` and `profile_status` reuse the
 same Profile control. Inspection of a retired scope is generation-fenced.
 
+`ScopedProfile::start_following` consumes an owner-supplied `ProfileCatalogSource`.
+It subscribes before capturing the initial frozen Host, then submits replacement
+inputs through the same Profile updater. Source notifications coalesce; a full
+Profile queue retains one pending input. A concurrent owner input commit retries
+that pending catalog against the current input revision without requiring another
+source notification. Preparation errors preserve the current
+graph and expose one bounded local diagnostic. Both explicit shutdown and
+observed Profile retirement stop the follower and release its source references.
+This source grants immutable catalog access; it does not mutate a Host or own a
+second Runtime. Products choose the role published through `ProfileCatalogContract`.
+
 ShellFactory publishes a Session-free surface host. A frozen surface catalog is
 injected by its constructor; its Profile configuration sets at most 16 concurrent
 surfaces (8 by default). Every open operation owns one non-queued slot through

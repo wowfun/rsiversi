@@ -29,6 +29,8 @@ rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-files-tools = { path = "../../rsi-files/tools" }
 rsi-session-files = { path = "../session-files" }
 rsi-ui = { path = "../ui" }
+rsi-ui-api = { path = "../ui-api" }
+rsi-ui-portable = { path = "../ui-portable" }
 rsi-session-ui = { path = "../session-ui" }
 rsi-client-composition = { path = "../client-composition" }
 rsi-web-assets = { path = "../web-assets" }

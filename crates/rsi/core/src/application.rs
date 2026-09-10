@@ -37,18 +37,15 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
     let coding = standard_coding_tools()?;
     #[cfg(not(target_os = "linux"))]
     let coding = None;
-    let (host, diagnostics) = rsi::standard_application_host(
-        rsi::StandardComposition::new(paths, capture_standard_environment()?, coding),
-        invocation.arguments,
-    )?;
     let program = profile
         .program()
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-    let running = host.start_program(program).await.map_err(|error| {
-        diagnostics
-            .take()
-            .unwrap_or_else(|| RsiError::Boot(error.to_string()))
-    })?;
+    let running = rsi::start_application(
+        rsi::StandardComposition::new(paths, capture_standard_environment()?, coding),
+        invocation.arguments,
+        program,
+    )
+    .await?;
     let result = match running.lookup_local::<rsi_application::ApplicationRunContract>() {
         Some(application) => application
             .run()

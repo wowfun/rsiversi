@@ -10,6 +10,9 @@ The terminal application plugin owns input, rendering, signals, and cleanup. One
 has one durable observer and one live-interaction observer. Child inspection
 uses finite history reads rather than additional observers. Switching Sessions
 preserves drafts and ignores asynchronous results from prior attachments.
+Renderer or scene-encoding failure preserves the resident Session and draft,
+shows a resident diagnostic without relying on the renderer, and retries at
+most once every 250 ms. A diagnostic frame grants no transcript source mapping.
 The client retains at most 64 saved Session drafts and 1,024 owned pending
 message identities. Read work leaves reserved capacity for submission and
 cancellation; at most 12 client requests are outstanding.

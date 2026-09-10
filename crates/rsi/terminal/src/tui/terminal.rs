@@ -38,6 +38,7 @@ pub(super) fn size() -> (u16, u16) {
 #[derive(Debug)]
 pub(super) struct RenderedFrame {
     pub(super) generation: u64,
+    pub(super) presentation: u64,
     pub(super) revision: u64,
     pub(super) buffer: Buffer,
     pub(super) view: super::render::View,
@@ -53,14 +54,6 @@ pub(super) struct Terminal {
 
 impl Terminal {
     pub(super) fn enter(tasks: &tokio_util::task::TaskTracker) -> io::Result<Self> {
-        static HOOK: std::sync::Once = std::sync::Once::new();
-        HOOK.call_once(|| {
-            let previous = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                restore();
-                previous(info);
-            }));
-        });
         terminal::enable_raw_mode()?;
         ACTIVE.store(true, Ordering::Release);
         let (frames, receiver) = watch::channel(None);
@@ -213,7 +206,7 @@ async fn write_frames(
                 if changed.is_err() { return Ok(()); }
                 let Some(next) = frames.borrow_and_update().clone() else { continue; };
                 if last.as_ref().is_some_and(|last| next.revision <= last.revision) { continue; }
-                let previous = last.as_ref().filter(|last| last.generation == next.generation);
+                let previous = last.as_ref().filter(|last| last.generation == next.generation && last.presentation == next.presentation);
                 let bytes = frame(&next.buffer, previous.map(|last| &last.buffer))?;
                 if write_bytes(tty, &bytes, stop, active).await? == WriteStatus::Interrupted {
                     return Ok(());
@@ -391,6 +384,7 @@ mod tests {
     fn rendered(generation: u64, revision: u64, buffer: Buffer) -> Arc<RenderedFrame> {
         Arc::new(RenderedFrame {
             generation,
+            presentation: 1,
             revision,
             buffer,
             view: super::super::render::View::default(),
@@ -534,9 +528,27 @@ mod tests {
         let stage = std::env::var("RSI_TUI_GUARD_TEST_STAGE").unwrap();
         std::fs::write(&stage, b"entering terminal").unwrap();
         let tasks = tokio_util::task::TaskTracker::new();
+        let termination = super::super::termination().unwrap();
         let mut terminal = Terminal::enter(&tasks).unwrap();
         std::fs::write(&stage, b"terminal entered").unwrap();
         let input_stop = CancellationToken::new();
+        if mode == "caught" {
+            assert!(std::panic::catch_unwind(|| panic!("contained addon panic")).is_err());
+            assert!(
+                terminal::is_raw_mode_enabled().unwrap(),
+                "caught panic restored raw mode"
+            );
+            terminal.frames.send_replace(Some(rendered(
+                1,
+                1,
+                Buffer::with_lines(["rendering survived a contained panic"]),
+            )));
+            tokio::time::timeout(Duration::from_secs(2), terminal.presented.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.presented.borrow().as_ref().unwrap().revision, 1);
+        }
         if mode == "input" {
             let mut input = super::super::input::spawn(input_stop.clone(), &tasks).unwrap();
             let received = tokio::time::timeout(Duration::from_secs(2), input.recv())
@@ -566,6 +578,7 @@ mod tests {
                 );
                 terminal.frames.send_replace(Some(Arc::new(RenderedFrame {
                     generation: 1,
+                    presentation: 1,
                     revision,
                     buffer,
                     view: super::super::render::View::default(),
@@ -575,6 +588,11 @@ mod tests {
         }
         std::fs::write(&stage, b"frames submitted").unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
+        if matches!(mode.as_str(), "interrupt" | "quit" | "hangup" | "terminate") {
+            tokio::time::timeout(Duration::from_secs(2), termination)
+                .await
+                .unwrap();
+        }
         assert_ne!(mode, "panic", "intentional terminal restoration probe");
         std::fs::write(&stage, b"closing terminal").unwrap();
         tokio::time::timeout(Duration::from_secs(2), terminal.close())
@@ -604,106 +622,147 @@ mod tests {
         }
     }
 
+    fn signal_terminal_child(
+        mode: &str,
+        stage: &std::path::Path,
+        child: &mut dyn portable_pty::Child,
+    ) {
+        if let Some(signal) = match mode {
+            "interrupt" => Some(rustix::process::Signal::INT),
+            "quit" => Some(rustix::process::Signal::QUIT),
+            "hangup" => Some(rustix::process::Signal::HUP),
+            "terminate" => Some(rustix::process::Signal::TERM),
+            _ => None,
+        } {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::fs::read_to_string(stage).unwrap_or_default() != "frames submitted" {
+                if std::time::Instant::now() >= deadline {
+                    kill_and_reap(child);
+                    panic!("PTY {mode} failed to arm termination");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            rustix::process::kill_process(
+                rustix::process::Pid::from_raw(i32::try_from(child.process_id().unwrap()).unwrap())
+                    .unwrap(),
+                signal,
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     fn panic_restores_terminal_and_blocked_writer_does_not_prevent_exit() {
-        for mode in ["panic", "slow", "input"] {
-            let directory = tempfile::tempdir().unwrap();
-            let completed = directory.path().join("closed");
-            let stage = directory.path().join("stage");
-            let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .unwrap();
-            let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
-            command.args([
-                "--exact",
-                "tui::terminal::tests::terminal_guard_child",
-                "--nocapture",
-            ]);
-            command.env("RSI_TUI_GUARD_TEST_CHILD", mode);
-            command.env("RSI_TUI_GUARD_TEST_DONE", &completed);
-            command.env("RSI_TUI_GUARD_TEST_STAGE", &stage);
-            command.env("TERM", "xterm-256color");
-            eprintln!("PTY {mode}: spawning child");
-            let mut child = pair.slave.spawn_command(command).unwrap();
-            eprintln!("PTY {mode}: child spawned");
-            drop(pair.slave);
-            if mode == "input" {
-                pair.master.take_writer().unwrap().write_all(b"x").unwrap();
-            }
-            if mode == "slow" {
-                let start = std::time::Instant::now();
-                while !completed.exists() {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        let stage = std::fs::read_to_string(&stage).unwrap_or_default();
-                        let capture = capture::PtyCapture::start(pair.master.as_ref());
-                        eprintln!("PTY slow: close timed out at {stage}; draining for teardown");
-                        kill_and_reap(child.as_mut());
-                        let output = capture.finish();
-                        panic!(
-                            "blocked output prevented terminal close at {stage}: {}",
-                            String::from_utf8_lossy(&output)
-                        );
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                eprintln!("PTY slow: terminal close completed; checking termios before draining");
-                assert!(
-                    format!("{:?}", pair.master.get_termios().unwrap().local_flags)
-                        .contains("ICANON")
-                );
-            }
-            // Only resume draining after the blocked writer has restored termios;
-            // libtest itself prints its result synchronously after this point.
-            eprintln!("PTY {mode}: starting output capture");
-            let reader = capture::PtyCapture::start(pair.master.as_ref());
+        const MODES: &[&str] = &[
+            "caught",
+            "panic",
+            "slow",
+            "input",
+            "interrupt",
+            "quit",
+            "hangup",
+            "terminate",
+        ];
+        for &mode in MODES {
+            verify_terminal_mode(mode);
+        }
+    }
+
+    fn verify_terminal_mode(mode: &str) {
+        let directory = tempfile::tempdir().unwrap();
+        let completed = directory.path().join("closed");
+        let stage = directory.path().join("stage");
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "tui::terminal::tests::terminal_guard_child",
+            "--nocapture",
+        ]);
+        command.env("RSI_TUI_GUARD_TEST_CHILD", mode);
+        command.env("RSI_TUI_GUARD_TEST_DONE", &completed);
+        command.env("RSI_TUI_GUARD_TEST_STAGE", &stage);
+        command.env("TERM", "xterm-256color");
+        eprintln!("PTY {mode}: spawning child");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        eprintln!("PTY {mode}: child spawned");
+        drop(pair.slave);
+        if mode == "input" {
+            pair.master.take_writer().unwrap().write_all(b"x").unwrap();
+        }
+        if mode == "slow" {
             let start = std::time::Instant::now();
-            let status = loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    break status;
-                }
+            while !completed.exists() {
                 if start.elapsed() > Duration::from_secs(5) {
+                    let stage = std::fs::read_to_string(&stage).unwrap_or_default();
+                    let capture = capture::PtyCapture::start(pair.master.as_ref());
+                    eprintln!("PTY slow: close timed out at {stage}; draining for teardown");
                     kill_and_reap(child.as_mut());
-                    panic!("{mode}: terminal writer prevented exit");
+                    let output = capture.finish();
+                    panic!(
+                        "blocked output prevented terminal close at {stage}: {}",
+                        String::from_utf8_lossy(&output)
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(20));
-            };
-            eprintln!("PTY {mode}: child exited; checking restored termios");
-            let bytes = reader.finish();
-            assert_eq!(
-                status.success(),
-                mode != "panic",
-                "PTY {mode}: {}",
-                String::from_utf8_lossy(&bytes)
-            );
+            }
+            eprintln!("PTY slow: terminal close completed; checking termios before draining");
             assert!(
                 format!("{:?}", pair.master.get_termios().unwrap().local_flags).contains("ICANON")
             );
-            eprintln!("PTY {mode}: finishing output capture");
-            eprintln!("PTY {mode}: capture finished ({} bytes)", bytes.len());
-            if mode == "input" {
-                let mut parser = vt100::Parser::new(24, 80, 0);
-                // Restoration leaves the alternate screen, so inspect its frame
-                // before that suffix instead of the enclosing libtest output.
-                let end = bytes
-                    .windows(RESTORE.len())
-                    .position(|part| part == RESTORE)
-                    .unwrap();
-                parser.process(&bytes[..end]);
-                assert!(
-                    parser
-                        .screen()
-                        .contents()
-                        .contains("terminal input and output ready")
-                );
+        }
+        // Only resume draining after the blocked writer has restored termios;
+        // libtest itself prints its result synchronously after this point.
+        eprintln!("PTY {mode}: starting output capture");
+        let reader = capture::PtyCapture::start(pair.master.as_ref());
+        signal_terminal_child(mode, &stage, child.as_mut());
+        let start = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
             }
-            if mode == "panic" {
-                assert!(bytes.windows(RESTORE.len()).any(|bytes| bytes == RESTORE));
+            if start.elapsed() > Duration::from_secs(5) {
+                kill_and_reap(child.as_mut());
+                panic!("{mode}: terminal writer prevented exit");
             }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        eprintln!("PTY {mode}: child exited; checking restored termios");
+        let bytes = reader.finish();
+        assert_eq!(
+            status.success(),
+            mode != "panic",
+            "PTY {mode}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(format!("{:?}", pair.master.get_termios().unwrap().local_flags).contains("ICANON"));
+        eprintln!("PTY {mode}: finishing output capture");
+        eprintln!("PTY {mode}: capture finished ({} bytes)", bytes.len());
+        if mode == "input" {
+            let mut parser = vt100::Parser::new(24, 80, 0);
+            // Restoration leaves the alternate screen, so inspect its frame
+            // before that suffix instead of the enclosing libtest output.
+            let end = bytes
+                .windows(RESTORE.len())
+                .position(|part| part == RESTORE)
+                .unwrap();
+            parser.process(&bytes[..end]);
+            assert!(
+                parser
+                    .screen()
+                    .contents()
+                    .contains("terminal input and output ready")
+            );
+        }
+        if mode == "panic" {
+            assert!(bytes.windows(RESTORE.len()).any(|bytes| bytes == RESTORE));
         }
     }
 }

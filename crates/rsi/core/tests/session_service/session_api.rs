@@ -249,6 +249,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
     let handle = session.attach(&create.session_id).await.unwrap();
     let inspection = handle.inspect().await.unwrap();
     assert_eq!(inspection.header.session_id(), &create.session_id);
+    target_grants(api.clone(), &create.session_id).await;
     assert!(handle.pending_questions().await.unwrap().is_empty());
     assert!(handle.pending_approvals().await.unwrap().is_empty());
     let mut interactions = handle.observe_interactions().await.unwrap();
@@ -314,6 +315,40 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
     assert!(server_runtime.shutdown().await.is_clean());
     assert!(host.shutdown().await.is_clean());
     provider.abort();
+}
+
+async fn target_grants(api: Arc<HttpClient>, session_id: &SessionId) {
+    let grant =
+        Arc::new(rsi_session_api::SessionTargetClient::new(api, session_id.clone()).unwrap());
+    assert_eq!(grant.operations().len(), 20);
+    let handle = rsi_session_api::SessionClient::attach_target(grant.clone(), session_id)
+        .await
+        .unwrap();
+    assert_eq!(handle.header().await.unwrap().session_id(), session_id);
+    assert_eq!(
+        handle.inspect().await.unwrap().header.session_id(),
+        session_id
+    );
+    handle.commands().await.unwrap();
+    assert!(matches!(
+        handle.answer_approval(
+            &SessionId::new("unrelated-approval-owner").unwrap(),
+            "approval",
+            rsi_approval_protocol::ApprovalDecision::Deny,
+        ).await,
+        Err(rsi_session_protocol::SessionError::Invalid(message))
+            if message.contains("outside the Agent tree")
+    ));
+    assert!(matches!(
+        rsi_session_api::SessionClient::attach_target(
+            grant,
+            &SessionId::new("different-session").unwrap()
+        )
+        .await,
+        Err(rsi_session_protocol::SessionError::Api(
+            ApiError::Unauthorized
+        ))
+    ));
 }
 
 async fn device_drafts(

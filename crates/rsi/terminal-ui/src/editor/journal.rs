@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
-pub(super) const MAXIMUM_CHANGES: usize = 128;
-pub(super) const MAXIMUM_BYTES: usize = 1024 * 1024;
+pub const MAXIMUM_CHANGES: usize = 128;
+pub const MAXIMUM_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
-pub(super) struct Change {
+pub struct Change {
     pub start: usize,
     pub removed: Box<str>,
     pub inserted: Box<str>,
@@ -18,7 +18,7 @@ impl Change {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct Journal {
+pub struct Journal {
     pub undo: VecDeque<Change>,
     pub redo: Vec<Change>,
     pub bytes: usize,

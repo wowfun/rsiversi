@@ -11,7 +11,7 @@ fn setup(root: &Path) -> String {
     fs::write(root.join("input"), b"A").unwrap();
     fs::write(root.join("build.sh"), GOOD).unwrap();
     let text = format!(
-        "format = 1\nid = 'fixture.watch'\nplugin = 'fixture.watch'\ntarget = '{}'\nartifact = 'artifact.bin'\n[build]\ncommand = ['/bin/sh', 'build.sh']\nwatch = ['input', 'build.sh']\n",
+        "format = 2\nscope = 'agent'\nid = 'fixture.watch'\nplugin = 'fixture.watch'\ntarget = '{}'\nartifact = 'artifact.bin'\n[build]\ncommand = ['/bin/sh', 'build.sh']\nwatch = ['input', 'build.sh']\n",
         rsi::native_addon_target()
     );
     fs::write(root.join("addon.toml"), &text).unwrap();

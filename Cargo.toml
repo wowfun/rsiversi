@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/*/*"]
 exclude = [
+    "crates/rsi/terminal-native",
     "crates/rsi-agent/docs",
     "crates/rsi-ai/docs",
     "crates/rsi-meta/docs",

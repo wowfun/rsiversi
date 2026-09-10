@@ -36,6 +36,8 @@ fn durable_records_reject_bad_identity_duplicate_membership_and_unknown_format()
     let valid: serde_json::Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
     let mut cases = Vec::new();
     for (field, value) in [
+        ("scope", json!("unknown")),
+        ("scope", json!("application")),
         ("id", json!("another.id")),
         ("plugin", json!("../plugin")),
         ("artifact_sha256", json!("A".repeat(64))),
@@ -47,14 +49,14 @@ fn durable_records_reject_bad_identity_duplicate_membership_and_unknown_format()
         cases.push(serde_json::to_vec(&invalid).unwrap());
     }
     let mut invalid = valid.clone();
-    invalid["format"] = json!(2);
+    invalid["format"] = json!(1);
     cases.push(serde_json::to_vec(&invalid).unwrap());
     let mut invalid = valid.clone();
     invalid["enabled"] = invalid["installed"].clone();
     invalid["installed"] = json!({});
     cases.push(serde_json::to_vec(&invalid).unwrap());
     let row = serde_json::to_string(&valid["installed"]["fixture.addon"]).unwrap();
-    cases.push(format!(r#"{{"format":1,"revision":1,"installed":{{"fixture.addon":{row},"fixture.addon":{row}}},"enabled":{{}}}}"#).into_bytes());
+    cases.push(format!(r#"{{"format":2,"revision":1,"installed":{{"fixture.addon":{row},"fixture.addon":{row}}},"enabled":{{}}}}"#).into_bytes());
     cases.push(vec![b' '; MAXIMUM_NATIVE_ADDON_STATE_BYTES + 1]);
     for bytes in cases {
         fs::write(&index, &bytes).unwrap();
@@ -79,7 +81,7 @@ fn installed_cardinality_and_revision_admission_precede_object_publication() {
         rows.insert(id, row);
     }
     let index = root.join("store/state.json");
-    let mut state = json!({"format":1,"revision":7,"installed":rows,"enabled":{}});
+    let mut state = json!({"format":2,"revision":7,"installed":rows,"enabled":{}});
     fs::write(&index, serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(
         store.snapshot().unwrap().installed.len(),
@@ -128,7 +130,7 @@ fn encoded_state_admission_preserves_old_index_even_when_metadata_counts_fit() {
         record["portable_services"] = json!(&keys);
         rows.insert(id, record);
     }
-    let bytes = serde_json::to_vec(&json!({"format":1,"revision":1,"installed":rows,"enabled":{}}))
+    let bytes = serde_json::to_vec(&json!({"format":2,"revision":1,"installed":rows,"enabled":{}}))
         .unwrap();
     assert!(bytes.len() <= MAXIMUM_NATIVE_ADDON_STATE_BYTES);
     assert!(MAXIMUM_NATIVE_ADDON_STATE_BYTES - bytes.len() < 16 * 1024);

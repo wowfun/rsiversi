@@ -1,14 +1,14 @@
 //! Explicit native staging; source publication is independent of Runtime apply.
 mod api;
+pub(crate) mod bootstrap;
 mod plugin;
-use crate::{
-    AddonScope, NativeAddonRecord, NativeAddonStore, StandardAddonBuilder, StandardAddonSet,
-};
+use crate::{NativeAddonRecord, NativeAddonStore, StandardAddonBuilder, StandardAddonSet};
 pub(crate) use api::NativeAddonApiFactory;
 pub(crate) use plugin::NativeAddonFactory;
 pub use plugin::{
     MAXIMUM_NATIVE_ADDON_REFRESH_REQUESTS, NativeAddonControl, NativeAddonControlContract,
 };
+pub(crate) use plugin::{NativeStaging, NativeStagingContract, SharedNativeAddonFactory};
 use rsi_agent_composition::{AgentCompositionSnapshot, AgentCompositionSource};
 use rsi_agent_presets::AgentPresetCatalog;
 use rsi_host::HostPaths;
@@ -50,8 +50,8 @@ pub enum NativeAddonUpdateError {
     /// Native loading rejected the selected bytes.
     #[error("native addon loading failed: {0}")]
     Load(#[from] rsi_meta_native_loader::LoaderError),
-    /// The complete proposed Agent selection is invalid.
-    #[error("invalid native Agent selection: {0}")]
+    /// The complete proposed role catalog selection is invalid.
+    #[error("invalid native selection: {0}")]
     Selection(&'static str),
     /// Another caller is staging this manager's selection.
     #[error("native addon refresh is already running")]
@@ -108,6 +108,7 @@ struct Staged {
     revision: u64,
     selected: Vec<NativeAddonRecord>,
     snapshot: Arc<AgentCompositionSnapshot>,
+    catalog: StandardAddonSet,
 }
 struct State {
     current: Option<Staged>,
@@ -115,7 +116,7 @@ struct State {
     attempted: Option<Vec<NativeAddonRecord>>,
 }
 
-/// One explicit Agent staging owner. Blocking refresh must be supervised by its caller.
+/// One explicit role-catalog staging owner. Blocking refresh must be supervised by its caller.
 /// It never constructs another Loader, runs builds, or starts background work.
 pub struct NativeAddonManager {
     store: Arc<NativeAddonStore>,
@@ -124,10 +125,13 @@ pub struct NativeAddonManager {
     linux_tools: bool,
     presets: AgentPresetCatalog,
     base: StandardAddonSet,
+    reserved: BTreeSet<String>,
     refresh: Mutex<()>,
     state: Mutex<State>,
     closed: AtomicBool,
     retained: AtomicBool,
+    service_owner: Mutex<Option<Arc<rsi_service_host::HostOwnerLease>>>,
+    changed: tokio::sync::watch::Sender<u64>,
 }
 impl std::fmt::Debug for NativeAddonManager {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,6 +150,7 @@ impl NativeAddonManager {
         linux_tools: bool,
         presets: AgentPresetCatalog,
         base: StandardAddonSet,
+        reserved: BTreeSet<String>,
     ) -> rsi_host::Result<Self> {
         let snapshot = AgentCompositionSnapshot::new(presets.clone(), base.agent_catalog()?);
         Ok(Self {
@@ -154,19 +159,23 @@ impl NativeAddonManager {
             paths,
             linux_tools,
             presets,
-            base,
+            base: base.clone(),
+            reserved,
             refresh: Mutex::new(()),
             state: Mutex::new(State {
                 current: Some(Staged {
                     revision: 0,
                     selected: Vec::new(),
                     snapshot: Arc::new(snapshot),
+                    catalog: base,
                 }),
                 failed: false,
                 attempted: None,
             }),
             closed: AtomicBool::new(false),
             retained: AtomicBool::new(false),
+            service_owner: Mutex::new(None),
+            changed: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -224,6 +233,15 @@ impl NativeAddonManager {
             }
         }
         validate_selection(&self.base, &before.enabled)?;
+        if before
+            .enabled
+            .iter()
+            .any(|record| self.reserved.contains(record.plugin()))
+        {
+            return Err(NativeAddonUpdateError::Selection(
+                "duplicate linked plugin identity",
+            ));
+        }
         let mut builder = StandardAddonBuilder::new("rsi.native.local");
         for record in &before.enabled {
             self.check_admission()?;
@@ -238,7 +256,7 @@ impl NativeAddonManager {
                 ));
             }
             builder
-                .register_resolved(AddonScope::Agent, factory)
+                .register_resolved(record.scope(), factory)
                 .map_err(|_| NativeAddonUpdateError::Selection("native factory declaration"))?;
             for key in record.portable_services() {
                 builder
@@ -285,8 +303,10 @@ impl NativeAddonManager {
             revision: after.revision,
             selected: after.enabled,
             snapshot,
+            catalog: addons,
         });
         state.failed = false;
+        self.changed.send_replace(after.revision);
         Ok(NativeAddonRefresh {
             source_revision: after.revision,
             changed: true,
@@ -298,6 +318,94 @@ impl NativeAddonManager {
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.state().current = None;
+    }
+
+    /// Captures the current immutable role catalog without loading or activating code.
+    /// Pending, failed or retained staging rejects new selection; existing snapshots live on.
+    pub fn catalog(&self) -> Result<StandardAddonSet> {
+        self.check_admission()?;
+        let source = self.store.snapshot()?;
+        let state = self.state();
+        if state.failed {
+            return Err(NativeAddonUpdateError::Selection("last refresh failed"));
+        }
+        let current = state
+            .current
+            .as_ref()
+            .ok_or(NativeAddonUpdateError::Closed)?;
+        if current.selected != source.enabled {
+            return Err(NativeAddonUpdateError::Selection("native refresh pending"));
+        }
+        self.check_admission()?;
+        Ok(current.catalog.clone())
+    }
+
+    /// Startup keeps linked management available without admitting a failed candidate.
+    pub(crate) fn published_catalog(&self) -> Result<StandardAddonSet> {
+        self.check_admission()?;
+        let state = self.state();
+        let current = state
+            .current
+            .as_ref()
+            .ok_or(NativeAddonUpdateError::Closed)?;
+        Ok(current.catalog.clone())
+    }
+
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    pub(crate) fn retain_service_owner(
+        &self,
+        lease: Arc<rsi_service_host::HostOwnerLease>,
+    ) -> rsi_meta::Result<()> {
+        let mut owner = self
+            .service_owner
+            .lock()
+            .expect("native service owner poisoned");
+        if owner.as_ref().is_some_and(|old| !Arc::ptr_eq(old, &lease)) {
+            return Err(rsi_meta::MetaError::Activation(
+                "native staging already owns a different Service Owner".into(),
+            ));
+        }
+        *owner = Some(lease);
+        Ok(())
+    }
+
+    pub(crate) async fn drain_native(
+        &self,
+        execution: &rsi_meta::Execution,
+    ) -> rsi_meta::Result<()> {
+        loop {
+            let snapshot = self.loader.snapshot();
+            if snapshot.retained_failed_finalizations != 0 {
+                // A retained native module can still own process-level resources. Keep
+                // the corresponding Service Owner until process exit as well.
+                if let Some(owner) = self
+                    .service_owner
+                    .lock()
+                    .expect("native service owner poisoned")
+                    .take()
+                {
+                    std::mem::forget(owner);
+                }
+                return Err(rsi_meta::MetaError::Activation(
+                    "native finalization retained resources; process recovery required".into(),
+                ));
+            }
+            if snapshot.staging_bytes == 0
+                && snapshot.active_loads == 0
+                && snapshot.active_callbacks == 0
+                && snapshot.active_destructions == 0
+            {
+                self.service_owner
+                    .lock()
+                    .expect("native service owner poisoned")
+                    .take();
+                return Ok(());
+            }
+            execution.sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// Observes bounded metadata without native code execution or raw error text.
@@ -360,6 +468,15 @@ impl NativeAddonManager {
 
 impl AgentCompositionSource for NativeAddonManager {
     fn snapshot(&self) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>> {
+        self.capture(None)
+    }
+}
+
+impl NativeAddonManager {
+    fn capture(
+        &self,
+        presets: Option<&AgentPresetCatalog>,
+    ) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>> {
         let capture = || -> Result<_> {
             self.check_admission()?;
             let source = self.store.snapshot()?;
@@ -375,7 +492,25 @@ impl AgentCompositionSource for NativeAddonManager {
                 return Err(NativeAddonUpdateError::Selection("native refresh pending"));
             }
             self.check_admission()?;
-            Ok(Arc::clone(&current.snapshot))
+            match presets {
+                None => Ok(Arc::clone(&current.snapshot)),
+                Some(presets) => {
+                    let compiler = crate::agent_preset::native_agent_profile_compiler(
+                        &self.paths,
+                        self.linux_tools,
+                        &self.base,
+                        &current.selected,
+                    )
+                    .map_err(|_| NativeAddonUpdateError::Selection("Agent compiler declaration"))?;
+                    let contributions = current.catalog.agent_catalog().map_err(|_| {
+                        NativeAddonUpdateError::Selection("Agent contribution catalog")
+                    })?;
+                    Ok(Arc::new(AgentCompositionSnapshot::new(
+                        presets.clone().with_compiler(compiler),
+                        contributions,
+                    )))
+                }
+            }
         };
         capture().map_err(|_| rsi_meta_profile::ProfileError::Source {
             message: "native Agent catalog is unavailable; inspect the local addon manager".into(),
@@ -413,7 +548,7 @@ pub(crate) fn validate_selection(
         }
         if !plugins.insert(record.plugin().to_owned()) {
             return Err(NativeAddonUpdateError::Selection(
-                "duplicate Agent plugin identity",
+                "duplicate plugin identity",
             ));
         }
     }

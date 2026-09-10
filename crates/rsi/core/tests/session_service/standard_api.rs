@@ -305,6 +305,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             "output",
             "session",
             "settings",
+            "ui",
             "workspace"
         ]
         .map(str::to_owned)
@@ -383,6 +384,8 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     let files = rsi_session_files::SessionFilesClient::new(api.clone()).unwrap();
     let (target, file) =
         super::files::browse(&sessions, &files, registered_workspace.id, "http").await;
+    dropped_ui_binding_releases_profile(&host, &target.session_id).await;
+    let mut ui_stream = remote_ui(api.clone(), &target.session_id).await;
     host.lookup_local::<DeviceAdministrationContract>()
         .unwrap()
         .revoke(&registered.record.id)
@@ -394,6 +397,28 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             .unwrap_err(),
         rsi_session_files::SessionFilesError::Api(rsi_api_protocol::ApiError::Unauthorized)
     );
+    let end = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut delivered = 0;
+        loop {
+            match ui_stream.next().await {
+                Ok(Some(_)) => {
+                    delivered += 1;
+                    assert!(
+                        delivered <= 16,
+                        "revocation must stop bounded queued deliveries"
+                    );
+                }
+                end => break end,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(end, Err(rsi_api_protocol::ApiError::Unauthorized)),
+        "unexpected UI stream end: {end:?}"
+    );
+    drop(ui_stream);
     api.close().await;
     stop.cancel();
     task.await.unwrap().unwrap();
@@ -428,4 +453,93 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         retained_device.record.id
     );
     assert!(restarted.shutdown().await.is_clean());
+}
+
+async fn dropped_ui_binding_releases_profile(
+    host: &rsi_host::RunningHost,
+    session: &rsi_agent_session_protocol::SessionId,
+) {
+    let baseline = host
+        .inspect(rsi_meta::InspectionRequest::default())
+        .unwrap()
+        .total_fibers;
+    let binder = host
+        .lookup_local::<rsi_ui_api::UiTargetBinderContract>()
+        .unwrap();
+    for _ in 0..24 {
+        let binding = binder
+            .bind(
+                rsi_api_protocol::CallOrigin::Local,
+                rsi_ui_api::ExportScope {
+                    kind: "session".into(),
+                    key: session.to_string(),
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            host.inspect(rsi_meta::InspectionRequest::default())
+                .unwrap()
+                .total_fibers
+                > baseline
+        );
+        // Also covers a delivered oneshot value dropped before its waiter accepts it.
+        drop(binding);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while host
+                .inspect(rsi_meta::InspectionRequest::default())
+                .unwrap()
+                .total_fibers
+                != baseline
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped UI binding retained an orphan Profile");
+    }
+}
+
+async fn remote_ui(
+    api: Arc<dyn ApiClient>,
+    session: &rsi_agent_session_protocol::SessionId,
+) -> rsi_ui_api::UiObservation {
+    use rsi_ui_api::{CatalogRequest, ExportScope, Observe, Selection, UiClient};
+    let client = UiClient::new(api).unwrap();
+    let scope = ExportScope {
+        kind: "session".into(),
+        key: session.to_string(),
+    };
+    let page = client
+        .catalog(&CatalogRequest {
+            scope: scope.clone(),
+            after: None,
+            maximum: 64,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].bundle, "rsi.session.inspection");
+    assert!(page.next.is_none());
+    let request = Observe {
+        application: "http-ui-fixture".into(),
+        selections: vec![Selection {
+            scope,
+            bundle: page.entries[0].bundle.clone(),
+            surface: page.entries[0].surface.clone(),
+        }],
+    };
+    let mut stream = client.observe(&request).await.unwrap();
+    let item = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .item;
+    let view = item.snapshot.model.standard_view.unwrap();
+    assert_eq!(view.title, "Session details");
+    assert!(view.elements.iter().any(|element| matches!(element, rsi_ui::UiElement::Field { label, value } if label == "Session" && value == session.as_str())));
+    assert!(item.ticket.is_some());
+    stream
 }

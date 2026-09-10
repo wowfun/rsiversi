@@ -30,8 +30,9 @@ pub use addon::{
 };
 mod application_connection;
 pub use application_connection::{ApplicationDiagnostics, standard_application_host};
+mod application_bootstrap;
+pub use application_bootstrap::start_application;
 mod api_composition;
-#[cfg(target_os = "linux")]
 mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::probe_service_host;
@@ -48,6 +49,8 @@ pub use native_addons::{
 mod output_read;
 mod profile_owner;
 mod profiles;
+#[cfg(unix)]
+mod service_bootstrap;
 mod settings;
 #[cfg(unix)]
 mod writer_lock;
@@ -107,16 +110,15 @@ impl RunningRsi {
         self.host.lookup_local::<C>()
     }
 
-    /// Boots the standard immutable catalog from one required Profile file.
+    /// Boots the standard Service bootstrap from one required Profile file.
     pub async fn boot(composition: StandardComposition, profile_path: &Path) -> Result<Self> {
-        let host = composition
-            .build()
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        let host = host
-            .start_file(profile_path)
-            .await
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        Self::from_started_host(ProfileOwner::Root(host)).await
+        Self::start_service(
+            composition,
+            rsi_host::ProfileProgram::from_file(profile_path),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Boots one catalog-resolved Host Profile document.
@@ -124,30 +126,17 @@ impl RunningRsi {
         composition: StandardComposition,
         profile: &HostProfileDocument,
     ) -> Result<Self> {
-        let host = composition
-            .build()
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        Self::start_host_profile(host, profile).await
+        Self::start_service(composition, service_program(profile), None, None).await
     }
 
-    /// Boots a standard service child Profile within the caller's application Runtime.
-    /// Parent lifetime and bootstrap cancellation belong to the caller; shutdown affects
-    /// only this isolated child subtree.
+    /// Boots a standard service subtree within the caller's application Runtime.
+    /// Parent lifetime and bootstrap cancellation belong to the caller.
     pub async fn boot_host_profile_in(
         composition: StandardComposition,
         profile: &HostProfileDocument,
         parent: &rsi_meta::Context,
     ) -> Result<Self> {
-        let paths = composition.paths().clone();
-        let host = composition
-            .build()
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        let program = match &profile.path {
-            Some(path) => rsi_host::ProfileProgram::from_file(path),
-            None => rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
-        };
-        Self::from_started_host(ProfileOwner::start_scoped(host, paths, parent, program).await?)
-            .await
+        Self::start_service(composition, service_program(profile), None, Some(parent)).await
     }
 
     #[cfg(target_os = "linux")]
@@ -157,35 +146,46 @@ impl RunningRsi {
         launch_key: &str,
         parent: Option<&rsi_meta::Context>,
     ) -> Result<Self> {
-        let paths = composition.paths().clone();
-        let host = composition
-            .build_daemon(launch_key)
-            .map_err(|error| RsiError::Boot(error.to_string()))?;
-        match parent {
-            Some(parent) => {
-                let program = match &profile.path {
-                    Some(path) => rsi_host::ProfileProgram::from_file(path),
-                    None => rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
-                };
-                Self::from_started_host(
-                    ProfileOwner::start_scoped(host, paths, parent, program).await?,
-                )
-                .await
-            }
-            None => Self::start_host_profile(host, profile).await,
-        }
+        Self::start_service(
+            composition,
+            service_program(profile),
+            Some(launch_key.to_owned()),
+            parent,
+        )
+        .await
     }
 
-    async fn start_host_profile(
-        host: rsi_host::Host,
-        profile: &HostProfileDocument,
+    async fn start_service(
+        composition: StandardComposition,
+        program: rsi_host::ProfileProgram,
+        launch_key: Option<String>,
+        parent: Option<&rsi_meta::Context>,
     ) -> Result<Self> {
-        let host = match &profile.path {
-            Some(path) => host.start_file(path).await,
-            None => host.start(rsi_host::Profile::default()).await,
-        }
-        .map_err(|error| RsiError::Boot(error.to_string()))?;
-        Self::from_started_host(ProfileOwner::Root(host)).await
+        #[cfg(unix)]
+        let owner = Box::pin(service_bootstrap::start(
+            composition,
+            program,
+            launch_key,
+            parent,
+        ))
+        .await?;
+        #[cfg(not(unix))]
+        let owner = {
+            let _ = launch_key;
+            let paths = composition.paths().clone();
+            let host = composition
+                .build()
+                .map_err(|error| RsiError::Boot(error.to_string()))?;
+            match parent {
+                Some(parent) => ProfileOwner::start_scoped(host, paths, parent, program).await?,
+                None => ProfileOwner::Root(
+                    host.start_program(program)
+                        .await
+                        .map_err(|error| RsiError::Boot(error.to_string()))?,
+                ),
+            }
+        };
+        Self::from_started_host(owner).await
     }
 
     async fn from_started_host(host: ProfileOwner) -> Result<Self> {
@@ -335,6 +335,13 @@ impl RunningRsi {
     pub async fn shutdown(&self) -> rsi_meta::ShutdownOutcome {
         self.host.shutdown().await
     }
+}
+
+fn service_program(profile: &HostProfileDocument) -> rsi_host::ProfileProgram {
+    profile.path.as_ref().map_or_else(
+        || rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
+        rsi_host::ProfileProgram::from_file,
+    )
 }
 
 fn required_local<C: rsi_meta::LocalContract>(

@@ -79,7 +79,7 @@ impl NativeAddonBuild {
     pub fn fingerprint(&self) -> Result<String> {
         self.check_root()?;
         let current = rsi_files_native_fs::open_relative_file_no_follow(
-            &self.source.directory,
+            &self.source.manifest_directory,
             self.source
                 .path
                 .file_name()
@@ -186,10 +186,7 @@ impl NativeAddonBuild {
         self.build().timeout_seconds
     }
     pub(crate) fn cwd(&self) -> &Path {
-        self.source
-            .path
-            .parent()
-            .expect("validated manifest parent")
+        &self.source.root
     }
     pub(crate) fn install(
         &self,
@@ -218,6 +215,26 @@ impl NativeAddonBuild {
             .expect("validated build declaration")
     }
     fn check_root(&self) -> Result<()> {
+        let manifest_parent = self
+            .source
+            .path
+            .parent()
+            .expect("validated manifest parent");
+        let current_manifest =
+            rsi_files_native_fs::open_absolute_directory_no_follow(manifest_parent)?
+                .into_std_file()
+                .metadata()?;
+        let original_manifest = self
+            .source
+            .manifest_directory
+            .try_clone()?
+            .into_std_file()
+            .metadata()?;
+        if (current_manifest.dev(), current_manifest.ino())
+            != (original_manifest.dev(), original_manifest.ino())
+        {
+            return Err(NativeAddonError::Conflict);
+        }
         let current = rsi_files_native_fs::open_absolute_directory_no_follow(self.cwd())?
             .into_std_file()
             .metadata()?;

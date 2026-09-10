@@ -1,7 +1,7 @@
 //! Fullscreen presentation over Session. The Kernel remains the execution authority.
 mod clipboard;
 mod commands;
-mod editor;
+use rsi_terminal_ui::editor;
 mod input;
 mod prompts;
 mod render;
@@ -9,7 +9,7 @@ mod state;
 mod terminal;
 #[cfg(test)]
 mod tests;
-mod transcript;
+use rsi_terminal_ui::transcript;
 mod ui;
 
 use super::*;
@@ -46,12 +46,13 @@ pub(super) struct Services {
 }
 
 pub(super) async fn run(
+    presentation: Option<rsi_host::Profile>,
     services: Services,
     command: SessionCommand,
     application_work: ApplicationWork,
     context: rsi_meta::Context,
 ) -> u8 {
-    match run_inner(services, command, application_work, context).await {
+    match run_inner(presentation, services, command, application_work, context).await {
         Ok(()) => 0,
         Err(error) => report_error(&error),
     }
@@ -78,7 +79,10 @@ struct Attachment {
 }
 
 async fn attachment(handle: Arc<dyn SessionHandle>, durable: bool) -> Result<Attachment> {
-    let header = handle.header().await.map_err(error)?;
+    let header = handle
+        .header()
+        .await
+        .map_err(|failure| error(format!("Session header read failed: {failure}")))?;
     let inspection = if durable {
         Some(read(|| handle.inspect()).await?)
     } else {
@@ -144,6 +148,16 @@ impl Work {
                 && self.view_revision != client.state.view_revision
     }
 }
+type RenderJob = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    rsi_terminal_ui::wire::Request,
+                    std::result::Result<crate::presentation::Frame, String>,
+                ),
+            > + Send,
+    >,
+>;
 type Task = std::pin::Pin<Box<dyn std::future::Future<Output = Work> + Send>>;
 
 #[derive(Default)]
@@ -432,7 +446,7 @@ impl Client {
                 self.state.notice("Resolve the previous submission through Actions → Retry; this draft is retained");
                 return;
             }
-            if self.state.editor.text.trim().is_empty() {
+            if self.state.editor.text().trim().is_empty() {
                 return;
             }
             if delivery == MessageDelivery::Steer && !self.state.active {
@@ -756,7 +770,9 @@ impl Client {
                 let workspace = self.workspace.clone();
                 self.spawn(async move {
                     let session_id = super::generated_cli_session_id().map_err(error)?;
-                    let registered = workspace.get_or_create(&cwd).await.map_err(error)?;
+                    let registered = workspace.get_or_create(&cwd).await.map_err(|failure| {
+                        error(format!("Workspace selection failed: {failure}"))
+                    })?;
                     let handle = application
                         .create(CreateSession {
                             workspace_id: registered.id,
@@ -765,7 +781,7 @@ impl Client {
                             workspace_trust: WorkspaceTrust::Untrusted,
                         })
                         .await
-                        .map_err(error)?;
+                        .map_err(|failure| error(format!("Session creation failed: {failure}")))?;
                     attachment(handle, false)
                         .await
                         .map(|attached| Update::Attached(Box::new(attached)))
@@ -1058,7 +1074,7 @@ impl Client {
                 .notice("Question was settled or withdrawn; answer was not sent");
             return;
         }
-        let raw = answer.editor.text.clone();
+        let raw = answer.editor.text().to_owned();
         let question = &answer.request.questions[answer.answers.len()];
         let text = raw
             .trim()
@@ -1099,6 +1115,7 @@ impl Client {
 
 #[allow(clippy::too_many_lines)] // One loop owns generation-tagged results and observer handoff.
 async fn run_inner(
+    presentation: Option<rsi_host::Profile>,
     services: Services,
     command: SessionCommand,
     application_work: ApplicationWork,
@@ -1149,6 +1166,9 @@ async fn run_inner(
             attachment(resolve_application_handle(&application, &workspace, selection).await?, resumed).await
         } => attached?,
     };
+    let mut presentation = crate::presentation::Owner::start(&context, presentation).await?;
+    let mut presentation_changes = presentation.changes();
+    let mut terminate = Box::pin(termination().map_err(error)?);
     let mut terminal = terminal::Terminal::enter(&application_work.tasks).map_err(error)?;
     let stopped = application_work.stop.child_token();
     let mut input = input::spawn(stopped.clone(), &application_work.tasks).map_err(error)?;
@@ -1194,17 +1214,18 @@ async fn run_inner(
     );
     let mut ui_changes = client.ui.registry.changes();
     client.state.input_preferences = preferences.tui;
-    let (width, height) = terminal::size();
-    let mut screen =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).map_err(error)?;
+    let mut dimensions = terminal::size();
     let mut view = render::View::default();
     let mut frame_revision = 0_u64;
+    let mut presentation_epoch = 1_u64;
+    let mut rendering: Option<RenderJob> = None;
+    let mut rendering_stop = stopped.child_token();
     let mut tick = tokio::time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut inspect_tick = tokio::time::interval(Duration::from_secs(1));
     inspect_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = true;
-    let mut terminate = Box::pin(termination());
+    let mut recovery = render::Recovery::default();
     let result: Result<()> = async {
         loop {
             client.state.busy = client.submission.busy || !client.tasks.is_empty();
@@ -1212,15 +1233,40 @@ async fn run_inner(
             if let Some(answer) = &mut client.state.answer { answer.editor.limit = rsi_user_questions_protocol::MAXIMUM_QUESTION_BYTES.saturating_sub(answer.answers.iter().map(String::len).sum()); }
             tokio::select! {
                 () = application_work.stop.cancelled() => break,
+                change = presentation_changes.changed() => {
+                    change.map_err(error)?;
+                    rendering_stop.cancel(); rendering.take();
+                    rendering_stop = stopped.child_token();
+                    presentation_epoch = presentation_epoch.checked_add(1).ok_or_else(||error("presentation epoch exhausted"))?;
+                    view = render::View::default(); dirty = true; recovery.reset();
+                },
+                (request, result) = async {match &mut rendering {Some(job)=>job.await,None=>std::future::pending().await}} => {
+                    rendering.take();
+                    if request.identity.attachment != client.generation || request.identity.presentation != presentation_epoch || (request.width,request.height) != terminal::size() { dirty = true; continue; }
+                    let result = result.and_then(|(buffer,next_view)| {
+                        if next_view.sources_belong_to(client.state.header.session_id(), &client.state.transcript) { Ok((buffer,next_view)) }
+                        else { Err("Renderer returned a stale source map".into()) }
+                    });
+                    match result {
+                        Ok((buffer,next_view)) => {
+                            recovery.reset();
+                            terminal.frames.send_replace(Some(Arc::new(terminal::RenderedFrame {generation:client.generation, presentation:presentation_epoch, revision:request.identity.revision,buffer,view:render::View(next_view)})));
+                        }
+                        Err(problem) => {
+                            client.state.notice(problem); dirty = true; recovery.failed();
+                            let frame = render::failure_frame(request.identity, ratatui::layout::Rect::new(0, 0, request.width, request.height), terminal.frames.borrow().as_deref(), &client.state.status);
+                            terminal.frames.send_replace(Some(Arc::new(frame)));
+                        }
+                    }
+                },
                 changed = ui_changes.changed() => {
                     if changed.is_ok() { client.ui_changed(); dirty = true; }
                 },
-                signal = tokio::signal::ctrl_c() => { signal.map_err(error)?; client.cancel(); dirty = true; },
                 () = &mut terminate => break,
                 changed = terminal.presented.changed() => {
                     changed.map_err(error)?;
                     if let Some(frame) = terminal.presented.borrow_and_update().as_ref() {
-                        view = if frame.generation == client.generation {
+                        view = if frame.generation == client.generation && frame.presentation == presentation_epoch {
                             frame.view.clone()
                         } else {
                             render::View::default()
@@ -1228,7 +1274,7 @@ async fn run_inner(
                     }
                 },
                 incoming = input.recv() => {
-                    if terminal.presented.borrow().as_ref().is_none_or(|frame| frame.generation != client.generation) {
+                    if terminal.presented.borrow().as_ref().is_none_or(|frame| frame.generation != client.generation || frame.presentation != presentation_epoch) {
                         view = render::View::default();
                     }
                     dirty = true;
@@ -1246,7 +1292,7 @@ async fn run_inner(
                             if key.code == KeyCode::Escape { client.state.escape(); continue; }
                             if control && key.code == KeyCode::Char('p') { client.action_menu(); continue; }
                             if control && key.code == KeyCode::Char('r') && client.state.ui_edit.is_none() && client.state.answer.is_none() && client.state.detail.is_none() { client.prompt_menu(); continue; }
-                            if control && key.code == KeyCode::Char('d') && client.state.editor.text.is_empty() && client.state.answer.is_none() && client.submission.request.is_none() { break; }
+                            if control && key.code == KeyCode::Char('d') && client.state.editor.text().is_empty() && client.state.answer.is_none() && client.submission.request.is_none() { break; }
                             if let Some(menu) = &mut client.state.menu {
                                 match key.code {
                                     KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
@@ -1375,7 +1421,7 @@ async fn run_inner(
                                     if client.submission.rejected {
                                         if let Some(request) = &client.submission.request { client.owned.remove(&request.message_id); }
                                         client.submission.cancel_when_accepted = false;
-                                        if client.state.editor.text.is_empty()
+                                        if client.state.editor.text().is_empty()
                                             && let Some(request) = client.submission.request.take()
                                             && let Some(MessageInput::Text { text }) = request.content.into_iter().next() { client.state.editor = editor::Editor::with_text(text, input::MAX_TEXT); }
                                     }
@@ -1387,7 +1433,7 @@ async fn run_inner(
                             if client.submission.request.is_some() { client.state.notice("Session switch deferred until submission is resolved"); continue; }
                             let next = match surfaces.open(attached.header.session_id(), attached.inspection.as_ref().map(|snapshot| ObservationCursor { fact_seq: snapshot.durable_fact_seq, control_seq: snapshot.durable_control_seq }), client.generation + 1).await {
                                 Ok(next) => next,
-                                Err(problem) => { client.state.notice(problem.to_string()); continue; },
+                                Err(problem) => { client.state.notice(format!("Session observation failed: {problem}")); continue; },
                             };
                             if let Some(observer) = observer.take() { observer.stop().await?; }
                             client.controller = next.controller.clone();
@@ -1399,7 +1445,7 @@ async fn run_inner(
                             let draft = std::mem::take(&mut client.state.editor); let model = client.state.model.take();
                             let owned = std::mem::take(&mut client.owned);
                             let command = std::mem::take(&mut client.command);
-                            if !draft.text.is_empty() || draft.has_edits() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
+                            if !draft.text().is_empty() || draft.has_edits() || model.is_some() || !owned.is_empty() || command.view().pending.is_some() || command.view().receipt.is_some() { client.drafts.insert(old, SavedSession { editor: draft, model, owned, command }); }
                             client.handle = attached.handle; client.state = State::new(attached.header, client.state.remote);
                             client.state.input_preferences = preferences.tui;
                             if let Some(saved) = client.drafts.remove(client.state.header.session_id()) { client.state.editor = saved.editor; client.state.model = saved.model; client.owned = saved.owned; client.command = saved.command; }
@@ -1453,18 +1499,23 @@ async fn run_inner(
                     if client.cancellation_queued && !client.cancelling && client.tasks.len() < 12 { client.cancel(); }
                     if terminal.failed() { return Err(error("Terminal writer stopped")); }
                     let (width,height) = terminal::size();
-                    if screen.size().map_err(error)? != ratatui::layout::Size::new(width,height) { render::resize(&mut screen, width, height).map_err(error)?; dirty = true; }
-                    if dirty {
-                        let mut next_view = render::View::default();
-                        screen.draw(|frame| next_view = render::draw(frame, &client.state)).map_err(error)?;
+                    if dimensions != (width,height) { dimensions=(width,height); dirty=true; }
+                    if dirty && recovery.ready() && rendering.is_none() {
                         frame_revision = frame_revision.checked_add(1).ok_or_else(|| error("Terminal frame revision exhausted"))?;
-                        terminal.frames.send_replace(Some(Arc::new(terminal::RenderedFrame {
-                            generation: client.generation,
-                            revision: frame_revision,
-                            buffer: screen.backend().buffer().clone(),
-                            view: next_view,
-                        })));
-                        dirty = false;
+                        let scene = match rsi_terminal_ui::scene::Scene::capture(&render::input(&client.state),height).and_then(|scene|scene.encode()) {
+                            Ok(scene) => scene,
+                            Err(problem) => {
+                                client.state.notice(problem); recovery.failed();
+                                let identity = rsi_terminal_ui::wire::Identity{attachment:client.generation,presentation:presentation_epoch,revision:frame_revision};
+                                let frame = render::failure_frame(identity, ratatui::layout::Rect::new(0, 0, width, height), terminal.frames.borrow().as_deref(), &client.state.status);
+                                terminal.frames.send_replace(Some(Arc::new(frame)));
+                                continue;
+                            }
+                        };
+                        let request = rsi_terminal_ui::wire::Request {identity:rsi_terminal_ui::wire::Identity{attachment:client.generation,presentation:presentation_epoch,revision:frame_revision},width,height,bytes:scene.len()};
+                        let work=presentation.render(rsi_terminal_ui::wire::Request{identity:request.identity,width,height,bytes:scene.len()},scene,rendering_stop.clone());
+                        rendering=Some(Box::pin(async move {(request,work.await)}));
+                        dirty=false;
                     }
                     if client.history.backfill && !client.history.loading { client.history(false); }
                 },
@@ -1473,24 +1524,42 @@ async fn run_inner(
         Ok(())
     }.await;
     stopped.cancel();
+    rendering_stop.cancel();
+    rendering.take();
     client.tasks.clear();
     let cleanup = match observer {
         Some(observer) => observer.stop().await,
         None => Ok(()),
     };
     let shell_cleanup = surfaces.close().await;
-    terminal.close().await.map_err(error)?;
-    result.and(cleanup).and(shell_cleanup)
+    let presentation_cleanup = close_rendering(terminal.close(), presentation.close()).await;
+    result
+        .and(cleanup)
+        .and(shell_cleanup)
+        .and(presentation_cleanup)
 }
 
-async fn termination() {
+async fn close_rendering(
+    output: impl std::future::Future<Output = std::io::Result<()>>,
+    presentation: impl std::future::Future<Output = crate::Result<()>>,
+) -> crate::Result<()> {
+    let output = output.await.map_err(error);
+    let presentation = presentation.await;
+    output.and(presentation)
+}
+
+fn termination() -> std::io::Result<impl std::future::Future<Output = ()>> {
     #[cfg(unix)]
-    if let (Ok(mut terminate), Ok(mut hangup)) = (
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()),
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()),
-    ) {
-        tokio::select! { _ = terminate.recv() => {}, _ = hangup.recv() => {} }
-        return;
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
+        let mut quit = signal(SignalKind::quit())?;
+        Ok(async move {
+            tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {}, _ = hangup.recv() => {}, _ = quit.recv() => {} }
+        })
     }
-    std::future::pending::<()>().await;
+    #[cfg(not(unix))]
+    Ok(std::future::pending())
 }

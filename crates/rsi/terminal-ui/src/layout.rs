@@ -1,6 +1,6 @@
 //! Presentation-owned body layouts; no durable records or source leases.
 use super::{MarkdownStyles, each_row, markdown_styles};
-use crate::tui::transcript::{Block, Role, Transcript};
+use crate::transcript::{Block, Role, Transcript};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -10,7 +10,7 @@ const MAX_ENTRIES: usize = 512;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug)]
-pub(super) struct Layout {
+pub struct Layout {
     pub text: String,
     pub styles: MarkdownStyles,
     ends: Vec<u32>,
@@ -64,14 +64,14 @@ impl Entry {
     }
 }
 #[derive(Debug, Default)]
-pub(in crate::tui) struct LayoutCache {
+pub struct LayoutCache {
     entries: VecDeque<Entry>,
     bytes: usize,
     #[cfg(test)]
     pub builds: usize,
 }
 impl LayoutCache {
-    pub(super) fn retain(&mut self, transcript: &Transcript) {
+    pub fn retain(&mut self, transcript: &Transcript) {
         let current: BTreeMap<_, _> = transcript
             .blocks
             .iter()
@@ -84,7 +84,7 @@ impl LayoutCache {
         });
         self.bytes = self.entries.iter().map(Entry::bytes).sum();
     }
-    pub(super) fn get(&mut self, block: &Block, width: u16) -> Arc<Layout> {
+    pub(crate) fn get(&mut self, block: &Block, width: u16) -> Arc<Layout> {
         if let Some(index) = self.entries.iter().position(|entry| entry.key == block.key) {
             let entry = self.entries.remove(index).expect("located cache entry");
             if Arc::ptr_eq(&entry.revision, &block.layout_revision)

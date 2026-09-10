@@ -13,6 +13,14 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
     builder.register_local_contract::<EndpointIdentityContract>()?;
     builder.register_local_contract::<DeviceAdministrationContract>()?;
     builder.register_local_contract::<DeviceAuthenticationContract>()?;
+    builder.register_local_contract::<rsi_ui::UiContract>()?;
+    builder.register_local_contract::<rsi_ui_api::UiTargetBinderContract>()?;
+    builder.register_linked(
+        "rsi.service.ui.portable",
+        env!("CARGO_PKG_VERSION"),
+        UpdateMode::Replayable,
+        std::sync::Arc::new(rsi_ui_portable::PortableUiFactory),
+    )?;
     #[cfg(unix)]
     {
         builder.register_local_contract::<rsi_service_host::LocalApiListenerContract>()?;
@@ -23,8 +31,53 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
             std::sync::Arc::new(rsi_service_host::LocalApiFactory),
         )?;
     }
-    let factories: [(&str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 12] = [
+    let factories = factories();
+    let mut entries = Vec::with_capacity(factories.len());
+    for (id, factory) in factories {
+        builder.register_linked(
+            id,
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            factory,
+        )?;
+        let config = if matches!(id, "rsi.service.identity" | "rsi.api.devices") {
+            json!({"backend": "base"})
+        } else {
+            Value::Null
+        };
+        entries.push(ProfileEntry::new(id, id, config));
+    }
+    #[cfg(unix)]
+    {
+        builder.register_linked(
+            "rsi.native-addons.api",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            std::sync::Arc::new(crate::native_addons::NativeAddonApiFactory),
+        )?;
+        entries.push(ProfileEntry::new(
+            "rsi.native-addons.api",
+            "rsi.native-addons.api",
+            Value::Null,
+        ));
+    }
+    builder.register_fragment(ProfileFragment::new("rsi.standard.api", entries))?;
+    Ok(())
+}
+
+fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 16] {
+    [
         ("rsi.api", std::sync::Arc::new(rsi_api::ApiFactory)),
+        ("rsi.service.ui", std::sync::Arc::new(rsi_ui::UiFactory)),
+        (
+            "rsi.service.session.ui",
+            std::sync::Arc::new(rsi_session_ui::SessionUiFactory),
+        ),
+        (
+            "rsi.session.ui.bindings",
+            std::sync::Arc::new(rsi_session_ui::SessionUiBinderFactory),
+        ),
+        ("rsi.ui.api", std::sync::Arc::new(rsi_ui_api::UiApiFactory)),
         (
             "rsi.service.identity",
             std::sync::Arc::new(rsi_service_host::ServiceIdentityFactory),
@@ -69,36 +122,5 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
             "rsi.session.files.api",
             std::sync::Arc::new(rsi_session_files::SessionFilesApiFactory),
         ),
-    ];
-    let mut entries = Vec::with_capacity(factories.len());
-    for (id, factory) in factories {
-        builder.register_linked(
-            id,
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            factory,
-        )?;
-        let config = if matches!(id, "rsi.service.identity" | "rsi.api.devices") {
-            json!({"backend": "base"})
-        } else {
-            Value::Null
-        };
-        entries.push(ProfileEntry::new(id, id, config));
-    }
-    #[cfg(unix)]
-    {
-        builder.register_linked(
-            "rsi.native-addons.api",
-            env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
-            std::sync::Arc::new(crate::native_addons::NativeAddonApiFactory),
-        )?;
-        entries.push(ProfileEntry::new(
-            "rsi.native-addons.api",
-            "rsi.native-addons.api",
-            Value::Null,
-        ));
-    }
-    builder.register_fragment(ProfileFragment::new("rsi.standard.api", entries))?;
-    Ok(())
+    ]
 }

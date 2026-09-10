@@ -399,8 +399,13 @@ plugin = "rsi.application.headless"
         "remote client created local backend state"
     );
     assert!(
-        !remote_cache.exists(),
+        !remote_cache.join("rsi/agent-presets").exists(),
         "remote client materialized backend presets"
     );
+    let cached = std::fs::read_dir(remote_cache.join("rsi"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(cached, [std::ffi::OsString::from("native-applications")]);
     fixture.assert_success(&["host", "status"]);
 }

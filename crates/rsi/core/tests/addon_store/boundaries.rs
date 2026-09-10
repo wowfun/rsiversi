@@ -146,7 +146,21 @@ fn manifest_is_fully_validated_before_artifact_access_or_build_execution() {
     let store = NativeAddonStore::open(root.join("store")).unwrap();
     fs::remove_file(root.join("source/artifact.bin")).unwrap();
     let invalid = [
-        valid.replace("format = 1", "format = 2"),
+        valid.replace("format = 2", "format = 1"),
+        valid.replace("scope = 'agent'", ""),
+        valid.replace("scope = 'agent'", "scope = 'unknown'"),
+        valid.replace("scope = 'agent'", "scope = 'application'"),
+        valid.replace(
+            "scope = 'agent'",
+            "source_root = '../escape'\nscope = 'agent'",
+        ),
+        valid.replace(
+            "scope = 'agent'",
+            &format!(
+                "source_root = '{}/source/../source'\nscope = 'agent'",
+                root.display()
+            ),
+        ),
         valid.replace("artifact.bin", "../artifact.bin"),
         valid.replace("fixture.addon", &"a".repeat(65)),
         valid.replace("['fixture.native.tools']", "['duplicate', 'duplicate']"),

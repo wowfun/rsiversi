@@ -229,7 +229,10 @@ async fn contributed_form_survives_menu_edit_discard_and_action_failure() {
         "closing the menu left card actions stale"
     );
     client.state.ui_paste("\nforbidden");
-    assert_eq!(client.state.ui_edit.as_ref().unwrap().editor.text, "first");
+    assert_eq!(
+        client.state.ui_edit.as_ref().unwrap().editor.text(),
+        "first"
+    );
     client.state.ui_paste(" 中文\x1b[31m");
     let screen = rendered(&client, "form-edit", 110, 30);
     assert!(
@@ -260,7 +263,7 @@ async fn contributed_form_survives_menu_edit_discard_and_action_failure() {
     assert_eq!(input.fields["body"], "second\nline two");
     assert_eq!(input.value, serde_json::json!({"operation":"save"}));
     assert!(client.state.detail.as_ref().unwrap().contains("line two"));
-    assert_eq!(client.state.editor.text, "conversation draft");
+    assert_eq!(client.state.editor.text(), "conversation draft");
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
 }

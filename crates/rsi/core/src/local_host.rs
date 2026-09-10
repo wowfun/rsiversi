@@ -222,12 +222,7 @@ pub async fn connect_or_embed_service_host(
                         }
                         let remote = tokio::time::timeout_at(
                             deadline,
-                            crate::client_composition::connect(
-                                &metadata,
-                                parent,
-                                composition.paths().clone(),
-                                composition.addons(),
-                            ),
+                            crate::client_composition::connect(&metadata, parent, &composition),
                         )
                         .await;
                         let remote = match remote {

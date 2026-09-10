@@ -126,6 +126,10 @@ pub struct StandardComposition {
     agent_presets: Option<(AgentPresetCatalog, String)>,
     service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
     addons: StandardAddonSet,
+    #[cfg(unix)]
+    native_staging: Option<crate::native_addons::NativeStaging>,
+    #[cfg(unix)]
+    native_catalog: Option<StandardAddonSet>,
 }
 
 /// Frozen process inputs required by the standard Linux coding-tool generation.
@@ -860,6 +864,103 @@ impl Drop for AssetStaging {
 }
 
 impl StandardComposition {
+    #[cfg(unix)]
+    pub(crate) fn native_bootstrap_factory(
+        &self,
+        require_service_owner: bool,
+    ) -> rsi_host::Result<crate::native_addons::NativeAddonFactory> {
+        let base = self.agent_addons()?;
+        Ok(crate::native_addons::NativeAddonFactory {
+            paths: self.paths.clone(),
+            linux_tools: self.coding_tools.is_some(),
+            // Bootstrap carries preset metadata only; a Service supplies its own
+            // Settings-backed materialized presets when selecting an Agent.
+            presets: self.preset_catalog(false, &base)?,
+            base,
+            application_cache: !require_service_owner,
+            require_service_owner,
+            reserved: Arc::new(std::sync::OnceLock::from(self.native_linked_plugins()?)),
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_native_staging(
+        self,
+        staging: crate::native_addons::NativeStaging,
+    ) -> crate::Result<Self> {
+        let catalog = staging
+            .manager
+            .catalog()
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        self.with_staged_catalog(staging, catalog)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_published_native_staging(
+        self,
+        staging: crate::native_addons::NativeStaging,
+    ) -> crate::Result<Self> {
+        let catalog = staging
+            .manager
+            .published_catalog()
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        self.with_staged_catalog(staging, catalog)
+    }
+
+    #[cfg(unix)]
+    fn with_staged_catalog(
+        mut self,
+        staging: crate::native_addons::NativeStaging,
+        catalog: StandardAddonSet,
+    ) -> crate::Result<Self> {
+        self.native_catalog = Some(catalog);
+        self.native_staging = Some(staging);
+        if let Some((presets, _)) = self.agent_presets.take() {
+            let compiler = self.agent_profile_compiler()?;
+            let identity = self.agent_compiler_identity()?;
+            self.agent_presets = Some((presets.with_compiler(compiler), identity));
+        }
+        Ok(self)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn catalog_base(&self) -> Self {
+        let mut base = self.clone();
+        base.native_catalog = None;
+        base
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn native_staging(&self) -> Option<crate::native_addons::NativeStaging> {
+        self.native_staging.clone()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn service_catalog_source(
+        &self,
+        launch_key: Option<String>,
+    ) -> Option<Arc<dyn rsi_application::ProfileCatalogSource>> {
+        self.native_staging.clone().map(|staging| {
+            Arc::new(ServiceCatalog {
+                composition: self.catalog_base(),
+                staging,
+                launch_key,
+            }) as Arc<dyn rsi_application::ProfileCatalogSource>
+        })
+    }
+
+    pub(crate) fn service_owner_factory(
+        &self,
+    ) -> rsi_host::Result<rsi_service_host::ServiceOwnerFactory> {
+        Ok(match self.service_owner.clone() {
+            Some(owner) => owner,
+            None => rsi_service_host::ServiceOwnerFactory::acquiring(
+                rsi_service_host::ServiceHostPaths::from_host_paths(&self.paths)
+                    .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?,
+            ),
+        })
+    }
+
     /// Constructs an explicit native Agent staging owner from one acquired store
     /// and Loader. This does not load code or change this composition's provider.
     #[cfg(unix)]
@@ -878,6 +979,7 @@ impl StandardComposition {
             self.coding_tools.is_some(),
             presets,
             addons,
+            self.native_linked_plugins().map_err(boot)?,
         )
         .map(Arc::new)
         .map_err(boot)
@@ -897,6 +999,10 @@ impl StandardComposition {
             agent_presets: None,
             service_owner: None,
             addons: StandardAddonSet::default(),
+            #[cfg(unix)]
+            native_staging: None,
+            #[cfg(unix)]
+            native_catalog: None,
         }
     }
 
@@ -908,11 +1014,19 @@ impl StandardComposition {
     }
 
     /// Returns the supplied immutable addon declarations for application/client composition.
-    pub const fn addons(&self) -> &StandardAddonSet {
+    pub fn addons(&self) -> &StandardAddonSet {
+        #[cfg(unix)]
+        if let Some(catalog) = &self.native_catalog {
+            return catalog;
+        }
         &self.addons
     }
 
     pub(crate) fn agent_addons(&self) -> rsi_host::Result<StandardAddonSet> {
+        #[cfg(unix)]
+        if let Some(catalog) = &self.native_catalog {
+            return Ok(catalog.clone());
+        }
         self.addons.validate_platform(&format!(
             "{}-{}",
             std::env::consts::OS,
@@ -1068,7 +1182,28 @@ impl StandardComposition {
 
     /// Freezes the standard catalog for pure inspection without materializing preset assets.
     pub fn build_for_preview(&self) -> rsi_host::Result<Host> {
-        self.build_internal(false, None)
+        self.preview_service(None)
+    }
+
+    pub(crate) fn preflight_service(
+        &self,
+        program: rsi_host::ProfileProgram,
+        launch_key: Option<&str>,
+    ) -> crate::Result<()> {
+        #[cfg(unix)]
+        let deferred = crate::native_addons::bootstrap::deferred(self, AddonScope::Service)?;
+        #[cfg(not(unix))]
+        let deferred = std::collections::BTreeSet::new();
+        self.preview_service(launch_key)
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?
+            .profile_input(program)
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))?
+            .preflight_linked(&deferred)
+            .map_err(|error| crate::RsiError::Boot(error.to_string()))
+    }
+
+    pub(crate) fn preview_service(&self, launch_key: Option<&str>) -> rsi_host::Result<Host> {
+        self.build_internal(false, launch_key)
             .map(|(host, _presets, _factories)| host)
     }
 
@@ -1116,6 +1251,46 @@ impl StandardComposition {
         }
     }
 
+    #[cfg(unix)]
+    fn register_native_source(
+        &self,
+        builder: &mut StandardAddonBuilder,
+        presets: AgentPresetCatalog,
+        addons: &StandardAddonSet,
+        reserved: Arc<std::sync::OnceLock<std::collections::BTreeSet<String>>>,
+    ) -> rsi_host::Result<()> {
+        builder
+            .register_local_contract::<rsi_agent_composition::AgentCompositionSourceContract>()?;
+        builder.register_local_contract::<crate::NativeAddonControlContract>()?;
+        if let Some(staging) = &self.native_staging {
+            register(
+                builder,
+                "rsi.native-addons",
+                UpdateMode::RestartRequired,
+                crate::native_addons::SharedNativeAddonFactory {
+                    staging: staging.clone(),
+                    presets,
+                },
+            )?;
+        } else {
+            register(
+                builder,
+                "rsi.native-addons",
+                UpdateMode::RestartRequired,
+                crate::native_addons::NativeAddonFactory {
+                    paths: self.paths.clone(),
+                    linux_tools: self.coding_tools.is_some(),
+                    presets,
+                    base: addons.clone(),
+                    application_cache: false,
+                    require_service_owner: true,
+                    reserved,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     fn build_internal(
         &self,
         materialize_assets: bool,
@@ -1138,6 +1313,8 @@ impl StandardComposition {
         let agent_composition =
             AgentCompositionFactory::new(presets, agent_addons.agent_catalog()?, scopes);
         let mut builder = StandardAddonBuilder::new("rsi.standard.service");
+        #[cfg(unix)]
+        let reserved = Arc::new(std::sync::OnceLock::new());
         let inspector = Arc::new(crate::inspector::InspectorFactory::default());
         builder.register_linked(
             "rsi.inspector.api",
@@ -1147,23 +1324,7 @@ impl StandardComposition {
         )?;
         register_contracts(&mut builder)?;
         #[cfg(unix)]
-        {
-            builder
-                .register_local_contract::<rsi_agent_composition::AgentCompositionSourceContract>(
-                )?;
-            builder.register_local_contract::<crate::NativeAddonControlContract>()?;
-            register(
-                &mut builder,
-                "rsi.native-addons",
-                UpdateMode::RestartRequired,
-                crate::native_addons::NativeAddonFactory {
-                    paths: paths.clone(),
-                    linux_tools: linux_tools_enabled,
-                    presets,
-                    base: agent_addons.clone(),
-                },
-            )?;
-        }
+        self.register_native_source(&mut builder, presets, &agent_addons, reserved.clone())?;
         register_factories(
             &mut builder,
             Arc::clone(&self.credential_store),
@@ -1171,13 +1332,7 @@ impl StandardComposition {
             self.coding_tools.clone(),
             agent_composition,
         )?;
-        let owner = match self.service_owner.clone() {
-            Some(owner) => owner,
-            None => rsi_service_host::ServiceOwnerFactory::acquiring(
-                rsi_service_host::ServiceHostPaths::from_host_paths(&paths)
-                    .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?,
-            ),
-        };
+        let owner = self.service_owner_factory()?;
         builder.register_local_contract::<rsi_service_host::ServiceOwnerContract>()?;
         builder.register_local_contract::<rsi_api_protocol::HostGenerationContract>()?;
         register(
@@ -1218,13 +1373,71 @@ impl StandardComposition {
                 )],
             ))?;
         }
-        let addons = agent_addons.merged(builder.build()?)?;
+        let service_addon = builder.build()?;
+        let frozen_digest = self
+            .addons
+            .merged(standard_agent_addon(self.coding_tools.as_ref())?)?
+            .merged(service_addon.clone())?
+            .digest()?;
+        let addons = agent_addons.merged(service_addon)?;
         let factories: Vec<_> = addons.descriptions().cloned().collect();
+        #[cfg(unix)]
+        reserved
+            .set(self.linked_plugins(&factories)?)
+            .expect("new catalog reservation");
         inspector.freeze(&factories)?;
         let mut host = HostBuilder::new(paths);
         addons.register_into(&mut host, AddonScope::Service)?;
-        host.define("rsi_standard_addons", json!(addons.digest()?))?;
+        host.define("rsi_standard_addons", json!(frozen_digest))?;
         host.build().map(|host| (host, preset_identity, factories))
+    }
+
+    #[cfg(unix)]
+    fn native_linked_plugins(&self) -> rsi_host::Result<std::collections::BTreeSet<String>> {
+        let (_, _, factories) = self.build_internal(false, None)?;
+        self.linked_plugins(&factories)
+    }
+
+    #[cfg(unix)]
+    fn linked_plugins(
+        &self,
+        factories: &[AddonFactoryDescription],
+    ) -> rsi_host::Result<std::collections::BTreeSet<String>> {
+        let (application, _) =
+            crate::application_connection::application_addons(self.clone(), Vec::new())
+                .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
+        Ok(factories
+            .iter()
+            .chain(application.descriptions())
+            .filter(|entry| matches!(entry.identity, rsi_meta::FactoryIdentity::Linked { .. }))
+            .map(|entry| entry.plugin.clone())
+            .chain(crate::client_composition::linked_plugins()?)
+            .chain(std::iter::once("rsi.meta.profile".into()))
+            .collect())
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ServiceCatalog {
+    composition: StandardComposition,
+    staging: crate::native_addons::NativeStaging,
+    launch_key: Option<String>,
+}
+#[cfg(unix)]
+impl rsi_application::ProfileCatalogSource for ServiceCatalog {
+    fn snapshot(&self) -> rsi_host::Result<Arc<Host>> {
+        let composition = self
+            .composition
+            .clone()
+            .with_native_staging(self.staging.clone())
+            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
+        composition
+            .build_internal(false, self.launch_key.as_deref())
+            .map(|(host, _, _)| Arc::new(host))
+    }
+    fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.staging.manager.changes()
     }
 }
 

@@ -35,7 +35,7 @@ async fn authoring_uses_declared_native_selection_without_loading_or_changing_ho
     fs::create_dir(&source).unwrap();
     fs::write(source.join("artifact.bin"), b"not executable native code").unwrap();
     let manifest = source.join("native.toml");
-    fs::write(&manifest, format!("format = 1\nid = 'fixture.native'\nplugin = 'fixture.native-addon'\ntarget = '{}'\nartifact = 'artifact.bin'\n", rsi::native_addon_target())).unwrap();
+    fs::write(&manifest, format!("format = 2\nscope = 'agent'\nid = 'fixture.native'\nplugin = 'fixture.native-addon'\ntarget = '{}'\nartifact = 'artifact.bin'\n", rsi::native_addon_target())).unwrap();
     let store = rsi::NativeAddonStore::open(root.join("config/native-addons")).unwrap();
     store.install(&manifest).unwrap();
     assert!(

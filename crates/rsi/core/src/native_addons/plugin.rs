@@ -10,7 +10,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, LocalContract, MetaError, PluginFactory,
     PreparedActivation, Task,
 };
-use rsi_meta_native_loader::{CatalogOptions, NativeCatalog};
+use rsi_meta_native_loader::{CatalogOptions, LoaderError, NativeCatalog};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -41,6 +41,64 @@ pub(crate) struct NativeAddonFactory {
     pub(crate) linux_tools: bool,
     pub(crate) presets: AgentPresetCatalog,
     pub(crate) base: StandardAddonSet,
+    pub(crate) application_cache: bool,
+    pub(crate) require_service_owner: bool,
+    pub(crate) reserved: Arc<std::sync::OnceLock<std::collections::BTreeSet<String>>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NativeStaging {
+    pub(crate) manager: Arc<NativeAddonManager>,
+    pub(crate) control: Arc<dyn NativeAddonControl>,
+}
+#[derive(Debug)]
+pub(crate) struct NativeStagingContract;
+impl LocalContract for NativeStagingContract {
+    const KEY: &'static str = "rsi.native-addons.staging";
+    type Service = NativeStaging;
+}
+
+#[derive(Debug)]
+pub(crate) struct SharedNativeAddonFactory {
+    pub(crate) staging: NativeStaging,
+    pub(crate) presets: AgentPresetCatalog,
+}
+#[async_trait]
+impl PluginFactory for SharedNativeAddonFactory {
+    fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        if !config.is_null() {
+            return Err(MetaError::InvalidInput(
+                "native staging configuration must be null".into(),
+            ));
+        }
+        Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<rsi_service_host::ServiceOwnerContract>())
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        self.staging
+            .manager
+            .retain_service_owner(plan.local::<rsi_service_host::ServiceOwnerContract>()?)?;
+        plan.context()
+            .provide_local::<AgentCompositionSourceContract>(Arc::new(ServiceAgentSource {
+                manager: self.staging.manager.clone(),
+                presets: self.presets.clone(),
+            }))?;
+        plan.context()
+            .provide_local::<NativeAddonControlContract>(self.staging.control.clone())?;
+        Ok(())
+    }
+}
+#[derive(Debug)]
+struct ServiceAgentSource {
+    manager: Arc<NativeAddonManager>,
+    presets: AgentPresetCatalog,
+}
+impl rsi_agent_composition::AgentCompositionSource for ServiceAgentSource {
+    fn snapshot(
+        &self,
+    ) -> rsi_meta_profile::Result<Arc<rsi_agent_composition::AgentCompositionSnapshot>> {
+        self.manager.capture(Some(&self.presets))
+    }
 }
 impl std::fmt::Debug for NativeAddonFactory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,9 +114,13 @@ impl NativeAddonFactory {
         };
         let store = NativeAddonStore::open(roots(self.paths.config().join("native-addons"))?)
             .map_err(activation_error)?;
-        let loader = NativeCatalog::new(CatalogOptions::new(roots(
-            self.paths.cache().join("native-addons"),
-        )?))
+        let loader = if self.application_cache {
+            open_application_catalog(&roots(self.paths.cache().join("native-applications"))?)
+        } else {
+            NativeCatalog::new(CatalogOptions::new(roots(
+                self.paths.cache().join("native-addons"),
+            )?))
+        }
         .map_err(activation_error)?;
         NativeAddonManager::new(
             Arc::new(store),
@@ -67,11 +129,32 @@ impl NativeAddonFactory {
             self.linux_tools,
             self.presets,
             self.base,
+            self.reserved
+                .get()
+                .expect("linked selection preflight frozen before activation")
+                .clone(),
         )
         .map(Arc::new)
         .map_err(activation_error)
     }
 }
+const APPLICATION_CACHE_SLOTS: u64 = 64;
+
+fn open_application_catalog(
+    root: &std::path::Path,
+) -> std::result::Result<NativeCatalog, LoaderError> {
+    for index in 0..APPLICATION_CACHE_SLOTS {
+        match NativeCatalog::new(CatalogOptions::new(root.join(format!("slot-{index:02}")))) {
+            Err(LoaderError::CacheLocked(_)) => {}
+            result => return result,
+        }
+    }
+    Err(LoaderError::CapacityExhausted {
+        resource: "application cache owners",
+        limit: APPLICATION_CACHE_SLOTS,
+    })
+}
+
 #[async_trait]
 impl PluginFactory for NativeAddonFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
@@ -80,11 +163,18 @@ impl PluginFactory for NativeAddonFactory {
                 "native addon manager configuration must be null".into(),
             ));
         }
-        Ok(PreparedActivation::new(ConfigValue::Null)
-            .requiring_local::<rsi_service_host::ServiceOwnerContract>())
+        let prepared = PreparedActivation::new(ConfigValue::Null);
+        Ok(if self.require_service_owner {
+            prepared.requiring_local::<rsi_service_host::ServiceOwnerContract>()
+        } else {
+            prepared
+        })
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let _owner_lease = plan.local::<rsi_service_host::ServiceOwnerContract>()?;
+        let owner_lease = self
+            .require_service_owner
+            .then(|| plan.local::<rsi_service_host::ServiceOwnerContract>())
+            .transpose()?;
         let owner = Arc::new(Worker {
             stop: CancellationToken::new(),
             task: Mutex::new(None),
@@ -109,6 +199,7 @@ impl PluginFactory for NativeAddonFactory {
             Arc::clone(&owner),
             queue,
             ready,
+            owner_lease,
         ));
         *owner
             .task
@@ -119,12 +210,15 @@ impl PluginFactory for NativeAddonFactory {
         })??;
         plan.context()
             .provide_local::<AgentCompositionSourceContract>(manager.clone())?;
+        let control: Arc<dyn NativeAddonControl> = Arc::new(Control {
+            manager: manager.clone(),
+            requests,
+            stop: owner.stop.clone(),
+        });
         plan.context()
-            .provide_local::<NativeAddonControlContract>(Arc::new(Control {
-                manager,
-                requests,
-                stop: owner.stop.clone(),
-            }))?;
+            .provide_local::<NativeAddonControlContract>(control.clone())?;
+        plan.context()
+            .provide_local::<NativeStagingContract>(Arc::new(NativeStaging { manager, control }))?;
         Ok(())
     }
 }
@@ -207,6 +301,7 @@ async fn run(
     owner: Arc<Worker>,
     mut requests: mpsc::Receiver<RefreshRequest>,
     ready: oneshot::Sender<rsi_meta::Result<Arc<NativeAddonManager>>>,
+    owner_lease: Option<Arc<rsi_service_host::HostOwnerLease>>,
 ) -> rsi_meta::Result<()> {
     let initialized = execution
         .prepare(move || factory.open())
@@ -221,21 +316,18 @@ async fn run(
             return Ok(());
         }
     };
+    if let Some(lease) = owner_lease {
+        manager.retain_service_owner(lease)?;
+    }
     *owner
         .manager
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manager.clone());
     let _admission = CloseOnDrop(manager.clone());
-    if owner.stop.is_cancelled() {
-        manager.close();
-        return Ok(());
-    }
-    let _initial_attempt = refresh(&execution, &manager, false).await?;
-    if ready.send(Ok(manager.clone())).is_err() {
-        manager.close();
-        return Ok(());
-    }
     let result = async {
+        if owner.stop.is_cancelled() { return Ok(()); }
+        let _initial_attempt = refresh(&execution, &manager, false).await?;
+        if ready.send(Ok(manager.clone())).is_err() { return Ok(()); }
         loop {
             tokio::select! {
                 biased;
@@ -253,7 +345,8 @@ async fn run(
         }
     }.await;
     manager.close();
-    result
+    let drained = manager.drain_native(&execution).await;
+    result.and(drained)
 }
 
 async fn refresh(
@@ -275,4 +368,46 @@ async fn refresh(
 }
 fn activation_error(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_cache_pool_bounds_live_owners_and_reuses_released_slots() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut owners: Vec<_> = (0..APPLICATION_CACHE_SLOTS)
+            .map(|_| open_application_catalog(temp.path()).unwrap())
+            .collect();
+        assert!(matches!(
+            open_application_catalog(temp.path()),
+            Err(LoaderError::CapacityExhausted {
+                resource: "application cache owners",
+                limit: APPLICATION_CACHE_SLOTS
+            })
+        ));
+        owners.pop();
+        owners.push(open_application_catalog(temp.path()).unwrap());
+        assert_eq!(
+            std::fs::read_dir(temp.path()).unwrap().count(),
+            usize::try_from(APPLICATION_CACHE_SLOTS).unwrap()
+        );
+        drop(owners);
+        for _ in 0..=APPLICATION_CACHE_SLOTS {
+            drop(open_application_catalog(temp.path()).unwrap());
+        }
+        assert_eq!(
+            std::fs::read_dir(temp.path()).unwrap().count(),
+            usize::try_from(APPLICATION_CACHE_SLOTS).unwrap()
+        );
+    }
+
+    #[test]
+    fn application_cache_pool_does_not_skip_malformed_slots() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("slot-00"), b"not a directory").unwrap();
+        assert!(open_application_catalog(temp.path()).is_err());
+        assert!(!temp.path().join("slot-01").exists());
+    }
 }

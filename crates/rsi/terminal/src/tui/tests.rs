@@ -13,13 +13,13 @@ async fn command_completion_is_discovered_undoable_and_inert_after_draft_change(
         panic!("discovered completions")
     };
     client.command_completions(&prefix, names);
-    assert_eq!(client.state.editor.text, "/plan ");
+    assert_eq!(client.state.editor.text(), "/plan ");
     assert!(handle.commands.lock().unwrap().is_empty());
     assert!(handle.submitted_requests.lock().unwrap().is_empty());
     let mut undo: termina::event::KeyEvent = KeyCode::Char('z').into();
     undo.modifiers = Modifiers::CONTROL;
     client.state.editor.key(undo).unwrap();
-    assert_eq!(client.state.editor.text, "/pl");
+    assert_eq!(client.state.editor.text(), "/pl");
     assert!(client.complete_command());
     client.state.editor.insert("changed").unwrap();
     let work = client.tasks.next().await.unwrap();
@@ -27,7 +27,7 @@ async fn command_completion_is_discovered_undoable_and_inert_after_draft_change(
         panic!("discovered completions")
     };
     client.command_completions(&prefix, names);
-    assert_eq!(client.state.editor.text, "/plchanged");
+    assert_eq!(client.state.editor.text(), "/plchanged");
     assert!(client.state.menu.is_none());
     let notice = client.state.status.clone();
     client.command_completions("/pl", Err(error("stale discovery error")));
@@ -50,11 +50,11 @@ async fn recalling_only_this_sessions_prompt_is_an_edit_without_submission() {
     let menu = client.state.menu.take().unwrap();
     assert_eq!(menu.items.len(), 1);
     client.action(menu.items[0].1.clone());
-    assert_eq!(client.state.editor.text, "first\nsecond");
+    assert_eq!(client.state.editor.text(), "first\nsecond");
     let mut undo: termina::event::KeyEvent = KeyCode::Char('z').into();
     undo.modifiers = Modifiers::CONTROL;
     client.state.editor.key(undo).unwrap();
-    assert_eq!(client.state.editor.text, "unfinished draft");
+    assert_eq!(client.state.editor.text(), "unfinished draft");
     assert!(handle.submitted_requests.lock().unwrap().is_empty());
     assert!(handle.commands.lock().unwrap().is_empty());
     assert!(client.tasks.is_empty());
@@ -73,7 +73,7 @@ async fn registered_slash_command_retains_unknown_identity_without_submitting_a_
     };
     assert!(result.is_err());
     client.command_finished(result);
-    assert_eq!(client.state.editor.text, "/plan on");
+    assert_eq!(client.state.editor.text(), "/plan on");
     client.prompt_menu();
     assert_eq!(client.state.menu.take().unwrap().items[0].0, "/plan on");
     assert!(client.submission.request.is_none());
@@ -385,7 +385,7 @@ async fn pending_menu_waits_for_transient_read_capacity_without_losing_the_draft
     client.action(Action::Queue);
     let update = client.tasks.next().await.unwrap().result.unwrap();
     assert!(matches!(update, Update::Menu(Menu { title, .. }) if title == "Pending inputs"));
-    assert_eq!(client.state.editor.text, "preserved draft");
+    assert_eq!(client.state.editor.text(), "preserved draft");
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -434,7 +434,7 @@ async fn explicit_retry_queries_before_replaying_the_frozen_submission() {
                 .all(|request| serde_json::to_value(request).unwrap()
                     == serde_json::to_value(&frozen).unwrap())
         );
-        assert_eq!(client.state.editor.text, "next draft");
+        assert_eq!(client.state.editor.text(), "next draft");
         surface.stop().await;
         assert!(runtime.shutdown().await.is_clean());
     }
@@ -461,7 +461,7 @@ async fn submission_reconciliation_freezes_id_content_and_model_while_editor_cha
             matches!(&request.content[0], MessageInput::Text { text } if text == "original input")
         );
     }
-    assert_eq!(client.state.editor.text, "next draft");
+    assert_eq!(client.state.editor.text(), "next draft");
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -473,7 +473,7 @@ async fn idle_steer_is_rejected_locally_and_active_steer_never_carries_model_ove
     client.state.model = Some(ModelRef::new("chosen", "model").unwrap());
     client.submit(MessageDelivery::Steer, false);
     assert!(client.submission.request.is_none());
-    assert_eq!(client.state.editor.text, "steering");
+    assert_eq!(client.state.editor.text(), "steering");
     client.state.active = true;
     client.submit(MessageDelivery::Steer, false);
     assert!(matches!(
@@ -543,7 +543,7 @@ async fn cancel_keeps_draft_and_targets_attached_turn_and_only_owned_pending_mes
         *targets,
         [CancelTarget::Turn(turn), CancelTarget::Message(own)]
     );
-    assert_eq!(client.state.editor.text, "preserved draft");
+    assert_eq!(client.state.editor.text(), "preserved draft");
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -764,4 +764,39 @@ async fn accepted_message_detail_is_bounded_and_keeps_its_cancellation_identity(
     drop(client);
     surface.stop().await;
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn output_close_failure_still_awaits_presentation_disposal() {
+    use std::{future::Future as _, task::Poll};
+    let (started, mut entered) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = disposed.clone();
+    let mut closing = std::pin::pin!(super::close_rendering(
+        async { Err(std::io::Error::other("fixture output restoration failure")) },
+        async move {
+            started.send(()).unwrap();
+            released.await.unwrap();
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    entered
+        .try_recv()
+        .expect("presentation cleanup started despite output failure");
+    assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+    release.send(()).unwrap();
+    let error = closing.await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("fixture output restoration failure")
+    );
+    assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
 }

@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-terminal-ui = { path = "../terminal-ui" }
 rsi-native-addons-api = { path = "../native-addons-api" }
 rsi-inspector = { path = "../inspector" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }
@@ -30,7 +31,6 @@ base64.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
-pulldown-cmark.workspace = true
 ratatui.workspace = true
 hex.workspace = true
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
@@ -61,6 +61,7 @@ rustix.workspace = true
 rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
+rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }
 vt100.workspace = true
 portable-pty.workspace = true
 filedescriptor.workspace = true

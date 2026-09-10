@@ -687,7 +687,12 @@ fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
         ];
         arguments.extend(preset_arguments);
         let run = fixture.command(&arguments);
-        assert_eq!(run.status.code(), Some(2));
+        assert_eq!(
+            run.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         assert!(run.stdout.is_empty());
         let error = String::from_utf8(run.stderr).unwrap();
         assert!(error.contains("future-agent"), "error: {error}");

@@ -1,0 +1,29 @@
+[package]
+name = "rsi-terminal-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-ui-protocol = { path = "../ui-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-media-protocol = { path = "../../rsi-media/protocol" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+rsi-conversation = { path = "../conversation" }
+ratatui = { version = "0.30.2", default-features = false, features = ["serde"] }
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+termina.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+
+[lints]
+workspace = true

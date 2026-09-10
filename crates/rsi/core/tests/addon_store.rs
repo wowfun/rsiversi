@@ -11,7 +11,7 @@ fn source(root: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
     fs::create_dir_all(root).unwrap();
     fs::write(root.join("artifact.bin"), bytes).unwrap();
     let manifest = root.join("addon.toml");
-    fs::write(&manifest, format!("format = 1\nid = 'fixture.addon'\nplugin = 'fixture.native-addon'\ntarget = '{}-{}'\nartifact = 'artifact.bin'\nportable_services = ['fixture.native.tools']\n", std::env::consts::OS, std::env::consts::ARCH)).unwrap();
+    fs::write(&manifest, format!("format = 2\nscope = 'agent'\nid = 'fixture.addon'\nplugin = 'fixture.native-addon'\ntarget = '{}-{}'\nartifact = 'artifact.bin'\nportable_services = ['fixture.native.tools']\n", std::env::consts::OS, std::env::consts::ARCH)).unwrap();
     manifest
 }
 

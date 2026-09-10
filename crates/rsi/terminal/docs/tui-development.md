@@ -6,11 +6,18 @@ repository root in Bash on Linux or WSL2. Use a real terminal for interactive
 commands. Native Windows input is unsupported; macOS terminal behavior needs
 separate verification.
 
-The [Terminal application contract](../crates/rsi/README.md#terminal-application)
-owns user behavior and resource limits. The [Session contract](../crates/rsi/session-protocol/README.md)
+The [Terminal application contract](../../README.md#terminal-application)
+owns user behavior and resource limits. The [Session contract](../../session-protocol/README.md)
 owns Session operations. Workspace registration, Models and completed Process
 output are injected independently into the terminal application. Use the [debugging reference](tui-debugging.md)
 when a result differs from the expected behavior.
+
+For ordinary layout and renderer development, start with `cargo xtask dev tui`.
+It prepares the real product with a keyless local provider and watches the native
+presentation. The [quick start](../../../../docs/quickstart.md) gives the minimal
+commands; the [launcher contract](../../../tools/rsi-xtask/README.md) owns isolation
+and cleanup. The manual environment below is for custom Profiles and opt-in live
+provider work.
 
 ## 1. Establish a keyless baseline
 
@@ -18,13 +25,13 @@ Build with the repository toolchain, then run the TUI behavior tests:
 
 ```bash
 cargo build --locked -p rsi
-cargo test --locked -p rsi-terminal tui
+cargo test --locked -p rsi-terminal-ui -p rsi-terminal
 ```
 
 These tests exercise input framing, editing, controller behavior, history
 projection, selection, rendering, clipboard fixtures, and terminal cleanup.
 They do not require a provider account. The
-[Linux PTY tests](../crates/rsi/core/tests/service_host_cli/tui.rs) run the built
+[Linux PTY tests](../../core/tests/service_host_cli/tui.rs) run the built
 binary against a local HTTP provider fixture:
 
 ```bash
@@ -52,31 +59,40 @@ chmod 700 "$tui_dev/rsi"
 sha256sum "$tui_dev/rsi" > "$tui_dev/binary.sha256"
 
 tui_rsi() {
-  env HOME="$tui_dev/home" \
+  env -i PATH="$PATH" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$tui_runtime/absent-session-bus" \
+    HOME="$tui_dev/home" \
     XDG_CONFIG_HOME="$tui_dev/config" \
     XDG_STATE_HOME="$tui_dev/state" \
     XDG_CACHE_HOME="$tui_dev/cache" \
     XDG_RUNTIME_DIR="$tui_runtime" \
     RUSTUP_HOME="$tui_rustup_home" \
     CARGO_HOME="$tui_dev/workspace/.cargo" \
-    "$tui_dev/rsi" "$@"
+    /bin/bash --noprofile --norc -c '
+      IFS= read -r DEEPSEEK_API_KEY <&3
+      export DEEPSEEK_API_KEY
+      exec 3<&-
+      exec "$@"
+    ' tui-rsi "$tui_dev/rsi" "$@" 3<<<"${DEEPSEEK_API_KEY-}"
 }
 ```
 
 The fixture uses `/var/tmp` because the Linux sandbox gives tools a private
 `/tmp`. Keep the copied executable visible to sandboxed tools: the binary also
 serves as the apply-patch helper. See the
-[Sandbox implementation](../crates/rsi-sandbox/local/src/lib.rs) and
-[standard tool setup](../crates/rsi/core/src/main.rs).
+[Sandbox implementation](../../../rsi-sandbox/local/src/lib.rs) and
+[standard tool setup](../../core/src/main.rs).
 The separate short runtime directory leaves room for the Host's state-root
 digest and socket filename within the Unix socket path limit.
 
 The environment overrides apply only to the child process. Preserving the
 installed Rustup location lets sandboxed Rust commands find their toolchain
 after HOME is isolated. Cargo's writable state remains inside the fixture
-workspace. Other environment variables are inherited; remove unrelated
-credentials from the launching shell when testing tools that inspect their
-environment.
+workspace. Only the listed variables reach this manually configured process;
+`DEEPSEEK_API_KEY` is an explicit opt-in for the live provider below. This is
+ambient configuration isolation, not a filesystem access restriction.
+The function passes that key through a separate descriptor, closes the descriptor
+before execution, and leaves terminal stdin available to the TUI.
 
 Create an Application Profile for the fullscreen client and another for
 machine-readable inspection. Both use the same Host Profile:
@@ -92,8 +108,22 @@ plugin = "rsi.application.connection"
 config = { host_profile = "dev" }
 [[steps]]
 kind = "plugin"
+id = "ui"
+plugin = "rsi.ui"
+[[steps]]
+kind = "plugin"
+id = "target"
+plugin = "rsi.ui.target"
+config = "application"
+[[steps]]
+kind = "plugin"
+id = "session-ui"
+plugin = "rsi.session.ui"
+[[steps]]
+kind = "plugin"
 id = "application"
 plugin = "rsi.application.tui"
+config = { presentation = [{ id = "linked", plugin = "rsi.terminal.ui" }] }
 TOML
 cat > "$tui_dev/config/rsi/application-profiles/dev-cli/application.profile.toml" <<'TOML'
 format = 1
@@ -147,9 +177,9 @@ JSON
 
 These capacities are explicit development fixture settings, not measurements
 of a provider's limits. Adjust the model and capacity declaration together for
-your deployment. The [DeepSeek adapter source](../crates/rsi-ai/deepseek/src/lib.rs)
+your deployment. The [DeepSeek adapter source](../../../rsi-ai/deepseek/src/lib.rs)
 defines configuration and credential handling; the
-[AI contract](../crates/rsi-ai/README.md) defines exact route selection.
+[AI contract](../../../rsi-ai/README.md) defines exact route selection.
 
 Export `DEEPSEEK_API_KEY` through your local credential workflow before sending
 a live task. The application does not automatically source `.local/dev/.env`.
@@ -189,11 +219,11 @@ tui_rsi host status
 
 The history command returns a bounded page. Use the line client's history
 commands for further pages, as described in its
-[contract](../crates/rsi/README.md#line-application). Do not pipe the fullscreen
+[contract](../../README.md#line-application). Do not pipe the fullscreen
 client into `tee`: its startup requires terminal stdin and stdout.
 
 Stop the isolated daemon before replacing the copied binary or rebuilding its
-Host Profile. The [Host lifecycle contract](../crates/rsi/service-host/README.md)
+Host Profile. The [Host lifecycle contract](../../service-host/README.md)
 explains incompatible owner handling.
 
 ```bash
@@ -205,7 +235,7 @@ directories. Keep them while you still need the reproduction and its evidence.
 
 ## 4. Make a focused change
 
-Follow the [application ownership boundary](architecture.md): terminal behavior
+Follow the [application ownership boundary](../../../../docs/architecture.md): terminal behavior
 belongs to rsi-terminal; durable execution belongs to the Agent Kernel. Trace a
 key or Fact through the [debugging reference](tui-debugging.md#trace-one-operation)
 before changing its handling. Update the owning contract first when changing
@@ -228,8 +258,8 @@ Export deterministic cell grids without an interactive terminal:
 
 ```bash
 tui_visual=$(mktemp -d /tmp/rsi-tui-visual.XXXXXX)
-RSI_TUI_VISUAL_DIR="$tui_visual" cargo test --locked -p rsi-terminal \
-  tui::render::tests::visual_scenes_are_bounded_and_exportable -- --exact
+RSI_TUI_VISUAL_DIR="$tui_visual" cargo test --locked -p rsi-terminal-ui \
+  render::tests::visual_scenes_are_bounded_and_exportable -- --exact
 ```
 
 The test writes `scene-110x35.json`, `scene-80x24.json`, and `scene-42x12.json`.

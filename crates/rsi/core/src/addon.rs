@@ -22,7 +22,7 @@ pub const MAXIMUM_ADDON_SCHEMA_DEPTH: usize = 64;
 pub const MAXIMUM_ADDON_PLATFORMS: usize = 32;
 
 /// Explicit placement of an ordinary addon factory or Profile fragment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddonScope {
     /// Independent service providers and explicitly enabled domain endpoints.

@@ -1,5 +1,11 @@
 # rsi
 
+The native Application bootstrap publishes its immutable role catalog source to
+descendant presentation Profiles before starting the Application. Descendants use
+the ordinary Profile update owner; they do not mutate the catalog or start a
+second Runtime. Terminal presentation factories are available in the Application
+catalog independently of the resident terminal entry.
+
 The native application connection is an ordinary plugin: it mounts its preset
 and embedded-service or UDS-client Profiles beneath its own Context, then publishes
 independent application-facing domain capabilities. Terminal application factories
@@ -30,6 +36,12 @@ exclusive native owner lease as process startup. Direct library startup acquires
 that lease during activation; daemon/embedded selection injects its existing lease
 and fresh epoch. These runtime values do not change the frozen catalog or launch
 preview. EndpointId persists in Base Storage independently of Session history.
+The Service also owns an isolated UI registry, Session contributions and the
+authenticated UI API. Its explicit Session binder creates ordinary child Profiles
+from semantic Session scopes; no request can name a Context or Local contract key.
+Application UI registries remain in their own Local mappings. Service Portable UI
+sources are opt-in Profile entries with an explicit injected service key, using
+the same staged native catalog and existing Meta retirement rules.
 Daemon startup adds the ordinary Local API listener to that service Profile and
 publishes metadata after the complete Profile is active. Native publication is a
 process role excluded from the shared service launch key, so embedded and daemon
@@ -119,8 +131,16 @@ The preset catalog and its Settings namespace registration belong to an ordinary
 catalog plugin. AgentPresetManager observes that capability and owns its Profile
 lifetime; it does not register a second Settings owner outside the plugin graph.
 Withdrawal drops the namespace registration together with the catalog publication.
+An embedded Service's Agent source combines this configured preset catalog with
+the bootstrap's staged native factories. Sharing the Loader does not replace the
+Service's Settings-backed roots or default selection with bootstrap defaults.
 The catalog owner retains one bounded startup diagnostic for its management caller;
 generic Profile lifecycle diagnostics continue to redact plugin error text.
+
+Application startup may use the last published role catalog so linked management
+surfaces remain available after a failed native candidate. New Agent selection
+still fails while staging is failed or pending. Remote applications create their
+private native staging cache, but do not materialize backend presets or state.
 `AgentPresetManager::open_standard_in` mounts that Profile below the application's
 existing Context with isolated Settings/catalog identities. Standalone management
 keeps an independent root Profile; the scoped manager never owns parent shutdown.
@@ -183,9 +203,19 @@ Local native addon storage uses `NativeAddonStore` on Unix. Installation reads a
 explicit bounded TOML manifest and a regular artifact beneath its retained source
 directory, hashes the copied bytes, and publishes a content-addressed object plus
 an installed record. It executes no build command, library constructor, ABI entry
-or plugin. The source manifest requires `format = 1`, `id`, `plugin`, `target` and
-`artifact`; optional `portable_services` declares generation-private keys.
-`artifact` is a normalized relative path. Optional build metadata declares an
+or plugin. The source manifest requires `format = 2`, `id`, `plugin`, `scope`,
+`target` and `artifact`. Scope is `agent`, `service`, `application` or `client`;
+it controls catalog visibility, independently of the ABI factory's update mode.
+Optional `portable_services` declares Agent-generation-private keys and is
+rejected for other scopes. The installed index also uses format 2; unsupported
+old records are rejected and left untouched.
+`artifact` is a normalized relative path. An optional absolute `source_root`
+rejects parent traversal before directory access and
+explicitly chooses the build, artifact and watch root; otherwise that root is
+the manifest directory. Both directory authorities are retained and checked,
+and symlinks are rejected. This permits a package-owned manifest to declare
+sibling workspace inputs without inferring a Cargo dependency graph.
+Optional build metadata declares an
 explicit argv, watch paths and deadline for a separate build action; none of that
 command text is retained in installed records.
 Identifiers start with an ASCII letter or digit and contain only ASCII letters,
@@ -238,8 +268,12 @@ owner from an acquired store and one supplied `NativeCatalog`. Construction
 does not load native code. Its blocking `refresh` validates the complete enabled
 selection before loading, checks every artifact's recorded digest and ABI plugin
 identity, and publishes one immutable compiler/contribution pair only if the
-enabled selection still matches after staging. Only Agent factories and explicit
-Portable isolation keys enter that pair. Linked base declarations remain fixed.
+enabled selection still matches after staging. The staged immutable addon
+catalog contains all declared roles; only Agent factories and explicit Portable
+isolation keys enter the Agent compiler/contribution pair. Linked base declarations remain fixed.
+Selection validation reserves the actual linked Application and Service catalogs
+as well as Agent declarations before any native Loader callback. A manifest cannot
+shadow a built-in factory, including a factory from another declared role.
 Installation-only index changes do not rebuild the executable catalog.
 
 The manager implements `AgentCompositionSource`. Capturing a snapshot reads the
@@ -253,8 +287,43 @@ failure. It never rotates the Loader or its cache to bypass admission closure.
 These explicit library operations do not start background work; callers supervise
 blocking refresh and retain its owner to completion.
 
-The standard Unix Host supplies that source through the ordinary
-`rsi.native-addons` plugin. Its frozen inputs derive storage at
+`start_application` starts one stable linked bootstrap in the Host's Runtime.
+Linked argument/configuration preflight precedes staging directory creation;
+complete native-aware preflight follows staging. Actual Service activation
+preflights linked configuration before opening the application preset Profile,
+even when reusing an existing staging owner, then
+materializes builtin preset assets before starting its child; preview and catalog
+snapshots do not write them. The bootstrap owns one ordinary
+staging Profile, then constructs its Application child from the immutable role
+catalog. Embedded Service composition uses that same manager and Loader; remote
+applications acquire no local Service Owner. Each application acquires one of 64
+reusable Loader cache slots under `<cache>/native-applications` at bootstrap.
+Only unlocked slots can be reused; exhaustion rejects startup. A slot remains
+fixed for the entire owner lifetime, including retained failed finalization;
+the owner never rotates it to bypass a closed Loader. The staging and Application control
+markers are explicitly isolated before capabilities are forwarded.
+
+Application, Service and Client input followers (both HTTP and daemon UDS clients)
+coalesce successful staging publications and submit complete inputs through their
+existing Profile updaters. Entry points and
+connections retain their declared RestartRequired policy. Child shutdown closes
+input admission; stopped Profile handles release executable catalog references.
+The native worker closes staging, drains actual mapped artifacts and callbacks,
+then releases an acquired Service Owner. A failed native finalization retains
+that owner until process exit, matching the Loader's retained foreign resources.
+
+Standalone Unix Service startup also mounts a stable bootstrap and a Service
+child Profile. Its staging Profile acquires the Service Owner before loading
+native code; the child receives the same lease and epoch. Embedded startup
+inherits an existing product staging owner when present. Frozen Profile defines
+describe linked declarations; native catalog changes use input revision and exact
+factory identity, without changing the Profile environment.
+The shared owner belongs to this product bootstrap. Explicit embedders may mount
+independent Services with different HostPaths in the same Runtime; each retains
+its own Service Owner and fixed Loader cache. Runtime has no product-global
+catalog registry, and a failed owner cannot reopen or rotate its own cache.
+
+The ordinary `rsi.native-addons` plugin's frozen inputs derive storage at
 `<config>/native-addons` and Loader cache at `<cache>/native-addons`; activation
 explicitly resolves a trusted first-component OS alias before acquiring either
 root. It requires the Service Owner before acquiring these roots and retains that

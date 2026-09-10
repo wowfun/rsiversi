@@ -58,7 +58,7 @@ enum Prepared {
     Devices(crate::devices::Command),
     Cli(SessionCommand),
     Headless(Command),
-    Tui(SessionCommand),
+    Tui(SessionCommand, Option<rsi_host::Profile>),
 }
 
 #[derive(Debug)]
@@ -87,7 +87,35 @@ impl Factory {
         result
     }
     fn prepare_inner(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        if !config.is_null() {
+        let presentation = if matches!(self.kind, Kind::Tui) && !config.is_null() {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TuiConfig {
+                presentation: Vec<Entry>,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Entry {
+                id: String,
+                plugin: String,
+                #[serde(default)]
+                config: ConfigValue,
+            }
+            let config: TuiConfig = serde_json::from_value(config.clone()).map_err(|_| {
+                MetaError::InvalidInput("invalid TUI presentation configuration".into())
+            })?;
+            if config.presentation.is_empty() || config.presentation.len() > 64 {
+                return Err(MetaError::InvalidInput(
+                    "TUI presentation entry bound".into(),
+                ));
+            }
+            Some(rsi_host::Profile::new(config.presentation.into_iter().map(
+                |entry| rsi_host::ProfileEntry::new(entry.id, entry.plugin, entry.config),
+            )))
+        } else {
+            None
+        };
+        if !config.is_null() && !matches!(self.kind, Kind::Tui) {
             return Err(MetaError::InvalidInput(
                 "terminal application configuration must be null".into(),
             ));
@@ -112,7 +140,8 @@ impl Factory {
             Kind::Devices => crate::devices::Command::parse(&self.arguments).map(Prepared::Devices),
             Kind::Cli => SessionCommand::parse(self.arguments.clone()).map(Prepared::Cli),
             Kind::Headless => Command::parse(self.arguments.clone()).map(Prepared::Headless),
-            Kind::Tui => crate::tui::parse(self.arguments.clone()).map(Prepared::Tui),
+            Kind::Tui => crate::tui::parse(self.arguments.clone())
+                .map(|command| Prepared::Tui(command, presentation)),
         }
         .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
         let prepared = PreparedActivation::with_state(config.clone(), state, bytes + 64 * 1024);
@@ -185,13 +214,14 @@ impl Factory {
                     plan.context().clone(),
                 ))
             }
-            Prepared::Tui(command) => {
+            Prepared::Tui(command, presentation) => {
                 let session = plan.local::<SessionContract>()?;
                 let workspace = plan.local::<WorkspaceRegistryContract>()?;
                 let output = plan.local::<rsi_process::ProcessOutputCacheContract>()?;
                 let models = plan.local::<rsi_ai_protocol::LanguageModelsContract>()?;
                 let lifetime = *plan.local::<ConnectionLifetimeContract>()?;
                 Box::pin(crate::tui::run(
+                    presentation,
                     crate::tui::Services {
                         ui: plan.local::<rsi_ui::UiContract>()?,
                         ui_target: plan.local::<rsi_ui::UiTargetContract>()?,

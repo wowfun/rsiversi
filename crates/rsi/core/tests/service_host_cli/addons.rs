@@ -10,7 +10,7 @@ async fn source_cli_default_root_drives_only_the_running_managers_explicit_selec
         b"deliberately invalid native code",
     )
     .unwrap();
-    std::fs::write(&manifest, format!("format = 1\nid = 'fixture.cli'\nplugin = 'fixture.native-cli'\ntarget = '{}'\nartifact = 'artifact.bin'\n", rsi::native_addon_target())).unwrap();
+    std::fs::write(&manifest, format!("format = 2\nscope = 'agent'\nid = 'fixture.cli'\nplugin = 'fixture.native-cli'\ntarget = '{}'\nartifact = 'artifact.bin'\n", rsi::native_addon_target())).unwrap();
     let config = fixture.temporary.path().join("config/rsi");
     let preset = config.join("agent-presets/native");
     std::fs::create_dir_all(&preset).unwrap();

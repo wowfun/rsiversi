@@ -1,5 +1,40 @@
 # rsi-terminal
 
+The resident application owns raw terminal modes, input decoding, the sole output
+writer, signal and unwind restoration, Session controllers and editable drafts.
+The [terminal presentation library](../terminal-ui/README.md) owns grapheme
+editing, bounded transcript windows, wrapping, styling and cell layout. Its render
+input borrows presentation values; it cannot invoke a backend or install process
+hooks. Completed writes publish their matching source map together with the frame.
+
+TUI configuration is null for the linked presentation, or a closed object with
+`presentation` containing an ordinary Profile. The resident application starts
+that Profile beneath its own Context and follows the enclosing application's
+immutable catalog source. The child must publish `rsi.terminal.presentation`.
+`rsi.terminal.ui` provides the linked implementation; `rsi.terminal.portable`
+imports the explicitly required `rsi.terminal.render` service. Renderer replacement
+never reruns ApplicationRun or changes terminal ownership.
+This is a lifecycle boundary for operator-selected Profiles and trusted native
+code, not a plugin sandbox. Presentation Profiles may compose dependencies from
+the application catalog; the resident controller does not transfer its terminal
+descriptor or Session controller through the rendering contract.
+
+Portable frame exchange has a two-second deadline, including sending the scene.
+Expiry cancels the read and enters the resident diagnostic-frame and 250 ms retry
+path; terminal input and draft ownership remain resident. This bounds the local
+wait, not execution or destruction of trusted native code. Linked synchronous
+rendering still requires bounded, non-panicking implementation work.
+Withdrawal without a replacement renderer and an already poisoned linked
+renderer enter the same resident diagnostic/retry path. A later valid publication
+resumes rendering without replacing the Session or losing resident drafts.
+The terminal guard restores modes when its owner unwinds; caught panics in other
+work do not retire the writer. Process aborts cannot guarantee restoration.
+INT, TERM, HUP and QUIT listeners are installed before entering raw terminal mode;
+each requests the ordinary output restoration and presentation shutdown path.
+Keyboard Ctrl-C in raw mode remains a cancel action for the current turn.
+Terminal output restoration and presentation disposal are both awaited even if
+either cleanup reports an error.
+
 Tool cards retain shared exact lifecycle metadata with their presentation blocks.
 Suffix-only cards mark missing intent; backfill repairs the name and argument
 source without regressing the observed phase. Focused-card details offer exact
@@ -118,8 +153,8 @@ descriptions. Darwin cannot register the `/dev/tty` alias with kqueue. Other Uni
 targets open that alias directly. Neither path changes the standard descriptors'
 flags; failure to open or register a terminal is reported with its I/O stage.
 Line framing retries interrupted reads without discarding an accumulated prefix.
-The [development tutorial](../../../docs/tui-development.md)
-and [debugging reference](../../../docs/tui-debugging.md) explain isolated launch,
+The [development tutorial](docs/tui-development.md)
+and [debugging reference](docs/tui-debugging.md) explain isolated launch,
 source tracing and visual evidence. Pure projection, argument and controller
 tests live here; built-product CLI/PTY integration remains with the launcher.
 Tests that override process-global terminal rendering settings run in isolated
@@ -131,19 +166,8 @@ PTY delivering EOF to complete fixture cleanup. Failure teardown starts draining
 before terminating the child, bounds its wait, and preserves a separate stage
 file even when terminal output is blocked.
 
-TUI body layout has a private cache owned by the current presentation State.
-Keys include the block's opaque content/source-mapping revision, width and
-collapse state. A cloned historical projection retains its revision until changed;
-attachment replacement creates a fresh cache. Insertions, source-window eviction,
-and backfill create a new revision. Titles and selection are projected from current
-state; source anchors and hit maps always resolve through the current pieces.
-The cache retains at most 512 entries and 32 MiB of owned text, compact row ends,
-Markdown style ranges and keys. Least recently used entries are evicted under
-pressure; the currently calculated block is a separate transient bounded by the
-existing 256 KiB source-window limit. Eviction affects recomputation cost, not
-visible content or selection semantics. Each redraw retains only two screens of
-visible row metadata; the writer's complete-frame acknowledgement remains the
-sole publication boundary for hit maps.
+Body layout caching belongs to the [presentation library](../terminal-ui/README.md).
+
 
 InspectorFactory owns the finite `runtime [AFTER_FIBER]`, `profile [OFFSET]`,
 `factories [OFFSET]` and `native` grammar. It prints a bounded JSON page through

@@ -11,6 +11,7 @@ mod headless_commands;
 mod inspector;
 mod native_addons;
 mod plugin;
+pub mod presentation;
 mod session_cli;
 mod surfaces;
 mod tui;
@@ -1172,20 +1173,7 @@ pub(crate) fn write_text_event(
     }
 }
 
-/// Neutralizes terminal and bidi controls while preserving line breaks and joiners.
-pub fn terminal_text(text: &str) -> String {
-    text.chars().map(terminal_character).collect()
-}
-
-fn terminal_character(character: char) -> char {
-    if character.is_control() && !matches!(character, '\n' | '\t')
-        || matches!(character, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-    {
-        '\u{fffd}'
-    } else {
-        character
-    }
-}
+pub use rsi_terminal_ui::terminal_text;
 
 fn write_status_event(stderr: &mut impl Write, event: &CliEvent) -> Result<()> {
     let text = match event {

@@ -1,37 +1,40 @@
 //! Partial historical projection; no model-context replay or retained observation leases.
-use super::super::{ContentDelta, LanguageEvent, SessionFact, SessionFactBody, ToolContent};
 use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
-pub(super) use rsi_conversation::SourceRef as Source;
+use rsi_agent_session_protocol::{SessionFact, SessionFactBody};
+use rsi_ai_protocol::{ContentDelta, LanguageEvent};
+pub use rsi_conversation::SourceRef as Source;
 use rsi_conversation::{
     BlockIdentity, FactField, FieldWindow, MAXIMUM_BLOCK_SOURCES, SourceAdmission, SourceIndex,
     ToolState,
 };
+use rsi_tools_protocol::ToolContent;
 use std::collections::VecDeque;
 
-pub(super) const MAX_BLOCKS: usize = 512;
-pub(super) const MAX_TEXT: usize = 4 * 1024 * 1024;
-pub(super) const MAX_METADATA: usize = 8 * 1024 * 1024;
-pub(super) const WINDOW: usize = 256 * 1024;
+pub const MAX_BLOCKS: usize = 512;
+pub const MAX_TEXT: usize = 4 * 1024 * 1024;
+pub const MAX_METADATA: usize = 8 * 1024 * 1024;
+pub const WINDOW: usize = 256 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct Anchor {
-    pub(super) source: Source,
-    pub(super) offset: usize,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Anchor {
+    pub source: Source,
+    pub offset: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Mapping {
     display: usize,
     source: usize,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct Piece {
-    pub(super) source: Source,
-    pub(super) text: String,
-    pub(super) omitted: bool,
-    pub(super) truncated_after: bool,
-    pub(super) start: usize,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Piece {
+    pub source: Source,
+    pub text: String,
+    pub omitted: bool,
+    pub truncated_after: bool,
+    pub start: usize,
     mapping: Vec<Mapping>,
 }
 
@@ -43,7 +46,7 @@ impl Piece {
         )
     }
 
-    pub(super) fn from_window(source: Source, window: &FieldWindow) -> Self {
+    pub fn from_window(source: Source, window: &FieldWindow) -> Self {
         let mut piece = Self::new(source, &window.text, 0, WINDOW);
         for run in &mut piece.mapping {
             run.source += window.start;
@@ -66,7 +69,7 @@ impl Piece {
         }];
         let mut consumed = start;
         for (offset, character) in text[start..].char_indices() {
-            let filtered = super::super::terminal_character(character);
+            let filtered = crate::terminal_character(character);
             if safe.len() + filtered.len_utf8() > limit {
                 break;
             }
@@ -91,7 +94,7 @@ impl Piece {
         }
     }
 
-    pub(super) fn anchor(&self, offset: usize) -> Anchor {
+    pub fn anchor(&self, offset: usize) -> Anchor {
         let offset = offset.min(self.text.len());
         let run = &self.mapping[self
             .mapping
@@ -103,7 +106,7 @@ impl Piece {
         }
     }
 
-    pub(super) fn display_offset(&self, anchor: Anchor) -> Option<usize> {
+    pub fn display_offset(&self, anchor: Anchor) -> Option<usize> {
         if anchor.source != self.source || anchor.offset < self.start {
             return None;
         }
@@ -111,7 +114,9 @@ impl Piece {
             .mapping
             .partition_point(|run| run.source <= anchor.offset)
             .saturating_sub(1)];
-        let offset = run.display + anchor.offset.saturating_sub(run.source);
+        let offset = run
+            .display
+            .checked_add(anchor.offset.saturating_sub(run.source))?;
         (offset <= self.text.len() && self.text.is_char_boundary(offset)).then_some(offset)
     }
 
@@ -120,8 +125,8 @@ impl Piece {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Role {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Role {
     User,
     Assistant,
     Reasoning,
@@ -130,26 +135,27 @@ pub(super) enum Role {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Block {
-    pub(super) key: String,
-    pub(super) layout_revision: std::sync::Arc<()>,
-    pub(super) title: String,
-    pub(super) role: Role,
-    pub(super) pieces: VecDeque<Piece>,
+pub struct Block {
+    pub key: String,
+    pub layout_revision: std::sync::Arc<()>,
+    pub title: String,
+    pub role: Role,
+    pub pieces: VecDeque<Piece>,
     sources: SourceIndex,
-    pub(super) collapsed: bool,
-    pub(super) outputs: [Option<String>; 2],
-    pub(super) first: u64,
-    pub(super) discarded: bool,
+    pub collapsed: bool,
+    pub outputs: [Option<String>; 2],
+    pub first: u64,
+    pub discarded: bool,
     text_bytes: usize,
     map_bytes: usize,
-    pub(super) tool: Option<ToolState>,
+    pub tool: Option<ToolState>,
 }
 
 /// One per-render index; source lookup does not rescan all streamed pieces per cell.
-pub(super) struct AnchorIndex<'a>(Vec<(usize, &'a Piece)>);
+#[derive(Debug)]
+pub struct AnchorIndex<'a>(Vec<(usize, &'a Piece)>);
 impl AnchorIndex<'_> {
-    pub(super) fn anchor(&self, offset: usize) -> Option<Anchor> {
+    pub fn anchor(&self, offset: usize) -> Option<Anchor> {
         let index = self
             .0
             .partition_point(|(start, _)| *start <= offset)
@@ -173,7 +179,7 @@ impl Block {
         self.discarded = true;
         true
     }
-    pub(super) fn anchor_index(&self) -> AnchorIndex<'_> {
+    pub fn anchor_index(&self) -> AnchorIndex<'_> {
         let mut offset = 0;
         AnchorIndex(
             self.pieces
@@ -186,16 +192,16 @@ impl Block {
                 .collect(),
         )
     }
-    pub(super) fn sources(&self) -> &SourceIndex {
+    pub fn sources(&self) -> &SourceIndex {
         &self.sources
     }
-    pub(super) fn text(&self) -> String {
+    pub fn text(&self) -> String {
         self.pieces
             .iter()
             .map(|piece| piece.text.as_str())
             .collect()
     }
-    pub(super) fn bytes(&self) -> usize {
+    pub fn bytes(&self) -> usize {
         self.text_bytes
     }
     fn metadata(&self) -> usize {
@@ -212,7 +218,7 @@ impl Block {
                 .map(String::capacity)
                 .sum::<usize>()
     }
-    pub(super) fn anchor(&self, mut offset: usize) -> Option<Anchor> {
+    pub fn anchor(&self, mut offset: usize) -> Option<Anchor> {
         for (index, piece) in self.pieces.iter().enumerate() {
             if offset < piece.text.len()
                 || index + 1 == self.pieces.len() && offset == piece.text.len()
@@ -223,7 +229,7 @@ impl Block {
         }
         None
     }
-    pub(super) fn offset(&self, anchor: Anchor) -> Option<usize> {
+    pub fn offset(&self, anchor: Anchor) -> Option<usize> {
         let mut offset = 0;
         for piece in &self.pieces {
             if let Some(found) = piece.display_offset(anchor) {
@@ -236,13 +242,26 @@ impl Block {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct Transcript {
-    pub(super) blocks: Vec<Block>,
-    pub(super) earlier: bool,
+pub struct Transcript {
+    pub blocks: Vec<Block>,
+    pub earlier: bool,
 }
 
 impl Transcript {
-    pub(super) fn apply(&mut self, fact: &SessionFact) {
+    pub(crate) fn reuse_layout_revisions(&mut self, previous: &Self) {
+        for block in &mut self.blocks {
+            if let Some(old) = previous.blocks.iter().find(|old| {
+                old.key == block.key
+                    && old.role == block.role
+                    && old.collapsed == block.collapsed
+                    && old.pieces == block.pieces
+            }) {
+                block.layout_revision = old.layout_revision.clone();
+            }
+        }
+    }
+
+    pub fn apply(&mut self, fact: &SessionFact) {
         self.project(fact);
         if !self.blocks.is_sorted_by_key(|block| block.first) {
             self.blocks.sort_by_key(|block| block.first);
@@ -250,14 +269,14 @@ impl Transcript {
         self.trim(false);
     }
 
-    pub(super) fn apply_history(&mut self, fact: &SessionFact) {
+    pub fn apply_history(&mut self, fact: &SessionFact) {
         self.project(fact);
         self.blocks.sort_by_key(|block| block.first);
         self.trim(true);
     }
 
     #[cfg(test)]
-    pub(super) fn window(fact: &SessionFact, source: Source, start: usize) -> Option<Piece> {
+    pub fn window(fact: &SessionFact, source: Source, start: usize) -> Option<Piece> {
         let window = rsi_conversation::select_field(fact, source)?
             .window(start, WINDOW)
             .ok()?;
@@ -435,7 +454,7 @@ impl Transcript {
                 .tool
                 .insert(ToolState::from_fact(fact).expect("Tool Fact"))
         };
-        let title = super::super::terminal_text(&format!(
+        let title = crate::terminal_text(&format!(
             "{}{}",
             tool.title(),
             if !tool.intent_present && tool.phase != rsi_conversation::ToolPhase::Rejected {
@@ -545,7 +564,7 @@ impl Transcript {
             self.blocks.push(Block {
                 key,
                 layout_revision: std::sync::Arc::new(()),
-                title: super::super::terminal_text(title),
+                title: crate::terminal_text(title),
                 role,
                 pieces: VecDeque::new(),
                 sources: SourceIndex::default(),
@@ -591,7 +610,7 @@ impl Transcript {
         block.pieces.insert(position, piece);
     }
 
-    pub(super) fn budgets(&self) -> (usize, usize) {
+    pub fn budgets(&self) -> (usize, usize) {
         (
             self.blocks.iter().map(Block::bytes).sum(),
             self.blocks.capacity() * std::mem::size_of::<Block>()
@@ -618,14 +637,14 @@ impl Transcript {
         }
     }
 
-    pub(super) fn locate(&self, anchor: Anchor) -> Option<(usize, usize)> {
+    pub fn locate(&self, anchor: Anchor) -> Option<(usize, usize)> {
         self.blocks
             .iter()
             .enumerate()
             .find_map(|(index, block)| block.offset(anchor).map(|offset| (index, offset)))
     }
 
-    pub(super) fn selected(&self, start: Anchor, end: Anchor) -> Result<String, &'static str> {
+    pub fn selected(&self, start: Anchor, end: Anchor) -> Result<String, &'static str> {
         let a = self
             .locate(start)
             .ok_or("Selection starts in unloaded text; reload it before copying")?;
@@ -666,7 +685,9 @@ impl Transcript {
     }
 }
 
-pub(super) fn json_window(value: &impl serde::Serialize) -> String {
+/// # Panics
+/// Panics if a linked serializer rejects its own value.
+pub fn json_window(value: &impl serde::Serialize) -> String {
     let window = FieldWindow::json(value, 0, WINDOW).expect("bounded linked JSON serialization");
     let mut text = window.text;
     if window.more {
@@ -678,6 +699,66 @@ pub(super) fn json_window(value: &impl serde::Serialize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn viewport_capture_does_not_report_resident_eviction_when_scrolling() {
+        let mut transcript = Transcript::default();
+        for seq in 1..=3 {
+            transcript.add(
+                "response".into(),
+                "Assistant",
+                Role::Assistant,
+                piece(seq, "hello"),
+            );
+        }
+        let top = transcript.blocks[0].anchor(11).unwrap();
+        let window = Viewport::capture(&transcript, Some(top), 24)
+            .restore()
+            .unwrap();
+        assert!(window.blocks[0].pieces.len() < transcript.blocks[0].pieces.len());
+        assert!(
+            !window.blocks[0].discarded,
+            "viewport clipping is not resident eviction"
+        );
+    }
+    #[test]
+    fn stale_viewport_anchor_starts_at_oldest_retained_content() {
+        let mut transcript = Transcript::default();
+        for seq in 1..=100 {
+            transcript.add(
+                seq.to_string(),
+                "Assistant",
+                Role::Assistant,
+                piece(seq, "hello"),
+            );
+        }
+        let stale = Anchor {
+            source: Source {
+                seq: 0,
+                field: FactField::ModelText,
+            },
+            offset: 0,
+        };
+        let window = Viewport::capture(&transcript, Some(stale), 24)
+            .restore()
+            .unwrap();
+        assert_eq!(window.blocks[0].key, transcript.blocks[0].key);
+    }
+    #[test]
+    fn external_source_coordinate_overflow_is_rejected() {
+        let source = Source {
+            seq: 1,
+            field: FactField::TurnInput,
+        };
+        let piece = Piece::from_window(source, &FieldWindow::text("\x1bhello", 0, 64).unwrap());
+        assert_eq!(
+            piece.display_offset(Anchor {
+                source,
+                offset: usize::MAX
+            }),
+            None
+        );
+    }
+
     fn piece(seq: u64, text: &str) -> Piece {
         Piece::new(
             Source {
@@ -1004,3 +1085,176 @@ mod tests {
 #[cfg(test)]
 #[path = "transcript_media_tests.rs"]
 mod media_tests;
+
+/// A portable viewport keeps source coordinates while discarding controller metadata.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Viewport {
+    blocks: Vec<WindowBlock>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowBlock {
+    key: String,
+    title: String,
+    role: Role,
+    collapsed: bool,
+    discarded: bool,
+    pieces: Vec<WindowPiece>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowPiece {
+    source: Source,
+    text: String,
+    start: usize,
+    omitted: bool,
+    truncated_after: bool,
+    mapping: Vec<(usize, usize)>,
+}
+impl Viewport {
+    pub const MAXIMUM_TEXT: usize = 512 * 1024;
+    pub fn capture(transcript: &Transcript, top: Option<Anchor>, height: u16) -> Self {
+        let position = top.map(|top| transcript.locate(top).unwrap_or((0, 0)));
+        let mut remaining = Self::MAXIMUM_TEXT;
+        let mut blocks = Vec::new();
+        let count = (usize::from(height) * 2).clamp(1, MAX_BLOCKS);
+        let range: Box<dyn Iterator<Item = usize>> = match position {
+            Some((index, _)) => Box::new(index..transcript.blocks.len()),
+            None => Box::new((0..transcript.blocks.len()).rev()),
+        };
+        for index in range.take(count) {
+            let block = &transcript.blocks[index];
+            let mut pieces = Vec::new();
+            let mut skipped = 0;
+            let indexes: Box<dyn Iterator<Item = usize>> = if position.is_some() {
+                Box::new(0..block.pieces.len())
+            } else {
+                Box::new((0..block.pieces.len()).rev())
+            };
+            for i in indexes {
+                let piece = &block.pieces[i];
+                let end = skipped + piece.text.len();
+                if position.is_some_and(|(at, offset)| at == index && end < offset) {
+                    skipped = end;
+                    continue;
+                }
+                if piece.text.len() > remaining {
+                    break;
+                }
+                remaining -= piece.text.len();
+                pieces.push(WindowPiece {
+                    source: piece.source,
+                    text: piece.text.clone(),
+                    start: piece.start,
+                    omitted: piece.omitted,
+                    truncated_after: piece.truncated_after,
+                    mapping: piece
+                        .mapping
+                        .iter()
+                        .map(|run| (run.display, run.source))
+                        .collect(),
+                });
+                skipped = end;
+            }
+            if position.is_none() {
+                pieces.reverse();
+            }
+            if pieces.is_empty() && !block.pieces.is_empty() {
+                break;
+            }
+            blocks.push(WindowBlock {
+                key: block.key.clone(),
+                title: block.title.clone(),
+                role: block.role,
+                collapsed: block.collapsed,
+                discarded: block.discarded,
+                pieces,
+            });
+            if remaining == 0 {
+                break;
+            }
+        }
+        if position.is_none() {
+            blocks.reverse();
+        }
+        Self { blocks }
+    }
+    pub fn restore(self) -> Result<Transcript, &'static str> {
+        if self.blocks.len() > MAX_BLOCKS {
+            return Err("viewport block bound");
+        }
+        let mut result = Transcript::default();
+        let mut text_bytes = 0usize;
+        let mut map_bytes = 0usize;
+        let mut keys = std::collections::BTreeSet::new();
+        for block in self.blocks {
+            if block.key.len() > 4096
+                || block.title.len() > 4096
+                || block.pieces.len() > MAXIMUM_BLOCK_SOURCES
+                || !keys.insert(block.key.clone())
+                || crate::terminal_text(&block.title) != block.title
+            {
+                return Err("invalid viewport block");
+            }
+            let index = result.block_index(block.key, &block.title, block.role, 1);
+            let target = &mut result.blocks[index];
+            target.collapsed = block.collapsed;
+            target.discarded = block.discarded;
+            for piece in block.pieces {
+                text_bytes = text_bytes
+                    .checked_add(piece.text.len())
+                    .ok_or("viewport overflow")?;
+                map_bytes = map_bytes
+                    .checked_add(piece.mapping.len() * size_of::<Mapping>())
+                    .ok_or("viewport overflow")?;
+                if text_bytes > Self::MAXIMUM_TEXT
+                    || map_bytes > MAX_METADATA
+                    || piece.source.seq == 0
+                    || piece.mapping.first().copied() != Some((0, piece.start))
+                    || crate::terminal_text(&piece.text) != piece.text
+                {
+                    return Err("invalid viewport piece");
+                }
+                let mut previous = None;
+                for &(display, source) in &piece.mapping {
+                    if !piece.text.is_char_boundary(display)
+                        || source < piece.start
+                        || source.checked_add(piece.text.len()).is_none()
+                        || previous.is_some_and(|(d, s)| display <= d || source < s)
+                    {
+                        return Err("invalid source mapping");
+                    }
+                    previous = Some((display, source));
+                }
+                if !matches!(
+                    target
+                        .sources
+                        .insert(piece.source)
+                        .map_err(|_| "invalid source index")?,
+                    SourceAdmission::Inserted(_)
+                ) {
+                    return Err("duplicate viewport source");
+                }
+                let mapping = piece
+                    .mapping
+                    .into_iter()
+                    .map(|(display, source)| Mapping { display, source })
+                    .collect();
+                let piece = Piece {
+                    source: piece.source,
+                    text: piece.text,
+                    start: piece.start,
+                    omitted: piece.omitted,
+                    truncated_after: piece.truncated_after,
+                    mapping,
+                };
+                target.text_bytes += piece.text.capacity();
+                target.map_bytes += piece.metadata();
+                target.first = target.first.min(piece.source.seq);
+                target.pieces.push_back(piece);
+            }
+        }
+        Ok(result)
+    }
+}

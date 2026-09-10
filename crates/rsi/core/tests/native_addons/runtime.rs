@@ -23,6 +23,121 @@ async fn wait_health(control: &dyn rsi::NativeAddonControl, health: NativeAddonH
 }
 
 #[tokio::test]
+async fn initial_failed_stage_keeps_control_and_typed_refresh_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let manifest = source(&root.join("source"), "fixture.native-addon");
+    let store = NativeAddonStore::open(root.join("config/native-addons")).unwrap();
+    store.install(&manifest).unwrap();
+    store.enable("fixture.addon").unwrap();
+    settings(&root);
+    let host = composition(&root)
+        .build()
+        .unwrap()
+        .start(rsi_host::Profile::default())
+        .await
+        .unwrap();
+    let control = host
+        .lookup_local::<NativeAddonControlContract>()
+        .expect("initial artifact failure must preserve inspection");
+    let status = control.inspect();
+    assert_eq!(status.health, NativeAddonHealth::Failed);
+    assert!(matches!(
+        control.refresh().await,
+        Err(NativeAddonUpdateError::Load(_))
+    ));
+    assert!(host.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pin_outlives_shutdown_waiter_and_drains_after_release() {
+    use rsi_meta::{DeadlineLimits, ResolvedFactory, Runtime, RuntimeLimits, UpdateMode};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let [artifact, _] = super::generations::artifacts(&root);
+    let manifest = source(&root.join("source"), "fixture.native-addon");
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        format!("{text}portable_services = ['fixture.native.tools']\n"),
+    )
+    .unwrap();
+    fs::copy(artifact, root.join("source/artifact.bin")).unwrap();
+    settings(&root);
+    let preset = root.join("config/agent-presets/native");
+    fs::create_dir_all(&preset).unwrap();
+    fs::write(
+        preset.join("agent.profile.toml"),
+        super::generations::PROFILE,
+    )
+    .unwrap();
+    let store = NativeAddonStore::open(root.join("config/native-addons")).unwrap();
+    store.install(&manifest).unwrap();
+    store.enable("fixture.addon").unwrap();
+    let runtime = Runtime::new(RuntimeLimits {
+        deadlines: DeadlineLimits {
+            shutdown_wait: Duration::from_millis(40),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
+    let host = composition(&root).build().unwrap();
+    let bootstrap = host
+        .prepare_in(
+            &runtime,
+            rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
+        )
+        .await
+        .unwrap();
+    let _profile = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "fixture.profile",
+                "1",
+                UpdateMode::RestartRequired,
+                bootstrap.factory(),
+            ),
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+    let control = runtime
+        .root()
+        .lookup_local::<NativeAddonControlContract>()
+        .unwrap();
+    let service = runtime
+        .root()
+        .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
+        .unwrap();
+    let pinned = service
+        .pin(&rsi_agent_presets::AgentPresetId::new("native").unwrap())
+        .await
+        .unwrap();
+    drop(service);
+    let first = runtime.shutdown().await;
+    assert!(
+        matches!(first, rsi_meta::ShutdownOutcome::TimedOut { .. }),
+        "{first:?}"
+    );
+    assert!(control.inspect().staging_bytes > 0);
+    assert!(
+        NativeCatalog::new(CatalogOptions::new(root.join("cache/native-addons"))).is_err(),
+        "live pin must retain the cache lease"
+    );
+    drop(pinned);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !runtime.shutdown().await.is_complete() {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(control.inspect().staging_bytes, 0);
+    drop(control);
+    drop(NativeCatalog::new(CatalogOptions::new(root.join("cache/native-addons"))).unwrap());
+}
+
+#[tokio::test]
 async fn standard_source_stages_before_pin_and_switches_real_native_code_only_after_enable() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

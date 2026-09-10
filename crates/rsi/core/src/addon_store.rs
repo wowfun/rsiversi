@@ -76,17 +76,22 @@ impl Default for NativeAddonStoreLimits {
     }
 }
 
-/// Validated installed bytes and their explicit Agent contribution description.
+/// Validated installed bytes and their explicit composition role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "source::RecordWire")]
 pub struct NativeAddonRecord {
     id: String,
     plugin: String,
+    scope: crate::AddonScope,
     target: String,
     artifact_sha256: String,
     portable_services: Vec<String>,
 }
 impl NativeAddonRecord {
+    /// Role whose frozen catalog may expose this factory.
+    pub const fn scope(&self) -> crate::AddonScope {
+        self.scope
+    }
     /// Exact product addon identity.
     pub fn id(&self) -> &str {
         &self.id
@@ -146,7 +151,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            format: 1,
+            format: 2,
             revision: 0,
             installed: BTreeMap::new(),
             enabled: BTreeMap::new(),
@@ -303,7 +308,7 @@ impl NativeAddonStore {
                 .map_err(|_| NativeAddonError::Invalid("store state"))?,
             None => State::default(),
         };
-        if state.format != 1
+        if state.format != 2
             || state
                 .enabled
                 .keys()

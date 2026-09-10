@@ -97,15 +97,15 @@ impl Client {
         }
     }
     pub(super) fn complete_command(&mut self) -> bool {
-        let text = &self.state.editor.text;
-        if self.state.editor.cursor != text.len()
+        let text = self.state.editor.text();
+        if self.state.editor.cursor() != text.len()
             || !text.starts_with('/')
             || text.len() > 256
             || text.contains(char::is_whitespace)
         {
             return false;
         }
-        let prefix = text.clone();
+        let prefix = text.to_owned();
         let controller = self.controller.clone();
         self.spawn(async move {
             let names = controller.commands().await.map_err(error).map(|commands| {
@@ -121,7 +121,7 @@ impl Client {
         true
     }
     pub(super) fn command_completions(&mut self, prefix: &str, names: Result<Vec<String>>) {
-        if self.state.editor.text != prefix || self.state.editor.cursor != prefix.len() {
+        if self.state.editor.text() != prefix || self.state.editor.cursor() != prefix.len() {
             return;
         }
         let names = match names {
@@ -154,7 +154,7 @@ impl Client {
         }
     }
     pub(super) fn insert_completion(&mut self, prefix: &str, name: &str) {
-        if self.state.editor.text != prefix || self.state.editor.cursor != prefix.len() {
+        if self.state.editor.text() != prefix || self.state.editor.cursor() != prefix.len() {
             return;
         }
         match self.state.editor.replace_text(&format!("/{name} ")) {

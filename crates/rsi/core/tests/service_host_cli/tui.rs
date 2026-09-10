@@ -447,7 +447,7 @@ async fn inspect_plan_projection(terminal: &mut TerminalClient, enabled: bool, c
 }
 
 impl TerminalClient {
-    fn start(fixture: &CliFixture, arguments: &[&str]) -> Self {
+    fn write_profile(fixture: &CliFixture, native: bool) {
         let directory = fixture
             .temporary
             .path()
@@ -489,6 +489,19 @@ plugin = "rsi.application.tui"
 "#,
         )
         .unwrap();
+        if native {
+            let mut profile = std::fs::OpenOptions::new()
+                .append(true)
+                .open(directory.join("application.profile.toml"))
+                .unwrap();
+            profile.write_all(b"\n[steps.config]\npresentation = [{id='native',plugin='rsi.terminal.native'}, {id='adapter',plugin='rsi.terminal.portable'}]\n").unwrap();
+        }
+    }
+    fn start(fixture: &CliFixture, arguments: &[&str]) -> Self {
+        Self::start_presentation(fixture, arguments, false)
+    }
+    fn start_presentation(fixture: &CliFixture, arguments: &[&str], native: bool) -> Self {
+        Self::write_profile(fixture, native);
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 30,
@@ -937,5 +950,86 @@ async fn daemon_detach_resume_reads_foreign_pending_body_and_ctrl_c_preserves_dr
     assert!(history.contains("foreign queued body"));
     assert!(history.contains("cancelled"));
     assert!(state.requests.lock().unwrap().len() >= 2);
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_pending_turn() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let mut artifacts = Vec::new();
+    for revision in ["a", "b"] {
+        let target = root.join("target/terminal-native-test").join(revision);
+        let mut build = Command::new(env!("CARGO"));
+        build
+            .args(["build", "--locked", "--manifest-path"])
+            .arg(root.join("crates/rsi/terminal-native/Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&target);
+        if revision == "b" {
+            build.args(["--features", "revision-b"]);
+        }
+        let result = build.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        artifacts.push(target.join("debug").join(format!(
+            "{}rsi_terminal_native{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        )));
+    }
+    let (endpoint, state, provider) = gated_provider("bash").await;
+    let fixture = CliFixture::new(&endpoint);
+    let source = fixture.temporary.path().join("native-source");
+    std::fs::create_dir(&source).unwrap();
+    let manifest = source.join("native.toml");
+    std::fs::write(&manifest,format!("format=2\nscope='application'\nid='dev.terminal'\nplugin='rsi.terminal.native'\ntarget='{}'\nartifact='artifact.bin'\n",rsi::native_addon_target())).unwrap();
+    std::fs::copy(&artifacts[0], source.join("artifact.bin")).unwrap();
+    let store =
+        rsi::NativeAddonStore::open(fixture.temporary.path().join("config/rsi/native-addons"))
+            .unwrap();
+    let old = store.install(&manifest).unwrap().record.unwrap();
+    store.enable_exact(&old, None).unwrap();
+    let mut terminal =
+        TerminalClient::start_presentation(&fixture, &["--session-id", "native-hot-reload"], true);
+    terminal.until("Ready").await;
+    terminal.send(b"hold this turn\r");
+    tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
+        .await
+        .unwrap();
+    terminal.until("RUNNING").await;
+    terminal.send(b"unsubmitted-draft-kept");
+    terminal.until("unsubmitted-draft-kept").await;
+    std::fs::copy(&artifacts[1], source.join("artifact.bin")).unwrap();
+    let next = store.install(&manifest).unwrap().record.unwrap();
+    store.enable_exact(&next, Some(&old)).unwrap();
+    terminal.until("B RSI").await;
+    terminal.until("unsubmitted-draft-kept").await;
+    terminal.until("RUNNING").await;
+    assert_eq!(
+        state.requests.lock().unwrap().len(),
+        1,
+        "reload must not replay a model request"
+    );
+    let output = terminal.output.lock().unwrap().clone();
+    assert_eq!(
+        output
+            .windows(b"\x1b[?1049h".len())
+            .filter(|bytes| *bytes == b"\x1b[?1049h")
+            .count(),
+        1,
+        "terminal owner must not restart"
+    );
+    state.release.notify_one();
+    terminal.until("hello from daemon").await;
+    terminal.until("unsubmitted-draft-kept").await;
+    terminal.send(b"\x10");
+    terminal.select_menu("Exit").await;
+    terminal.finish().await;
     provider.abort();
 }

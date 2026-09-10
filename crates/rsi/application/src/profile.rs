@@ -10,13 +10,63 @@ pub struct ScopedProfile {
     scope: ScopeHandle,
     context: Context,
     control: Arc<dyn ProfileControl>,
+    updater: rsi_host::ProfileUpdateHandle,
+    follower: Option<crate::catalog::CatalogFollower>,
 }
 impl ScopedProfile {
+    /// Mounts a source snapshot and follows later catalogs in this Profile's fixed Context.
+    pub async fn start_following(
+        source: Arc<dyn crate::ProfileCatalogSource>,
+        parent: &Context,
+        program: ProfileProgram,
+    ) -> Result<Self> {
+        let changes = source.changes();
+        let capture = source.clone();
+        let host = parent
+            .runtime()
+            .execution()
+            .prepare(move || capture.snapshot())
+            .await
+            .map_err(|_| crate::ApplicationError::TaskStopped)??;
+        let mut profile = Self::start(&host, parent, program.clone()).await?;
+        profile.follower = Some(crate::catalog::CatalogFollower::start(
+            parent.runtime().execution(),
+            source,
+            changes,
+            program,
+            profile.updater.clone(),
+            profile.control.as_ref(),
+            false,
+        ));
+        Ok(profile)
+    }
+    /// Attaches one owner catalog source and immediately captures its latest input.
+    pub fn follow_catalog(
+        &mut self,
+        source: Arc<dyn crate::ProfileCatalogSource>,
+        program: ProfileProgram,
+    ) -> Result<()> {
+        if self.follower.is_some() {
+            return Err(crate::ApplicationError::CatalogAlreadyFollowed);
+        }
+        let changes = source.changes();
+        self.follower = Some(crate::catalog::CatalogFollower::start(
+            self.context.runtime().execution(),
+            source,
+            changes,
+            program,
+            self.updater.clone(),
+            self.control.as_ref(),
+            true,
+        ));
+        Ok(())
+    }
     /// Prepares before activating, with fresh Local identities for the frozen catalog.
     pub async fn start(host: &Host, parent: &Context, program: ProfileProgram) -> Result<Self> {
         let isolated = host.isolate_local_context(parent.clone())?;
         let bootstrap = host.prepare_in(parent.runtime(), program).await?;
         let control = bootstrap.control();
+        let updater = bootstrap.updater();
         let scopes = ScopeRoot::new(16)?;
         let scope = scopes.create(&isolated).await?;
         let context = scope.context().meta().clone();
@@ -55,6 +105,8 @@ impl ScopedProfile {
             scope,
             context,
             control,
+            updater,
+            follower: None,
         })
     }
     /// Looks up a capability using this Profile's fixed Local mappings.
@@ -64,6 +116,10 @@ impl ScopedProfile {
     /// Reloads only this Profile through its ordinary control capability.
     pub async fn reload(&self) -> rsi_host::Result<ReloadOutcome> {
         self.control.reload().await.map_err(Into::into)
+    }
+    /// Returns owner-only authority for input replacement in the same isolated Context.
+    pub fn updater(&self) -> rsi_host::ProfileUpdateHandle {
+        self.updater.clone()
     }
     /// Observes this Profile's convergence and retirement without owning its lifetime.
     pub fn subscribe_profile(&self) -> tokio::sync::watch::Receiver<rsi_host::ProfileStatus> {
@@ -89,7 +145,17 @@ impl ScopedProfile {
     }
     /// Disposes only this Profile's scope and returns Meta's exact cleanup report.
     pub async fn shutdown(&self) -> CleanupReport {
+        self.updater.close().await;
+        if let Some(follower) = &self.follower {
+            follower.close().await;
+        }
         self.scope.dispose().await
+    }
+    /// Latest catalog capture/submission failure, bounded to 4096 UTF-8 bytes.
+    pub fn catalog_diagnostic(&self) -> Option<String> {
+        self.follower
+            .as_ref()
+            .and_then(crate::catalog::CatalogFollower::diagnostic)
     }
     pub(crate) fn context(&self) -> Context {
         self.context.clone()

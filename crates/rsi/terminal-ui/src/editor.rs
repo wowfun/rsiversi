@@ -1,4 +1,4 @@
-use super::input::MAX_TEXT;
+use crate::MAX_TEXT;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -6,10 +6,10 @@ mod journal;
 use journal::{Change, Journal};
 
 #[derive(Clone, Debug)]
-pub(super) struct Editor {
-    pub(super) text: String,
-    pub(super) cursor: usize,
-    pub(super) limit: usize,
+pub struct Editor {
+    pub(crate) text: String,
+    pub(crate) cursor: usize,
+    pub limit: usize,
     retention_limit: usize,
     journal: Journal,
 }
@@ -27,7 +27,13 @@ impl Default for Editor {
 }
 
 impl Editor {
-    pub(super) fn with_text(text: String, limit: usize) -> Self {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+    pub fn with_text(text: String, limit: usize) -> Self {
         Self {
             cursor: text.len(),
             text,
@@ -35,13 +41,13 @@ impl Editor {
             ..Self::default()
         }
     }
-    pub(super) fn retained_bytes(&self) -> usize {
+    pub fn retained_bytes(&self) -> usize {
         self.text.capacity() + self.journal.bytes
     }
-    pub(super) fn has_edits(&self) -> bool {
+    pub fn has_edits(&self) -> bool {
         !self.journal.undo.is_empty() || !self.journal.redo.is_empty()
     }
-    pub(super) fn set_retention_limit(&mut self, budget: usize) {
+    pub fn set_retention_limit(&mut self, budget: usize) {
         self.retention_limit = budget.min(MAX_TEXT + journal::MAXIMUM_BYTES);
         if self.text.capacity() > self.retention_limit {
             self.text.shrink_to_fit();
@@ -49,7 +55,7 @@ impl Editor {
         self.journal
             .trim(self.retention_limit.saturating_sub(self.text.capacity()));
     }
-    pub(super) fn insert(&mut self, text: &str) -> Result<(), &'static str> {
+    pub fn insert(&mut self, text: &str) -> Result<(), &'static str> {
         if text.contains(['\0', '\u{7f}']) {
             return Err("Input contains NUL or DEL; nothing was inserted");
         }
@@ -63,7 +69,7 @@ impl Editor {
         Ok(())
     }
 
-    pub(super) fn replace_text(&mut self, text: &str) -> Result<(), &'static str> {
+    pub fn replace_text(&mut self, text: &str) -> Result<(), &'static str> {
         if text.contains(['\0', '\u{7f}']) {
             return Err("Input contains NUL or DEL; nothing was inserted");
         }
@@ -133,7 +139,7 @@ impl Editor {
             .trim(self.retention_limit.saturating_sub(self.text.capacity()));
     }
 
-    pub(super) fn take(&mut self) -> String {
+    pub fn take(&mut self) -> String {
         self.cursor = 0;
         self.journal.clear();
         std::mem::take(&mut self.text)
@@ -153,7 +159,7 @@ impl Editor {
             .map_or(self.cursor, |s| self.cursor + s.len())
     }
 
-    pub(super) fn key(&mut self, key: KeyEvent) -> Result<(), &'static str> {
+    pub fn key(&mut self, key: KeyEvent) -> Result<(), &'static str> {
         let control = key.modifiers.contains(Modifiers::CONTROL);
         match key.code {
             KeyCode::Char('z' | 'Z') if control || key.modifiers.contains(Modifiers::ALT) => {

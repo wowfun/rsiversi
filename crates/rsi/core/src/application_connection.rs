@@ -34,6 +34,9 @@ impl ConnectionFactory {
         plan: &mut ActivationPlan,
     ) -> rsi_meta::Result<(HostProfileDocument, StandardComposition)> {
         let host = plan.take_state::<HostProfileDocument>()?;
+        self.composition
+            .preflight_service(crate::service_program(&host), None)
+            .map_err(|error| self.diagnosed(error))?;
         let system_root = crate::standard_agent_preset_root(self.composition.paths())
             .map_err(|error| self.diagnosed(error))?;
         let presets =
@@ -188,6 +191,18 @@ pub fn standard_application_host(
     composition: StandardComposition,
     arguments: Vec<std::ffi::OsString>,
 ) -> crate::Result<(Host, ApplicationDiagnostics)> {
+    let (addons, diagnostics) = application_addons(composition, arguments)?;
+    let mut host = HostBuilder::new(diagnostics.connection.composition.paths().clone());
+    addons
+        .register_into(&mut host, crate::AddonScope::Application)
+        .map_err(boot)?;
+    Ok((host.build().map_err(boot)?, diagnostics))
+}
+
+pub(crate) fn application_addons(
+    composition: StandardComposition,
+    arguments: Vec<std::ffi::OsString>,
+) -> crate::Result<(crate::StandardAddonSet, ApplicationDiagnostics)> {
     let diagnostics = ApplicationDiagnostics {
         connection: Arc::new(ConnectionFactory {
             composition,
@@ -214,6 +229,7 @@ pub fn standard_application_host(
         ))
         .map_err(boot)?;
     register_contracts(&mut builder)?;
+    register_presentations(&mut builder)?;
     builder
         .register_factory(
             crate::AddonScope::Application,
@@ -223,6 +239,7 @@ pub fn standard_application_host(
             Arc::new(diagnostics.connection.composition.credentials_factory()),
         )
         .map_err(boot)?;
+
     builder
         .register_factory(
             crate::AddonScope::Application,
@@ -269,15 +286,42 @@ pub fn standard_application_host(
         .addons()
         .merged(builder.build().map_err(boot)?)
         .map_err(boot)?;
-    let mut host = HostBuilder::new(diagnostics.connection.composition.paths().clone());
-    addons
-        .register_into(&mut host, crate::AddonScope::Application)
-        .map_err(boot)?;
-    Ok((host.build().map_err(boot)?, diagnostics))
+    Ok((addons, diagnostics))
 }
 
 fn boot(error: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(error.to_string())
+}
+
+fn register_presentations(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
+    builder
+        .register_local_contract_at::<rsi_terminal::presentation::FrameRendererContract>(
+            crate::AddonScope::Application,
+        )
+        .map_err(boot)?;
+    for (id, factory) in [
+        (
+            "rsi.terminal.ui",
+            Arc::new(rsi_terminal::presentation::LinkedPresentationFactory)
+                as Arc<dyn PluginFactory>,
+        ),
+        (
+            "rsi.terminal.portable",
+            Arc::new(rsi_terminal::presentation::PortablePresentationFactory)
+                as Arc<dyn PluginFactory>,
+        ),
+    ] {
+        builder
+            .register_factory(
+                crate::AddonScope::Application,
+                id,
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::Replayable,
+                factory,
+            )
+            .map_err(boot)?;
+    }
+    Ok(())
 }
 
 fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
@@ -290,6 +334,9 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_api_http::HttpAssetsContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<rsi_web_assets::WebAssetControlContract>(scope)
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_credentials_protocol::CredentialsResolveContract>(scope)

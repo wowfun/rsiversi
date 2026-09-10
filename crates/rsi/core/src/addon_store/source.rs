@@ -19,6 +19,7 @@ use std::{
 pub(super) struct RecordWire {
     id: String,
     plugin: String,
+    scope: crate::AddonScope,
     target: String,
     artifact_sha256: String,
     portable_services: Vec<String>,
@@ -32,9 +33,11 @@ impl TryFrom<RecordWire> for NativeAddonRecord {
         if !digest(&wire.artifact_sha256) {
             return Err(NativeAddonError::Invalid("artifact digest"));
         }
+        validate_scope_services(wire.scope, &wire.portable_services)?;
         Ok(Self {
             id: wire.id,
             plugin: wire.plugin,
+            scope: wire.scope,
             target: wire.target,
             artifact_sha256: wire.artifact_sha256,
             portable_services: services(wire.portable_services)?,
@@ -48,8 +51,10 @@ pub(super) struct Manifest {
     format: u32,
     pub(super) id: String,
     plugin: String,
+    scope: crate::AddonScope,
     target: String,
     pub(super) artifact: PathBuf,
+    source_root: Option<PathBuf>,
     #[serde(default)]
     portable_services: Vec<String>,
     pub(super) build: Option<Build>,
@@ -68,14 +73,23 @@ const fn build_timeout() -> u64 {
 }
 impl Manifest {
     fn validate(mut self) -> Result<Self> {
-        if self.format != 1 {
+        if self.format != 2 {
             return Err(NativeAddonError::Invalid("manifest format"));
         }
         identifier(&self.id, 64)?;
         identifier(&self.plugin, 256)?;
         identifier(&self.target, 64)?;
         relative(&self.artifact)?;
+        if let Some(root) = &self.source_root
+            && (!root.is_absolute()
+                || root.as_os_str().len() > 4096
+                || root.components().count() > 64
+                || root.components().any(|part| part == Component::ParentDir))
+        {
+            return Err(NativeAddonError::Invalid("absolute source root bounds"));
+        }
         self.portable_services = services(self.portable_services)?;
+        validate_scope_services(self.scope, &self.portable_services)?;
         if let Some(build) = &self.build {
             if build.command.is_empty()
                 || build.command.len() > 64
@@ -100,6 +114,7 @@ impl Manifest {
         NativeAddonRecord {
             id: self.id,
             plugin: self.plugin,
+            scope: self.scope,
             target: self.target,
             artifact_sha256,
             portable_services: self.portable_services,
@@ -111,6 +126,8 @@ pub(super) struct ManifestSource {
     pub(super) manifest: Manifest,
     pub(super) bytes: Vec<u8>,
     pub(super) directory: cap_std::fs::Dir,
+    pub(super) manifest_directory: cap_std::fs::Dir,
+    pub(super) root: PathBuf,
     pub(super) path: PathBuf,
 }
 
@@ -144,12 +161,28 @@ pub(super) fn open_manifest(path: &Path) -> Result<ManifestSource> {
     let manifest = toml::from_str::<Manifest>(text)
         .map_err(|_| NativeAddonError::Invalid("manifest syntax"))?
         .validate()?;
+    let root = manifest
+        .source_root
+        .clone()
+        .unwrap_or_else(|| parent.to_owned());
+    let source_directory = rsi_files_native_fs::open_absolute_directory_no_follow(&root)?;
     Ok(ManifestSource {
         manifest,
         bytes,
-        directory,
+        directory: source_directory,
+        manifest_directory: directory,
+        root,
         path: path.to_owned(),
     })
+}
+
+fn validate_scope_services(scope: crate::AddonScope, services: &[String]) -> Result<()> {
+    if scope != crate::AddonScope::Agent && !services.is_empty() {
+        return Err(NativeAddonError::Invalid(
+            "Portable isolation requires Agent scope",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn bounded_read(file: File, maximum: usize) -> Result<Vec<u8>> {

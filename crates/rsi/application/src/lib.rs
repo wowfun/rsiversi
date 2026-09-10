@@ -5,8 +5,10 @@
 #![allow(clippy::missing_errors_doc)]
 
 pub mod arguments;
+mod catalog;
 mod error;
 mod profile;
+pub use catalog::{ProfileCatalogContract, ProfileCatalogSource};
 mod shell;
 pub use error::RsiError;
 pub use profile::ScopedProfile;
@@ -32,6 +34,9 @@ impl rsi_meta::LocalContract for ApplicationRunContract {
 /// Failure owned by application composition or execution.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
+    /// The Profile already follows one owner-supplied catalog.
+    #[error("Profile already follows a catalog")]
+    CatalogAlreadyFollowed,
     /// A child Profile failed to prepare, activate or reload.
     #[error(transparent)]
     Profile(#[from] rsi_host::HostError),
