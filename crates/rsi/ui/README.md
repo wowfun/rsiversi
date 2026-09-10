@@ -44,11 +44,46 @@ focus, editing, sanitization and layout. UI fields are non-secret. Linked
 callbacks are trusted application code; no dynamic frontend script admission
 or DOM isolation is implied. Text never becomes HTML or an execution entry.
 
-Limits are declared once in this crate: 128 live bundles, 16 targets, 32 entries
-of each contribution type per bundle, 8 concurrent actions per application,
-256 elements and 128 KiB encoded bytes per view, and 64 KiB per action input.
+This registry owns limits of 128 live bundles, 16 targets, 32 entries of each
+contribution type per bundle and 8 concurrent actions per application.
+[rsi-ui-protocol](../ui-protocol/README.md) owns view and action-input wire limits.
 Retiring entries keep their admitted action capacity until completion. A
 registry generation cannot admit replacement work by forgetting old tasks.
+
+`PresentationLease` owns asynchronous model refresh for one exact surface. Its
+source runs after reserving one of 32 snapshot slots and up to 128 KiB from the
+application's shared 4 MiB encoded snapshot pool. At most 16 presentations run.
+Current, candidate and escaped reader pins share these limits. A synchronous
+snapshot lookup reads already materialized data and never calls domain code.
+Failed refresh preserves the current snapshot and publishes one bounded diagnostic.
+Before the first snapshot, `ready()` preserves Invalid, Retired and Capacity
+classification; contribution and infrastructure failures remain diagnostic handler
+failures. A materialization rejection is not evidence that an action was invoked.
+Capacity-blocked refresh resumes when retained snapshot or source bytes release
+admission, without requiring a domain invalidation. Once an action handler has
+started, any failure to produce or publish its reply has an unknown outcome;
+only failures before dispatch can report that the action was not admitted.
+Closing a lease or retiring its target/contribution cancels reads and drains its
+owned work before releasing the presentation slot.
+
+A source may bind one ordinary presentation child scope before its first model.
+The source owns cancellation-safe startup; the presentation worker requests
+cancellation and joins startup instead of releasing its slot while a candidate
+is still activating. Models, actions and source reads use that scope's Context.
+Closing drains admitted actions, then joins the binding owner and reports cleanup
+failure. The binding cannot turn a presentation ID into domain authority; products
+must explicitly supply already narrowed Local facets to the child scope.
+`UiBusinessApiContract` is that explicit target facet: a semantic scope and a
+domain-owned restricted ApiClient. Adapters never substitute an ambient global
+ApiClient when the target facet is absent.
+
+The [neutral protocol](../ui-protocol/README.md) gives a model an explicit schema,
+renderer, displayed actions and sources. Presentation invocation checks the exact
+epoch, current revision and displayed membership before admitting the existing
+owned action task. Neither possession of a bundle name nor construction of a
+`UiReference` grants a presentation action. The source handler interprets only
+names published in the same snapshot. These local capabilities are distinct from
+remote authentication and one-time input admission.
 
 Verification exercises ordinary plugin activation, source reorder, rollback,
 stale and foreign references, duplicate/capacity failures, target isolation,

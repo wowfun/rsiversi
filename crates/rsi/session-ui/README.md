@@ -35,3 +35,25 @@ or either owner retiring. An admitted mutation's ownership is independent of a
 presentation waiter. Both adapters discard responses from closed detail or target
 generations. Tests use deterministic Session fixtures; native/Worker and visual
 product evidence are reported separately from live-provider evidence.
+
+`SessionUiBinderFactory` is the explicit server export policy for `scope.kind =
+session`. It accepts a validated Session id from an authenticated or trusted local
+API origin, following the Session API's existing deployment-wide attachment
+policy. It never accepts a raw Context, Local key, filesystem path or caller
+origin in the scope. Revoked origins are rejected before creating a target.
+
+Each export is a real child `ScopedProfile` with isolated controller, observation
+sink and target slots. It retains the ordinary Session controller and its domain
+facets; projection delivery only invalidates UI snapshots and immediately releases
+the incoming projection lease. No Session read lease is held across UI observation.
+The UI API closes presentations and drains admitted actions before the binder
+closes this Profile. A cancelled startup waiter leaves owned startup and cleanup
+with the binder task tracker, including results which the waiter no longer receives.
+Dropping a delivered binding also schedules owned Profile shutdown. Its binding
+slot stays held until that shutdown finishes; a discarded response cannot leave
+an orphan controller or release admission ahead of actual cleanup.
+
+Each server target also publishes `UiBusinessApiContract` in its isolated mapping.
+Its `SessionTargetClient` retains this binding's trusted origin and permits only
+the controller's Session. Portable presentation children consume this explicit
+facet; neither the UI source nor a presentation identity selects a global API.

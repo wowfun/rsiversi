@@ -10,6 +10,14 @@ publish = false
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-application = { path = "../application" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-session-api = { path = "../session-api" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-ui-api = { path = "../ui-api" }
 rsi-ui = { path = "../ui" }
 rsi-client = { path = "../client" }
 rsi-conversation = { path = "../conversation" }

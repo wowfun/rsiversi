@@ -3,7 +3,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod binding;
 mod output;
+pub use binding::SessionUiBinderFactory;
 
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;

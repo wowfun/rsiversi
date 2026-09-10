@@ -15,6 +15,9 @@ use tokio_util::{
     sync::CancellationToken,
     task::{TaskTracker, task_tracker::TaskTrackerToken},
 };
+#[path = "presentation.rs"]
+mod presentation;
+pub use presentation::{PresentationLease, PresentationStatus, SnapshotPin};
 
 #[derive(Debug, Default)]
 pub(crate) struct Owner {
@@ -75,6 +78,8 @@ pub struct Ui {
     owner: Arc<Owner>,
     slots: Arc<Semaphore>,
     changed: watch::Sender<u64>,
+    presentations: Arc<Semaphore>,
+    snapshots: presentation::SnapshotPool,
 }
 /// Nominal application contribution registry capability.
 #[derive(Debug)]
@@ -110,6 +115,10 @@ pub struct ContributionLease {
     owner: Arc<Owner>,
 }
 impl ContributionLease {
+    /// Immediately fences new target/contribution work; disposal joins its cleanup.
+    pub fn retire(&self) {
+        self.owner.retire();
+    }
     /// Withdraws and joins both Meta registration cleanup and admitted actions.
     pub async fn dispose(&self) -> rsi_meta::CleanupReport {
         self.owner.retire();
@@ -135,6 +144,8 @@ impl Ui {
             owner: Arc::new(Owner::default()),
             slots: Arc::new(Semaphore::new(MAXIMUM_ACTIONS)),
             changed,
+            presentations: Arc::new(Semaphore::new(crate::MAXIMUM_PRESENTATIONS)),
+            snapshots: presentation::SnapshotPool::new(),
         })
     }
     /// Signals that a plugin's underlying presentation data has changed.
@@ -365,6 +376,7 @@ impl Ui {
                     .iter()
                     .filter(|surface| surface.target == target.kind)
                     .map(|surface| SurfaceDescriptor {
+                        bundle: entry.value.name.clone(),
                         reference: self.reference(&handle.id, id, &surface.name),
                         title: surface.title.clone(),
                     })
@@ -403,7 +415,9 @@ impl Ui {
 
     fn capture(&self, reference: &UiReference) -> Result<Capture> {
         let state = self.state.lock().expect("UI state poisoned");
-        if reference.application != self.application || !crate::view::name_valid(&reference.name) {
+        if reference.application != self.application
+            || !rsi_ui_protocol::name_valid(&reference.name)
+        {
             return Err(UiError::Retired);
         }
         let target = self.target_id(&state, &reference.target)?;
@@ -542,6 +556,7 @@ impl Ui {
                 contribution_stop: capture.entry.owner.stop.clone(),
                 target_stop: capture.target.owner.stop.clone(),
                 presentation_stop,
+                presentation: None,
             };
             let result = handler.invoke(target, input).await;
             ui.invalidate();
@@ -583,7 +598,7 @@ struct Capture {
     _tokens: (TaskTrackerToken, TaskTrackerToken, TaskTrackerToken),
 }
 fn validate_contributions(value: &Contributions) -> Result<()> {
-    if !crate::view::name_valid(&value.name) {
+    if !rsi_ui_protocol::name_valid(&value.name) {
         return Err(UiError::Invalid("invalid UI bundle name".into()));
     }
     for names in [
@@ -607,7 +622,7 @@ fn validate_contributions(value: &Contributions) -> Result<()> {
         if names.len() > MAXIMUM_CONTRIBUTIONS
             || names
                 .into_iter()
-                .any(|name| !crate::view::name_valid(name) || !seen.insert(name))
+                .any(|name| !rsi_ui_protocol::name_valid(name) || !seen.insert(name))
         {
             return Err(UiError::Invalid(
                 "invalid or duplicate UI contribution name".into(),
