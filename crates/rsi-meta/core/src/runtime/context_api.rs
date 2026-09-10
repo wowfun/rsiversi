@@ -23,6 +23,25 @@ impl Context {
         self.owner.map(|owner| (owner.fiber, owner.generation))
     }
 
+    /// Observes this exact owner's admission closure, before calls and effects drain.
+    ///
+    /// A root Context observes Runtime admission. Capturing from a stale generation
+    /// fails. The observer retains no Runtime or admission lease and cannot cancel
+    /// the owner; adapters still join their work through ordinary owned cleanup.
+    pub fn retirement_observer(&self) -> Result<crate::CancellationObserver> {
+        let Some(owner) = self.owner else {
+            return Ok(self.runtime.inner.runtime_admission.retirement_observer());
+        };
+        let fiber = self.runtime.owner_fiber(owner)?;
+        let data = fiber.data.lock().expect("fiber state poisoned");
+        Runtime::validate_live_owner_data(owner, &data)?;
+        let active = data.active.as_ref().ok_or(MetaError::StaleContext {
+            fiber: owner.fiber,
+            generation: owner.generation,
+        })?;
+        Ok(active.lease.retirement_observer())
+    }
+
     /// Returns the currently visible safe-Rust Local object, if any.
     ///
     /// This point-in-time lookup does not create a managed dependency edge.

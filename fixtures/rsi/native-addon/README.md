@@ -1,5 +1,12 @@
 # rsi-fixture-native-addon
 
+The optional `ui: true` port implements Portable UI models, refresh and raw source
+windows. Every bound model performs an actual Session attach through its sole
+explicit Portable API grant and checks the returned Header before displaying its
+Session identity. Describe receives no grant; an absent or extra business grant
+fails. The Web renderer fixture consumes this native model over authenticated UI
+API and renders it in Rust/WASM, without a Worker factory for the native source.
+
 This standalone keyless fixture exports a real ABI v3 dynamic library using the
 safe native SDK. Its Tool port implements the public Portable Tool Describe,
 Execute and host-confined process-plan exchange. Tool catalog tests consume the
@@ -39,6 +46,13 @@ test compiles it with the native C compiler and runs its retention assertions in
 a child process. It checks retained mapping/staging/accounting and the still-held
 cache lock after ordinary owners drop; only child-process exit permits cleanup.
 It does not provide an Agent Tool or simulate a library-close failure.
+
+The optional `api_probe: true` port accepts one explicitly transferred API
+capability with the first request frame. It forwards bounded Portable API frames
+through an actual native SDK caller channel and checks its terminal outcome.
+`rsi-api-portable` uses this port to verify binary fragments, domain errors and
+export retirement across the dynamic-library boundary. No Rust API trait object
+or implicit domain authority enters the fixture.
 Compile-time marker paths can pause IDENTITY, and a compile-time status can make
 FINALIZE succeed. The manager race test uses those explicit local controls to
 change selection or close admission while native staging is still in flight;

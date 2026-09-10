@@ -46,6 +46,13 @@ generation at its linearization point. A stale Context can be inspected but
 cannot publish, open a call, register an effect, or create a child. Root
 Contexts can apply root plugins but cannot impersonate a plugin generation.
 
+`Context::retirement_observer` captures an observation-only signal for the exact
+live generation, or Runtime admission for a root Context. It fires when that
+owner closes admission, before draining calls, children, or deferred cleanup.
+It retains neither execution admission nor the Runtime. Local adapters use it
+to release suspended outbound calls that their later deferred cleanup must join;
+the signal grants no cleanup authority and does not replace owned cleanup.
+
 ## Preparation, injection, and activation
 
 `ResolvedFactory` contains one already bounded `FactoryIdentity`, static

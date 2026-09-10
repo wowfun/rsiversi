@@ -49,6 +49,12 @@ requests commit after successful setup; errors, panics, and drops converge on
 abort. The SDK maps those lifetime-bound operations to the raw exchange. The
 header owns the exact channel, effect, callback-seal, and output state machines.
 
+Each channel's `host()` clones callback-scoped authority without borrowing that
+channel for the remainder of a nested call. A provider can therefore forward a
+bounded request or response while its nested caller channel remains open. Both
+channels still share the original callback lifetime and seal; this grants no
+authority after the callback returns.
+
 ## Concurrency and trust
 
 Callbacks may run on arbitrary host-owned OS threads. Factory preparation is

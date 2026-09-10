@@ -1,4 +1,6 @@
 mod ai;
+mod api_probe;
+mod ui;
 use rsi_meta_native::{
     Activation, Message, NativeInstance, NativePlugin, Prepared, ProviderChannel, export_plugin,
 };
@@ -17,12 +19,17 @@ const DESCRIPTION: &str = if cfg!(feature = "revision-b") {
 struct Plugin;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent opt-in fixture ports, not lifecycle states.
 struct Config {
     label: String,
     #[serde(default = "enabled")]
     tools: bool,
     #[serde(default)]
     ai: bool,
+    #[serde(default)]
+    api_probe: bool,
+    #[serde(default)]
+    ui: bool,
 }
 fn enabled() -> bool {
     true
@@ -44,12 +51,34 @@ impl NativePlugin for Plugin {
         Ok(Prepared::new(desired.clone(), config, bytes))
     }
     fn create(&self, config: Config) -> Result<Instance, String> {
-        Ok(Instance(config))
+        Ok(Instance(config, 0))
     }
 }
-struct Instance(Config);
+struct Instance(Config, u32);
 impl NativeInstance for Instance {
     fn activate(&mut self, activation: &mut Activation<'_>) -> Result<(), String> {
+        if self.0.ui {
+            activation
+                .effects()
+                .provide(
+                    "fixture.native.ui",
+                    rsi_ui_protocol::portable::CONTRACT,
+                    u64::from(rsi_ui_protocol::portable::VERSION),
+                    b"ui",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if self.0.api_probe {
+            activation
+                .effects()
+                .provide(
+                    "fixture.native.api-probe",
+                    "fixture.api-probe",
+                    1,
+                    b"api-probe",
+                )
+                .map_err(|error| error.to_string())?;
+        }
         if self.0.tools {
             activation
                 .effects()
@@ -78,6 +107,16 @@ impl NativeInstance for Instance {
             .map_err(|error| error.to_string())
     }
     fn serve(&mut self, port: &[u8], channel: &mut ProviderChannel<'_>) -> Result<(), String> {
+        if port == b"ui" {
+            let result = ui::serve(channel, &mut self.1);
+            if let Err(error) = &result {
+                eprintln!("fixture native UI: {error}");
+            }
+            return result;
+        }
+        if port == b"api-probe" {
+            return api_probe::serve(channel);
+        }
         if port == b"ai" {
             return ai::serve(channel, &self.0.label);
         }

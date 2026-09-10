@@ -47,14 +47,25 @@ impl SessionClient {
         {
             return Err(ApiError::Unavailable);
         }
-        Ok(Self {
+        Ok(Self::from_api(api))
+    }
+    /// Validates the restricted handle catalog and attaches only the supplied Session.
+    pub async fn attach_target(
+        api: Arc<dyn ApiClient>,
+        session: &SessionId,
+    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        crate::target::operations(api.operations()).map_err(SessionError::Api)?;
+        Self::from_api(api).attach(session).await
+    }
+    fn from_api(api: Arc<dyn ApiClient>) -> Self {
+        Self {
             state: Arc::new(State {
                 api,
                 observations: ObservationRetention::default(),
                 interactions: InteractionRetention::default(),
                 projections: rsi_session_protocol::ProjectionRetention::default(),
             }),
-        })
+        }
     }
     fn handle(
         &self,

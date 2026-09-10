@@ -17,15 +17,22 @@ rsi-ai-protocol = { path = "../../../crates/rsi-ai/protocol" }
 rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
 rsi-meta-native = { path = "../../../crates/rsi-meta/native" }
 rsi-tools-protocol = { path = "../../../crates/rsi-tools/protocol" }
+rsi-ui-protocol = { path = "../../../crates/rsi/ui-protocol" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 
 [workspace]
 
 [lints.rust]
 unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
+must_use_candidate = "allow"

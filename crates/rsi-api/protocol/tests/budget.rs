@@ -3,6 +3,39 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
+fn attached_count_admission_survives_last_transport_slice() {
+    let budget = ByteBudget::new(8).unwrap();
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let bytes = budget.copy(b"payload").unwrap().with_retention(guard);
+    let wire = bytes.slice(1..4).unwrap().into_bytes();
+    drop(bytes);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(budget.used(), 7);
+    assert_eq!(wire.as_ref(), b"ayl");
+    drop(wire);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn empty_slice_does_not_retain_admission_but_sibling_payload_does() {
+    let budget = ByteBudget::new(8).unwrap();
+    let guard = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&guard);
+    let bytes = budget.copy(b"payload").unwrap().with_retention(guard);
+    let sibling = bytes.clone();
+    let empty = bytes.slice(3..3).unwrap();
+    drop(bytes);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(budget.used(), 7);
+    drop(sibling);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(budget.used(), 0);
+    assert!(empty.is_empty());
+}
+
+#[test]
 fn growing_payloads_share_receiving_capacity_and_transfer_last_slice_ownership() {
     let receiving = ByteBudget::new(7).unwrap();
     let retained = ByteBudget::new(7).unwrap();

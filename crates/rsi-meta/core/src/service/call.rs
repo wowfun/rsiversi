@@ -42,7 +42,7 @@ impl fmt::Debug for CallLease {
     }
 }
 
-/// Cloneable observation-only view of one service call's cancellation fact.
+/// Cloneable observation-only view of one owned activity's cancellation fact.
 #[derive(Clone)]
 pub struct CancellationObserver {
     cancellation: CancellationToken,

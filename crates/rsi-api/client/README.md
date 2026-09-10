@@ -57,3 +57,12 @@ the transport. It handles finite/common/domain replies and explicit-end SSE,
 including the five-second EOF deadline after an end frame. Native and browser
 adapters retain I/O cancellation and the overall finite-exchange deadline; they
 do not duplicate body decoding or error-status classification.
+
+A non-HTTP transport that has already authenticated and negotiated its provider
+may construct `ClientConnection::from_negotiated` with that exact immutable
+connection description and operation catalog. The constructor validates the
+shared wire version and required negotiation descriptors; the transport owns the
+proof that those values belong to its captured provider generation. It uses the
+same call slots, receiving/retained pools, owned mutation jobs and unpolled-stream
+retirement as ordinary connection negotiation. Portable adapters use this seam;
+they do not create another client admission or lifecycle implementation.

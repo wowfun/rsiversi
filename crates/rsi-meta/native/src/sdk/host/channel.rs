@@ -11,7 +11,7 @@ pub struct CallChannel<'callback> {
     terminal_observed: bool,
 }
 
-impl CallChannel<'_> {
+impl<'callback> CallChannel<'callback> {
     pub(super) fn new(port: HostPort, scope: CallbackScope, channel: CapId) -> Self {
         Self {
             host: Host {
@@ -27,7 +27,7 @@ impl CallChannel<'_> {
         }
     }
 
-    pub fn host(&self) -> Host<'_> {
+    pub fn host(&self) -> Host<'callback> {
         self.host.clone()
     }
 
@@ -106,8 +106,15 @@ pub struct ProviderChannel<'callback> {
     requests_eof: bool,
 }
 
-impl ProviderChannel<'_> {
-    pub fn host(&self) -> Host<'_> {
+impl<'callback> ProviderChannel<'callback> {
+    /// Clones authority for this callback, independently of a borrow of this channel.
+    ///
+    /// ```compile_fail
+    /// fn escape(channel: &rsi_meta_native::ProviderChannel<'_>) -> rsi_meta_native::Host<'static> {
+    ///     channel.host()
+    /// }
+    /// ```
+    pub fn host(&self) -> Host<'callback> {
         self.host.clone()
     }
 

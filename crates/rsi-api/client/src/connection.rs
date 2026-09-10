@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 /// Platform I/O for one admitted exchange; no connection admission or domain state.
 #[async_trait]
 pub trait ConnectionTransport: fmt::Debug + Send + Sync + 'static {
-    /// Checks exact deployment/generation headers and bounds finite I/O to one minute.
+    /// Checks exact deployment/generation identity and bounds finite I/O to one minute.
     ///
     /// Read/stream drop releases local I/O. Retirement cancels the local exchange;
     /// any possibly delivered mutation then remains `OutcomeUnknown`. Returned streams
@@ -109,6 +109,32 @@ fn lane(class: OperationClass) -> usize {
     }
 }
 impl ClientConnection {
+    /// Uses identity and descriptors already negotiated by the supplied transport.
+    /// The transport owns verification against its exact provider generation.
+    pub fn from_negotiated(
+        execution: Execution,
+        transport: Arc<dyn ConnectionTransport>,
+        description: ConnectionDescription,
+        catalog: OperationCatalog,
+    ) -> Result<Self> {
+        if description.wire_version != 1
+            || !catalog.operations().contains(&describe_operation())
+            || !catalog.operations().contains(&operations_operation())
+        {
+            return Err(ApiError::Invalid(
+                "invalid negotiated API connection".into(),
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(Connection::new(
+                execution,
+                description.endpoint_id.clone(),
+                transport,
+            )),
+            description,
+            catalog,
+        })
+    }
     /// Negotiates one deployment over an explicitly owned transport.
     pub async fn connect(
         execution: Execution,
@@ -118,21 +144,7 @@ impl ClientConnection {
         let deadline = execution.deadline_after(Duration::from_secs(15));
         deadline
             .timeout(async move {
-                let inner = Arc::new(Connection {
-                    transport,
-                    execution,
-                    endpoint,
-                    retiring: CancellationToken::new(),
-                    calls: [
-                        Arc::new(Semaphore::new(4)),
-                        Arc::new(Semaphore::new(4)),
-                        Arc::new(Semaphore::new(8)),
-                    ],
-                    input: budgets(),
-                    output: budgets(),
-                    retained: budgets(),
-                    work: Arc::default(),
-                });
+                let inner = Arc::new(Connection::new(execution, endpoint, transport));
                 let operation = describe_operation();
                 let input = inner.input[0].encode(
                     &ConnectionHello {
@@ -261,6 +273,28 @@ impl ApiClient for ClientConnection {
     }
 }
 impl Connection {
+    fn new(
+        execution: Execution,
+        endpoint: EndpointId,
+        transport: Arc<dyn ConnectionTransport>,
+    ) -> Self {
+        Self {
+            transport,
+            execution,
+            endpoint,
+            retiring: CancellationToken::new(),
+            calls: [
+                Arc::new(Semaphore::new(4)),
+                Arc::new(Semaphore::new(4)),
+                Arc::new(Semaphore::new(8)),
+            ],
+            input: budgets(),
+            output: budgets(),
+            retained: budgets(),
+            work: Arc::default(),
+        }
+    }
+
     fn admit(&self, operation: &OperationSpec, input: &RetainedBytes) -> Result<Admission> {
         let mut state = self
             .work

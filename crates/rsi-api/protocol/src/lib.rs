@@ -9,6 +9,7 @@ mod budget;
 mod client;
 mod identity;
 mod json;
+pub mod portable;
 mod service;
 mod stream;
 pub use authentication::*;

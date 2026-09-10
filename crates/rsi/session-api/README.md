@@ -6,6 +6,20 @@ trusted ingress; it owns no draft table, execution pin, provider or durable log.
 Creation passes the authenticated origin to the existing draft owner. The client
 publishes only the application-facing Session capability.
 
+`SessionTargetClient` narrows an existing client or an explicitly supplied local
+dispatch/origin pair to one Session. It advertises only attach and handle
+operations, never creation or deployment-wide recent listings. It validates the
+closed Session target envelope before dispatch and rejects another Session ID;
+the ordinary handlers still validate the current Header fingerprint and every
+domain input. Local construction reuses the registry's input pools and invocation
+ownership. It never derives caller origin from JSON or a presentation identity.
+The grant preserves that handle's domain authority: approval answers may name
+the attached Session or a descendant in its current Agent tree. The Session
+service validates that membership and the exact owner/approval tuple; unrelated
+owners are rejected. Cancellation and commands remain scoped by that handle.
+`SessionClient::attach_target` consumes this smaller catalog and returns only the
+attached handle. Exporters retain normal domain receipts and never replay a call.
+
 Each attached handle carries an atomic Header and fingerprint binding. Handle
 operations and stream items carry that fingerprint and exact Session identity;
 operations reject a different Header under a reused Session identity. This

@@ -9,8 +9,10 @@ mod client_stream;
 mod plugin;
 mod server;
 mod server_stream;
+mod target;
 mod wire;
 
 pub use client::SessionClient;
 pub use plugin::{SessionApiFactory, SessionClientFactory};
 pub use server::SessionApi;
+pub use target::SessionTargetClient;

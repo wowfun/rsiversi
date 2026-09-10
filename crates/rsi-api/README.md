@@ -7,9 +7,14 @@ identity. The API foundation has no dependency on Session, Agent, Workspace,
 Media, Settings, standard Host paths or rendering.
 
 Immutable API buffers retain their byte reservation through every clone and
-slice. Input retention, output retention and transport scratch use separate
+nonempty slice. Empty slices retain neither storage nor attached resource guards. Input retention, output retention and transport scratch use separate
 budgets. These are encoded-byte bounds, not process RSS measurements. JSON is
 parsed and encoded in Rust with the repository's exact-number policy.
+An owner may attach an already acquired resource guard to immutable bytes with
+`RetainedBytes::with_retention`. The guard follows clones, nonempty slices and
+transport transfer without copying the payload or replacing its byte reservation.
+This binds object-count admission to the same last-reader lifetime as its bytes;
+the API foundation does not interpret the attached guard.
 
 The registry is an ordinary Meta plugin. An operation's unique registration owns
 admitted work. Retirement immediately fences new calls, cancels reads and streams,
@@ -55,3 +60,10 @@ Authenticated origins carry the verifier's revocation signal into registry-owned
 work. Read and stream cancellation therefore does not depend on the HTTP consumer
 polling another body item; mutation ownership remains independent of that signal
 after execution starts.
+
+An explicitly supplied API client can be exported through the ordinary
+[Portable adapter](portable/README.md). Its closed wire vocabulary lives in this
+family's protocol crate; semantic target narrowing stays with the supplying
+domain. Portable transport carries operation identities and bounded bytes, never
+caller-origin claims or Local trait objects, and inherits Meta's existing call
+deadline and generation fencing.

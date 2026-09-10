@@ -218,6 +218,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "block-buffer"
@@ -295,7 +298,7 @@ dependencies = [
  "io-lifetimes 3.0.1",
  "ipnet",
  "maybe-owned",
- "rustix",
+ "rustix 1.1.4",
  "rustix-linux-procfs",
  "windows-sys 0.61.2",
  "winx",
@@ -310,7 +313,7 @@ dependencies = [
  "cap-primitives",
  "io-extras",
  "io-lifetimes 3.0.1",
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -378,6 +381,7 @@ dependencies = [
  "itoa",
  "rustversion",
  "ryu",
+ "serde",
  "static_assertions",
 ]
 
@@ -492,6 +496,23 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "crossterm"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
+dependencies = [
+ "bitflags 2.13.1",
+ "crossterm_winapi",
+ "mio",
+ "parking_lot",
+ "rustix 0.38.44",
+ "serde",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
@@ -502,7 +523,8 @@ dependencies = [
  "document-features",
  "mio",
  "parking_lot",
- "rustix",
+ "rustix 1.1.4",
+ "serde",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -850,7 +872,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes 2.0.4",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.52.0",
 ]
 
@@ -1529,6 +1551,12 @@ dependencies = [
 
 [[package]]
 name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+
+[[package]]
+name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
@@ -1818,6 +1846,12 @@ checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "numtoa"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
 
 [[package]]
 name = "once_cell"
@@ -2302,6 +2336,7 @@ dependencies = [
  "ratatui-crossterm",
  "ratatui-macros",
  "ratatui-termina",
+ "ratatui-termion",
  "ratatui-termwiz",
  "ratatui-widgets",
  "serde",
@@ -2336,7 +2371,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
 dependencies = [
  "cfg-if",
- "crossterm",
+ "crossterm 0.28.1",
+ "crossterm 0.29.0",
  "instability",
  "ratatui-core",
 ]
@@ -2360,6 +2396,17 @@ dependencies = [
  "instability",
  "ratatui-core",
  "termina",
+]
+
+[[package]]
+name = "ratatui-termion"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87c732202fa5a71a9da0991013f0853e53f87048f45198e3a1ca3ee722accc2f"
+dependencies = [
+ "instability",
+ "ratatui-core",
+ "termion",
 ]
 
 [[package]]
@@ -2668,13 +2715,15 @@ dependencies = [
  "rsi-tools",
  "rsi-tools-protocol",
  "rsi-ui",
+ "rsi-ui-api",
+ "rsi-ui-portable",
  "rsi-user-questions-protocol",
  "rsi-web-assets",
  "rsi-workspace",
  "rsi-workspace-api",
  "rsi-workspace-protocol",
  "rusqlite",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -2844,7 +2893,7 @@ dependencies = [
  "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta-profile",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3355,7 +3404,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-meta",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3388,6 +3437,25 @@ dependencies = [
  "tokio",
  "tokio-util",
  "zeroize",
+]
+
+[[package]]
+name = "rsi-api-portable"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "rsi-api",
+ "rsi-api-client",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "rsi-meta-native-loader",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3425,7 +3493,7 @@ dependencies = [
  "rsi-api-http",
  "rsi-api-protocol",
  "rsi-meta",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3461,7 +3529,7 @@ dependencies = [
  "rsi-sandbox-local",
  "rsi-tools",
  "rsi-tools-protocol",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3653,7 +3721,7 @@ version = "0.0.1"
 dependencies = [
  "cap-std",
  "libc",
- "rustix",
+ "rustix 1.1.4",
  "tempfile",
 ]
 
@@ -3904,7 +3972,7 @@ dependencies = [
  "libloading",
  "rsi-meta",
  "rsi-meta-native",
- "rustix",
+ "rustix 1.1.4",
  "serde_json",
  "sha2",
  "tempfile",
@@ -3997,7 +4065,7 @@ dependencies = [
  "rsi-meta",
  "rsi-process",
  "rsi-sandbox",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -4065,10 +4133,13 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api",
  "rsi-api-http",
  "rsi-api-protocol",
  "rsi-application",
  "rsi-meta",
+ "rsi-web-assets",
+ "rsi-web-assets-api",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -4097,7 +4168,7 @@ dependencies = [
  "rsi-storage-domain",
  "rsi-storage-sqlite",
  "rsi-user-questions-protocol",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -4151,6 +4222,7 @@ dependencies = [
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api",
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-meta",
@@ -4161,6 +4233,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4272,12 +4345,20 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
+ "rsi-application",
  "rsi-client",
  "rsi-conversation",
+ "rsi-host",
  "rsi-meta",
  "rsi-process",
+ "rsi-session-api",
+ "rsi-session-protocol",
  "rsi-tools-protocol",
  "rsi-ui",
+ "rsi-ui-api",
  "serde",
  "serde_json",
  "tokio",
@@ -4437,14 +4518,13 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
- "crossterm",
+ "crossterm 0.29.0",
  "filedescriptor",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
  "libc",
  "portable-pty",
- "pulldown-cmark",
  "ratatui",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -4461,6 +4541,7 @@ dependencies = [
  "rsi-inspector",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-meta-native-loader",
  "rsi-native-addons-api",
  "rsi-process",
  "rsi-sandbox",
@@ -4470,11 +4551,12 @@ dependencies = [
  "rsi-session-tree-ui",
  "rsi-session-ui",
  "rsi-settings-protocol",
+ "rsi-terminal-ui",
  "rsi-tools-protocol",
  "rsi-ui",
  "rsi-user-questions-protocol",
  "rsi-workspace-protocol",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -4485,6 +4567,27 @@ dependencies = [
  "unicode-width",
  "vt100",
  "zeroize",
+]
+
+[[package]]
+name = "rsi-terminal-ui"
+version = "0.0.1"
+dependencies = [
+ "pulldown-cmark",
+ "ratatui",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-conversation",
+ "rsi-media-protocol",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "rsi-ui-protocol",
+ "rsi-user-questions-protocol",
+ "serde",
+ "serde_json",
+ "termina",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -4531,8 +4634,10 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "js-sys",
+ "rsi-api-protocol",
  "rsi-conversation",
  "rsi-meta",
+ "rsi-ui-protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4540,6 +4645,51 @@ dependencies = [
  "tokio-util",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "rsi-ui-api"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-api",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "rsi-meta-scope",
+ "rsi-ui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ui-portable"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-api-portable",
+ "rsi-api-protocol",
+ "rsi-application",
+ "rsi-host",
+ "rsi-meta",
+ "rsi-ui",
+ "rsi-ui-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ui-protocol"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4593,7 +4743,9 @@ dependencies = [
  "rsi-settings-protocol",
  "rsi-tools-protocol",
  "rsi-ui",
+ "rsi-ui-api",
  "rsi-user-questions-protocol",
+ "rsi-web-assets-api",
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
@@ -4604,6 +4756,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "zeroize",
 ]
 
@@ -4612,13 +4765,38 @@ name = "rsi-web-assets"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "hex",
  "rsi-api-http",
  "rsi-api-protocol",
  "rsi-host",
  "rsi-meta",
- "rustix",
+ "rsi-ui-protocol",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-web-assets-api"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-api",
+ "rsi-api-http",
+ "rsi-api-protocol",
+ "rsi-host",
+ "rsi-meta",
+ "rsi-ui-protocol",
+ "rsi-web-assets",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -4689,13 +4867,16 @@ dependencies = [
 name = "rsi-xtask"
 version = "0.0.1"
 dependencies = [
+ "nix 0.29.0",
  "percent-encoding",
  "pulldown-cmark",
  "ra_ap_syntax",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "toml",
  "yaml_serde",
 ]
@@ -4754,6 +4935,19 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.13.1",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -4761,7 +4955,7 @@ dependencies = [
  "bitflags 2.13.1",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -4772,7 +4966,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
 dependencies = [
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -5213,7 +5407,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -5225,7 +5419,7 @@ checksum = "9048a889effe34a5cddee0af7f53285198b16dca3be510858d38dfdb3e62a04e"
 dependencies = [
  "bitflags 2.13.1",
  "parking_lot",
- "rustix",
+ "rustix 1.1.4",
  "signal-hook",
  "windows-sys 0.61.2",
 ]
@@ -5240,6 +5434,17 @@ dependencies = [
  "nom",
  "phf",
  "phf_codegen",
+]
+
+[[package]]
+name = "termion"
+version = "4.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f44138a9ae08f0f502f24104d82517ef4da7330c35acd638f1f29d3cd5475ecb"
+dependencies = [
+ "libc",
+ "numtoa",
+ "serde",
 ]
 
 [[package]]
@@ -5276,6 +5481,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "phf",
+ "serde",
  "sha2",
  "signal-hook",
  "siphasher",
@@ -5672,6 +5878,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -5879,6 +6086,7 @@ checksum = "692daff6d93d94e29e4114544ef6d5c942a7ed998b37abdc19b17136ea428eb7"
 dependencies = [
  "getrandom 0.3.4",
  "mac_address",
+ "serde",
  "sha2",
  "thiserror 1.0.69",
  "uuid",
@@ -5893,6 +6101,7 @@ dependencies = [
  "csscolorparser",
  "deltae",
  "lazy_static",
+ "serde",
  "wezterm-dynamic",
 ]
 

@@ -301,7 +301,26 @@ impl AsRef<[u8]> for BufferOwner {
 pub struct RetainedBytes(Bytes);
 
 impl RetainedBytes {
-    /// Returns a checked slice without releasing any part of the shared allocation.
+    /// Retains an already acquired resource guard through byte clones, slices and
+    /// transport transfer. Does not copy data or replace its byte reservation.
+    #[must_use]
+    pub fn with_retention<T: Send + 'static>(self, guard: T) -> Self {
+        struct Retention<T> {
+            data: RetainedBytes,
+            _guard: T,
+        }
+        impl<T> AsRef<[u8]> for Retention<T> {
+            fn as_ref(&self) -> &[u8] {
+                self.data.as_bytes()
+            }
+        }
+        Self(Bytes::from_owner(Retention {
+            data: self,
+            _guard: guard,
+        }))
+    }
+    /// Returns a checked slice. Nonempty slices retain the complete allocation
+    /// and attached guard; empty slices retain neither. Siblings are unaffected.
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Result<Self> {
         let start = match range.start_bound() {
             Bound::Included(&start) => start,

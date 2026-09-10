@@ -262,6 +262,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-meta-native",
  "rsi-tools-protocol",
+ "rsi-ui-protocol",
  "serde",
  "serde_json",
 ]
@@ -330,6 +331,15 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-ui-protocol"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
