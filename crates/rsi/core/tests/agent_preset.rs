@@ -701,5 +701,56 @@ fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
 }
 
 #[cfg(unix)]
+#[test]
+fn application_preflight_rejects_nested_config_symlinks_without_creating_a_store() {
+    let mut fixture = CliFixture::new();
+    let alias = fixture.xdg_config.parent().unwrap().join("config-alias");
+    std::os::unix::fs::symlink(&fixture.xdg_config, &alias).unwrap();
+    fixture.xdg_config = alias;
+    let output = fixture.command(&[
+        "--profile",
+        "test-headless",
+        "task",
+        "--cwd",
+        fixture.workspace.to_str().unwrap(),
+        "--agent-preset",
+        "future-agent",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("native addon filesystem operation failed"),
+        "{error}"
+    );
+    assert!(!fixture.config.join("native-addons").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn application_bootstrap_accepts_the_system_config_alias_for_preset_validation() {
+    let mut fixture = CliFixture::new();
+    if cfg!(target_os = "macos") {
+        let config = fixture.xdg_config.canonicalize().unwrap();
+        fixture.xdg_config = Path::new("/").join(config.strip_prefix("/private").unwrap());
+        assert!(fixture.xdg_config.starts_with("/var"));
+    }
+    let output = fixture.command(&[
+        "--profile",
+        "test-headless",
+        "task",
+        "--cwd",
+        fixture.workspace.to_str().unwrap(),
+        "--agent-preset",
+        "future-agent",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("future-agent"), "{error}");
+    assert!(error.contains("unavailable"), "{error}");
+}
+
+#[cfg(unix)]
 #[path = "agent_preset/native.rs"]
 mod native;

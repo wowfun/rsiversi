@@ -361,6 +361,9 @@ store's validation, locking and atomic publication boundaries.
 objects, locks or index files. A missing root returns no store; an existing but
 incomplete or invalid store is an error. It uses the same ownership, identity and
 bounded index validation as ordinary snapshot reads.
+Application bootstrap resolves the config path's trusted first-component OS alias
+before this read-only preflight, just as staging does before activation. Nested
+symlinks remain rejected.
 
 `AgentPresetManager::authoring_catalog` takes the matching frozen composition and
 captures one current native enabled-selection snapshot for pure preset preflight.

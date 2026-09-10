@@ -8,9 +8,13 @@ pub(crate) fn deferred(
     composition: &StandardComposition,
     scope: crate::AddonScope,
 ) -> crate::Result<std::collections::BTreeSet<rsi_meta::PluginId>> {
-    let selection =
-        crate::NativeAddonStore::read_snapshot(&composition.paths().config().join("native-addons"))
-            .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+    let root = rsi_files_native_fs::resolve_absolute_root_alias(
+        &composition.paths().config().join("native-addons"),
+        true,
+    )
+    .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+    let selection = crate::NativeAddonStore::read_snapshot(&root)
+        .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
     Ok(selection
         .into_iter()
         .flat_map(|snapshot| snapshot.enabled)
