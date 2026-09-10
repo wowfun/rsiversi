@@ -18,7 +18,8 @@ pub use host::{
 pub use paths::HostPaths;
 pub use rsi_meta_profile::{
     Profile, ProfileBootstrap, ProfileBundle, ProfileControl, ProfileControlContract, ProfileEntry,
-    ProfileFragment, ProfileGroup, ProfileHealth, ProfileInstanceState, ProfileInstanceStatus,
-    ProfileLimits, ProfileNode, ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus,
-    ProfileStep, ProfileTargetStatus, ReloadOutcome, SnapshotNode, WatcherHealth,
+    ProfileError, ProfileFragment, ProfileGroup, ProfileHealth, ProfileInput, ProfileInstanceState,
+    ProfileInstanceStatus, ProfileLimits, ProfileNode, ProfilePatch, ProfileProgram,
+    ProfileSnapshot, ProfileStatus, ProfileStep, ProfileTargetStatus, ProfileUpdateHandle,
+    ProfileUpdateTicket, ReloadOutcome, SnapshotNode, WatcherHealth,
 };

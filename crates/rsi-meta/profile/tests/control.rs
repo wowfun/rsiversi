@@ -866,6 +866,7 @@ async fn restart_required_publishes_digest_without_mutating_and_pending_is_usabl
     write_profile(&path, "ok");
     let (runtime, _handle, control, starts) = start(temp.path(), UpdateMode::RestartRequired).await;
     let old_digest = control.status().source_digest().to_owned();
+    let old_revision = control.status().revision();
     write_profile(&path, "pending");
     let outcome = control.reload().await.unwrap();
     assert!(matches!(outcome, ReloadOutcome::RestartRequired(_)));
@@ -873,11 +874,18 @@ async fn restart_required_publishes_digest_without_mutating_and_pending_is_usabl
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     let repeated = control.reload().await.unwrap();
     assert!(matches!(repeated, ReloadOutcome::RestartRequired(_)));
+    assert_eq!(repeated.status().revision(), old_revision);
     assert_eq!(
         starts.load(Ordering::SeqCst),
         1,
         "reloading the same restart-only candidate must not apply it live"
     );
+    write_profile(&path, "ok");
+    let reverted = control.reload().await.unwrap();
+    assert!(matches!(reverted, ReloadOutcome::Unchanged(_)));
+    assert_eq!(reverted.status().health(), ProfileHealth::Converged);
+    assert_eq!(reverted.status().revision(), old_revision);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     let _ = runtime.shutdown().await;
 
     write_profile(&path, "pending");
@@ -1126,4 +1134,60 @@ fn control_object_is_send_sync() {
     fn assert_send_sync<T: Send + Sync + ?Sized>() {}
     assert_send_sync::<dyn rsi_meta_profile::ProfileControl>();
     let _ = Mutex::new(());
+}
+
+#[derive(Debug)]
+struct PanickingSuccessor;
+impl ProfileResolver for PanickingSuccessor {
+    fn resolve(&self, _: &rsi_meta::PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
+        unreachable!("empty profile")
+    }
+    fn validate_successor(&self, _: &dyn ProfileResolver) -> rsi_meta_profile::Result<()> {
+        panic!("fixture successor panic");
+    }
+}
+#[tokio::test]
+async fn panicked_update_settles_tickets_closes_admission_and_reports_cleanup_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Runtime::default();
+    let input = rsi_meta_profile::ProfileInput::new(
+        Arc::new(PanickingSuccessor),
+        ProfileProgram::from_profile(rsi_meta_profile::Profile::default()),
+        environment(temp.path()),
+        ProfileLimits::default(),
+    );
+    let bootstrap = ProfileBootstrap::prepare_input(&runtime, input.clone()).unwrap();
+    let updater = bootstrap.updater();
+    let handle = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "profile",
+                "1",
+                UpdateMode::RestartRequired,
+                bootstrap.factory(),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let ticket = updater
+        .submit(updater.input_revision(), input.clone())
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), ticket.wait())
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(rsi_meta_profile::ProfileError::Stopped)
+    ));
+    assert!(matches!(
+        updater.submit(updater.input_revision(), input),
+        Err(rsi_meta_profile::ProfileError::Stopped)
+    ));
+    assert!(
+        !handle.dispose().await.is_clean(),
+        "worker panic must be reported by cleanup"
+    );
+    runtime.shutdown().await;
 }

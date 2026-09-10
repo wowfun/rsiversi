@@ -33,8 +33,9 @@ use native_source::read_profile_source;
 
 pub use control::{
     ProfileBootstrap, ProfileControl, ProfileControlContract, ProfileGenerationPlan, ProfileHealth,
-    ProfileInstanceState, ProfileInstanceStatus, ProfileResolver, ProfileSnapshot, ProfileStatus,
-    ProfileTargetStatus, ReloadOutcome, SnapshotNode, WatcherHealth,
+    ProfileInput, ProfileInstanceState, ProfileInstanceStatus, ProfileResolver, ProfileSnapshot,
+    ProfileStatus, ProfileTargetStatus, ProfileUpdateHandle, ProfileUpdateTicket, ReloadOutcome,
+    SnapshotNode, WatcherHealth,
 };
 
 const PROFILE_FORMAT: u32 = 1;
@@ -752,6 +753,20 @@ impl ProfileCompiler {
 /// Failure at the Profile source, language, or pure preflight boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
+    /// An input cannot preserve the running Profile's environment or marker identities.
+    #[error("incompatible Profile input: {0}")]
+    IncompatibleInput(String),
+    /// Another accepted input superseded the submitter's expected revision.
+    #[error("Profile input revision conflict: expected {expected}, current {current}")]
+    InputConflict {
+        /// Revision supplied by the composition owner.
+        expected: u64,
+        /// Current committed input revision.
+        current: u64,
+    },
+    /// The one pending command slot is occupied.
+    #[error("Profile command queue is full")]
+    Busy,
     /// One explicit environment path is not absolute.
     #[error("{kind} path must be absolute")]
     PathNotAbsolute {

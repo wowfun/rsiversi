@@ -46,6 +46,13 @@ handle. Scope creation, Local isolation and child disposal belong to that caller
 preparation neither creates nor shuts down a Runtime. This supports embedded
 compositions under the same Runtime/Context/Fiber authority as their application.
 
+`Host::profile_input` captures the same complete frozen composition for submission
+through a running Profile's owner-only updater. Building a second Host never
+mutates the first Host. Profile validates environment, limits and the old
+catalog's nominal Local/event identities before convergence; existing Context
+isolation remains unchanged. Runtime execution and global policy belong to the
+already running Runtime and are not replaced by an input.
+
 `Host::isolate_local_context` derives a caller-supplied Context with fresh Local
 identities for the frozen contract/event catalog and Profile control. It creates
 no Fiber or Runtime and does not activate a provider. Unregistered contracts and
@@ -95,8 +102,11 @@ explicitly frozen in its catalog, plus Profile's built-in `ProfileControl`.
 This does not expose the root Context or lifecycle mutation authority and does
 not create a managed dependency.
 
-Shutdown delegates deterministic quiescence to Meta and returns its structured
-cleanup outcome. Windows and macOS behavior is claimed only when their native
+Shutdown synchronously closes Profile command admission, then delegates
+deterministic quiescence to Meta and returns its structured cleanup outcome.
+An executing Profile update is included in Meta's shutdown waiter deadline;
+timeout retains the cleanup owner, and a later shutdown call joins the same work.
+Windows and macOS behavior is claimed only when their native
 test suites run on those systems.
 
 The SDK is usable by custom Rust applications. The standard product composition

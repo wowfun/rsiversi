@@ -8,7 +8,9 @@ use rsi_meta::{
     LocalContractKey, LocalEvent, LocalEventKey, PluginId, ResolvedFactory, Runtime,
     RuntimeSnapshot, ShutdownOutcome, UpdateMode,
 };
-use rsi_meta_profile::{ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileResolver};
+use rsi_meta_profile::{
+    ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileInput, ProfileResolver,
+};
 use sha2::{Digest as _, Sha256};
 use std::any::TypeId;
 use std::collections::BTreeMap;
@@ -73,6 +75,23 @@ pub(crate) struct FrozenCatalog {
 }
 
 impl ProfileResolver for FrozenCatalog {
+    fn validate_successor(&self, successor: &dyn ProfileResolver) -> rsi_meta_profile::Result<()> {
+        for (key, marker) in &self.local_contracts {
+            if successor.local_contract_type(key.as_str()).ok() != Some(*marker) {
+                return Err(rsi_meta_profile::ProfileError::IncompatibleInput(format!(
+                    "Local contract `{key}` changed nominal identity"
+                )));
+            }
+        }
+        for (key, marker) in &self.local_events {
+            if successor.local_event_type(key.as_str()).ok() != Some(*marker) {
+                return Err(rsi_meta_profile::ProfileError::IncompatibleInput(format!(
+                    "Local event `{key}` changed nominal identity"
+                )));
+            }
+        }
+        Ok(())
+    }
     fn resolve(&self, plugin: &PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
         let registration = self.factories.get(plugin).ok_or_else(|| {
             rsi_meta_profile::ProfileError::UnknownPlugin {
@@ -319,6 +338,16 @@ impl Host {
         self.prepare_profile(runtime, program).await
     }
 
+    /// Captures this frozen Host's complete Profile input without changing a running Host.
+    pub fn profile_input(&self, program: ProfileProgram) -> Result<ProfileInput> {
+        Ok(ProfileInput::new(
+            Arc::clone(&self.catalog) as Arc<dyn ProfileResolver>,
+            self.configured_program(program),
+            self.environment.clone(),
+            self.limits.profile.clone(),
+        ))
+    }
+
     /// Derives fresh Local identities for this catalog and Profile control, without Fibers.
     /// Unregistered and Portable mappings remain inherited from the supplied Context.
     /// This is not an authority allowlist: callers must supply a least-authority
@@ -339,22 +368,11 @@ impl Host {
         runtime: &Runtime,
         program: ProfileProgram,
     ) -> Result<ProfileBootstrap> {
-        let environment = self.environment.clone();
-        let program = self.configured_program(program);
+        let input = self.profile_input(program)?;
         let preparation_runtime = runtime.clone();
-        let resolver = Arc::clone(&self.catalog) as Arc<dyn ProfileResolver>;
-        let limits = self.limits.profile.clone();
         runtime
             .execution()
-            .prepare(move || {
-                ProfileBootstrap::prepare(
-                    &preparation_runtime,
-                    resolver,
-                    program,
-                    environment,
-                    limits,
-                )
-            })
+            .prepare(move || ProfileBootstrap::prepare_input(&preparation_runtime, input))
             .await
             .map_err(|_| HostError::Bootstrap("Profile preparation task failed".to_owned()))?
             .map_err(Into::into)
@@ -375,6 +393,7 @@ impl Host {
         };
         let bootstrap = self.prepare_profile(&runtime, program).await?;
         let control = bootstrap.control();
+        let updater = bootstrap.updater();
         let applied = runtime
             .root()
             .apply(
@@ -407,6 +426,7 @@ impl Host {
             catalog: self.catalog,
             profile_fiber,
             control,
+            updater,
         })
     }
 }
@@ -682,6 +702,7 @@ pub struct RunningHost {
     catalog: Arc<FrozenCatalog>,
     profile_fiber: FiberHandle,
     control: Arc<dyn ProfileControl>,
+    updater: rsi_meta_profile::ProfileUpdateHandle,
 }
 
 impl std::fmt::Debug for RunningHost {
@@ -695,6 +716,10 @@ impl std::fmt::Debug for RunningHost {
 }
 
 impl RunningHost {
+    /// Grants the owner input submission for this Profile without Runtime mutation authority.
+    pub fn updater(&self) -> rsi_meta_profile::ProfileUpdateHandle {
+        self.updater.clone()
+    }
     /// Returns the frozen filesystem authority.
     pub const fn paths(&self) -> Option<&HostPaths> {
         self.paths.as_ref()
@@ -760,6 +785,7 @@ impl RunningHost {
 
     /// Starts or joins deterministic Runtime teardown.
     pub async fn shutdown(&self) -> ShutdownOutcome {
+        self.updater.close_admission();
         self.runtime.shutdown().await
     }
 }

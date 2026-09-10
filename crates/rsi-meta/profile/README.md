@@ -78,7 +78,7 @@ Runtime Fiber ceiling instead of requiring a shadow copy of either graph. A
 prepared leaf may commit as Pending when its declared dependencies are absent.
 
 Equal healthy trees return `Unchanged` without advancing revision. Degraded
-state never suppresses a same-content retry. A changed `RestartRequired` leaf
+state never suppresses a same-content retry. A changed `RestartRequired` leaf in the committed source program
 publishes the candidate source digest and `RestartRequired` status without
 changing the observed graph. Replayable changes converge in the existing Meta
 graph. Failure retires candidate generations and reconstructs the prior target;
@@ -105,6 +105,58 @@ members in new order. Compensation removes failed candidate members, restores
 old bindings/order and reconstructs only members this attempt retired. A retained
 member may still participate in ordinary Meta dependency convergence. There is
 no prefix/suffix fallback or cross-registry atomicity claim.
+
+## Input replacement
+
+`ProfileInput` retains one immutable resolver, source program and compiler
+environment. `ProfileBootstrap::updater` grants its composition owner a separate
+`ProfileUpdateHandle`; the published `ProfileControl` does not grant that
+authority. A frozen Host can prepare another input without mutating its catalog.
+Replacement preserves the existing Runtime, Context, namespace and limits. The
+old resolver must validate that every registered Local/event name retains its
+nominal marker; resolvers that cannot establish this reject replacement.
+
+`ProfileInput::preflight_linked` lets product bootstraps reject linked argument
+and configuration errors before opening their native staging owner. It compiles
+the program and prepares selected known linked factories, containing preparation
+and prepared-state destruction panics on unwind targets. With `panic=abort`
+(including the browser WASM build), a panic terminates the process or Worker.
+It leaves unresolved/native factories to
+the complete preflight after staging and provides no Runtime activation proof.
+
+Manual reload, source notifications and input submissions share one owned
+command worker, with one executing command and at most one queued command.
+Submission returns a ticket; dropping a ticket never cancels admitted work.
+Retirement closes admission, lets the executing command finish convergence or
+compensation and rejects pending commands. Profile effect cleanup joins all
+background tasks and reports a failed task; a panicked command worker closes
+its queue, settling outstanding tickets as Stopped. Input revision is
+independent of completed graph revision and advances on accepted `Applied` or
+`Unchanged` input replacement. A stale expected revision returns `InputConflict`;
+an incompatible input returns `IncompatibleInput`. A full queue returns `Busy`
+without mutation, including manual reload; source
+notification retries use the normal capped backoff. Restart-required and failed attempts retain
+the previous complete input, including its resolver for compensation.
+An owner replacement requiring restart publishes `RestartRequired` while keeping
+the committed target and watch plan. Reloading that unchanged input preserves the
+indication; an accepted replacement or a changed committed tree supersedes it.
+Successful compensation preserves an outstanding owner restart indication. Failed
+compensation publishes `Degraded` while retaining that indication for recovery;
+repairing the old committed tree does not silently acknowledge the refused input.
+Restart refusals and no-op reloads do not advance graph revision. Reverting a
+file-based restart candidate to the converged tree clears its indication without
+reapplying Fibers.
+Scoped owners call `ProfileUpdateHandle::close` before disposing their child tree.
+This closes input and reload admission and waits for the executing command.
+Whole-Runtime owners call synchronous `close_admission` before Runtime shutdown;
+Meta's waiter deadline then includes any executing command, and the Profile effect
+owns its final joins. The command worker releases executable inputs after its
+admitted command settles, without waiting for child cleanup to reach the parent's
+deferred effect. The product's `ScopedProfile` uses the first path and
+`RunningHost` uses the second.
+Stopped control handles retain redacted status and tree snapshots, releasing
+their resolver and executable targets. A long-lived observation handle therefore
+does not postpone native factory finalization after its owning tree retires.
 
 ## Static generations
 
@@ -135,6 +187,9 @@ The Profile Fiber watches the root and every transitive include. Change signals
 use a serialized single-flight worker with a dirty bit, so a signal arriving
 during reload causes one subsequent rebuild. A candidate watch plan is fully
 established before mutation and replaces the old plan only after commit.
+If the command queue is full, the automatic worker retains the dirty signal and
+retries with capped backoff; it does not require another source event. Manual
+reload continues to report `Busy` to its caller without admitting a command.
 The native polling watcher performs bounded metadata probes at its short
 interval, rereads immediately when metadata changes, and forces a complete
 content hash at least every five seconds to detect changes that preserve size
