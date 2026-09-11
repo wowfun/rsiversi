@@ -36,6 +36,13 @@ and runs within the standard-product test step's policy lifetime, with its own
 failure log emitted before restoration. The deterministic required-backend failure test also
 runs without relaxing policy.
 
+The Linux desktop job owns native admission, standalone-versus-paired build
+rejection, frame-ACK failure, startup-close deadlines, and the normal conversation
+close/restart path. Its frozen distribution uses a fresh target directory; the
+budget includes that cold build rather than assuming the ordinary Cargo cache
+covers it. The browser job also runs the shared document typecheck and ownership
+tests before product interaction.
+
 The always-running `ci-required` job depends on every independent contract and
 fails unless each result is `success`. A repository-tool test derives the set
 of top-level workflow jobs and proves that the aggregate names every other job,

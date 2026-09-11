@@ -8,7 +8,7 @@ The repository-wide ownership and dependency rules live in
 setup, security, and verification documentation below its own subtree.
 
 Start with the [developer quick start](docs/quickstart.md) to build and run an
-isolated TUI or Web environment.
+isolated TUI or Web environment, or a paired Linux desktop distribution.
 
 Development builds optimize the SHA-256 dependency used to verify complete
 executable artifacts. This keeps local startup practical with full debug

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>RSI platform admission</title>
+<style>body{font:16px system-ui;background:#f7f6f3;color:#222;margin:0}main{max-width:880px;margin:40px auto}article{padding:16px;margin:8px;background:white;border:1px solid #deddd8;border-radius:8px}textarea{width:100%;height:64px;font:inherit}pre{white-space:pre-wrap}</style>
+<main><h1>RSI · desktop admission</h1><p>Real WebKitGTK, native Rust IPC, isolated state.</p><textarea aria-label="Message">Hello · 你好 · مرحبا</textarea><section id="transcript"></section><pre id="result">Running…</pre></main>
+<script>
+(async () => {
+ const report = { ok: false, userAgent: navigator.userAgent, checks: [], errors: [] };
+ const invoke = window.__TAURI__.core.invoke;
+ const check = (name, condition) => { if (!condition) throw new Error(name); report.checks.push(name); };
+ try {
+  const input = { kind: 'number', integer: 4294967297, fraction: 0.125, nested: { order: [3, 1, 2], value: 0.5 } };
+  check('tagged numeric IPC', JSON.stringify(await invoke('echo', { input })) === JSON.stringify(input));
+  const exact = '{"z":18446744073709551615,"a":1.234567890123456789,"nested":{"b":2,"a":1}}';
+  check('lossless ordered JSON text', await invoke('exact', { json: exact }) === exact);
+  let rejected = false; try { await invoke('echo', { input: { kind: 'number', integer: -1, fraction: 1, nested: null } }); } catch { rejected = true; }
+  check('typed invalid input rejection', rejected);
+  const bytes = new Uint8Array(await (await fetch('probe://localhost/frame')).arrayBuffer());
+  check('raw protocol bytes', bytes.join(',') === '0,1,127,128,255');
+  const start = performance.now();
+  const root = document.querySelector('#transcript');
+  for (let i = 0; i < 128; i++) { const block = document.createElement('article'); block.textContent = `${i}: bounded streaming content · ${'世界 '.repeat(30)}`; root.append(block); }
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  check('128 laid-out DOM blocks', root.children.length === 128 && root.lastElementChild.getBoundingClientRect().height > 0);
+  report.renderMs = performance.now() - start;
+  check('no horizontal overflow', document.documentElement.scrollWidth <= innerWidth);
+  report.ok = true;
+ } catch (error) { report.errors.push(String(error.stack ?? error)); }
+ window.admissionReport = report;
+ document.querySelector('#result').textContent = JSON.stringify(report, null, 2);
+ await invoke('finish', { report });
+})();
+</script></html>

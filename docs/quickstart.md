@@ -51,11 +51,24 @@ cargo check --locked -p rsi-terminal
 cargo build --locked -p rsi-web --target wasm32-unknown-unknown
 ```
 
+For the Linux desktop, install the GTK 3 and WebKitGTK 4.1 development libraries
+(`libgtk-3-dev` and `libwebkit2gtk-4.1-dev` on Ubuntu), use the Web build tools
+above, and run from a graphical session:
+
+```bash
+cargo xtask dist desktop /absolute/new/output --debug
+/absolute/new/output/bundle/rsi-desktop --assets /absolute/new/output/bundle/assets
+```
+
+The [desktop contract](../crates/rsi/desktop/README.md) owns persistent state,
+Host selection and paired-companion requirements.
+
 `xtask dev tui` watches the native renderer's explicit source inputs and replaces
-its presentation through the ordinary addon catalog. `xtask dev web` watches the
-standard document renderer and publishes its complete asset graph. Editing that
-JavaScript renderer requires no Rust build. Worker Rust code or bootstrap changes
-need a new Web bundle and application restart; see the
+its presentation through the ordinary addon catalog. `xtask dev web` uses Vite
+React Refresh for feature components; bootstrap edits reload the document.
+Independent renderers publish a complete asset graph through their own watcher.
+Editing JavaScript requires no Rust build. Worker Rust changes need a new Web
+bundle and application restart; see the
 [Web build contract](../plugins/rsi/web/README.md).
 
 The first development launch still builds `rsi` and all of its linked backends.

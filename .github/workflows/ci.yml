@@ -90,6 +90,7 @@ jobs:
             fixtures/rsi-api/browser-fetch/package-lock.json
             fixtures/rsi/client-probe/package-lock.json
             fixtures/rsi/web-product/package-lock.json
+            plugins/rsi/web/package-lock.json
       - name: Install matching bindings generator
         timeout-minutes: 15
         run: cargo install wasm-bindgen-cli --locked --version 0.2.127
@@ -145,6 +146,9 @@ jobs:
               sudo sysctl -w "$setting"
             fi
           done
+          npm ci --ignore-scripts --prefix ../../../plugins/rsi/web
+          npm run typecheck --prefix ../../../plugins/rsi/web
+          npm test --prefix ../../../plugins/rsi/web
           npm ci --ignore-scripts
           npm test
 
@@ -306,7 +310,7 @@ jobs:
           cargo clippy --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml --all-targets --all-features -- -D warnings
         timeout-minutes: 10
       - name: Lint standard rsi
-        run: cargo clippy --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check independent terminal presentation
         run: |
@@ -316,7 +320,7 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc --locked --manifest-path crates/rsi/terminal-native/Cargo.toml --no-deps --all-features
         timeout-minutes: 15
       - name: Compile standard rsi tests
-        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
+        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: runner.os == 'Linux'
@@ -337,7 +341,7 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets
+          cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets
           cargo xtask dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
             smoke_status=$?
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
@@ -346,7 +350,7 @@ jobs:
         timeout-minutes: 35
       - name: Exercise standard rsi on macOS
         if: runner.os == 'macOS'
-        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- --nocapture
+        run: cargo test --locked -p rsi -p rsi-service-host -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- --nocapture
         timeout-minutes: 20
 
   repository-tools:
@@ -415,6 +419,7 @@ jobs:
   ci-required:
     if: always()
     needs:
+      - rsi-desktop
       - documentation
       - rsi-meta-conformance
       - rsi-meta-browser
@@ -436,6 +441,7 @@ jobs:
           RSI_AI: ${{ needs.rsi-ai.result }}
           RSI_AGENT: ${{ needs.rsi-agent.result }}
           RSI: ${{ needs.rsi.result }}
+          RSI_DESKTOP: ${{ needs.rsi-desktop.result }}
           REPOSITORY_TOOLS: ${{ needs.repository-tools.result }}
           DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
           WINDOWS_RSI_META: ${{ needs.windows-rsi-meta.result }}
@@ -447,6 +453,52 @@ jobs:
           test "$RSI_AI" = success
           test "$RSI_AGENT" = success
           test "$RSI" = success
+          test "$RSI_DESKTOP" = success
           test "$REPOSITORY_TOOLS" = success
           test "$DEPENDENCY_AUDIT" = success
           test "$WINDOWS_RSI_META" = success
+
+  rsi-desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Linux desktop dependencies
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev webkit2gtk-driver xvfb dbus-x11
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.0
+          components: clippy,rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: . -> target
+      - name: Lint and test desktop adapter
+        timeout-minutes: 25
+        run: |
+          cargo clippy --locked -p rsi-desktop --all-targets -- -D warnings
+          cargo test --locked -p rsi-desktop --all-targets
+          cargo build --locked -p rsi-desktop --bin rsi-desktop
+      - name: Exercise native admission
+        timeout-minutes: 10
+        run: dbus-run-session -- xvfb-run -a cargo run --locked --manifest-path fixtures/rsi/desktop-admission/Cargo.toml
+      - name: Build shared document and desktop
+        timeout-minutes: 110
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.127 --locked
+          cargo xtask dist desktop "$RUNNER_TEMP/rsi-desktop-dist" --debug
+      - name: Exercise actual WebKitGTK first conversation
+        timeout-minutes: 5
+        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-evidence" --daemon --window-close --restart --save-failure --refresh-during-click --foreign-binary "$GITHUB_WORKSPACE/target/debug/rsi-desktop"
+      - name: Exercise missing frame acknowledgement
+        timeout-minutes: 5
+        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-ack-evidence" --daemon --ack-timeout
+      - name: Exercise startup close deadline
+        timeout-minutes: 5
+        run: dbus-run-session -- xvfb-run -a python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-startup-evidence" --daemon --startup-close

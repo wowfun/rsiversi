@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "rsi-desktop-admission"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tauri = "=2.11.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+tokio = { version = "1.47", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tempfile = "3.20"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

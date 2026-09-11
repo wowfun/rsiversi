@@ -1,0 +1,32 @@
+[package]
+name = "rsi-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi = { path = "../core" }
+rsi-application = { path = "../application" }
+rsi-gui = { path = "../gui" }
+rsi-workbench-ui = { path = "../workbench-ui" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-api-http = { path = "../../rsi-api/http" }
+rsi-web-assets = { path = "../web-assets" }
+rsi-ui = { path = "../ui" }
+async-trait.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "signal"] }
+tokio-util.workspace = true
+tauri = "=2.11.5"
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[lints]
+workspace = true

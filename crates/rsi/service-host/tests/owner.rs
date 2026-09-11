@@ -29,12 +29,45 @@ fn product_build() -> String {
 }
 
 #[test]
-fn product_build_identifies_the_exact_executable_artifact() {
-    let identity = service_host_product_build().unwrap();
+fn artifact_identity_remains_exact_independently_of_compatibility_family() {
+    let identity = rsi_service_host::service_host_executable_build().unwrap();
     let (version, digest) = identity.split_once("+sha256:").expect("artifact digest");
     assert_eq!(version, env!("CARGO_PKG_VERSION"));
     assert_eq!(digest.len(), 64);
     assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
+#[test]
+fn compatibility_identity_separates_family_from_executable_and_checks_epoch() {
+    let root = TempDir::new().unwrap();
+    let paths = paths(&root);
+    let mut metadata = HostOwnerMetadata::current(
+        HostOwnerMode::Daemon,
+        launch_key(),
+        HostEpoch::generate().unwrap(),
+        rsi_api_protocol::EndpointId::from_bytes([1; 16]),
+        Some(paths.socket().into()),
+    )
+    .unwrap();
+    let exact = rsi_service_host::service_host_executable_build().unwrap();
+    match option_env!("RSI_COMPILED_BUILD_FAMILY") {
+        Some(digest) => assert_eq!(
+            metadata.product_build,
+            format!("{}+family-sha256:{digest}", env!("CARGO_PKG_VERSION"))
+        ),
+        None => assert_eq!(metadata.product_build, exact),
+    }
+    assert!(metadata.is_compatible_with_current().unwrap());
+    metadata.product_build = if metadata.product_build.contains("+family-sha256:") {
+        exact.into()
+    } else {
+        exact.replace("+sha256:", "+family-sha256:")
+    };
+    metadata.validate().unwrap();
+    assert!(!metadata.is_compatible_with_current().unwrap());
+    metadata.product_build = product_build();
+    metadata.protocol_epoch += 1;
+    assert!(!metadata.is_compatible_with_current().unwrap());
 }
 
 #[test]

@@ -12,11 +12,27 @@ use thiserror::Error;
 /// Service Host wire protocol epoch.
 pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 9;
 static SERVICE_HOST_PRODUCT_BUILD: LazyLock<Result<String, String>> =
+    LazyLock::new(|| match option_env!("RSI_COMPILED_BUILD_FAMILY") {
+        Some(digest) => Ok(format!(
+            "{}+family-sha256:{digest}",
+            env!("CARGO_PKG_VERSION")
+        )),
+        None => SERVICE_HOST_EXECUTABLE_BUILD.clone(),
+    });
+static SERVICE_HOST_EXECUTABLE_BUILD: LazyLock<Result<String, String>> =
     LazyLock::new(executable_product_build);
 
-/// Returns the exact running executable identity used by local compatibility checks.
+/// Returns the exact standalone executable or paired family identity used for compatibility.
 pub fn service_host_product_build() -> Result<&'static str, ServiceHostError> {
     SERVICE_HOST_PRODUCT_BUILD
+        .as_ref()
+        .map(String::as_str)
+        .map_err(|error| ServiceHostError::Io(error.clone()))
+}
+
+/// Returns the exact running executable artifact identity independently of its build family.
+pub fn service_host_executable_build() -> Result<&'static str, ServiceHostError> {
+    SERVICE_HOST_EXECUTABLE_BUILD
         .as_ref()
         .map(String::as_str)
         .map_err(|error| ServiceHostError::Io(error.clone()))
@@ -168,9 +184,12 @@ pub(crate) fn validate_launch_key(value: &str) -> Result<(), ServiceHostError> {
 }
 
 fn validate_product_build(value: &str) -> Result<(), ServiceHostError> {
-    let Some((version, digest)) = value.rsplit_once("+sha256:") else {
+    let Some((version, digest)) = value
+        .rsplit_once("+sha256:")
+        .or_else(|| value.rsplit_once("+family-sha256:"))
+    else {
         return Err(ServiceHostError::Invalid(
-            "Service Host product build has no executable digest".into(),
+            "Service Host product build has no executable or family digest".into(),
         ));
     };
     if version.is_empty()

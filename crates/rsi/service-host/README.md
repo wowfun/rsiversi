@@ -29,7 +29,7 @@ HostEpoch is generated for each running owner and is not stored in that record.
 `LocalApiFactory` publishes an owner-only Unix listener for the
 [shared API HTTP codec](../../rsi-api/http/README.md). It requires the owner lease,
 API dispatcher and connection description. Startup supplies a validated launch
-key; the product combines it with the exact running executable build into the
+key; the product combines it with the running product compatibility build into the
 opaque LocalCompatibilityKey. The native peer UID supplies authentication.
 The listener capability exposes its socket, diagnostics and stop result without
 shutdown authority. Cancelling a stop waiter does not stop serving.
@@ -52,9 +52,24 @@ Session operation switch, draft table or composition pin. The
 [API contract](../../rsi-api/README.md) owns admission and mutation supervision;
 [native UDS client](../../rsi-api/uds-client/README.md) shares the same negotiated
 connection and finite/binary/SSE decoders as the other transports. The product's
-exact executable/launch gate remains stronger than remote wire negotiation.
+exact build/launch gate remains stronger than remote wire negotiation.
 Readiness completes the bounded description and operation-catalog exchanges,
 without creating or attaching a Session.
+
+Standalone builds identify compatibility by the running executable's SHA-256.
+Paired desktop/headless builds instead compile the digest of one frozen build
+manifest through `RSI_BUILD_FAMILY_MANIFEST`; the manifest is at most 16 MiB and
+schema 1. The build script validates each recorded file, executable bit and
+symlink against the current source root before embedding the digest, and registers
+those paths with Cargo for rebuilds. A stale manifest cannot describe modified
+recorded inputs. Runtime does not require the source checkout or manifest.
+The repository packaging owner captures actual source bytes, target,
+toolchain and controlled build inputs and builds both executables from that
+snapshot. A family digest is compatibility metadata, not authentication.
+Individual executable identity remains separately available through
+`service_host_executable_build` and the distribution's artifact hashes. A family
+identity never compares equal to a standalone executable identity. Both still
+require the protocol epoch, exact Service launch key and same-user transport.
 
 The persistent lease, strict owner metadata and detached log live below
 `<state>/session-host/`. Owner metadata schema 2 records EndpointId, HostEpoch,

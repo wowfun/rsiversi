@@ -26,8 +26,8 @@ pub use local_api::{
 };
 pub use owner::{
     HostOwnerLease, HostOwnerMetadata, HostOwnerMode, HostSignal, SERVICE_HOST_PROTOCOL_EPOCH,
-    ServiceHostError, ServiceHostPaths, owner_process_is_current, service_host_product_build,
-    signal_owner,
+    ServiceHostError, ServiceHostPaths, owner_process_is_current, service_host_executable_build,
+    service_host_product_build, signal_owner,
 };
 pub use owner_plugin::{ServiceOwnerContract, ServiceOwnerFactory};
 pub use questions::{QuestionBroker, QuestionBrokerFactory};
