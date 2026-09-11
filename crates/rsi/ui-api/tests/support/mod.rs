@@ -25,8 +25,19 @@ pub struct Source {
     pub entered: AtomicUsize,
     pub completed: AtomicUsize,
     pub gate: Semaphore,
+    lease: Mutex<std::sync::Weak<ContributionLease>>,
 }
 impl Source {
+    pub fn invalidate(&self) {
+        self.lease
+            .lock()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .invalidate()
+            .unwrap();
+    }
+
     fn view() -> UiView {
         UiView {
             title: "Exact target".into(),
@@ -118,6 +129,8 @@ impl PluginFactory for ContributionsFactory {
                 },
             )
             .unwrap();
+        let lease = Arc::new(lease);
+        *self.0.lease.lock().unwrap() = Arc::downgrade(&lease);
         plan.defer(
             "contribution",
             Box::new(move || {
@@ -261,6 +274,7 @@ impl Fixture {
             entered: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
             gate: Semaphore::new(0),
+            lease: Mutex::default(),
         });
         apply(
             &runtime.root(),

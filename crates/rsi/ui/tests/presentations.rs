@@ -13,6 +13,10 @@ use tokio::sync::Semaphore;
 
 #[path = "presentations/binding.rs"]
 mod binding;
+#[path = "presentations/invalidation.rs"]
+mod invalidation;
+#[path = "presentations/ordering.rs"]
+mod ordering;
 
 #[derive(Debug)]
 struct Source {
@@ -20,6 +24,8 @@ struct Source {
     mutations: AtomicUsize,
     fail: AtomicBool,
     unknown_action: AtomicBool,
+    fail_action: AtomicBool,
+    panic_action: AtomicBool,
     gate: Semaphore,
     mutating: Semaphore,
 }
@@ -83,6 +89,13 @@ impl UiAction for Action {
         Box::pin(async move {
             source.mutations.fetch_add(1, Ordering::SeqCst);
             source.mutating.acquire().await.unwrap().forget();
+            assert!(
+                !source.panic_action.load(Ordering::SeqCst),
+                "fixture action panic"
+            );
+            if source.fail_action.load(Ordering::SeqCst) {
+                return Err(UiError::Action("fixture action failure".into()));
+            }
             Ok(source.view())
         })
     }
@@ -167,6 +180,8 @@ async fn setup() -> (
         mutations: AtomicUsize::new(0),
         fail: AtomicBool::new(false),
         unknown_action: AtomicBool::new(false),
+        fail_action: AtomicBool::new(false),
+        panic_action: AtomicBool::new(false),
         gate: Semaphore::new(0),
         mutating: Semaphore::new(0),
     });
@@ -229,7 +244,7 @@ async fn asynchronous_refresh_preserves_current_data_and_fences_displayed_member
     assert_eq!(source.mutations.load(Ordering::SeqCst), 0);
     source.fail.store(true, Ordering::SeqCst);
     source.gate.add_permits(1);
-    ui.invalidate();
+    lease.invalidate().unwrap();
     until(|| lease.status().diagnostic.is_some()).await;
     assert_eq!(
         lease.snapshot().unwrap().unwrap().revision(),
@@ -237,7 +252,7 @@ async fn asynchronous_refresh_preserves_current_data_and_fences_displayed_member
     );
     source.fail.store(false, Ordering::SeqCst);
     source.gate.add_permits(1);
-    ui.invalidate();
+    lease.invalidate().unwrap();
     until(|| lease.status().revision == 2).await;
     assert!(lease.status().diagnostic.is_none());
     assert!(
@@ -258,7 +273,7 @@ async fn escaped_transport_bytes_keep_snapshot_slots_and_retired_readers_keep_th
     let mut readers = vec![lease.ready().await.unwrap().bytes().clone().into_bytes()];
     for revision in 2..=MAXIMUM_SNAPSHOTS as u64 {
         source.gate.add_permits(1);
-        ui.invalidate();
+        lease.invalidate().unwrap();
         until(|| lease.status().revision == revision).await;
         readers.push(
             lease
@@ -271,7 +286,7 @@ async fn escaped_transport_bytes_keep_snapshot_slots_and_retired_readers_keep_th
         );
     }
     assert_eq!(ui.presentation_usage().1, MAXIMUM_SNAPSHOTS);
-    ui.invalidate();
+    lease.invalidate().unwrap();
     until(|| lease.status().diagnostic.is_some()).await;
     assert_eq!(
         source.reads.load(Ordering::SeqCst),
@@ -329,7 +344,7 @@ async fn action_executed_before_retirement_has_an_unknown_outcome() {
 
 #[tokio::test]
 async fn models_cannot_publish_actions_outside_the_contribution() {
-    let (runtime, ui, source, _fiber, lease) = setup().await;
+    let (runtime, _ui, source, _fiber, lease) = setup().await;
     source.unknown_action.store(true, Ordering::SeqCst);
     source.gate.add_permits(1);
     assert!(matches!(lease.ready().await, Err(UiError::Invalid(_))));
@@ -343,8 +358,79 @@ async fn models_cannot_publish_actions_outside_the_contribution() {
     );
     source.unknown_action.store(false, Ordering::SeqCst);
     source.gate.add_permits(1);
-    ui.invalidate();
+    lease.invalidate().unwrap();
     until(|| lease.status().revision == 1).await;
     assert!(lease.snapshot().unwrap().unwrap().action("run").is_some());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn invalidation_during_action_coalesces_to_one_trailing_read() {
+    let (runtime, _ui, source, _fiber, lease) = setup().await;
+    source.gate.add_permits(1);
+    let snapshot = lease.ready().await.unwrap();
+    let action = lease.invoke(&snapshot.action("run").unwrap(), ActionInput::default());
+    until(|| source.mutations.load(Ordering::SeqCst) == 1).await;
+    for _ in 0..100 {
+        lease.invalidate().unwrap();
+    }
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            until(|| source.reads.load(Ordering::SeqCst) != 1),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+    source.gate.add_permits(1);
+    source.mutating.add_permits(1);
+    action.await.unwrap();
+    until(|| lease.status().revision == 3).await;
+    assert_eq!(source.reads.load(Ordering::SeqCst), 2);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn failed_and_panicking_actions_refresh_even_after_the_waiter_is_dropped() {
+    for panic in [false, true] {
+        let (runtime, _ui, source, _fiber, lease) = setup().await;
+        source.gate.add_permits(1);
+        let snapshot = lease.ready().await.unwrap();
+        source.fail_action.store(!panic, Ordering::SeqCst);
+        source.panic_action.store(panic, Ordering::SeqCst);
+        drop(lease.invoke(&snapshot.action("run").unwrap(), ActionInput::default()));
+        until(|| source.mutations.load(Ordering::SeqCst) == 1).await;
+        source.gate.add_permits(1);
+        source.mutating.add_permits(1);
+        until(|| lease.status().revision == 2).await;
+        assert_eq!(source.reads.load(Ordering::SeqCst), 2);
+        assert_eq!(source.mutations.load(Ordering::SeqCst), 1);
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
+async fn concurrent_action_replies_keep_their_original_predecessor() {
+    let (runtime, _ui, source, _fiber, lease) = setup().await;
+    source.gate.add_permits(1);
+    let snapshot = lease.ready().await.unwrap();
+    let reference = snapshot.action("run").unwrap();
+    let first = lease.invoke(&reference, ActionInput::default());
+    let second = lease.invoke(&reference, ActionInput::default());
+    until(|| source.mutations.load(Ordering::SeqCst) == 2).await;
+    source.gate.add_permits(1);
+    source.mutating.add_permits(2);
+    let results = [first.await, second.await];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(UiError::Action(_))))
+            .count(),
+        1
+    );
+    until(|| lease.status().revision == 3).await;
+    assert_eq!(source.mutations.load(Ordering::SeqCst), 2);
     assert!(runtime.shutdown().await.is_clean());
 }

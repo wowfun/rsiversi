@@ -1234,7 +1234,7 @@ async fn run_inner(
             .clone()
             .ok_or_else(|| error("TUI surface target is unavailable"))?,
     );
-    let mut ui_changes = client.ui.registry.changes();
+    let mut ui_changes = client.ui.registry.membership_changes();
     client.state.input_preferences = preferences.tui;
     let mut dimensions = terminal::size();
     let mut view = render::View::default();

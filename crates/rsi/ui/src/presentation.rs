@@ -4,7 +4,7 @@ use crate::{
     Result, UiError, UiModel, UiReference,
 };
 use futures_util::{FutureExt as _, future::BoxFuture};
-use rsi_api_protocol::{ByteBudget, ByteReservation, RetainedBytes};
+use rsi_api_protocol::{ByteBudget, ByteReceiver, ByteReservation, RetainedBytes};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex, Weak},
@@ -72,10 +72,11 @@ impl Reservation {
             revision,
             model,
         };
-        snapshot.validate()?;
-        let bytes = self
-            .bytes
-            .encode(&snapshot)
+        let mut writer = SnapshotWriter(self.bytes.receive());
+        snapshot.write_json(&mut writer)?;
+        let bytes = writer
+            .0
+            .finish_compact()
             .map_err(|_| UiError::Invalid("encoded snapshot exceeds admission".into()))?;
         self.release.changed.send_replace(());
         let bytes = bytes.with_retention(self.release);
@@ -96,6 +97,16 @@ impl Reservation {
                 .collect(),
             bytes,
         })))
+    }
+}
+struct SnapshotWriter(ByteReceiver);
+impl std::io::Write for SnapshotWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.append(bytes).map_err(std::io::Error::other)?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 #[derive(Debug)]
@@ -167,9 +178,48 @@ impl FailureKind {
     }
 }
 #[derive(Debug)]
+struct Publication {
+    snapshot: Option<SnapshotPin>,
+    action_epoch: u64,
+    active_actions: usize,
+    dirty: bool,
+}
+#[derive(Clone, Copy)]
+struct RefreshTicket {
+    revision: u64,
+    action_epoch: u64,
+}
+impl Publication {
+    fn revision(&self) -> u64 {
+        self.snapshot.as_ref().map_or(0, SnapshotPin::revision)
+    }
+    fn accepts(&self, ticket: RefreshTicket) -> bool {
+        self.revision() == ticket.revision
+            && self.action_epoch == ticket.action_epoch
+            && self.active_actions == 0
+    }
+}
+struct ActionCompletion {
+    state: Arc<Presentation>,
+    failed: bool,
+}
+impl Drop for ActionCompletion {
+    fn drop(&mut self) {
+        let mut current = self
+            .state
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current.active_actions -= 1;
+        current.dirty |= self.failed;
+        self.state.wake.send_replace(());
+    }
+}
+#[derive(Debug)]
 struct Presentation {
     identity: PresentationIdentity,
-    current: Mutex<Option<SnapshotPin>>,
+    current: Mutex<Publication>,
+    wake: watch::Sender<()>,
     changed: watch::Sender<PresentationStatus>,
     stop: CancellationToken,
     finished: CancellationToken,
@@ -178,37 +228,62 @@ struct Presentation {
     cleanup_error: Mutex<Option<String>>,
 }
 impl Presentation {
+    fn live(&self, capture: &Capture) -> bool {
+        !self.stop.is_cancelled()
+            && capture.entry.position.is_admitting()
+            && capture.target.position.is_admitting()
+            && !capture.entry.owner.stop.is_cancelled()
+            && !capture.target.owner.stop.is_cancelled()
+    }
+    fn invalidate(&self) {
+        self.current.lock().expect("presentation poisoned").dirty = true;
+        self.wake.send_replace(());
+    }
+    fn begin_refresh(&self) -> Option<RefreshTicket> {
+        let mut current = self.current.lock().expect("presentation poisoned");
+        if !current.dirty || current.active_actions != 0 {
+            return None;
+        }
+        current.dirty = false;
+        Some(RefreshTicket {
+            revision: current.revision(),
+            action_epoch: current.action_epoch,
+        })
+    }
     fn publish(
         &self,
         reservation: Reservation,
         capture: &Capture,
         model: UiModel,
-        expected: Option<u64>,
-    ) -> Result<SnapshotPin> {
+        predecessor: u64,
+        refresh: Option<RefreshTicket>,
+    ) -> Result<Option<SnapshotPin>> {
         validate_model(capture, &model)?;
-        let mut current = self.current.lock().expect("presentation poisoned");
-        if self.stop.is_cancelled()
-            || !capture.entry.position.is_admitting()
-            || !capture.target.position.is_admitting()
-            || capture.entry.owner.stop.is_cancelled()
-            || capture.target.owner.stop.is_cancelled()
-        {
-            return Err(UiError::Retired);
-        }
-        let revision = current.as_ref().map_or(0, SnapshotPin::revision);
-        if expected.is_some_and(|expected| expected != revision) {
-            return Err(UiError::Retired);
-        }
-        let next = revision.checked_add(1).ok_or(UiError::Capacity)?;
+        let next = predecessor.checked_add(1).ok_or(UiError::Capacity)?;
         let snapshot = reservation.materialize(self.identity.clone(), next, model)?;
-        *current = Some(snapshot.clone());
+        let mut current = self.current.lock().expect("presentation poisoned");
+        if !self.live(capture) {
+            return Err(UiError::Retired);
+        }
+        if current.revision() != predecessor
+            || refresh.is_some_and(|ticket| !current.accepts(ticket))
+        {
+            return Ok(None);
+        }
+        current.snapshot = Some(snapshot.clone());
         self.changed.send_replace(PresentationStatus {
             revision: next,
             diagnostic: None,
             stopped: false,
             failure: None,
         });
-        Ok(snapshot)
+        Ok(Some(snapshot))
+    }
+    fn fail_refresh(&self, capture: &Capture, ticket: RefreshTicket, error: &UiError) {
+        let current = self.current.lock().expect("presentation poisoned");
+        if self.live(capture) && current.accepts(ticket) {
+            self.fail(error);
+        }
     }
     fn fail(&self, error: &UiError) {
         let mut message = error.to_string();
@@ -231,7 +306,7 @@ impl Presentation {
         let mut current = self.current.lock().expect("presentation poisoned");
         self.stop.cancel();
         self.actions.retire();
-        current.take();
+        current.snapshot.take();
         self.changed.send_modify(|status| status.stopped = true);
     }
 }
@@ -243,6 +318,13 @@ pub struct PresentationLease {
     state: Arc<Presentation>,
 }
 impl PresentationLease {
+    /// Requests one coalesced refresh for this exact live presentation.
+    pub fn invalidate(&self) -> Result<()> {
+        self.snapshot()?;
+        self.state.invalidate();
+        Ok(())
+    }
+
     /// Exact presentation identity, available before the first model is produced.
     pub fn identity(&self) -> &PresentationIdentity {
         &self.state.identity
@@ -261,6 +343,7 @@ impl PresentationLease {
             .current
             .lock()
             .expect("presentation poisoned")
+            .snapshot
             .clone())
     }
     /// Latest bounded state for an owner-rendered diagnostic.
@@ -315,8 +398,8 @@ impl PresentationLease {
         let admitted = (|| {
             input.validate()?;
             let ui = self.ui.upgrade().ok_or(UiError::Retired)?;
-            let current = self.state.current.lock().expect("presentation poisoned");
-            let snapshot = current.as_ref().ok_or(UiError::Retired)?;
+            let mut current = self.state.current.lock().expect("presentation poisoned");
+            let snapshot = current.snapshot.as_ref().ok_or(UiError::Retired)?;
             if self.state.stop.is_cancelled()
                 || reference.presentation != self.state.identity
                 || reference.revision != snapshot.revision()
@@ -343,23 +426,38 @@ impl PresentationLease {
                 .map_err(|_| UiError::Capacity)?;
             let token = self.state.actions.admit()?;
             let reservation = ui.snapshots.reserve()?;
-            Ok((ui, capture, handler, permit, token, reservation))
+            current.action_epoch = current
+                .action_epoch
+                .checked_add(1)
+                .ok_or(UiError::Capacity)?;
+            current.active_actions += 1;
+            let completion = ActionCompletion {
+                state: self.state.clone(),
+                failed: true,
+            };
+            Ok((ui, capture, handler, permit, token, reservation, completion))
         })();
-        let (ui, capture, handler, permit, token, reservation) = match admitted {
+        let (ui, capture, handler, permit, token, reservation, completion) = match admitted {
             Ok(admitted) => admitted,
             Err(error) => return Box::pin(async { Err(error) }),
         };
         let state = self.state.clone();
         let revision = reference.revision;
         let task = ui.execution.spawn(async move {
+            let mut completion = completion;
             let (_permit, _token) = (permit, token);
             let model = handler
                 .invoke_model(action_target(&capture, &state), input)
                 .await
                 .map_err(|error| UiError::Action(error.to_string()))?;
-            state
-                .publish(reservation, &capture, model, Some(revision))
-                .map_err(|error| UiError::Action(error.to_string()))
+            let snapshot = state
+                .publish(reservation, &capture, model, revision, None)
+                .map_err(|error| UiError::Action(error.to_string()))?
+                .ok_or_else(|| {
+                    UiError::Action("action reply was superseded after execution".into())
+                })?;
+            completion.failed = false;
+            Ok(snapshot)
         });
         Box::pin(async move {
             task.await
@@ -383,7 +481,7 @@ impl PresentationLease {
             }
             let ui = self.ui.upgrade().ok_or(UiError::Retired)?;
             let current = self.state.current.lock().expect("presentation poisoned");
-            let snapshot = current.as_ref().ok_or(UiError::Retired)?;
+            let snapshot = current.snapshot.as_ref().ok_or(UiError::Retired)?;
             if self.state.stop.is_cancelled()
                 || revision != snapshot.revision()
                 || !snapshot.0.sources.contains(name)
@@ -461,7 +559,13 @@ impl Ui {
                 reference: reference.clone(),
                 epoch: crate::fresh_identity("presentation").map_err(UiError::Action)?,
             },
-            current: Mutex::new(None),
+            current: Mutex::new(Publication {
+                snapshot: None,
+                action_epoch: 0,
+                active_actions: 0,
+                dirty: true,
+            }),
+            wake: watch::channel(()).0,
             changed: status_sender,
             stop: CancellationToken::new(),
             finished: CancellationToken::new(),
@@ -469,7 +573,10 @@ impl Ui {
             bound_context: Mutex::new(None),
             cleanup_error: Mutex::new(None),
         });
-        let changes = self.changes();
+        let changes = (
+            capture.entry.owner.changed.subscribe(),
+            capture.target.owner.changed.subscribe(),
+        );
         let lease = PresentationLease {
             ui: Arc::downgrade(self),
             state: state.clone(),
@@ -562,37 +669,65 @@ async fn materialize(
     renderer: Arc<dyn crate::SurfaceRenderer>,
     pool: SnapshotPool,
     initial: Reservation,
-    mut changes: watch::Receiver<u64>,
+    changes: (watch::Receiver<()>, watch::Receiver<()>),
 ) {
+    let (mut contribution_changes, mut target_changes) = changes;
     let mut initial = Some(initial);
     let mut released = pool.released.subscribe();
+    let mut wake = state.wake.subscribe();
+    let mut capacity_blocked = false;
     loop {
-        released.borrow_and_update();
-        let reservation = initial.take().map_or_else(|| pool.reserve(), Ok);
-        let capacity_blocked = matches!(&reservation, Err(UiError::Capacity));
-        let result = match reservation {
-            Ok(reservation) => tokio::select! {
-                biased;
-                () = state.stop.cancelled() => break,
-                () = capture.entry.owner.stop.cancelled() => break,
-                () = capture.target.owner.stop.cancelled() => break,
-                result = renderer.model_in(context(capture, state), state.identity.clone()) => result.and_then(|model| state.publish(reservation, capture, model, None)),
-            },
-            Err(error) => Err(error),
-        };
-        if let Err(error) = result {
-            state.fail(&error);
+        wake.borrow_and_update();
+        for changes in [&mut contribution_changes, &mut target_changes] {
+            if changes.has_changed().unwrap_or(false) {
+                changes.borrow_and_update();
+                state.invalidate();
+            }
+        }
+        if !capacity_blocked && let Some(ticket) = state.begin_refresh() {
+            released.borrow_and_update();
+            let reservation = initial.take().map_or_else(|| pool.reserve(), Ok);
+            let result = match reservation {
+                Ok(reservation) => tokio::select! {
+                    biased;
+                    () = state.stop.cancelled() => break,
+                    () = capture.entry.owner.stop.cancelled() => break,
+                    () = capture.target.owner.stop.cancelled() => break,
+                    result = renderer.model_in(context(capture, state), state.identity.clone()) =>
+                        result.and_then(|model| state.publish(reservation, capture, model, ticket.revision, Some(ticket))),
+                },
+                Err(error) => {
+                    capacity_blocked = true;
+                    state.invalidate();
+                    Err(error)
+                }
+            };
+            if let Err(error) = result {
+                state.fail_refresh(capture, ticket, &error);
+            }
+            if !capacity_blocked {
+                continue;
+            }
         }
         tokio::select! {
             biased;
             () = state.stop.cancelled() => break,
             () = capture.entry.owner.stop.cancelled() => break,
             () = capture.target.owner.stop.cancelled() => break,
-            result = changes.changed() => if result.is_err() { break; },
-            _ = released.changed(), if capacity_blocked => {},
+            result = contribution_changes.changed() => {
+                if result.is_err() { break; }
+                state.invalidate();
+            },
+            result = target_changes.changed() => {
+                if result.is_err() { break; }
+                state.invalidate();
+            },
+            _ = wake.changed() => {},
+            _ = released.changed(), if capacity_blocked => { capacity_blocked = false; },
         }
     }
 }
+
 fn action_target(capture: &Capture, state: &Presentation) -> crate::ActionTarget {
     crate::ActionTarget {
         context: context(capture, state),
@@ -613,7 +748,6 @@ fn surface(capture: &Capture, reference: &UiReference) -> Result<Arc<dyn crate::
         .ok_or(UiError::Retired)
 }
 fn validate_model(capture: &Capture, model: &UiModel) -> Result<()> {
-    model.validate()?;
     for action in &model.actions {
         if !capture.entry.value.actions.iter().any(|candidate| {
             candidate.name == action.name && candidate.target == capture.target.kind

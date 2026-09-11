@@ -19,13 +19,32 @@ use tokio_util::{
 mod presentation;
 pub use presentation::{PresentationLease, PresentationStatus, SnapshotPin};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Owner {
     pub(crate) stop: CancellationToken,
     pub(crate) tasks: TaskTracker,
     admission: Mutex<()>,
+    changed: watch::Sender<()>,
+}
+impl Default for Owner {
+    fn default() -> Self {
+        Self {
+            stop: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+            admission: Mutex::new(()),
+            changed: watch::channel(()).0,
+        }
+    }
 }
 impl Owner {
+    fn invalidate(&self) -> Result<()> {
+        let _admission = self.admission.lock().expect("UI owner admission poisoned");
+        if self.stop.is_cancelled() {
+            return Err(UiError::Retired);
+        }
+        self.changed.send_replace(());
+        Ok(())
+    }
     fn admit(&self) -> Result<TaskTrackerToken> {
         let _admission = self.admission.lock().expect("UI owner admission poisoned");
         if self.stop.is_cancelled() {
@@ -115,6 +134,11 @@ pub struct ContributionLease {
     owner: Arc<Owner>,
 }
 impl ContributionLease {
+    /// Invalidates data only for this exact contribution or target registration.
+    pub fn invalidate(&self) -> Result<()> {
+        self.owner.invalidate()
+    }
+
     /// Immediately fences new target/contribution work; disposal joins its cleanup.
     pub fn retire(&self) {
         self.owner.retire();
@@ -148,13 +172,12 @@ impl Ui {
             snapshots: presentation::SnapshotPool::new(),
         })
     }
-    /// Signals that a plugin's underlying presentation data has changed.
-    pub fn invalidate(&self) {
+    fn membership_changed(&self) {
         self.changed
             .send_modify(|value| *value = value.saturating_add(1));
     }
-    /// Coalesced membership/presentation changes, independent of durable cursors.
-    pub fn changes(&self) -> watch::Receiver<u64> {
+    /// Coalesced registration changes for catalogs and menus, never domain data.
+    pub fn membership_changes(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
     }
     fn ensure_owner(&self, plan: &ActivationPlan) -> Result<()> {
@@ -210,7 +233,7 @@ impl Ui {
                         .entries
                         .remove(&undo_id);
                     drop(removed);
-                    ui.invalidate();
+                    ui.membership_changed();
                 }
                 Ok(())
             },
@@ -240,7 +263,7 @@ impl Ui {
                 Ok(())
             },
         )?;
-        self.invalidate();
+        self.membership_changed();
         Ok(ContributionLease {
             registration,
             owner,
@@ -277,7 +300,7 @@ impl Ui {
                         .targets
                         .remove(&undo_id);
                     drop(removed);
-                    ui.invalidate();
+                    ui.membership_changed();
                 }
                 Ok(())
             },
@@ -301,7 +324,7 @@ impl Ui {
                 Ok(())
             },
         )?;
-        self.invalidate();
+        self.membership_changed();
         Ok((
             Arc::new(UiTarget {
                 ui: Arc::downgrade(self),
@@ -559,7 +582,7 @@ impl Ui {
                 presentation: None,
             };
             let result = handler.invoke(target, input).await;
-            ui.invalidate();
+            let _ = capture.target.owner.invalidate();
             ui.bind(&reference, &capture, result?)
         });
         Box::pin(async move {
@@ -577,7 +600,7 @@ impl Ui {
         for target in state.targets.values() {
             target.owner.retire();
         }
-        self.invalidate();
+        self.membership_changed();
     }
     pub(crate) async fn close(&self) {
         self.retire();

@@ -83,6 +83,10 @@ impl UiModel {
     }
     /// Validates complete model data before publication.
     pub fn validate(&self) -> Result<()> {
+        self.validate_semantics()?;
+        bounded(self, MAXIMUM_VIEW_BYTES)
+    }
+    fn validate_semantics(&self) -> Result<()> {
         let invalid = || ProtocolError("invalid model identity or references".into());
         if !name_valid(&self.renderer)
             || !name_valid(&self.schema.name)
@@ -100,7 +104,7 @@ impl UiModel {
             }
         }
         if let Some(view) = &self.standard_view {
-            view.validate()?;
+            view.validate_semantics()?;
             for element in &view.elements {
                 if let UiElement::Button { action, .. } = element
                     && !names.contains(action)
@@ -123,7 +127,7 @@ impl UiModel {
                 return Err(invalid());
             }
         }
-        bounded(self, MAXIMUM_VIEW_BYTES)
+        Ok(())
     }
 }
 /// An exact live presentation, independently of contribution and target lifetimes.
@@ -149,6 +153,16 @@ pub struct ModelSnapshot {
 impl ModelSnapshot {
     /// Validates the full wire envelope, not merely its inner model.
     pub fn validate(&self) -> Result<()> {
+        self.validate_semantics()?;
+        bounded(self, MAXIMUM_VIEW_BYTES)
+    }
+    /// Validates and writes one complete bounded envelope into caller-admitted storage.
+    /// Partial output must be discarded when validation or writing fails.
+    pub fn write_json(&self, writer: &mut impl std::io::Write) -> Result<()> {
+        self.validate_semantics()?;
+        crate::view::write_bounded(self, MAXIMUM_VIEW_BYTES, writer)
+    }
+    fn validate_semantics(&self) -> Result<()> {
         let reference = &self.presentation.reference;
         if self.revision == 0
             || !name_valid(&self.presentation.epoch)
@@ -163,8 +177,7 @@ impl ModelSnapshot {
         {
             return Err(ProtocolError("invalid presentation identity".into()));
         }
-        self.model.validate()?;
-        bounded(self, MAXIMUM_VIEW_BYTES)
+        self.model.validate_semantics()
     }
 }
 /// Invocation address fenced by the displayed presentation and snapshot.
@@ -182,6 +195,44 @@ pub struct PresentationAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_writer_bounds_the_escaped_envelope_and_propagates_destination_failure() {
+        let mut snapshot = ModelSnapshot {
+            presentation: PresentationIdentity {
+                reference: UiReference {
+                    application: "app".into(),
+                    target: "target".into(),
+                    contribution: "bundle".into(),
+                    name: "panel".into(),
+                },
+                epoch: "epoch".into(),
+            },
+            revision: 1,
+            model: UiModel::standard(UiView::default()).unwrap(),
+        };
+        for size in [0, 100, MAXIMUM_VIEW_BYTES / 6 - 200, MAXIMUM_VIEW_BYTES / 6] {
+            snapshot.model.data = Value::String("\u{0001}".repeat(size));
+            let mut output = Vec::new();
+            let result = snapshot.write_json(&mut output);
+            assert_eq!(result.is_ok(), snapshot.validate().is_ok());
+            assert!(output.len() <= MAXIMUM_VIEW_BYTES);
+            if result.is_ok() {
+                assert_eq!(
+                    serde_json::from_slice::<ModelSnapshot>(&output)
+                        .unwrap()
+                        .model
+                        .data,
+                    snapshot.model.data
+                );
+            }
+        }
+        snapshot.model.data = Value::Null;
+        assert!(snapshot.write_json(&mut [0_u8; 16].as_mut_slice()).is_err());
+        snapshot.revision = 0;
+        let mut output = Vec::new();
+        assert!(snapshot.write_json(&mut output).is_err());
+        assert!(output.is_empty(), "semantic rejection precedes writing");
+    }
     #[test]
     fn model_membership_and_full_escaped_envelope_are_bounded() {
         let view = UiView {

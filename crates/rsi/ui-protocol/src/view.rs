@@ -100,6 +100,10 @@ pub enum UiElement {
 impl UiView {
     /// Validates names, cardinalities and the complete encoded envelope.
     pub fn validate(&self) -> Result<()> {
+        self.validate_semantics()?;
+        bounded(self, MAXIMUM_VIEW_BYTES)
+    }
+    pub(crate) fn validate_semantics(&self) -> Result<()> {
         #[derive(Serialize)]
         struct Input<'a> {
             value: &'a Value,
@@ -143,7 +147,7 @@ impl UiView {
                 )?;
             }
         }
-        bounded(self, MAXIMUM_VIEW_BYTES)
+        Ok(())
     }
 }
 /// Bound view; buttons resolve only through the same bundle and target.
@@ -179,21 +183,38 @@ pub fn name_valid(value: &str) -> bool {
 }
 /// Counts encoded JSON within a fixed bound without allocating a payload.
 pub fn bounded(value: &impl Serialize, maximum: usize) -> Result<()> {
-    struct Counter(usize);
-    impl Write for Counter {
+    write_bounded(value, maximum, &mut std::io::sink())
+}
+pub(crate) fn write_bounded(
+    value: &impl Serialize,
+    maximum: usize,
+    writer: &mut impl Write,
+) -> Result<()> {
+    struct Bounded<'a, W> {
+        remaining: usize,
+        writer: &'a mut W,
+    }
+    impl<W: Write> Write for Bounded<'_, W> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
+            self.remaining = self
+                .remaining
                 .checked_sub(bytes.len())
                 .ok_or_else(|| std::io::Error::other("quota"))?;
+            self.writer.write_all(bytes)?;
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+            self.writer.flush()
         }
     }
-    serde_json::to_writer(Counter(maximum), value)
-        .map_err(|_| ProtocolError("encoded UI data exceeds its limit".into()))
+    serde_json::to_writer(
+        Bounded {
+            remaining: maximum,
+            writer,
+        },
+        value,
+    )
+    .map_err(|error| ProtocolError(format!("could not write bounded UI data: {error}")))
 }
 
 #[cfg(test)]

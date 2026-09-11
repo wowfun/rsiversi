@@ -51,7 +51,22 @@ Retiring entries keep their admitted action capacity until completion. A
 registry generation cannot admit replacement work by forgetting old tasks.
 
 `PresentationLease` owns asynchronous model refresh for one exact surface. Its
-source runs after reserving one of 32 snapshot slots and up to 128 KiB from the
+background reads capture the displayed revision and action admission epoch.
+An admitted action fences older reads before its handler starts; a background
+result or diagnostic cannot publish during an action or after that ticket changes.
+Concurrent actions retain their displayed predecessor: a reply conflict after
+execution is an unknown outcome, never permission to replay the mutation.
+Invalidations coalesce while work runs. Failed actions request a trailing refresh;
+successful actions keep their returned model unless data was explicitly invalidated.
+Candidates are validated and encoded outside the publication lock; that lock only
+checks freshness and installs a complete immutable snapshot.
+
+`Ui::membership_changes` reports registration changes to menu/catalog consumers.
+Data refresh belongs to the exact contribution/target registration lease or
+presentation lease: their `invalidate` methods reject retired owners. Each
+presentation watches only its contribution, target and own coalesced invalidation.
+
+Each source runs after reserving one of 32 snapshot slots and up to 128 KiB from the
 application's shared 4 MiB encoded snapshot pool. At most 16 presentations run.
 Current, candidate and escaped reader pins share these limits. A synchronous
 snapshot lookup reads already materialized data and never calls domain code.

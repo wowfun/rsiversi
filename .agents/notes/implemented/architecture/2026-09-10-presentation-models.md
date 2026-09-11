@@ -14,6 +14,11 @@ Keep bounded neutral models separate from executable renderer admission.
 Presentation leases materialize asynchronously and drawing consumes captured
 snapshots. Invocation checks exact presentation, revision and displayed
 membership. Snapshot-count retention follows the last encoded-byte reader.
+Background reads carry both the publication predecessor and action admission
+epoch. An action blocks refresh publication until all admitted actions finish;
+superseded reads coalesce into one trailing refresh. Candidate encoding runs
+outside the publication lock. Membership changes and scoped model invalidation
+have distinct owners, so unrelated presentations do not refresh together.
 Portable UI receives an explicit target-scoped business API capability through
 an ordinary child Profile; opaque presentation strings grant no domain access.
 
@@ -26,6 +31,11 @@ One resident HttpAssets object publishes renderer-only candidates by expected
 generation. Current, retiring and candidate graphs share one budget. Full graph
 leases retain old lazy imports; unchanged file bytes reuse existing reservations.
 Document mount/update/dispose and old-work drain finish before acknowledgement.
+One document owner spans Worker replacements and closes replacement admission
+synchronously. Disposal rejection or deadline expiry requires a document reload,
+because a new table cannot prove that arbitrary old renderer resources are gone.
+Both bridge ends reserve bounded lifecycle admission independently of ordinary
+input, while draining admitted mutations before reporting shutdown.
 The native terminal owner retains TTY modes, hooks, controller and drafts while
 an ordinary presentation subtree loads independent native renderer code.
 

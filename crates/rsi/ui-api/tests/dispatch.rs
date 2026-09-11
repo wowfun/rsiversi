@@ -155,9 +155,14 @@ async fn dropped_action_waiter_and_observer_do_not_cancel_admitted_mutation() {
         Err(ApiError::OutcomeUnknown)
     ));
     drop(stream);
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            until(|| fixture.binder.closed.load(Ordering::SeqCst) != 0),
+        )
+        .await
+        .is_err()
+    );
     assert_eq!(fixture.binder.closed.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.source.completed.load(Ordering::SeqCst), 0);
     fixture.source.gate.add_permits(1);
@@ -257,7 +262,7 @@ async fn transport_bytes_keep_snapshot_count_and_budget_after_observer_retiremen
     let escaped_item = message.json.clone();
     let escaped = message.json.into_bytes().slice(1..2);
     assert_eq!(fixture.ui.presentation_usage().1, 1);
-    fixture.ui.invalidate();
+    fixture.source.invalidate();
     let next = item(&mut stream).await;
     assert_eq!(next.snapshot.revision, 2);
     assert!(next.ticket.as_ref().unwrap().starts_with("input-"));
@@ -389,7 +394,7 @@ async fn catalog_pages_bound_full_json_escaping_and_resume_by_logical_name() {
 }
 
 #[tokio::test]
-async fn refresh_during_action_fences_busy_tickets_and_reports_uncertain_publication() {
+async fn refresh_during_action_waits_for_its_reply_and_preserves_ticket_fences() {
     let fixture = Fixture::new().await;
     let ApiOutput::Stream(mut stream) = fixture
         .call("observe", CallOrigin::Local, &observe("busy", 1))
@@ -402,23 +407,26 @@ async fn refresh_during_action_fences_busy_tickets_and_reports_uncertain_publica
     let request = action("busy", &first);
     let running = fixture.call("invoke", CallOrigin::Local, &request);
     until(|| fixture.source.entered.load(Ordering::SeqCst) == 1).await;
-    fixture.ui.invalidate();
-    let refreshed = loop {
-        let next = item(&mut stream).await;
-        if next.snapshot.revision > first.snapshot.revision {
-            break next;
-        }
-    };
+    fixture.source.invalidate();
     assert!(
-        refreshed.ticket.is_none(),
-        "refresh must not mint tickets while busy"
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            until(|| fixture.source.refreshes.load(Ordering::SeqCst) != 1),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        fixture.source.refreshes.load(Ordering::SeqCst),
+        1,
+        "invalidation waits for an admitted action instead of invalidating its predecessor"
     );
     assert!(matches!(
         fixture.call("invoke", CallOrigin::Local, &request).await,
         Err(ApiError::OutcomeUnknown)
     ));
     fixture.source.gate.add_permits(1);
-    assert!(matches!(running.await, Err(ApiError::OutcomeUnknown)));
+    running.await.unwrap();
     assert_eq!(fixture.source.completed.load(Ordering::SeqCst), 1);
     let fresh = loop {
         let next = item(&mut stream).await;
@@ -454,7 +462,7 @@ async fn diagnostic_only_refresh_keeps_the_delivered_ticket_and_sends_no_duplica
     let first = item(&mut stream).await;
     let refreshes = fixture.source.refreshes.load(Ordering::SeqCst);
     fixture.source.fail_refresh.store(true, Ordering::SeqCst);
-    fixture.ui.invalidate();
+    fixture.source.invalidate();
     until(|| fixture.source.refreshes.load(Ordering::SeqCst) > refreshes).await;
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())

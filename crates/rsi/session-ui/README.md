@@ -44,7 +44,10 @@ origin in the scope. Revoked origins are rejected before creating a target.
 
 Each export is a real child `ScopedProfile` with isolated controller, observation
 sink and target slots. It retains the ordinary Session controller and its domain
-facets; projection delivery only invalidates UI snapshots and immediately releases
+facets; observation delivery invalidates only this binding's target through a
+private weak registration lease, attached after target activation. Before that
+activation no presentation exists; an early notice needs no retained replay.
+Projection delivery immediately releases
 the incoming projection lease. No Session read lease is held across UI observation.
 The UI API closes presentations and drains admitted actions before the binder
 closes this Profile. A cancelled startup waiter leaves owned startup and cleanup

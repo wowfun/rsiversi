@@ -15,10 +15,10 @@ use rsi_meta::{
     UpdateMode,
 };
 use rsi_session_protocol::SessionContract;
-use rsi_ui::{ContributionLease, TargetKind, Ui, UiContract, UiTargetContract};
+use rsi_ui::{ContributionLease, TargetKind, UiContract, UiTargetContract};
 use rsi_ui_api::{ExportScope, UiBinding, UiBindingOwner, UiTargetBinder, UiTargetBinderContract};
 use std::sync::{
-    Arc,
+    Arc, Mutex, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
@@ -33,6 +33,7 @@ impl LocalContract for TargetLease {
 #[derive(Debug)]
 struct Target {
     origin: CallOrigin,
+    invalidation: Arc<Invalidation>,
 }
 #[async_trait]
 impl PluginFactory for Target {
@@ -71,6 +72,11 @@ impl PluginFactory for Target {
             .register_target(&plan, TargetKind::Surface)
             .map_err(super::meta)?;
         let lease = Arc::new(lease);
+        *self
+            .invalidation
+            .0
+            .lock()
+            .expect("Session UI invalidation poisoned") = Arc::downgrade(&lease);
         let supplies = [
             plan.context().provide_local::<UiTargetContract>(target)?,
             plan.context().provide_local::<TargetLease>(lease.clone())?,
@@ -93,7 +99,21 @@ impl PluginFactory for Target {
     }
 }
 #[derive(Debug)]
-struct Sink(Arc<Ui>);
+struct Sink(Arc<Invalidation>);
+#[derive(Debug, Default)]
+struct Invalidation(Mutex<Weak<ContributionLease>>);
+impl Invalidation {
+    fn invalidate(&self) {
+        if let Some(lease) = self
+            .0
+            .lock()
+            .expect("Session UI invalidation poisoned")
+            .upgrade()
+        {
+            let _ = lease.invalidate();
+        }
+    }
+}
 #[async_trait]
 impl ObservationSink for Sink {
     async fn observation(
@@ -129,18 +149,16 @@ impl ObservationSink for Sink {
     }
 }
 #[derive(Debug)]
-struct SinkFactory;
+struct SinkFactory(Arc<Invalidation>);
 #[async_trait]
 impl PluginFactory for SinkFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        Ok(super::no_config(config)?.requiring_local::<UiContract>())
+        super::no_config(config)
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let supply = plan
             .context()
-            .provide_local::<ObservationSinkContract>(Arc::new(Sink(
-                plan.local::<UiContract>()?,
-            )))?;
+            .provide_local::<ObservationSinkContract>(Arc::new(Sink(self.0.clone())))?;
         plan.defer(
             "withdraw exported Session observation",
             Box::new(move || {
@@ -303,18 +321,28 @@ impl UiTargetBinder for Binding {
 }
 fn host(origin: CallOrigin) -> rsi_host::Result<Host> {
     let mut builder = HostBuilder::without_paths(std::env::consts::OS);
+    let invalidation = Arc::new(Invalidation::default());
     builder.register_local_contract::<ObservationSinkContract>()?;
     builder.register_local_contract::<SessionControllerContract>()?;
     builder.register_local_contract::<UiTargetContract>()?;
     builder.register_local_contract::<TargetLease>()?;
     builder.register_local_contract::<rsi_ui::UiBusinessApiContract>()?;
     let factories: [(&str, Arc<dyn PluginFactory>); 3] = [
-        ("rsi.session.ui.sink", Arc::new(SinkFactory)),
+        (
+            "rsi.session.ui.sink",
+            Arc::new(SinkFactory(invalidation.clone())),
+        ),
         (
             "rsi.client.session-controller",
             Arc::new(SessionControllerFactory),
         ),
-        ("rsi.session.ui.target", Arc::new(Target { origin })),
+        (
+            "rsi.session.ui.target",
+            Arc::new(Target {
+                origin,
+                invalidation,
+            }),
+        ),
     ];
     for (id, factory) in factories {
         builder.register_linked(

@@ -25,3 +25,9 @@ its envelope. Actions carry at most 64 KiB. At most 32 actions and 32 source
 descriptors occur in a model. This package validates data and owns no runtime,
 Session, transport, terminal, DOM or plugin lifecycle. Owners separately reserve
 aggregate snapshot capacity before asking a source to materialize a model.
+
+`ModelSnapshot::write_json` validates identities, membership and nested action
+inputs, then writes the complete envelope once through a 128 KiB bound. The
+enclosing bound also covers its nested model and standard view. Callers reserve
+storage before writing and discard partial output on error. Standalone `validate`
+methods retain their complete semantic and encoded-size checks.
