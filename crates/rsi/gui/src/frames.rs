@@ -1,5 +1,5 @@
 //! One bounded presentation baseline, independent of durable replay cursors.
-use crate::WebApplication;
+use crate::GuiApplication;
 use rsi_api_protocol::{ApiError, ByteBudget, Result, RetainedBytes};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, io::Write, sync::Arc};
@@ -33,69 +33,75 @@ struct PaneView {
 #[derive(Debug, Default)]
 pub(crate) struct FrameState {
     pub(crate) id: u64,
-    panes: [Option<PaneView>; 2],
+    panes: BTreeMap<crate::SurfaceId, PaneView>,
     sections: Value,
     #[cfg(test)]
-    projections: [usize; 2],
+    projections: BTreeMap<crate::SurfaceId, usize>,
 }
 impl FrameState {
     pub fn encode(
         &mut self,
-        app: &WebApplication,
+        app: &GuiApplication,
         budget: &ByteBudget,
         base: Option<&str>,
     ) -> Result<RetainedBytes> {
-        let ui = *app.ui.changes().borrow();
-        let stamps = std::array::from_fn(|index| app.panes[index].stamp(ui));
+        let ui = *app.ui.membership_changes().borrow();
+        let surfaces = app.panes.lock().expect("GUI surfaces poisoned").clone();
+        let stamps = surfaces
+            .iter()
+            .map(|(key, pane)| (*key, pane.stamp(ui)))
+            .collect();
         self.capture(
             budget,
             base,
-            stamps,
+            &stamps,
             || app.sections(),
-            |index| app.panes[index].view(&app.ui),
+            |key| surfaces[&key].view(&app.ui),
         )
     }
     fn capture(
         &mut self,
         budget: &ByteBudget,
         base: Option<&str>,
-        stamps: [PaneStamp; 2],
+        stamps: &BTreeMap<crate::SurfaceId, PaneStamp>,
         sections: impl FnOnce() -> Value,
-        mut project: impl FnMut(usize) -> Value,
+        mut project: impl FnMut(crate::SurfaceId) -> Value,
     ) -> Result<RetainedBytes> {
         let base = base.map(frame_id).transpose()?;
-        let mut snapshot = self.id == 0 || base != Some(self.id);
+        let mut snapshot =
+            self.id == 0 || base != Some(self.id) || !self.panes.keys().eq(stamps.keys());
         let id = self
             .id
             .checked_add(1)
-            .ok_or_else(|| ApiError::Invalid("Web frame sequence exhausted".into()))?;
+            .ok_or_else(|| ApiError::Invalid("GUI frame sequence exhausted".into()))?;
         let reservation = budget.reserve(MAX_BYTES)?;
-        let mut replacements: [Option<PaneView>; 2] = [None, None];
+        let mut replacements = BTreeMap::new();
         let mut size = 32;
-        for (index, stamp) in stamps.into_iter().enumerate() {
-            if self.panes[index]
-                .as_ref()
-                .is_none_or(|old| old.stamp != stamp)
-            {
-                snapshot |= self.panes[index]
-                    .as_ref()
+        for (key, stamp) in stamps {
+            if self.panes.get(key).is_none_or(|old| old.stamp != *stamp) {
+                snapshot |= self
+                    .panes
+                    .get(key)
                     .is_some_and(|old| old.stamp.generation != stamp.generation);
-                let value = project(index);
+                let value = project(*key);
                 let bytes = encoded_size(&value)?;
-                replacements[index] = Some(PaneView {
-                    stamp,
-                    value,
-                    bytes,
-                });
+                replacements.insert(
+                    *key,
+                    PaneView {
+                        stamp: stamp.clone(),
+                        value,
+                        bytes,
+                    },
+                );
                 #[cfg(test)]
                 {
-                    self.projections[index] += 1;
+                    *self.projections.entry(*key).or_default() += 1;
                 }
             }
-            size += replacements[index]
-                .as_ref()
-                .or(self.panes[index].as_ref())
-                .expect("projected pane")
+            size += replacements
+                .get(key)
+                .or(self.panes.get(key))
+                .expect("projected surface")
                 .bytes;
         }
         let sections = sections();
@@ -106,44 +112,44 @@ impl FrameState {
         let wire = if snapshot {
             let mut view = sections.clone();
             view.as_object_mut().expect("closed sections").insert(
-                "panes".into(),
-                Value::Array(
-                    (0..2)
-                        .map(|index| {
-                            replacements[index]
-                                .as_ref()
-                                .or(self.panes[index].as_ref())
-                                .expect("projected pane")
-                                .value
-                                .clone()
+                "surfaces".into(),
+                Value::Object(
+                    stamps
+                        .keys()
+                        .map(|key| {
+                            (
+                                key.to_string(),
+                                replacements
+                                    .get(key)
+                                    .or(self.panes.get(key))
+                                    .expect("projected surface")
+                                    .value
+                                    .clone(),
+                            )
                         })
                         .collect(),
                 ),
             );
-            json!({"kind":"snapshot", "frame_id":id.to_string(), "view":view})
+            json!({"kind":"snapshot","frame_id":id.to_string(),"view":view})
         } else {
-            let panes: Vec<_> = replacements
+            let surfaces: Vec<_> = replacements
                 .iter()
-                .enumerate()
-                .filter_map(|(index, replacement)| {
-                    let replacement = replacement.as_ref()?;
-                    let old = &self.panes[index].as_ref().expect("patch baseline").value;
-                    (old != &replacement.value).then(|| pane_patch(index, old, &replacement.value))
+                .filter_map(|(key, replacement)| {
+                    let old = &self.panes[key].value;
+                    (old != &replacement.value).then(|| pane_patch(*key, old, &replacement.value))
                 })
                 .collect();
-            json!({"kind":"patch", "frame_id":id.to_string(), "base_frame_id":self.id.to_string(), "sections":fields(&self.sections, &sections, &[]), "panes":panes})
+            json!({"kind":"patch","frame_id":id.to_string(),"base_frame_id":self.id.to_string(),"sections":fields(&self.sections,&sections,&[]),"surfaces":surfaces})
         };
         let frame = reservation.encode(&wire)?;
-        for (old, replacement) in self.panes.iter_mut().zip(replacements) {
-            if replacement.is_some() {
-                *old = replacement;
-            }
-        }
+        self.panes.retain(|key, _| stamps.contains_key(key));
+        self.panes.extend(replacements);
         self.id = id;
         self.sections = sections;
         Ok(frame)
     }
 }
+
 fn frame_id(text: &str) -> Result<u64> {
     if text.len() > 20 {
         return Err(ApiError::Invalid("Invalid Web frame ID".into()));
@@ -167,8 +173,8 @@ fn fields(before: &Value, after: &Value, excluded: &[&str]) -> Map<String, Value
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
-fn pane_patch(index: usize, before: &Value, after: &Value) -> Value {
-    let mut patch = json!({"index":index,"fields":fields(before,after,&["transcript"])});
+fn pane_patch(index: crate::SurfaceId, before: &Value, after: &Value) -> Value {
+    let mut patch = json!({"surface":index,"fields":fields(before,after,&["transcript"])});
     let (old, new) = (&before["transcript"], &after["transcript"]);
     if old != new {
         let old_blocks: BTreeMap<_, _> = old["blocks"]
@@ -231,15 +237,23 @@ fn encoded_size(value: &Value) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn stamps() -> [PaneStamp; 2] {
-        std::array::from_fn(|_| PaneStamp {
-            generation: Some(1),
-            pane: Arc::new(()),
-            renderer: Some(Arc::new(())),
-            ui: 1,
-        })
+    fn stamps() -> BTreeMap<crate::SurfaceId, PaneStamp> {
+        [crate::SurfaceId::MAIN, crate::SurfaceId::COMPARE]
+            .into_iter()
+            .map(|key| {
+                (
+                    key,
+                    PaneStamp {
+                        generation: Some(1),
+                        pane: Arc::new(()),
+                        renderer: Some(Arc::new(())),
+                        ui: 1,
+                    },
+                )
+            })
+            .collect()
     }
-    fn pane(index: usize) -> Value {
+    fn pane(index: crate::SurfaceId) -> Value {
         json!({"generation":"1","session":format!("session-{index}"),"draft":"","transcript":{"blocks":[{"key":"a","text":"first"},{"key":"b","text":"second"}],"status":"Ready"}})
     }
     fn decoded(bytes: RetainedBytes) -> Value {
@@ -248,41 +262,48 @@ mod tests {
         value
     }
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One observable lifecycle with shared setup and assertions"
+    )]
     fn frames_reuse_unchanged_panes_and_patch_only_changed_blocks() {
         let budget = ByteBudget::new(MAX_BYTES).unwrap();
         let mut frames = FrameState::default();
         let mut stamps = stamps();
         let first = decoded(
             frames
-                .capture(&budget, None, stamps.clone(), || json!({"notice":""}), pane)
+                .capture(&budget, None, &stamps, || json!({"notice":""}), pane)
                 .unwrap(),
         );
         assert_eq!(first["kind"], "snapshot");
-        assert_eq!(frames.projections, [1, 1]);
+        assert_eq!(
+            frames.projections,
+            BTreeMap::from([(crate::SurfaceId::MAIN, 1), (crate::SurfaceId::COMPARE, 1)])
+        );
         let unchanged = decoded(
             frames
                 .capture(
                     &budget,
                     Some("1"),
-                    stamps.clone(),
+                    &stamps,
                     || json!({"notice":"status only"}),
                     |_| panic!("unchanged pane was encoded"),
                 )
                 .unwrap(),
         );
         assert_eq!(unchanged["kind"], "patch");
-        assert_eq!(unchanged["panes"], json!([]));
+        assert_eq!(unchanged["surfaces"], json!([]));
         assert_eq!(unchanged["sections"], json!({"notice":"status only"}));
-        stamps[0].renderer = Some(Arc::new(()));
+        stamps.get_mut(&crate::SurfaceId::MAIN).unwrap().renderer = Some(Arc::new(()));
         let changed = decoded(
             frames
                 .capture(
                     &budget,
                     Some("2"),
-                    stamps.clone(),
+                    &stamps,
                     || json!({"notice":"status only"}),
                     |index| {
-                        assert_eq!(index, 0, "other pane is not encoded");
+                        assert_eq!(index, crate::SurfaceId::MAIN, "other pane is not encoded");
                         let mut pane = pane(index);
                         pane["transcript"]["blocks"][1]["text"] = json!("second updated");
                         pane
@@ -290,21 +311,24 @@ mod tests {
                 )
                 .unwrap(),
         );
-        assert_eq!(frames.projections, [2, 1]);
         assert_eq!(
-            changed["panes"],
-            json!([{"index":0,"fields":{},"transcript":{"fields":{},"upsert":[{"key":"b","text":"second updated"}],"remove":[]}}])
+            frames.projections,
+            BTreeMap::from([(crate::SurfaceId::MAIN, 2), (crate::SurfaceId::COMPARE, 1)])
         );
-        stamps[0].pane = Arc::new(());
+        assert_eq!(
+            changed["surfaces"],
+            json!([{"surface":"main","fields":{},"transcript":{"fields":{},"upsert":[{"key":"b","text":"second updated"}],"remove":[]}}])
+        );
+        stamps.get_mut(&crate::SurfaceId::MAIN).unwrap().pane = Arc::new(());
         let reorder = decoded(
             frames
                 .capture(
                     &budget,
                     Some("3"),
-                    stamps.clone(),
+                    &stamps,
                     || json!({"notice":"status only"}),
                     |_| {
-                        let mut pane = pane(0);
+                        let mut pane = pane(crate::SurfaceId::MAIN);
                         pane["transcript"]["blocks"] =
                             json!([{"key":"c","text":"new"},{"key":"b","text":"second updated"}]);
                         pane
@@ -313,7 +337,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(
-            reorder["panes"][0]["transcript"],
+            reorder["surfaces"][0]["transcript"],
             json!({"fields":{},"upsert":[{"key":"c","text":"new"}],"remove":["a"],"order":["c","b"]})
         );
         let mismatch = decoded(
@@ -321,7 +345,7 @@ mod tests {
                 .capture(
                     &budget,
                     Some("1"),
-                    stamps.clone(),
+                    &stamps,
                     || json!({"notice":"status only"}),
                     |_| panic!("resync reuses its projection"),
                 )
@@ -329,16 +353,19 @@ mod tests {
         );
         assert_eq!(mismatch["kind"], "snapshot");
         assert_eq!(mismatch["frame_id"], "5");
-        stamps[1].generation = Some(2);
+        stamps
+            .get_mut(&crate::SurfaceId::COMPARE)
+            .unwrap()
+            .generation = Some(2);
         let generation = decoded(
             frames
                 .capture(
                     &budget,
                     Some("5"),
-                    stamps,
+                    &stamps,
                     || json!({"notice":"status only"}),
                     |index| {
-                        assert_eq!(index, 1);
+                        assert_eq!(index, crate::SurfaceId::COMPARE);
                         let mut value = pane(index);
                         value["generation"] = json!("2");
                         value
@@ -347,7 +374,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(generation["kind"], "snapshot");
-        assert_eq!(generation["view"]["panes"][1]["generation"], "2");
+        assert_eq!(generation["view"]["surfaces"]["compare"]["generation"], "2");
     }
     #[test]
     fn frame_admission_and_baseline_failure_do_not_advance_sequence() {
@@ -355,13 +382,13 @@ mod tests {
         let mut frames = FrameState::default();
         let stamps = stamps();
         let retained = frames
-            .capture(&budget, None, stamps.clone(), || json!({}), pane)
+            .capture(&budget, None, &stamps, || json!({}), pane)
             .unwrap();
         assert!(matches!(
             frames.capture(
                 &budget,
                 Some("1"),
-                stamps.clone(),
+                &stamps,
                 || json!({}),
                 |_| unreachable!()
             ),
@@ -374,7 +401,7 @@ mod tests {
                 frames.capture(
                     &budget,
                     Some(invalid),
-                    stamps.clone(),
+                    &stamps,
                     || unreachable!(),
                     |_| unreachable!()
                 ),
@@ -384,7 +411,7 @@ mod tests {
         let excessive = frames.capture(
             &budget,
             Some("1"),
-            stamps.clone(),
+            &stamps,
             || json!({"notice":"x".repeat(MAX_BYTES)}),
             |_| unreachable!(),
         );
@@ -393,10 +420,16 @@ mod tests {
         assert_eq!(frames.sections, json!({}));
         let recovered = decoded(
             frames
-                .capture(&budget, Some("1"), stamps, || json!({}), |_| unreachable!())
+                .capture(
+                    &budget,
+                    Some("1"),
+                    &stamps,
+                    || json!({}),
+                    |_| unreachable!(),
+                )
                 .unwrap(),
         );
         assert_eq!(recovered["frame_id"], "2");
-        assert_eq!(recovered["panes"], json!([]));
+        assert_eq!(recovered["surfaces"], json!([]));
     }
 }

@@ -1,10 +1,10 @@
 use crate::{
-    application::{Result, SettingsEditor, WebApplication, error},
+    application::{GuiApplication, Result, SettingsEditor, error},
     details::SettingsCatalog,
 };
 use rsi_settings_protocol::{MAXIMUM_SETTINGS_PAGE, validate_namespace};
 
-impl WebApplication {
+impl GuiApplication {
     pub(crate) async fn list_settings(&self, ticket: Option<&str>) -> Result<()> {
         let (revision, stop, after) = {
             let mut details = self.details.lock().expect("Web details poisoned");

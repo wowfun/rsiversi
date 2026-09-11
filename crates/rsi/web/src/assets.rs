@@ -43,7 +43,7 @@ impl Assets {
                 accept,
             })
             .await
-            .map_err(crate::application::error);
+            .map_err(rsi_gui::display_error);
         if let Err(error) = &result {
             self.stop.cancel();
             self.changed.send_replace(Some(Err(error.clone())));
@@ -81,9 +81,9 @@ impl PluginFactory for AssetsFactory {
         let producer = owner.clone();
         let task = plan.context().runtime().execution().spawn(async move {
             let work = async {
-                let mut observation = producer.client.observe(&Observe { application: producer.application.clone() }).await.map_err(crate::application::error)?;
+                let mut observation = producer.client.observe(&Observe { application: producer.application.clone() }).await.map_err(rsi_gui::display_error)?;
                 loop {
-                    let offer = observation.next().await.map_err(crate::application::error)?;
+                    let offer = observation.next().await.map_err(rsi_gui::display_error)?;
                     let mut pending = producer.pending.lock().expect("renderer offer poisoned");
                     if pending.is_some() { return Err::<(), String>("renderer server sent an unacknowledged second offer".into()); }
                     *pending = Some(offer.revision.clone());

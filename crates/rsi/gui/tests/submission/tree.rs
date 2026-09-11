@@ -8,7 +8,7 @@ async fn fixture() -> (
     Runtime,
     Arc<Backend>,
     Arc<Backend>,
-    Arc<rsi_web::WebApplication>,
+    Arc<rsi_gui::GuiApplication>,
 ) {
     let (runtime, root, app) = sources::fixture().await;
     let plugin = runtime
@@ -64,7 +64,7 @@ async fn fixture() -> (
             },
         ));
     }
-    app.command(&json!({"action":"open","pane":0,"session":root_id}).to_string())
+    app.command(&json!({"action":"open","pane":"main","session":root_id}).to_string())
         .await
         .unwrap();
     until(|| root.observations.load(Ordering::SeqCst) == 4).await;
@@ -136,17 +136,17 @@ async fn until(mut condition: impl FnMut() -> bool) {
     .await
     .unwrap();
 }
-async fn open(app: &Arc<rsi_web::WebApplication>) {
-    let pane = view(app)["panes"][0].clone();
+async fn open(app: &Arc<rsi_gui::GuiApplication>) {
+    let pane = view(app)["surfaces"]["main"].clone();
     let surface = pane["ui_surfaces"]
         .as_array()
         .unwrap()
         .iter()
         .find(|surface| surface["title"] == "Agent tree")
         .unwrap();
-    app.command(&json!({"action":"ui_surface","pane":0,"generation":pane["generation"],"reference":surface["reference"]}).to_string()).await.unwrap();
+    app.command(&json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":surface["reference"]}).to_string()).await.unwrap();
 }
-async fn click(app: &Arc<rsi_web::WebApplication>, label: &str) -> Value {
+async fn click(app: &Arc<rsi_gui::GuiApplication>, label: &str) -> Value {
     let command = ui::button(&view(app)["ui_detail"], Some(label));
     app.command(&command.to_string()).await.unwrap();
     let detail = view(app)["ui_detail"].clone();

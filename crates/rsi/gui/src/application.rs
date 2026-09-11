@@ -15,15 +15,30 @@ use tokio::sync::{Semaphore, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
-pub(crate) fn error(value: impl std::fmt::Display) -> String {
+/// Bounds an external error for the GUI and its transport adapters.
+pub fn display_error(value: impl std::fmt::Display) -> String {
     short(&value.to_string(), 4096).into()
 }
+
+pub(crate) use display_error as error;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
+    AddSurface {
+        pane: crate::SurfaceId,
+    },
+    CloseSurface {
+        pane: crate::SurfaceId,
+    },
+    Setup {
+        command: rsi_workbench_ui::SetupCommand,
+    },
+    Navigate {
+        command: rsi_workbench_ui::NavigationCommand,
+    },
     RemoteUiList {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
     },
     RemoteUiNext {
@@ -34,13 +49,16 @@ pub(crate) enum Command {
         bundle: String,
         surface: String,
     },
+    ApplicationUiSurface {
+        reference: rsi_ui::UiReference,
+    },
     UiSurface {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         reference: rsi_ui::UiReference,
     },
     UiBlock {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         key: String,
     },
@@ -57,70 +75,49 @@ pub(crate) enum Command {
         path: String,
     },
     Open {
-        pane: u8,
+        pane: crate::SurfaceId,
         session: rsi_agent_session_protocol::SessionId,
     },
     Create {
-        pane: u8,
+        pane: crate::SurfaceId,
         workspace: rsi_workspace_protocol::WorkspaceId,
         trust: bool,
-    },
-    Draft {
-        pane: u8,
-        generation: String,
-        text: String,
-    },
-    ImageEdit {
-        pane: u8,
-        generation: String,
-        revision: String,
-        from: u8,
-        to: Option<u8>,
+        #[serde(default)]
+        reuse: Option<crate::panes::ReuseDraft>,
     },
     InspectImage {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
-        index: u8,
         media: rsi_media_protocol::MediaRef,
     },
     Model {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         model: rsi_ai_protocol::ModelRef,
     },
-    Submit {
-        pane: u8,
-        generation: String,
-        text: String,
-        steer: bool,
-    },
     Cancel {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
     },
     History {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
     },
     Commands {
-        pane: u8,
-        generation: String,
-    },
-    RefreshCommandResult {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
     },
     Live {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
     },
     InspectSource {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         source: rsi_conversation::SourceRef,
     },
     InspectBlock {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         key: String,
     },
@@ -133,19 +130,19 @@ pub(crate) enum Command {
         forward: bool,
     },
     InspectInteraction {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         owner: String,
         id: String,
     },
     Answer {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         id: String,
         answers: Vec<String>,
     },
     Approve {
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: String,
         owner: rsi_agent_session_protocol::SessionId,
         id: String,
@@ -166,22 +163,23 @@ pub(crate) enum Command {
 }
 
 impl Command {
-    fn affected_pane(&self) -> Option<u8> {
+    fn affected_pane(&self) -> Option<crate::SurfaceId> {
         match self {
             Self::Open { pane, .. }
             | Self::Create { pane, .. }
-            | Self::Draft { pane, .. }
-            | Self::ImageEdit { pane, .. }
             | Self::Model { pane, .. }
-            | Self::Submit { pane, .. }
             | Self::Cancel { pane, .. }
             | Self::History { pane, .. }
             | Self::Commands { pane, .. }
-            | Self::RefreshCommandResult { pane, .. }
             | Self::Live { pane, .. }
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
-            Self::UiSurface { .. }
+            Self::ApplicationUiSurface { .. }
+            | Self::UiSurface { .. }
+            | Self::AddSurface { .. }
+            | Self::CloseSurface { .. }
+            | Self::Setup { .. }
+            | Self::Navigate { .. }
             | Self::RemoteUiList { .. }
             | Self::RemoteUiNext { .. }
             | Self::RemoteUiSurface { .. }
@@ -236,10 +234,13 @@ pub(crate) struct SettingsEditor {
     pub version: rsi_settings_protocol::SettingsVersion,
 }
 
-/// Ordinary Web application handle; its plugin retains all admitted command work.
+/// Ordinary shared GUI application handle; its plugin retains all admitted command work.
 #[derive(Debug)]
-pub struct WebApplication {
+pub struct GuiApplication {
+    pub(crate) setup: Option<Arc<rsi_workbench_ui::SetupFeature>>,
+    pub(crate) navigation: Option<Arc<rsi_workbench_ui::NavigationFeature>>,
     pub(crate) ui: Arc<rsi_ui::Ui>,
+    pub(crate) application_target: Option<Arc<rsi_ui::UiTarget>>,
     pub(crate) remote_ui: Option<rsi_ui_api::UiClient>,
     pub(crate) session: Arc<dyn rsi_session_protocol::SessionService>,
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
@@ -248,7 +249,8 @@ pub struct WebApplication {
     pub(crate) preferences: rsi_client_preferences::Composer,
     pub(crate) media: Option<Arc<dyn rsi_media_protocol::Media>>,
     pub(crate) image_work: Arc<Semaphore>,
-    pub(crate) panes: [Arc<crate::panes::Pane>; 2],
+    pub(crate) panes: Mutex<std::collections::BTreeMap<crate::SurfaceId, Arc<crate::panes::Pane>>>,
+    pub(crate) attachment_generation: std::sync::atomic::AtomicU64,
     pub(crate) shell: Arc<Shell>,
     pub(crate) has_files: bool,
     pub(crate) catalog: Mutex<Catalog>,
@@ -264,7 +266,7 @@ pub struct WebApplication {
     stream: Mutex<crate::frames::FrameState>,
     admission: Mutex<()>,
 }
-impl WebApplication {
+impl GuiApplication {
     /// Admits a bounded closed command before returning its response waiter.
     /// Dropping that waiter cannot replay a mutation or detach command ownership.
     ///
@@ -285,7 +287,7 @@ impl WebApplication {
     pub(crate) fn admit<T, F, Fut>(
         self: &Arc<Self>,
         report_error: bool,
-        affected_pane: Option<u8>,
+        affected_pane: Option<crate::SurfaceId>,
         operation: F,
     ) -> BoxFuture<'static, Result<T>>
     where
@@ -293,13 +295,31 @@ impl WebApplication {
         F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
+        match self.try_admit(report_error, affected_pane, operation) {
+            Ok(waiter) => waiter,
+            Err(error) => Box::pin(async { Err(error) }),
+        }
+    }
+    pub(crate) fn try_admit<T, F, Fut>(
+        self: &Arc<Self>,
+        report_error: bool,
+        affected_pane: Option<crate::SurfaceId>,
+        operation: F,
+    ) -> Result<BoxFuture<'static, Result<T>>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
         let admission = self.admission.lock().expect("Web admission poisoned");
         if self.stop.is_cancelled() {
-            return Box::pin(async { Err("Web application is closed".into()) });
+            return Err("Web application is closed".into());
         }
-        let Ok(permit) = self.slots.clone().try_acquire_owned() else {
-            return Box::pin(async { Err("Web application is busy".into()) });
-        };
+        let permit = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "Web application is busy")?;
         let app = self.clone();
         let task = self.execution.spawn(self.tasks.track_future(async move {
             let _permit = permit;
@@ -308,23 +328,28 @@ impl WebApplication {
                 result = operation(app.clone()) => result,
             };
             if report_error && let Err(error) = &result { app.notice.lock().expect("Web notice poisoned").clone_from(error); }
-            if let Some(pane) = affected_pane.and_then(|index| app.panes.get(usize::from(index))) { pane.changed(); }
+            if let Some(pane) = affected_pane.and_then(|index| app.panes.lock().expect("GUI surfaces poisoned").get(&index).cloned()) { pane.changed(); }
             app.changed();
             result
         }));
         drop(admission);
-        Box::pin(async move { task.await.map_err(error)? })
+        Ok(Box::pin(async move { task.await.map_err(error)? }))
     }
     pub(crate) fn changed(&self) {
         self.changed
             .send_modify(|value| *value = value.saturating_add(1));
     }
+    /// Reports non-queued image admission before a platform copies source bytes.
+    /// The import itself acquires the authoritative permit.
+    pub fn image_import_available(&self) -> bool {
+        !self.stop.is_cancelled() && self.image_work.available_permits() > 0
+    }
     /// Subscribes to coalesced projection changes; this is independent of domain cursors.
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
     }
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn closed(&self) {
+    /// Waits for application withdrawal without owning shutdown authority.
+    pub async fn closed(&self) {
         self.stop.cancelled().await;
     }
     /// Encodes one immutable UI view under its independent 32 MiB frame reservation.
@@ -338,18 +363,23 @@ impl WebApplication {
         let reservation = self.frames.reserve(32 * 1024 * 1024)?;
         let panes = self
             .panes
+            .lock()
+            .expect("GUI surfaces poisoned")
             .iter()
-            .map(|pane| pane.view(&self.ui))
-            .collect::<Vec<_>>();
+            .map(|(key, pane)| (key.to_string(), pane.view(&self.ui)))
+            .collect::<serde_json::Map<_, _>>();
         let mut view = self.sections();
         view.as_object_mut()
             .expect("view sections")
-            .insert("panes".into(), panes.into());
+            .insert("surfaces".into(), panes.into());
         reservation.encode(&view)
     }
     pub(crate) fn sections(&self) -> serde_json::Value {
         let details = self.details.lock().expect("Web details poisoned");
         serde_json::json!({
+            "application_surfaces": self.application_target.as_ref().and_then(|target| self.ui.surfaces(target).ok()).unwrap_or_default(),
+            "setup": self.setup.as_ref().map(|feature| feature.view()),
+            "navigation": self.navigation.as_ref().map(|feature| feature.view()),
             "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "preferences": self.preferences,
             "ui_detail": details.ui,
@@ -380,13 +410,36 @@ impl WebApplication {
         stream.encode(self, &self.frames, base)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn frame_id(&self) -> Option<String> {
+    /// Returns the exact latest encoded frame ID for acknowledgement.
+    ///
+    /// # Panics
+    /// Panics if an earlier application panic poisoned its frame state.
+    pub fn frame_id(&self) -> Option<String> {
         let id = self.stream.lock().expect("Web frame stream poisoned").id;
         (id > 0).then(|| id.to_string())
     }
     async fn execute(self: &Arc<Self>, command: Command) -> Result<()> {
         match command {
+            Command::AddSurface { pane } => self.add_surface(pane),
+            Command::CloseSurface { pane } => self.close_surface(pane).await,
+            Command::Setup { command } => {
+                self.setup
+                    .as_ref()
+                    .ok_or("Model setup is unavailable on this connection")?
+                    .command(command)
+                    .await?;
+                self.refresh(Command::Refresh).await
+            }
+            Command::Navigate { command } => {
+                self.navigation
+                    .as_ref()
+                    .ok_or("Session navigation is unavailable on this connection")?
+                    .command(command)
+                    .await
+            }
+            Command::ApplicationUiSurface { reference } => {
+                self.application_ui_surface(&reference).await
+            }
             Command::UiSurface {
                 pane,
                 generation,
@@ -438,19 +491,19 @@ impl WebApplication {
     }
 }
 
-/// Nominal application capability used by the Worker input/rendering bridge.
+/// Nominal application capability used by native and Worker bridges.
 #[derive(Debug)]
-pub struct WebApplicationContract;
-impl LocalContract for WebApplicationContract {
-    const KEY: &'static str = "rsi.web.application";
-    type Service = WebApplication;
+pub struct GuiApplicationContract;
+impl LocalContract for GuiApplicationContract {
+    const KEY: &'static str = "rsi.gui.application";
+    type Service = GuiApplication;
 }
 
 /// Ordinary coding-workspace application over independently supplied domains.
 #[derive(Clone, Debug, Default)]
-pub struct WebApplicationFactory;
+pub struct GuiApplicationFactory;
 #[async_trait]
-impl PluginFactory for WebApplicationFactory {
+impl PluginFactory for GuiApplicationFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         if !desired.is_null() {
             return Err(MetaError::InvalidInput(
@@ -475,8 +528,18 @@ impl PluginFactory for WebApplicationFactory {
             .lookup_local::<rsi_session_files::SessionFilesContract>()
             .is_some();
         let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
-        let app = Arc::new(WebApplication {
+        let app = Arc::new(GuiApplication {
+            setup: plan
+                .context()
+                .lookup_local::<rsi_workbench_ui::SetupFeatureContract>(),
+            navigation: plan
+                .context()
+                .lookup_local::<rsi_workbench_ui::NavigationFeatureContract>(),
             ui: plan.local::<rsi_ui::UiContract>()?,
+            application_target: plan
+                .context()
+                .lookup_local::<rsi_ui::UiTargetContract>()
+                .filter(|target| target.kind() == rsi_ui::TargetKind::Application),
             remote_ui: plan
                 .context()
                 .lookup_local::<rsi_api_protocol::ApiClientContract>()
@@ -490,7 +553,11 @@ impl PluginFactory for WebApplicationFactory {
                 .context()
                 .lookup_local::<rsi_media_protocol::MediaContract>(),
             image_work: Arc::new(Semaphore::new(1)),
-            panes: std::array::from_fn(|_| Arc::new(crate::panes::Pane::default())),
+            panes: Mutex::new(std::collections::BTreeMap::from([(
+                crate::SurfaceId::MAIN,
+                Arc::new(crate::panes::Pane::default()),
+            )])),
+            attachment_generation: std::sync::atomic::AtomicU64::new(0),
             shell,
             has_files,
             catalog: Mutex::new(Catalog::default()),
@@ -507,23 +574,10 @@ impl PluginFactory for WebApplicationFactory {
             admission: Mutex::new(()),
             stream: Mutex::new(crate::frames::FrameState::default()),
         });
-        let mut ui_changes = app.ui.changes();
-        let watching = app.clone();
-        drop(app.execution.spawn(app.tasks.track_future(async move {
-            loop {
-                tokio::select! { biased;
-                    () = watching.stop.cancelled() => break,
-                    result = ui_changes.changed() => {
-                        if result.is_err() { break; }
-                        watching.prune_ui();
-                        watching.changed();
-                    }
-                }
-            }
-        })));
+        watch_features(&app);
         let supply = plan
             .context()
-            .provide_local::<WebApplicationContract>(app.clone())?;
+            .provide_local::<GuiApplicationContract>(app.clone())?;
         plan.defer(
             "withdraw Web application and drain commands",
             Box::new(move || {
@@ -593,7 +647,7 @@ async fn start_shell(
         .map_err(meta)?;
     catalog
         .register_linked(
-            "rsi.web.renderer",
+            "rsi.gui.renderer",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
             Arc::new(RendererFactory { changed }),
@@ -622,7 +676,7 @@ async fn start_shell(
     let fiber = parent
         .apply(
             ResolvedFactory::linked(
-                "rsi.web.shell",
+                "rsi.gui.shell",
                 env!("CARGO_PKG_VERSION"),
                 UpdateMode::RestartRequired,
                 Arc::new(ShellFactory::new(catalog.build().map_err(meta)?)),
@@ -646,18 +700,12 @@ fn meta(error: impl std::fmt::Display) -> MetaError {
 }
 
 pub(crate) fn surface_program(
-    pane: u8,
-    generation: u64,
     session: &rsi_agent_session_protocol::SessionId,
     cursor: Option<rsi_agent_turn_protocol::ObservationCursor>,
     has_files: bool,
 ) -> ProfileProgram {
     let mut entries = vec![
-        ProfileEntry::new(
-            "renderer",
-            "rsi.web.renderer",
-            serde_json::json!({"pane":pane,"generation":generation}),
-        ),
+        ProfileEntry::new("renderer", "rsi.gui.renderer", ConfigValue::Null),
         ProfileEntry::new(
             "controller",
             "rsi.client.session-controller",
@@ -678,4 +726,37 @@ pub(crate) fn surface_program(
         ));
     }
     ProfileProgram::from_profile(Profile::new(entries))
+}
+
+fn watch_features(app: &Arc<GuiApplication>) {
+    let mut ui_changes = app.ui.membership_changes();
+    for changes in [
+        app.setup.as_ref().map(|feature| feature.changes()),
+        app.navigation.as_ref().map(|feature| feature.changes()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let mut changes = changes;
+        let watching = app.clone();
+        drop(app.execution.spawn(app.tasks.track_future(async move {
+                loop { tokio::select! { biased;
+                    () = watching.stop.cancelled() => break,
+                    result = changes.changed() => { if result.is_err() { break; } watching.changed(); }
+                } }
+            })));
+    }
+    let watching = app.clone();
+    drop(app.execution.spawn(app.tasks.track_future(async move {
+        loop {
+            tokio::select! { biased;
+                () = watching.stop.cancelled() => break,
+                result = ui_changes.changed() => {
+                    if result.is_err() { break; }
+                    watching.prune_ui();
+                    watching.changed();
+                }
+            }
+        }
+    })));
 }

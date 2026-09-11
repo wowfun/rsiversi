@@ -85,61 +85,76 @@ async fn until(mut condition: impl FnMut() -> bool) {
     .await
     .unwrap();
 }
-async fn cmd(app: &Arc<rsi_web::WebApplication>, value: Value) {
+async fn cmd(app: &Arc<rsi_gui::GuiApplication>, value: Value) {
     app.command(&value.to_string()).await.unwrap();
 }
-async fn edit(app: &Arc<rsi_web::WebApplication>, from: u8, to: Option<u8>) {
-    let pane = view(app)["panes"][0].clone();
-    cmd(app, json!({"action":"image_edit","pane":0,"generation":pane["generation"],"revision":pane["images_revision"],"from":from,"to":to})).await;
-}
-
 #[tokio::test]
-async fn ordered_images_and_image_only_retry_freeze_content_and_preserve_edited_drafts() {
+async fn ordered_images_and_image_only_retry_freeze_complete_content() {
     for resolution in [1, 2] {
         let (runtime, backend, app) = sources::fixture().await;
-        let pane = view(&app)["panes"][0].clone();
+        let pane = view(&app)["surfaces"]["main"].clone();
         let generation = pane["generation"].as_str().unwrap();
-        assert!(app.import_image(0, generation, Bytes::new()).await.is_err());
         assert!(
-            app.import_image(0, generation, vec![0; 16 * 1024 * 1024 + 1].into())
+            app.import_image(rsi_gui::SurfaceId::MAIN, generation, Bytes::new())
                 .await
                 .is_err()
         );
+        assert!(
+            app.import_image(
+                rsi_gui::SurfaceId::MAIN,
+                generation,
+                vec![0; 16 * 1024 * 1024 + 1].into()
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(backend.media.imports.load(Ordering::SeqCst), 0);
-        let first = app.import_image(0, generation, png(2)).await.unwrap();
-        let second = app.import_image(0, generation, png(3)).await.unwrap();
-        let old_revision = view(&app)["panes"][0]["images_revision"].clone();
-        edit(&app, 1, Some(0)).await;
-        assert!(app.command(&json!({"action":"image_edit","pane":0,"generation":generation,"revision":old_revision,"from":0,"to":null}).to_string()).await.is_err());
-        let submit =
-            json!({"action":"submit","pane":0,"generation":generation,"text":"","steer":false});
-        assert!(app.command(&submit.to_string()).await.is_err());
+        let first = app
+            .import_image(rsi_gui::SurfaceId::MAIN, generation, png(2))
+            .await
+            .unwrap();
+        let second = app
+            .import_image(rsi_gui::SurfaceId::MAIN, generation, png(3))
+            .await
+            .unwrap();
+        let prepared = prepare(
+            &app,
+            generation,
+            "",
+            vec![second.clone(), first.clone()],
+            false,
+        )
+        .await;
+        assert_eq!(
+            dispatch(&app, generation, &prepared, "dispatch").await["status"],
+            "unknown"
+        );
         let original = backend.requests.lock().unwrap()[0].clone();
         assert_eq!(
             original.content,
             vec![
-                SessionInput::Image {
-                    media: second.clone()
-                },
+                SessionInput::Image { media: second },
                 SessionInput::Image {
                     media: first.clone()
                 }
             ]
         );
-        assert_eq!(view(&app)["panes"][0]["unresolved_text"], "");
-        edit(&app, 0, None).await;
-        let third = app.import_image(0, generation, png(4)).await.unwrap();
+        let third = app
+            .import_image(rsi_gui::SurfaceId::MAIN, generation, png(4))
+            .await
+            .unwrap();
         cmd(
             &app,
-            json!({"action":"open","pane":0,"session":pane["session"]}),
+            json!({"action":"open","pane":"main","session":pane["session"]}),
         )
         .await;
-        let generation = view(&app)["panes"][0]["generation"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let next = view(&app);
+        let generation = next["surfaces"]["main"]["generation"].as_str().unwrap();
         backend.resolution.store(resolution, Ordering::SeqCst);
-        cmd(&app, json!({"action":"submit","pane":0,"generation":generation,"text":"edited","steer":true})).await;
+        assert_eq!(
+            dispatch(&app, generation, &prepared, "retry_message").await["status"],
+            "complete"
+        );
         let requests = backend.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), if resolution == 1 { 2 } else { 1 });
         assert!(
@@ -147,85 +162,88 @@ async fn ordered_images_and_image_only_retry_freeze_content_and_preserve_edited_
                 .iter()
                 .all(|request| json!(request) == json!(original))
         );
-        let current = view(&app)["panes"][0].clone();
-        assert_eq!(current["draft"], "edited");
-        assert_eq!(current["images"], json!([first, third]));
-        cmd(&app, json!({"action":"submit","pane":0,"generation":generation,"text":"/plan on","steer":false})).await;
+        let next = prepare(
+            &app,
+            generation,
+            "/plan on",
+            vec![first.clone(), third],
+            false,
+        )
+        .await;
+        assert_eq!(
+            dispatch(&app, generation, &next, "dispatch").await["status"],
+            "complete"
+        );
         assert!(
             backend.commands.lock().unwrap().is_empty(),
             "images prevent text-only slash dispatch"
         );
-        {
-            let requests = backend.requests.lock().unwrap();
-            assert_ne!(requests.last().unwrap().message_id, original.message_id);
-            assert_eq!(requests.last().unwrap().content.len(), 3);
-        }
-        assert_eq!(view(&app)["panes"][0]["images"], json!([]));
-        assert_eq!(
-            backend.media.objects.lock().unwrap().len(),
-            3,
-            "submission never deletes independent imports"
-        );
-        for _ in 0..8 {
-            app.import_image(0, &generation, png(2)).await.unwrap();
-        }
-        let imports = backend.media.imports.load(Ordering::SeqCst);
-        assert!(app.import_image(0, &generation, png(2)).await.is_err());
-        assert_eq!(backend.media.imports.load(Ordering::SeqCst), imports);
+        assert_eq!(backend.media.objects.lock().unwrap().len(), 3);
+        let nine = json!({"pane":"main","generation":generation,"text":"","images":vec![first;9],"steer":false});
+        assert!(app.prepare_submission(&nine.to_string()).await.is_err());
         assert!(runtime.shutdown().await.is_clean());
     }
 }
 
 #[tokio::test]
-async fn a_lost_upload_waiter_keeps_its_captured_draft_and_admission_through_pane_replacement() {
+async fn a_lost_upload_waiter_retains_import_ownership_through_pane_replacement() {
     let (runtime, backend, app) = sources::fixture().await;
-    let pane = view(&app)["panes"][0].clone();
+    let pane = view(&app)["surfaces"]["main"].clone();
     let generation = pane["generation"].as_str().unwrap();
-    let header = backend.header.lock().unwrap().clone();
     backend.media.block_import.store(true, Ordering::SeqCst);
-    drop(app.import_image(0, generation, png(2)));
+    drop(app.import_image(rsi_gui::SurfaceId::MAIN, generation, png(2)));
     until(|| backend.media.active.load(Ordering::SeqCst) == 1).await;
-    assert!(app.import_image(0, generation, png(3)).await.is_err());
-    assert!(app.command(&json!({"action":"submit","pane":0,"generation":generation,"text":"blocked","steer":false}).to_string()).await.is_err());
-    cmd(&app, json!({"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false})).await;
+    assert!(
+        app.import_image(rsi_gui::SurfaceId::MAIN, generation, png(3))
+            .await
+            .is_err()
+    );
+    cmd(&app, json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false})).await;
     backend.media.release.notify_one();
     until(|| backend.media.active.load(Ordering::SeqCst) == 0).await;
-    assert_eq!(view(&app)["panes"][0]["images"], json!([]));
-    // This minimal fixture has one active header; restore the original service record before attachment.
-    *backend.header.lock().unwrap() = header;
-    cmd(
-        &app,
-        json!({"action":"open","pane":0,"session":pane["session"]}),
-    )
-    .await;
+    assert!(view(&app)["surfaces"]["main"].get("images").is_none());
     assert_eq!(
-        view(&app)["panes"][0]["images"].as_array().unwrap().len(),
-        1
+        backend.media.objects.lock().unwrap().len(),
+        1,
+        "lost reply does not roll back durable Media"
+    );
+    assert_eq!(
+        backend.media.imports.load(Ordering::SeqCst),
+        1,
+        "lost reply never replays import"
     );
     assert!(backend.requests.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
-async fn clearing_the_edited_draft_cannot_prevent_retrying_the_frozen_image_request() {
+async fn retry_requires_only_the_frozen_request_and_new_empty_input_is_invalid() {
     let (runtime, backend, app) = sources::fixture().await;
-    let generation = view(&app)["panes"][0]["generation"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    app.import_image(0, &generation, png(2)).await.unwrap();
-    let submit =
-        json!({"action":"submit","pane":0,"generation":generation,"text":"","steer":false})
-            .to_string();
-    assert!(app.command(&submit).await.is_err());
+    let pane = view(&app)["surfaces"]["main"].clone();
+    let generation = pane["generation"].as_str().unwrap();
+    let image = app
+        .import_image(rsi_gui::SurfaceId::MAIN, generation, png(2))
+        .await
+        .unwrap();
+    let prepared = prepare(&app, generation, "", vec![image], false).await;
+    assert_eq!(
+        dispatch(&app, generation, &prepared, "dispatch").await["status"],
+        "unknown"
+    );
     let original = json!(backend.requests.lock().unwrap()[0]);
-    edit(&app, 0, None).await;
     backend.resolution.store(1, Ordering::SeqCst);
-    app.command(&submit).await.unwrap();
+    assert_eq!(
+        dispatch(&app, generation, &prepared, "retry_message").await["status"],
+        "complete"
+    );
     assert_eq!(json!(backend.requests.lock().unwrap()[1]), original);
     assert!(
-        app.command(&submit).await.is_err(),
-        "a new empty draft remains invalid after retry resolves"
+        app.prepare_submission(
+            &json!({"pane":"main","generation":generation,"text":"","images":[],"steer":false})
+                .to_string()
+        )
+        .await
+        .is_err()
     );
     assert_eq!(backend.requests.lock().unwrap().len(), 2);
     assert!(runtime.shutdown().await.is_clean());
@@ -234,23 +252,24 @@ async fn clearing_the_edited_draft_cannot_prevent_retrying_the_frozen_image_requ
 #[tokio::test]
 async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
     let (runtime, backend, app) = sources::fixture().await;
-    let generation = view(&app)["panes"][0]["generation"]
+    let generation = view(&app)["surfaces"]["main"]["generation"]
         .as_str()
         .unwrap()
         .to_owned();
-    let media = app.import_image(0, &generation, png(2)).await.unwrap();
-    let direct = json!({"kind":"draft","pane":0,"generation":generation,"index":0,"media":media});
-    assert_eq!(
-        app.read_image(&direct.to_string()).await.unwrap().bytes,
-        png(2)
-    );
-    let mut stale = direct;
-    stale["index"] = json!(1);
+    let media = app
+        .import_image(rsi_gui::SurfaceId::MAIN, &generation, png(2))
+        .await
+        .unwrap();
+    let direct = json!({"kind":"draft","pane":"main","generation":generation,"media":media});
     let reads = backend.media.reads.load(Ordering::SeqCst);
-    assert!(app.read_image(&stale.to_string()).await.is_err());
+    assert!(app.read_image(&direct.to_string()).await.is_err());
+    assert_eq!(backend.media.reads.load(Ordering::SeqCst), reads);
+    let stale =
+        json!({"action":"inspect_image","pane":"main","generation":"retired","media":media});
+    assert!(app.command(&stale.to_string()).await.is_err());
     assert_eq!(backend.media.reads.load(Ordering::SeqCst), reads);
     let inspect =
-        json!({"action":"inspect_image","pane":0,"generation":generation,"index":0,"media":media});
+        json!({"action":"inspect_image","pane":"main","generation":generation,"media":media});
     cmd(&app, inspect.clone()).await;
     let ticket = view(&app)["image_detail"]["ticket"].clone();
     let selection = json!({"kind":"source","ticket":ticket}).to_string();
@@ -258,7 +277,11 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
     backend.media.block_read.store(true, Ordering::SeqCst);
     let reading = app.read_image(&selection);
     until(|| backend.media.active.load(Ordering::SeqCst) == 1).await;
-    assert!(app.import_image(0, &generation, png(3)).await.is_err());
+    assert!(
+        app.import_image(rsi_gui::SurfaceId::MAIN, &generation, png(3))
+            .await
+            .is_err()
+    );
     cmd(&app, json!({"action":"close_detail"})).await;
     assert!(reading.await.is_err());
     assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
@@ -278,7 +301,7 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
         )
         .unwrap(),
     );
-    cmd(&app, json!({"action":"inspect_source","pane":0,"generation":generation,"source":{"seq":"7","field":{"kind":"image_output"}}})).await;
+    cmd(&app, json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"7","field":{"kind":"image_output"}}})).await;
     assert_eq!(view(&app)["source_media"], json!(media));
     let selection =
         json!({"kind":"source","ticket":view(&app)["source_detail"]["ticket"]}).to_string();

@@ -1,11 +1,11 @@
-use super::{Arc, Attachment, Result, WebApplication, error};
+use super::{Arc, Attachment, GuiApplication, Result, error};
 use crate::details::UiDetail;
 use rsi_ui::{ActionInput, BoundView, UiReference};
 
-impl WebApplication {
+impl GuiApplication {
     pub(super) fn ui_selection(
         &self,
-        index: u8,
+        index: crate::SurfaceId,
         generation: &str,
     ) -> Result<(Arc<Attachment>, u64)> {
         let pane = self.pane(index)?;
@@ -18,8 +18,8 @@ impl WebApplication {
         let mut details = self.details.lock().expect("Web details poisoned");
         let revision = details.begin()?;
         details.ui = Some(UiDetail {
-            pane: index,
-            generation: generation.into(),
+            pane: Some(index),
+            generation: Some(generation.into()),
             ticket: revision.to_string(),
             view: None,
             lease: None,
@@ -76,7 +76,7 @@ impl WebApplication {
     }
     pub(crate) async fn ui_surface(
         self: &Arc<Self>,
-        index: u8,
+        index: crate::SurfaceId,
         generation: &str,
         reference: &UiReference,
     ) -> Result<()> {
@@ -88,6 +88,40 @@ impl WebApplication {
             );
             return Ok(());
         }
+        self.present_ui(revision, reference).await
+    }
+    pub(crate) async fn application_ui_surface(
+        self: &Arc<Self>,
+        reference: &UiReference,
+    ) -> Result<()> {
+        let target = self
+            .application_target
+            .as_ref()
+            .ok_or("Application UI target is unavailable")?;
+        if !self.ui.matches_target(target, reference) {
+            return Err("This UI contribution belongs to another or retired target".into());
+        }
+        let revision = {
+            let mut details = self.details.lock().expect("GUI details poisoned");
+            let revision = details.begin()?;
+            details.ui = Some(UiDetail {
+                pane: None,
+                generation: None,
+                ticket: revision.to_string(),
+                view: None,
+                lease: None,
+                snapshot: None,
+                remote: None,
+                binding: None,
+                model: None,
+                error: None,
+                busy: false,
+            });
+            revision
+        };
+        self.present_ui(revision, reference).await
+    }
+    async fn present_ui(self: &Arc<Self>, revision: u64, reference: &UiReference) -> Result<()> {
         let lease = Arc::new(self.ui.present(reference).map_err(error)?);
         let stop = {
             let mut details = self.details.lock().expect("Web details poisoned");
@@ -178,7 +212,12 @@ impl WebApplication {
         drop(details);
         self.changed();
     }
-    pub(crate) fn ui_block(&self, index: u8, generation: &str, key: &str) -> Result<()> {
+    pub(crate) fn ui_block(
+        &self,
+        index: crate::SurfaceId,
+        generation: &str,
+        key: &str,
+    ) -> Result<()> {
         let (attached, revision) = self.ui_selection(index, generation)?;
         let block = {
             let state = attached
@@ -296,12 +335,12 @@ impl WebApplication {
             (detail.pane, detail.generation.clone(), reference)
         };
         let reference = selected.2;
-        let pane = self.pane(selected.0)?;
+        let pane = self.pane(selected.0.ok_or("Legacy card requires a Session target")?)?;
         let (revision, stop) = {
             let current = pane.current.lock().expect("Web pane poisoned");
             let attached = current
                 .as_ref()
-                .filter(|attached| attached.generation.to_string() == selected.1)
+                .filter(|attached| Some(attached.generation.to_string()) == selected.1)
                 .ok_or("This pane changed; reopen its card")?;
             if !self.ui.matches_target(&attached.ui_target, &reference) {
                 return Err("This UI action has retired".into());
@@ -333,7 +372,7 @@ impl WebApplication {
     }
 }
 
-impl WebApplication {
+impl GuiApplication {
     /// Reads a model-local source from the exact displayed detail snapshot.
     ///
     /// # Panics

@@ -1,11 +1,16 @@
 use crate::{
-    application::{Result, WebApplication, error},
+    application::{GuiApplication, Result, error},
     details::{SOURCE_PAGE_BYTES, SourceDetail},
 };
 use rsi_conversation::SourceRef;
 
-impl WebApplication {
-    pub(super) fn inspect_block(&self, index: u8, generation: &str, key: &str) -> Result<()> {
+impl GuiApplication {
+    pub(super) fn inspect_block(
+        &self,
+        index: crate::SurfaceId,
+        generation: &str,
+        key: &str,
+    ) -> Result<()> {
         let pane = self.pane(index)?;
         let current = pane.current.lock().expect("Web pane poisoned");
         let attached = current
@@ -88,7 +93,7 @@ impl WebApplication {
 
     pub(super) async fn inspect_source(
         &self,
-        index: u8,
+        index: crate::SurfaceId,
         generation: &str,
         source: SourceRef,
         start: usize,

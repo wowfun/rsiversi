@@ -1,8 +1,8 @@
-use crate::{WebApplication, WebApplicationContract, WebApplicationFactory};
 use async_trait::async_trait;
 use rsi_api_browser_client::{BrowserClient, BrowserClientConfig, BrowserClientFactory};
 use rsi_api_protocol::ApiClientContract;
 use rsi_credentials_protocol::SecretValue;
+use rsi_gui::{GuiApplication, GuiApplicationContract, GuiApplicationFactory};
 use rsi_host::{Profile, ProfileEntry, ProfileProgram, RunningHost};
 use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, LocalContract, MetaError, PluginFactory,
@@ -11,6 +11,7 @@ use rsi_meta::{
 use serde::Deserialize;
 use std::{
     cell::RefCell,
+    fmt::Write as _,
     sync::{Arc, Mutex},
 };
 use tokio_util::task::TaskTracker;
@@ -19,7 +20,7 @@ use wasm_bindgen::prelude::*;
 #[derive(Default)]
 struct Owner {
     running: Option<Arc<RunningHost>>,
-    app: Option<Arc<WebApplication>>,
+    app: Option<Arc<GuiApplication>>,
     connection: Option<Arc<BrowserClient>>,
     config: Option<BrowserClientConfig>,
     revision: Option<u64>,
@@ -68,7 +69,7 @@ impl PluginFactory for AuthenticatedFactory {
                 .diagnostic
                 .lock()
                 .expect("Web authentication diagnostic poisoned") =
-                Some(crate::application::error(error));
+                Some(rsi_gui::display_error(error));
         }
         result
     }
@@ -182,16 +183,18 @@ pub async fn connect(receipt: String, allow_loopback_http: bool) -> Result<Strin
                 .expect("Web authentication diagnostic poisoned")
                 .take();
             return Err(failure(
-                detail.unwrap_or_else(|| crate::application::error(error)),
+                detail.unwrap_or_else(|| rsi_gui::display_error(error)),
             ));
         }
     };
-    let Some(app) = running.lookup_local::<WebApplicationContract>() else {
+    let Some(app) = running.lookup_local::<GuiApplicationContract>() else {
         let _ = running.shutdown().await;
         OWNER.with(|owner| owner.borrow_mut().failed = true);
         return Err(failure("Web Profile did not publish its application"));
     };
     let connection = running.lookup_local::<BrowserConnection>();
+    let identity = serde_json::to_string(&serde_json::json!({"endpoint_id": endpoint,
+        "principal": rsi_api_protocol::CallerIdentity::Device { device_id: connection.as_ref().ok_or_else(|| failure("Authenticated caller is unavailable"))?.device_id().clone() }})).map_err(failure)?;
     let assets = running.lookup_local::<crate::assets::AssetsContract>();
     OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
@@ -204,7 +207,7 @@ pub async fn connect(receipt: String, allow_loopback_http: bool) -> Result<Strin
         owner.revision = None;
     });
     let _ = app.command(r#"{"action":"refresh"}"#).await;
-    Ok(endpoint)
+    Ok(identity)
 }
 
 fn prepare_profile(
@@ -216,6 +219,25 @@ fn prepare_profile(
     let (mut builder, mut entries) =
         rsi_client_composition::domain_clients("browser").map_err(failure)?;
     builder = builder.execution(execution);
+    register_session_views(&mut builder, &mut entries)?;
+    register_browser_application(&mut builder, &mut entries, config, token, diagnostic)?;
+    // Feature owners must publish before the GUI captures their optional handles.
+    rsi_workbench_ui::register(&mut builder, &mut entries).map_err(failure)?;
+    entries.push(ProfileEntry::new(
+        "application",
+        "rsi.application.web",
+        ConfigValue::Null,
+    ));
+    Ok((
+        builder.build().map_err(failure)?,
+        ProfileProgram::from_profile(Profile::new(entries)),
+    ))
+}
+
+fn register_session_views(
+    builder: &mut rsi_host::HostBuilder,
+    entries: &mut Vec<ProfileEntry>,
+) -> Result<(), JsValue> {
     builder
         .register_local_contract::<rsi_ui::UiContract>()
         .map_err(failure)?;
@@ -267,8 +289,18 @@ fn prepare_profile(
         "rsi.session.ui",
         ConfigValue::Null,
     ));
+    Ok(())
+}
+
+fn register_browser_application(
+    builder: &mut rsi_host::HostBuilder,
+    entries: &mut Vec<ProfileEntry>,
+    config: &BrowserClientConfig,
+    token: Option<SecretValue>,
+    diagnostic: Arc<Mutex<Option<String>>>,
+) -> Result<(), JsValue> {
     builder
-        .register_local_contract::<WebApplicationContract>()
+        .register_local_contract::<GuiApplicationContract>()
         .map_err(failure)?;
     builder
         .register_local_contract::<BrowserConnection>()
@@ -289,7 +321,7 @@ fn prepare_profile(
             "rsi.application.web",
             env!("CARGO_PKG_VERSION"),
             UpdateMode::RestartRequired,
-            Arc::new(WebApplicationFactory),
+            Arc::new(GuiApplicationFactory),
         )
         .map_err(failure)?;
     entries.insert(
@@ -307,8 +339,10 @@ fn prepare_profile(
         .get_random_values_with_u8_array(&mut nonce)?;
     let nonce = nonce
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+        .fold(String::with_capacity(32), |mut text, byte| {
+            write!(&mut text, "{byte:02x}").expect("writing to a String cannot fail");
+            text
+        });
     builder
         .register_local_contract::<crate::assets::AssetsContract>()
         .map_err(failure)?;
@@ -325,15 +359,23 @@ fn prepare_profile(
         "rsi.web.renderer.leases",
         ConfigValue::Null,
     ));
+    builder
+        .register_local_contract::<rsi_ui::UiTargetContract>()
+        .map_err(failure)?;
+    builder
+        .register_linked(
+            "rsi.ui.target",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_ui::UiTargetFactory),
+        )
+        .map_err(failure)?;
     entries.push(ProfileEntry::new(
-        "application",
-        "rsi.application.web",
-        ConfigValue::Null,
+        "application-target",
+        "rsi.ui.target",
+        serde_json::json!("application"),
     ));
-    Ok((
-        builder.build().map_err(failure)?,
-        ProfileProgram::from_profile(Profile::new(entries)),
-    ))
+    Ok(())
 }
 
 /// Forwards a closed input document to the ordinary application command owner.
@@ -343,25 +385,66 @@ pub async fn command(source: String) -> Result<(), JsValue> {
     app.command(&source).await.map_err(failure)
 }
 
+/// Freezes input before the document persists its execution intent.
+#[wasm_bindgen]
+pub async fn prepare_submission(source: String) -> Result<String, JsValue> {
+    application()?
+        .prepare_submission(&source)
+        .await
+        .map_err(failure)
+}
+
+/// Restores saved input only to an exact Session, or explicitly creates a Fresh replacement.
+#[wasm_bindgen]
+pub async fn restore_session(source: String) -> Result<String, JsValue> {
+    application()?
+        .restore_session(&source)
+        .await
+        .map_err(failure)
+}
+
+/// Dispatches or queries one exact saved Rust JSON request.
+#[wasm_bindgen]
+pub async fn dispatch_submission(
+    pane: String,
+    generation: String,
+    opaque: String,
+    mode: String,
+) -> Result<String, JsValue> {
+    application()?
+        .dispatch_submission(
+            rsi_gui::SurfaceId::parse(&pane).map_err(failure)?,
+            &generation,
+            &opaque,
+            &mode,
+        )
+        .await
+        .map_err(failure)
+}
+
 /// Imports bounded binary source bytes without encoding them into a JSON command.
 #[wasm_bindgen]
 pub async fn import_image(
-    pane: u8,
+    pane: String,
     generation: String,
     source: js_sys::Uint8Array,
-) -> Result<(), JsValue> {
+) -> Result<String, JsValue> {
     let app = application()?;
-    if source.length() as usize > crate::panes::images::MAXIMUM_UPLOAD_BYTES || source.length() == 0
-    {
+    if source.length() as usize > rsi_gui::MAXIMUM_UPLOAD_BYTES || source.length() == 0 {
         return Err(failure("Image source must contain 1 byte to 16 MiB"));
     }
-    if app.image_work.available_permits() == 0 {
+    if !app.image_import_available() {
         return Err(failure("An image operation is still in progress"));
     }
-    app.import_image(pane, &generation, source.to_vec().into())
+    let reference = app
+        .import_image(
+            rsi_gui::SurfaceId::parse(&pane).map_err(failure)?,
+            &generation,
+            source.to_vec().into(),
+        )
         .await
         .map_err(failure)?;
-    Ok(())
+    serde_json::to_string(&reference).map_err(failure)
 }
 
 /// Copies a validated canonical object into the transferable document response.
@@ -486,7 +569,16 @@ pub async fn disconnect(sign_out: bool) -> Result<JsValue, JsValue> {
         }
     }
     if sign_out && let Some(config) = config {
-        BrowserClient::logout(Execution::browser().map_err(failure)?, &config)
+        let device = OWNER
+            .with(|owner| {
+                owner
+                    .borrow()
+                    .connection
+                    .as_ref()
+                    .map(|connection| connection.device_id().clone())
+            })
+            .ok_or_else(|| failure("Authenticated browser identity is absent"))?;
+        BrowserClient::logout(Execution::browser().map_err(failure)?, &config, &device)
             .await
             .map_err(failure)?;
     }
@@ -506,11 +598,11 @@ pub fn resource_snapshot() -> JsValue {
     });
     JsValue::from_str(&serde_json::json!({"pending_timers":execution.pending_timers,"active_alarms":execution.active_alarms,"active_requests":requests}).to_string())
 }
-fn application() -> Result<Arc<WebApplication>, JsValue> {
+fn application() -> Result<Arc<GuiApplication>, JsValue> {
     OWNER
         .with(|owner| owner.borrow().app.clone())
         .ok_or_else(|| failure("Web application is not connected"))
 }
 fn failure(error: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&crate::application::error(error))
+    JsValue::from_str(&rsi_gui::display_error(error))
 }

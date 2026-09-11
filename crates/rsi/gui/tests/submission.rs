@@ -4,6 +4,8 @@ use rsi_agent_turn_protocol::*;
 use rsi_meta::*;
 use rsi_session_protocol::*;
 use std::sync::{Arc, Mutex};
+#[path = "submission/admission.rs"]
+mod admission;
 #[path = "submission/commands.rs"]
 mod commands;
 #[path = "submission/files.rs"]
@@ -27,6 +29,34 @@ mod tree_replacement;
 #[path = "submission/ui.rs"]
 mod ui;
 
+async fn prepare(
+    app: &Arc<rsi_gui::GuiApplication>,
+    generation: &str,
+    text: &str,
+    images: Vec<rsi_media_protocol::MediaRef>,
+    steer: bool,
+) -> serde_json::Value {
+    serde_json::from_str(&app.prepare_submission(&serde_json::json!({"pane":"main","generation":generation,"text":text,"images":images,"steer":steer}).to_string()).await.unwrap()).unwrap()
+}
+async fn dispatch(
+    app: &Arc<rsi_gui::GuiApplication>,
+    generation: &str,
+    prepared: &serde_json::Value,
+    mode: &str,
+) -> serde_json::Value {
+    serde_json::from_str(
+        &app.dispatch_submission(
+            rsi_gui::SurfaceId::MAIN,
+            generation,
+            prepared["opaque"].as_str().unwrap(),
+            mode,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 fn missing<T>() -> rsi_session_protocol::Result<T> {
     Err(rsi_session_protocol::SessionError::Backend(
         "injected status outage".into(),
@@ -34,6 +64,9 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    unpublished: std::sync::atomic::AtomicBool,
+    reject_submissions: std::sync::atomic::AtomicBool,
+    header_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     children: Mutex<std::collections::BTreeMap<SessionId, Arc<Backend>>>,
     tree: Mutex<Vec<rsi_agent_store_protocol::StoreAgentDescendantStatus>>,
     observations: std::sync::atomic::AtomicUsize,
@@ -44,6 +77,8 @@ struct Backend {
     commands: Mutex<Vec<SessionCommandInvocation>>,
     command_receipt: Mutex<Option<SessionCommandReceipt>>,
     requests: Mutex<Vec<SubmitInput>>,
+    pending_messages: Mutex<Vec<rsi_agent_store_protocol::StorePendingMessage>>,
+    receipt_sequence: std::sync::atomic::AtomicU64,
     facts: Mutex<Vec<SessionFact>>,
     history_requests: Mutex<Vec<Option<u64>>>,
     cancel: Mutex<Vec<CancelTarget>>,
@@ -106,7 +141,16 @@ impl SessionHandle for Backend {
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
-        panic!("unexpected draft snapshot")
+        if self.unpublished.load(std::sync::atomic::Ordering::Acquire) {
+            Ok(SessionDraftView {
+                header: self.header().await?,
+                revision: 0,
+            })
+        } else {
+            Err(rsi_session_protocol::SessionError::NotFound(
+                "unpublished draft".into(),
+            ))
+        }
     }
     async fn select_preset(
         &self,
@@ -150,9 +194,22 @@ impl SessionHandle for Backend {
     }
 
     async fn header(&self) -> rsi_session_protocol::Result<SessionHeader> {
+        let gate = self.header_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.cancel();
+            gate.release.cancelled().await;
+        }
         Ok(self.header.lock().unwrap().clone().unwrap())
     }
     async fn submit(&self, req: SubmitInput) -> rsi_session_protocol::Result<MessageReceipt> {
+        if self
+            .reject_submissions
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rsi_session_protocol::SessionError::Invalid(
+                "injected pre-admission rejection".into(),
+            ));
+        }
         let err = rsi_session_protocol::SessionError::MessageOutcomeUnknown {
             session: self.header().await?.session_id().to_string(),
             message: req.message_id.to_string(),
@@ -236,6 +293,11 @@ impl SessionHandle for Backend {
         use rsi_agent_store_protocol::{
             StoreAgentSessionStatus, StoreAgentSubtreeSnapshot, StoreSessionInspection,
         };
+        if self.unpublished.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(rsi_session_protocol::SessionError::NotFound(
+                "no durable history for Fresh Session".into(),
+            ));
+        }
         let header = self.header().await?;
         Ok(StoreSessionInspection {
             tree: StoreAgentSubtreeSnapshot {
@@ -256,7 +318,7 @@ impl SessionHandle for Backend {
                 .last()
                 .map_or(0, SessionFact::seq),
             durable_control_seq: 1,
-            pending: vec![],
+            pending: self.pending_messages.lock().unwrap().clone(),
             active_turn_id: None,
             activation_phase: None,
         })
@@ -309,11 +371,15 @@ impl SessionHandle for Backend {
 }
 impl Backend {
     async fn receipt(&self, id: &MessageId) -> rsi_session_protocol::Result<MessageReceipt> {
+        let sequence = self
+            .receipt_sequence
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .max(1);
         Ok(MessageReceipt {
             session_id: self.header().await?.session_id().clone(),
             message_id: id.clone(),
-            accepted_control_seq: 1,
-            observed_fact_seq: 0,
+            accepted_control_seq: sequence,
+            observed_fact_seq: sequence - 1,
             state: MessageState::Pending,
         })
     }
@@ -410,6 +476,7 @@ async fn unknown_submission_retains_its_identity_across_user_retries() {
         verify_retry(resolution).await;
     }
 }
+#[allow(clippy::too_many_lines)] // One lifecycle from preparation through unknown outcome and exact retry.
 async fn verify_retry(resolution: usize) {
     let rt = Runtime::with_execution(
         RuntimeLimits::default(),
@@ -438,7 +505,7 @@ async fn verify_retry(resolution: usize) {
                 "web",
                 "test",
                 UpdateMode::RestartRequired,
-                Arc::new(rsi_web::WebApplicationFactory),
+                Arc::new(rsi_gui::GuiApplicationFactory),
             ),
             serde_json::Value::Null,
         )
@@ -446,31 +513,40 @@ async fn verify_retry(resolution: usize) {
         .unwrap();
     assert_eq!(fiber.snapshot().state, FiberState::Active);
     let app = root
-        .lookup_local::<rsi_web::WebApplicationContract>()
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    let generation = view["panes"][0]["generation"].as_str().unwrap();
-    let input=serde_json::json!({"action":"submit","pane":0,"generation":generation,"text":"perform effect once","steer":false}).to_string();
-    for _ in 0..2 {
-        assert!(app.command(&input).await.is_err());
-    }
+    let generation = view["surfaces"]["main"]["generation"].as_str().unwrap();
+    let prepared = prepare(&app, generation, "perform effect once", vec![], false).await;
+    assert!(
+        backend.requests.lock().unwrap().is_empty(),
+        "preparation must not execute"
+    );
+    assert_eq!(
+        dispatch(&app, generation, &prepared, "dispatch").await["status"],
+        "unknown"
+    );
+    assert_eq!(
+        dispatch(&app, generation, &prepared, "query").await["status"],
+        "unknown"
+    );
     assert_eq!(
         backend.requests.lock().unwrap().len(),
         1,
         "status outage must not replay a possibly accepted request"
     );
     let original = backend.requests.lock().unwrap()[0].clone();
-    let session = view["panes"][0]["session"].clone();
+    let session = view["surfaces"]["main"]["session"].clone();
     // Replacing the surface must preserve both the original request and its admission.
-    app.command(&serde_json::json!({"action":"open","pane":0,"session":session}).to_string())
+    app.command(&serde_json::json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    let generation = view["panes"][0]["generation"].as_str().unwrap();
+    let generation = view["surfaces"]["main"]["generation"].as_str().unwrap();
     let model = rsi_ai_protocol::ModelRef::new("other", "new-model").unwrap();
     app.command(
-        &serde_json::json!({"action":"model","pane":0,"generation":generation,"model":model})
+        &serde_json::json!({"action":"model","pane":"main","generation":generation,"model":model})
             .to_string(),
     )
     .await
@@ -478,7 +554,10 @@ async fn verify_retry(resolution: usize) {
     backend
         .resolution
         .store(resolution, std::sync::atomic::Ordering::SeqCst);
-    app.command(&serde_json::json!({"action":"submit","pane":0,"generation":generation,"text":"edited next draft","steer":true}).to_string()).await.unwrap();
+    assert_eq!(
+        dispatch(&app, generation, &prepared, "retry_message").await["status"],
+        "complete"
+    );
     {
         let requests = backend.requests.lock().unwrap();
         assert_eq!(requests.len(), if resolution == 1 { 2 } else { 1 });
@@ -491,9 +570,12 @@ async fn verify_retry(resolution: usize) {
         );
     }
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    assert_eq!(view["panes"][0]["draft"], "edited next draft");
-    assert!(view["panes"][0]["unresolved_text"].is_null());
-    app.command(&serde_json::json!({"action":"submit","pane":0,"generation":generation,"text":"edited next draft","steer":false}).to_string()).await.unwrap();
+    assert!(view["surfaces"]["main"].get("draft").is_none());
+    let next = prepare(&app, generation, "edited next draft", vec![], false).await;
+    assert_eq!(
+        dispatch(&app, generation, &next, "dispatch").await["status"],
+        "complete"
+    );
     {
         let requests = backend.requests.lock().unwrap();
         let last = requests.last().unwrap();
@@ -510,7 +592,7 @@ async fn verify_retry(resolution: usize) {
 }
 
 #[tokio::test]
-async fn failed_navigation_at_draft_capacity_keeps_current_draft_editable() {
+async fn failed_navigation_at_submission_capacity_keeps_the_current_pane_usable() {
     let rt = Runtime::with_execution(
         RuntimeLimits::default(),
         Execution::native(tokio::runtime::Handle::current()),
@@ -538,7 +620,7 @@ async fn failed_navigation_at_draft_capacity_keeps_current_draft_editable() {
                 "web",
                 "test",
                 UpdateMode::RestartRequired,
-                Arc::new(rsi_web::WebApplicationFactory),
+                Arc::new(rsi_gui::GuiApplicationFactory),
             ),
             serde_json::Value::Null,
         )
@@ -546,28 +628,43 @@ async fn failed_navigation_at_draft_capacity_keeps_current_draft_editable() {
         .unwrap();
     assert_eq!(fiber.snapshot().state, FiberState::Active);
     let app = root
-        .lookup_local::<rsi_web::WebApplicationContract>()
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
 
+    backend
+        .resolution
+        .store(2, std::sync::atomic::Ordering::SeqCst);
     let mut current = serde_json::Value::Null;
     for index in 0..64 {
-        app.command(r#"{"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+        app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
         current = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
         if index < 63 {
-            app.command(&serde_json::json!({"action":"draft","pane":0,"generation":current["panes"][0]["generation"],"text":"saved"}).to_string()).await.unwrap();
+            let generation = current["surfaces"]["main"]["generation"].as_str().unwrap();
+            let prepared = prepare(&app, generation, "accepted", vec![], false).await;
+            assert_eq!(
+                dispatch(&app, generation, &prepared, "dispatch").await["status"],
+                "complete"
+            );
         }
     }
     assert!(
-        app.command(r#"{"action":"open","pane":0,"session":"missing"}"#)
+        app.command(r#"{"action":"open","pane":"main","session":"missing"}"#)
             .await
             .is_err()
     );
-    app.command(&serde_json::json!({"action":"draft","pane":0,"generation":current["panes"][0]["generation"],"text":"still editable"}).to_string()).await.unwrap();
+    prepare(
+        &app,
+        current["surfaces"]["main"]["generation"].as_str().unwrap(),
+        "still usable",
+        vec![],
+        false,
+    )
+    .await;
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    assert_eq!(view["panes"][0]["draft"], "still editable");
+    assert!(view["surfaces"]["main"].get("draft").is_none());
     assert_eq!(
-        view["panes"][0]["generation"],
-        current["panes"][0]["generation"]
+        view["surfaces"]["main"]["generation"],
+        current["surfaces"]["main"]["generation"]
     );
     assert!(rt.shutdown().await.is_clean());
 }
@@ -601,7 +698,7 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
                 "web",
                 "test",
                 UpdateMode::RestartRequired,
-                Arc::new(rsi_web::WebApplicationFactory),
+                Arc::new(rsi_gui::GuiApplicationFactory),
             ),
             serde_json::Value::Null,
         )
@@ -609,12 +706,12 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
         .unwrap();
     assert_eq!(fiber.snapshot().state, FiberState::Active);
     let app = root
-        .lookup_local::<rsi_web::WebApplicationContract>()
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
 
-    app.command(r#"{"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    let session = view["panes"][0]["session"].clone();
+    let session = view["surfaces"]["main"]["session"].clone();
     *backend.facts.lock().unwrap() = (1..=300)
         .map(|seq| {
             SessionFact::new(
@@ -628,13 +725,14 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
             .unwrap()
         })
         .collect();
-    app.command(&serde_json::json!({"action":"open","pane":0,"session":session}).to_string())
+    app.command(&serde_json::json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    let generation = &view["panes"][0]["generation"];
-    let command =
-        |action| serde_json::json!({"action":action,"pane":0,"generation":generation}).to_string();
+    let generation = &view["surfaces"]["main"]["generation"];
+    let command = |action| {
+        serde_json::json!({"action":action,"pane":"main","generation":generation}).to_string()
+    };
     app.command(&command("history")).await.unwrap();
     let prior: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
     app.command(&command("history")).await.unwrap();
@@ -642,8 +740,8 @@ async fn returning_to_live_restarts_history_at_the_live_projection() {
     app.command(&command("history")).await.unwrap();
     let again: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
     assert_eq!(
-        prior["panes"][0]["transcript"],
-        again["panes"][0]["transcript"]
+        prior["surfaces"]["main"]["transcript"],
+        again["surfaces"]["main"]["transcript"]
     );
     assert_eq!(
         *backend.history_requests.lock().unwrap(),

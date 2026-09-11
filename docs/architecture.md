@@ -56,8 +56,9 @@ ordinary child Profile selects linked or independently built native presentation
 code. Both consume the same pure scene and cell-frame contracts.
 The Serve application owns authenticated HTTP configuration and signals, consuming
 an independently composed service generation within that same Runtime.
-The Web application runs Rust Meta, Profiles and shared client controllers in a
-Dedicated Worker; its document bridge renders two independent conversation panes.
+The shared GUI application owns Rust Session controllers, projections and
+submission reconciliation. The Web adapter runs it with Meta and Profiles in a
+Dedicated Worker; the document bridge owns presentation and persistent editing.
 Static Web assets and complete renderer graphs are supplied by their own plugin
 to the HTTP listener. The Worker owns API-backed renderer generation leases;
 the document owns dynamic module mounting and disposal.

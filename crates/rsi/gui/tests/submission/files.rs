@@ -140,7 +140,7 @@ impl PluginFactory for Supply {
 async fn fixture() -> (
     Runtime,
     Arc<Reader>,
-    Arc<rsi_web::WebApplication>,
+    Arc<rsi_gui::GuiApplication>,
     FiberHandle,
 ) {
     let runtime = Runtime::default();
@@ -155,7 +155,7 @@ async fn fixture() -> (
         ("files", Arc::new(Supply(reader.clone()))),
         ("ui", Arc::new(rsi_ui::UiFactory)),
         ("files-ui", Arc::new(rsi_session_files_ui::FilesUiFactory)),
-        ("web", Arc::new(rsi_web::WebApplicationFactory)),
+        ("web", Arc::new(rsi_gui::GuiApplicationFactory)),
     ] {
         let fiber = runtime
             .root()
@@ -172,14 +172,14 @@ async fn fixture() -> (
     }
     let app = runtime
         .root()
-        .lookup_local::<rsi_web::WebApplicationContract>()
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
     (runtime, reader, app, files_fiber.unwrap())
 }
-async fn open_card(app: &Arc<rsi_web::WebApplication>, pane: usize) {
+async fn open_card(app: &Arc<rsi_gui::GuiApplication>, pane: &str) {
     let current = view(app);
-    let pane_view = &current["panes"][pane];
+    let pane_view = &current["surfaces"][pane];
     let menu = pane_view["ui_surfaces"]
         .as_array()
         .unwrap()
@@ -188,7 +188,7 @@ async fn open_card(app: &Arc<rsi_web::WebApplication>, pane: usize) {
         .unwrap();
     app.command(&json!({"action":"ui_surface","pane":pane,"generation":pane_view["generation"],"reference":menu["reference"]}).to_string()).await.unwrap();
 }
-async fn click(app: &Arc<rsi_web::WebApplication>, label: &str) -> Value {
+async fn click(app: &Arc<rsi_gui::GuiApplication>, label: &str) -> Value {
     let command = ui::button(&view(app)["ui_detail"], Some(label));
     app.command(&command.to_string()).await.unwrap();
     view(app)["ui_detail"].clone()
@@ -200,7 +200,7 @@ fn shown(detail: &Value) -> String {
 #[tokio::test]
 async fn files_cards_page_exact_bytes_paths_refresh_and_keep_same_session_panes_independent() {
     let (runtime, reader, app, _files) = fixture().await;
-    open_card(&app, 0).await;
+    open_card(&app, "main").await;
     let directory = click(&app, "Workspace root").await;
     assert!(shown(&directory).contains("0–16 of 20"));
     let next = click(&app, "Next page").await;
@@ -231,14 +231,17 @@ async fn files_cards_page_exact_bytes_paths_refresh_and_keep_same_session_panes_
     click(&app, "Refresh").await;
     assert_eq!(reader.next.load(Ordering::SeqCst), opens + 1);
     assert_ne!(reader.reads.lock().unwrap().last().unwrap().0, first_token);
-    let session = view(&app)["panes"][0]["session"].clone();
-    app.command(&json!({"action":"open","pane":1,"session":session}).to_string())
+    let session = view(&app)["surfaces"]["main"]["session"].clone();
+    app.command(r#"{"action":"add_surface","pane":"compare"}"#)
         .await
         .unwrap();
-    open_card(&app, 1).await;
+    app.command(&json!({"action":"open","pane":"compare","session":session}).to_string())
+        .await
+        .unwrap();
+    open_card(&app, "compare").await;
     click(&app, "Workspace root").await;
     assert_eq!(reader.opened.lock().unwrap().len(), 2);
-    open_card(&app, 0).await;
+    open_card(&app, "main").await;
     assert!(shown(&click(&app, "Current snapshot").await).contains("Workspace file"));
     click(&app, "Release snapshot").await;
     assert_eq!(reader.opened.lock().unwrap().len(), 1);
@@ -251,7 +254,7 @@ async fn files_cards_page_exact_bytes_paths_refresh_and_keep_same_session_panes_
 #[tokio::test]
 async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_action() {
     let (runtime, reader, app, _files) = fixture().await;
-    open_card(&app, 0).await;
+    open_card(&app, "main").await;
     click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
     reader.block.store(true, Ordering::SeqCst);
@@ -279,10 +282,10 @@ async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_acti
     assert_eq!(reader.active.load(Ordering::SeqCst), 0);
     assert!(view(&app)["ui_detail"].is_null());
     reader.block.store(false, Ordering::SeqCst);
-    open_card(&app, 0).await;
+    open_card(&app, "main").await;
     let old = ui::button(&view(&app)["ui_detail"], Some("Current snapshot"));
-    let session = view(&app)["panes"][0]["session"].clone();
-    app.command(&json!({"action":"open","pane":0,"session":session}).to_string())
+    let session = view(&app)["surfaces"]["main"]["session"].clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let reads = reader.reads.lock().unwrap().len();
@@ -295,7 +298,7 @@ async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_acti
 #[tokio::test]
 async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     let (runtime, reader, app, files) = fixture().await;
-    open_card(&app, 0).await;
+    open_card(&app, "main").await;
     click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
     let old = ui::button(&view(&app)["ui_detail"], Some("Next page"));
@@ -335,7 +338,7 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     );
     assert_eq!(replacement.next.load(Ordering::SeqCst), 0);
     assert!(reader.opened.lock().unwrap().is_empty());
-    open_card(&app, 0).await;
+    open_card(&app, "main").await;
     let mut invalid = ui::button(&view(&app)["ui_detail"], Some("Read file"));
     invalid["input"]["fields"] = json!({"path":"sample","root":"/"});
     assert!(matches!(

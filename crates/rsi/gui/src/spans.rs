@@ -24,6 +24,7 @@ impl Transcript {
         if block.sources.position(source).is_some() {
             return;
         }
+        block.markdown.take();
         if block.sources.is_empty() {
             // Entered Message data replaces its transient accepted-control preview.
             block.text.clear();
@@ -100,6 +101,69 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn unchanged_blocks_parse_once_and_backfill_invalidates_only_its_block() {
+        use std::sync::atomic::Ordering;
+        let mut transcript = Transcript::default();
+        transcript.add(
+            "finalized".into(),
+            "assistant",
+            "Assistant",
+            "**Final** answer",
+            false,
+        );
+        transcript.fact(&delta(3, "tail"));
+        for _ in 0..10 {
+            serde_json::to_value(&transcript).unwrap();
+        }
+        assert!(
+            transcript
+                .blocks
+                .iter()
+                .all(|block| block.markdown_parses.load(Ordering::Relaxed) == 1)
+        );
+        transcript.fact(&delta(3, "tail"));
+        serde_json::to_value(&transcript).unwrap();
+        assert!(
+            transcript
+                .blocks
+                .iter()
+                .all(|block| block.markdown_parses.load(Ordering::Relaxed) == 1),
+            "duplicate facts must not invalidate the cache"
+        );
+        transcript.fact(&delta(2, "**backfill** "));
+        let view = serde_json::to_value(&transcript).unwrap();
+        let finalized = transcript
+            .blocks
+            .iter()
+            .find(|block| block.key == "finalized")
+            .unwrap();
+        assert_eq!(finalized.markdown_parses.load(Ordering::Relaxed), 1);
+        let changed = transcript
+            .blocks
+            .iter()
+            .find(|block| block.key != "finalized")
+            .unwrap();
+        assert_eq!(changed.markdown_parses.load(Ordering::Relaxed), 2);
+        assert_eq!(changed.text, "**backfill** tail");
+        assert!(view.to_string().contains("strong"));
+        transcript.fact(&delta(4, &"界".repeat(MAX_BLOCK_BYTES)));
+        for _ in 0..3 {
+            serde_json::to_value(&transcript).unwrap();
+        }
+        let changed = transcript
+            .blocks
+            .iter()
+            .find(|block| block.key != "finalized")
+            .unwrap();
+        assert_eq!(
+            changed.markdown_parses.load(Ordering::Relaxed),
+            3,
+            "plain-text fallback is cached too"
+        );
+        assert!(changed.markdown.get().unwrap().is_none());
     }
     #[test]
     fn missing_interior_delta_is_inserted_once_without_regressing_terminal_status() {

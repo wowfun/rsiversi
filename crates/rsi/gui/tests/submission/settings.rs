@@ -31,6 +31,42 @@ impl Default for Fixture {
         }
     }
 }
+
+#[tokio::test]
+async fn empty_draft_reuse_preserves_attachment_and_rejects_changed_defaults_or_pending_work() {
+    let (runtime, backend, app) = fixture().await;
+    backend.unpublished.store(true, Ordering::Release);
+    let first = view(&app)["surfaces"]["main"].clone();
+    let create = |current: &serde_json::Value| {
+        json!({"action":"create","pane":"main","workspace":"a".repeat(64),"trust":false,
+        "reuse":{"generation":current["generation"],"header":current["header"]}})
+        .to_string()
+    };
+    app.command(&create(&first)).await.unwrap();
+    let reused = view(&app)["surfaces"]["main"].clone();
+    assert_eq!(first["session"], reused["session"]);
+    assert_eq!(first["generation"], reused["generation"]);
+    assert_ne!(first["selection"], reused["selection"]);
+    backend
+        .settings
+        .changed_scope
+        .store(true, Ordering::Release);
+    app.command(&create(&reused)).await.unwrap();
+    let changed = view(&app)["surfaces"]["main"].clone();
+    assert_ne!(changed["session"], reused["session"]);
+    let generation = changed["generation"].as_str().unwrap();
+    let prepared = prepare(&app, generation, "unconfirmed input", vec![], false).await;
+    assert_eq!(
+        dispatch(&app, generation, &prepared, "dispatch").await["status"],
+        "unknown"
+    );
+    app.command(&create(&changed)).await.unwrap();
+    assert_ne!(
+        view(&app)["surfaces"]["main"]["session"],
+        changed["session"]
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
 impl Fixture {
     async fn reading(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);

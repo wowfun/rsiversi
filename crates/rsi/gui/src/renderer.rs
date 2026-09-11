@@ -5,17 +5,10 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_session_protocol::InteractionSnapshot;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RenderConfig {
-    pub pane: u8,
-    pub generation: u64,
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Pending {
@@ -211,7 +204,7 @@ impl ObservationSink for Renderer {
 #[derive(Debug)]
 pub(crate) struct RendererContract;
 impl LocalContract for RendererContract {
-    const KEY: &'static str = "rsi.web.renderer";
+    const KEY: &'static str = "rsi.gui.renderer";
     type Service = Renderer;
 }
 
@@ -222,16 +215,12 @@ pub(crate) struct RendererFactory {
 #[async_trait]
 impl PluginFactory for RendererFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        let config: RenderConfig = serde_json::from_value(desired.clone())
-            .map_err(|_| MetaError::InvalidInput("invalid Web renderer configuration".into()))?;
-        if config.pane >= 2 || config.generation == 0 {
-            return Err(MetaError::InvalidInput("invalid pane or generation".into()));
+        if !desired.is_null() {
+            return Err(MetaError::InvalidInput(
+                "Web renderer configuration must be null".into(),
+            ));
         }
-        Ok(PreparedActivation::with_state(
-            ConfigValue::Null,
-            config,
-            16,
-        ))
+        Ok(PreparedActivation::new(ConfigValue::Null))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let renderer = Arc::new(Renderer {
@@ -377,7 +366,7 @@ mod tests {
                     rsi_meta::UpdateMode::Replayable,
                     Arc::new(RendererFactory { changed }),
                 ),
-                serde_json::json!({"pane":0,"generation":1}),
+                ConfigValue::Null,
             )
             .await
             .unwrap();

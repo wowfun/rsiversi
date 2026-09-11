@@ -113,7 +113,7 @@ impl PluginFactory for Connection {
         Ok(())
     }
 }
-async fn ready(app: &rsi_web::WebApplication, revision: u64) -> Value {
+async fn ready(app: &rsi_gui::GuiApplication, revision: u64) -> Value {
     let mut changed = app.changes();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -151,7 +151,7 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
         ),
         ("connection", Arc::new(Connection(remote.clone()))),
         ("ui", Arc::new(rsi_ui::UiFactory)),
-        ("web", Arc::new(rsi_web::WebApplicationFactory)),
+        ("web", Arc::new(rsi_gui::GuiApplicationFactory)),
     ] {
         let fiber = root
             .apply(
@@ -163,14 +163,14 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
         assert_eq!(fiber.snapshot().state, FiberState::Active);
     }
     let app = root
-        .lookup_local::<rsi_web::WebApplicationContract>()
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
     let view = sources::view(&app);
-    let pane = &view["panes"][0];
+    let pane = &view["surfaces"]["main"];
     assert_eq!(view["has_remote_ui"], true);
-    let list =
-        json!({"action":"remote_ui_list","pane":0,"generation":pane["generation"]}).to_string();
+    let list = json!({"action":"remote_ui_list","pane":"main","generation":pane["generation"]})
+        .to_string();
     for _ in 0..24 {
         app.command(&list).await.unwrap();
         let catalog = sources::view(&app)["remote_ui_catalog"].clone();

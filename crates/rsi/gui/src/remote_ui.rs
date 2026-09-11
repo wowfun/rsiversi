@@ -1,13 +1,13 @@
-use super::{Arc, Result, WebApplication, error};
+use super::{Arc, GuiApplication, Result, error};
 use crate::details::{RemoteCatalog, RemotePresentation};
 use rsi_ui_api::{
     CatalogCursor, CatalogRequest, ExportScope, Invoke, Observe, Selection, Source, UiItem,
 };
 
-impl WebApplication {
+impl GuiApplication {
     pub(crate) async fn remote_ui_list(
         &self,
-        pane: u8,
+        pane: crate::SurfaceId,
         generation: &str,
         after: Option<CatalogCursor>,
     ) -> Result<()> {

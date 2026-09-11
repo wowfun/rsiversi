@@ -32,7 +32,7 @@ async fn idle_read(backend: &Backend, active: bool) {
 #[tokio::test]
 async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling_session_work() {
     let (runtime, backend, app) = fixture().await;
-    let session = view(&app)["panes"][0]["session"].clone();
+    let session = view(&app)["surfaces"]["main"]["session"].clone();
     let text = format!("<script>literal</script>{}", "界".repeat(20_000));
     backend.facts.lock().unwrap().push(
         SessionFact::new(
@@ -48,14 +48,14 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
         )
         .unwrap(),
     );
-    app.command(&json!({"action":"open","pane":0,"session":session}).to_string())
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let current = view(&app);
-    let pane = &current["panes"][0];
+    let pane = &current["surfaces"]["main"];
     assert_eq!(pane["ui_surfaces"][0]["title"], "Session details");
     assert_eq!(pane["ui_cards"], true);
-    let card = json!({"action":"ui_block","pane":0,"generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
+    let card = json!({"action":"ui_block","pane":"main","generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
     app.command(&card).await.unwrap();
     let first = view(&app)["ui_detail"].clone();
     let read = button(&first, None);
@@ -89,7 +89,7 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
     backend.block_source.store(false, Ordering::SeqCst);
     app.command(&card).await.unwrap();
     let stale = button(&view(&app)["ui_detail"], None);
-    app.command(&json!({"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}).to_string())
+    app.command(&json!({"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}).to_string())
         .await
         .unwrap();
     let reads = backend.history_requests.lock().unwrap().len();
@@ -205,16 +205,19 @@ async fn independent_addon_has_generic_fields_and_actions_with_cross_pane_and_wi
         .await
         .unwrap();
     assert_eq!(fiber.snapshot().state, FiberState::Active);
-    app.command(&json!({"action":"create","pane":1,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}).to_string()).await.unwrap();
+    app.command(r#"{"action":"add_surface","pane":"compare"}"#)
+        .await
+        .unwrap();
+    app.command(&json!({"action":"create","pane":"compare","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}).to_string()).await.unwrap();
     let current = view(&app);
-    let pane = &current["panes"][0];
+    let pane = &current["surfaces"]["main"];
     let menu = pane["ui_surfaces"]
         .as_array()
         .unwrap()
         .iter()
         .find(|surface| surface["title"] == "Independent addon")
         .unwrap();
-    app.command(&json!({"action":"ui_surface","pane":1,"generation":current["panes"][1]["generation"],"reference":menu["reference"]}).to_string()).await.unwrap();
+    app.command(&json!({"action":"ui_surface","pane":"compare","generation":current["surfaces"]["compare"]["generation"],"reference":menu["reference"]}).to_string()).await.unwrap();
     assert!(view(&app)["ui_detail"]["model"].is_null());
     assert!(
         view(&app)["ui_detail"]["error"]
@@ -222,7 +225,7 @@ async fn independent_addon_has_generic_fields_and_actions_with_cross_pane_and_wi
             .unwrap()
             .contains("another")
     );
-    let open = json!({"action":"ui_surface","pane":0,"generation":pane["generation"],"reference":menu["reference"]}).to_string();
+    let open = json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":menu["reference"]}).to_string();
     app.command(&open).await.unwrap();
     let mut invoke = button(&view(&app)["ui_detail"], Some("Apply"));
     invoke["input"]["fields"] = json!({"value":"<script>literal</script>界"});
@@ -246,7 +249,7 @@ async fn independent_addon_has_generic_fields_and_actions_with_cross_pane_and_wi
     .await
     .unwrap();
     assert!(
-        !view(&app)["panes"][0]["ui_surfaces"]
+        !view(&app)["surfaces"]["main"]["ui_surfaces"]
             .as_array()
             .unwrap()
             .iter()
@@ -348,14 +351,14 @@ async fn arbitrary_async_models_keep_exact_source_authority_and_close_every_snap
         .await
         .unwrap();
     assert_eq!(fiber.snapshot().state, FiberState::Active);
-    let pane = view(&app)["panes"][0].clone();
+    let pane = view(&app)["surfaces"]["main"].clone();
     let surface = pane["ui_surfaces"]
         .as_array()
         .unwrap()
         .iter()
         .find(|item| item["title"] == "Binary model")
         .unwrap();
-    let open = json!({"action":"ui_surface","pane":0,"generation":pane["generation"],"reference":surface["reference"]}).to_string();
+    let open = json!({"action":"ui_surface","pane":"main","generation":pane["generation"],"reference":surface["reference"]}).to_string();
     let registry = runtime.root().lookup_local::<rsi_ui::UiContract>().unwrap();
     for _ in 0..24 {
         app.command(&open).await.unwrap();

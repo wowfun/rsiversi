@@ -2,11 +2,11 @@ use super::*;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 
-pub(super) fn view(app: &rsi_web::WebApplication) -> Value {
+pub(super) fn view(app: &rsi_gui::GuiApplication) -> Value {
     serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap()
 }
 
-pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplication>) {
+pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>) {
     let runtime = Runtime::default();
     let root = runtime.root();
     let backend = Arc::new(Backend::default());
@@ -17,7 +17,7 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplica
         ),
         ("ui", Arc::new(rsi_ui::UiFactory)),
         ("session-ui", Arc::new(rsi_session_ui::SessionUiFactory)),
-        ("web", Arc::new(rsi_web::WebApplicationFactory)),
+        ("web", Arc::new(rsi_gui::GuiApplicationFactory)),
     ] {
         let fiber = root
             .apply(
@@ -29,9 +29,9 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplica
         assert_eq!(fiber.snapshot().state, FiberState::Active);
     }
     let app = root
-        .lookup_local::<rsi_web::WebApplicationContract>()
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
-    app.command(r#"{"action":"create","pane":0,"workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
+    app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust":false}"#).await.unwrap();
     (runtime, backend, app)
 }
 
@@ -39,7 +39,7 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_web::WebApplica
 async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replacement() {
     let (runtime, backend, app) = fixture().await;
     let initial = view(&app);
-    let generation = &initial["panes"][0]["generation"];
+    let generation = &initial["surfaces"]["main"]["generation"];
     let text = format!("<script>literal</script>{}", "界".repeat(30_000));
     backend.facts.lock().unwrap().push(
         SessionFact::new(
@@ -56,7 +56,7 @@ async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replace
         .unwrap(),
     );
     let inspect = |seq| {
-        json!({"action":"inspect_source","pane":0,"generation":generation,"source":{"seq":seq,"field":{"kind":"turn_input"}}}).to_string()
+        json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":seq,"field":{"kind":"turn_input"}}}).to_string()
     };
     app.command(&inspect("9")).await.unwrap();
     let first = view(&app)["source_detail"].clone();
@@ -108,7 +108,7 @@ async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replace
             "detail" => app.command(&inspect("10")).await.unwrap(),
             "pane" => app
                 .command(
-                    &json!({"action":"open","pane":0,"session":initial["panes"][0]["session"]})
+                    &json!({"action":"open","pane":"main","session":initial["surfaces"]["main"]["session"]})
                         .to_string(),
                 )
                 .await
@@ -141,7 +141,7 @@ async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replace
 #[tokio::test]
 async fn block_source_lists_are_bounded_stable_and_invalidated_with_their_pane() {
     let (runtime, backend, app) = fixture().await;
-    let session = view(&app)["panes"][0]["session"].clone();
+    let session = view(&app)["surfaces"]["main"]["session"].clone();
     for seq in 1..=100 {
         backend.facts.lock().unwrap().push(
             SessionFact::new(
@@ -159,13 +159,13 @@ async fn block_source_lists_are_bounded_stable_and_invalidated_with_their_pane()
             .unwrap(),
         );
     }
-    let open = json!({"action":"open","pane":0,"session":session}).to_string();
+    let open = json!({"action":"open","pane":"main","session":session}).to_string();
     app.command(&open).await.unwrap();
     let current = view(&app);
-    let pane = &current["panes"][0];
+    let pane = &current["surfaces"]["main"];
     let block = &pane["transcript"]["blocks"][0];
     assert_eq!(block["sources"], 100);
-    app.command(&json!({"action":"inspect_block","pane":0,"generation":pane["generation"],"key":block["key"]}).to_string()).await.unwrap();
+    app.command(&json!({"action":"inspect_block","pane":"main","generation":pane["generation"],"key":block["key"]}).to_string()).await.unwrap();
     let first = view(&app)["block_sources"].clone();
     assert_eq!(first["page"].as_array().unwrap().len(), 64);
     assert_eq!(first["page"][0]["seq"], "1");

@@ -9,46 +9,24 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rsi-workbench-ui = { path = "../workbench-ui" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-util.workspace = true
 rsi-web-assets-api = { path = "../web-assets-api" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }
-bytes.workspace = true
-rsi-media-protocol = { path = "../../rsi-media/protocol" }
-rsi-client-preferences = { path = "../client-preferences" }
-rsi-session-files = { path = "../session-files" }
 rsi-session-files-ui = { path = "../session-files-ui" }
 rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
-async-trait.workspace = true
-futures-util.workspace = true
-pulldown-cmark.workspace = true
-url.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
-rsi-ui-api = { path = "../ui-api" }
-rsi-application = { path = "../application" }
-rsi-client = { path = "../client" }
-rsi-conversation = { path = "../conversation" }
 rsi-client-composition = { path = "../client-composition" }
 rsi-host = { path = "../../rsi-host/core" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-execution = { path = "../../rsi-meta/execution" }
-rsi-session-protocol = { path = "../session-protocol" }
-rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
-rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
-rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
-rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
-rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
-rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
-rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
-rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
-rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
-tokio-util.workspace = true
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+rsi-gui = { path = "../gui" }
 web-sys = { workspace = true, features = ["Crypto", "WorkerGlobalScope"] }
 js-sys.workspace = true
 rsi-api-browser-client = { path = "../../rsi-api/browser-client" }
@@ -56,14 +34,6 @@ rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 zeroize.workspace = true
-
-[dev-dependencies]
-image.workspace = true
-sha2.workspace = true
-rsi-process = { path = "../../rsi-process/core" }
-rsi-files-protocol = { path = "../../rsi-files/protocol" }
-rsi-sandbox = { path = "../../rsi-sandbox/core" }
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

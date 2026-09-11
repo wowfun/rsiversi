@@ -5,7 +5,7 @@ const MAXIMUM_INPUT_BYTES: usize = 64 * 1024;
 const MAXIMUM_EVENTS: usize = 4096;
 const MAXIMUM_DEPTH: usize = 32;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Node {
     Start { element: Element },
@@ -15,7 +15,7 @@ pub(crate) enum Node {
     Break,
     Rule,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Element {
     Paragraph,
@@ -94,7 +94,19 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
     if depth != 0 || serde_json::to_vec(&nodes).ok()?.len() > source.len() * 4 + 256 {
         return None;
     }
-    Some(nodes)
+    // Bound retained cache capacity independently of its encoded frame expansion.
+    let owned = nodes.capacity() * std::mem::size_of::<Node>()
+        + nodes
+            .iter()
+            .map(|node| match node {
+                Node::Text { text } | Node::Code { text } => text.capacity(),
+                Node::Start {
+                    element: Element::Link { href },
+                } => href.capacity(),
+                _ => 0,
+            })
+            .sum::<usize>();
+    (owned <= source.len() * 8 + 512).then_some(nodes)
 }
 
 #[cfg(test)]

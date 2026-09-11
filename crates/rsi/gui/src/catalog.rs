@@ -1,9 +1,9 @@
 #[path = "settings.rs"]
 mod settings;
 
-use crate::application::{Command, Recent, Result, WebApplication, error};
+use crate::application::{Command, GuiApplication, Recent, Result, error};
 
-impl WebApplication {
+impl GuiApplication {
     pub(crate) async fn refresh(&self, command: Command) -> Result<()> {
         let _work = self.catalog_work.lock().await;
         if matches!(command, Command::Refresh | Command::WorkspacesNext) {

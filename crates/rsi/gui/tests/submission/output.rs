@@ -111,13 +111,13 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         identity:rsi_tools_protocol::ToolResultIdentity::new("owner","invocation","call","a".repeat(64)).unwrap(),
         result:rsi_tools_protocol::ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":"a".repeat(32)},"stderr":{"full_output":"b".repeat(32)}}),vec![],false).unwrap(),
     }).unwrap());
-    let session = view(&app)["panes"][0]["session"].clone();
-    app.command(&json!({"action":"open","pane":0,"session":session}).to_string())
+    let session = view(&app)["surfaces"]["main"]["session"].clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let current = view(&app);
-    let pane = &current["panes"][0];
-    let open = json!({"action":"ui_block","pane":0,"generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
+    let pane = &current["surfaces"]["main"];
+    let open = json!({"action":"ui_block","pane":"main","generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
     for (label, id) in [("Read stdout", "a"), ("Read stderr", "b")] {
         app.command(&open).await.unwrap();
         let card = view(&app)["ui_detail"].clone();
@@ -169,7 +169,7 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         if close {
             app.command(r#"{"action":"close_detail"}"#).await.unwrap();
         } else {
-            app.command(&json!({"action":"open","pane":0,"session":session}).to_string())
+            app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
                 .await
                 .unwrap();
         }

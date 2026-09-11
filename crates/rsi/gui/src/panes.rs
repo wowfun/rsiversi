@@ -4,19 +4,21 @@ pub(crate) mod images;
 mod remote_ui;
 #[path = "source_details.rs"]
 mod source_details;
+#[path = "submissions.rs"]
+mod submissions;
 #[path = "ui_details.rs"]
 mod ui_details;
 
 use crate::{
-    application::{Command, Result, WebApplication, error, surface_program},
+    application::{Command, GuiApplication, Result, error, surface_program},
     projection::Transcript,
     renderer::{Renderer, RendererContract},
 };
-use rsi_agent_session_protocol::{MessageDelivery, MessageId, SessionId, WorkspaceTrust};
+use rsi_agent_session_protocol::{MessageId, SessionId, WorkspaceTrust};
 use rsi_agent_turn_protocol::{CancelTarget, ObservationCursor};
 use rsi_application::Surface;
 use rsi_client::{SessionController, SessionControllerContract};
-use rsi_session_protocol::{SessionHandle, SessionInput, SubmitInput};
+use rsi_session_protocol::SessionHandle;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -24,27 +26,31 @@ use std::{
 
 #[derive(Debug, Default)]
 pub(crate) struct Pane {
+    closed: std::sync::atomic::AtomicBool,
     switching: tokio::sync::Mutex<()>,
     revision: Mutex<Arc<()>>,
     current: Mutex<Option<Arc<Attachment>>>,
-    generation: Mutex<u64>,
-    drafts: Mutex<BTreeMap<SessionId, Arc<SavedDraft>>>,
+    submissions: Mutex<BTreeMap<SessionId, Arc<SubmissionState>>>,
+    selection: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReuseDraft {
+    generation: String,
+    header: String,
 }
 
 #[derive(Debug)]
-struct SavedDraft {
-    command: rsi_client::CommandSubmission,
-    input: Mutex<images::DraftInput>,
-    unresolved: Mutex<Option<SubmitInput>>,
+struct SubmissionState {
+    receipt: Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
     owned: Mutex<BTreeSet<MessageId>>,
     submissions: Arc<tokio::sync::Semaphore>,
 }
-impl SavedDraft {
+impl SubmissionState {
     fn new() -> Self {
         Self {
-            command: rsi_client::CommandSubmission::default(),
-            input: Mutex::new(images::DraftInput::default()),
-            unresolved: Mutex::new(None),
+            receipt: Mutex::new(None),
             owned: Mutex::new(BTreeSet::new()),
             submissions: Arc::new(tokio::sync::Semaphore::new(1)),
         }
@@ -57,52 +63,20 @@ struct Attachment {
     generation: u64,
     id: SessionId,
     path: String,
+    header: String,
+    creation: Option<rsi_session_protocol::CreateSession>,
+    defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
     handle: Arc<dyn SessionHandle>,
     controller: Arc<SessionController>,
     ui_target: Arc<rsi_ui::UiTarget>,
     renderer: Arc<Renderer>,
-    draft: Arc<SavedDraft>,
+    submission: Arc<SubmissionState>,
     model: Mutex<rsi_ai_protocol::ModelRef>,
     durable: std::sync::atomic::AtomicBool,
     history_work: tokio::sync::Semaphore,
 }
 impl Attachment {
-    async fn slash(&self, text: &str) -> Result<bool> {
-        if let Some(pending) = self.draft.command.view().pending {
-            return Err(format!(
-                "Command {} is unresolved; refresh its result first",
-                pending.request_id
-            ));
-        }
-        let retry_message = self
-            .draft
-            .unresolved
-            .lock()
-            .expect("Web submission poisoned")
-            .is_some();
-        if !retry_message && rsi_client::slash_command(text).is_some() {
-            let id = rsi_agent_session_protocol::DomainRequestId::new(rsi_ui::fresh_identity(
-                "command",
-            )?)
-            .map_err(error)?;
-            if self
-                .draft
-                .command
-                .try_slash(&self.controller, text, id)
-                .await
-                .map_err(error)?
-                .is_some()
-            {
-                let mut draft = self.draft.input.lock().expect("Web draft poisoned");
-                if draft.text.as_str() == text && draft.images.is_empty() {
-                    draft.text.clear();
-                }
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
     async fn close(&self) -> Result<()> {
         let surface = self.surface.lock().expect("Web surface poisoned").take();
         if let Some(surface) = surface {
@@ -115,128 +89,31 @@ impl Attachment {
     }
 }
 impl Pane {
-    fn draft(&self, id: &SessionId) -> Result<Arc<SavedDraft>> {
+    fn submission(&self, id: &SessionId) -> Result<Arc<SubmissionState>> {
         let current = self.current.lock().expect("Web pane poisoned").clone();
-        let mut drafts = self.drafts.lock().expect("Web drafts poisoned");
-        if let Some(draft) = drafts.get(id) {
+        let mut submissions = self.submissions.lock().expect("Web submissions poisoned");
+        if let Some(draft) = submissions.get(id) {
             return Ok(draft.clone());
         }
-        if drafts.len() == 64 {
-            drafts.retain(|_, draft| {
+        if submissions.len() == 64 {
+            submissions.retain(|_, draft| {
                 current
                     .as_ref()
-                    .is_some_and(|attachment| Arc::ptr_eq(&attachment.draft, draft))
-                    || !draft.input.lock().expect("Web draft poisoned").is_empty()
+                    .is_some_and(|attachment| Arc::ptr_eq(&attachment.submission, draft))
                     || draft.submissions.available_permits() == 0
-                    || draft.command.view().pending.is_some()
-                    || draft
-                        .unresolved
+                    || !draft
+                        .owned
                         .lock()
-                        .expect("Web submission poisoned")
-                        .is_some()
+                        .expect("Web pending identities poisoned")
+                        .is_empty()
             });
         }
-        if drafts.len() == 64 {
-            return Err("Saved draft capacity is full; send or clear a draft before opening another conversation".into());
+        if submissions.len() == 64 {
+            return Err("Session submission owner capacity is full; resolve pending messages before opening another conversation".into());
         }
-        let draft = Arc::new(SavedDraft::new());
-        drafts.insert(id.clone(), draft.clone());
+        let draft = Arc::new(SubmissionState::new());
+        submissions.insert(id.clone(), draft.clone());
         Ok(draft)
-    }
-    fn set_draft(&self, draft: &SavedDraft, text: String) -> Result<()> {
-        if text.len() > 1024 * 1024 {
-            return Err("Draft exceeds 1 MiB".into());
-        }
-        let drafts = self.drafts.lock().expect("Web drafts poisoned");
-        if !drafts
-            .values()
-            .any(|entry| std::ptr::eq(entry.as_ref(), draft))
-        {
-            return Err("This draft belongs to a replaced pane".into());
-        }
-        let total = drafts
-            .values()
-            .map(|draft| draft.input.lock().expect("Web draft poisoned").text.len())
-            .sum::<usize>();
-        let mut current = draft.input.lock().expect("Web draft poisoned");
-        if total - current.text.len() + text.len() > 2 * 1024 * 1024 {
-            return Err("Saved drafts exceed this pane's 2 MiB limit".into());
-        }
-        current.text = text;
-        Ok(())
-    }
-    fn submit_request(
-        &self,
-        attachment: &Attachment,
-        text: &str,
-        content: Vec<SessionInput>,
-        steer: bool,
-    ) -> Result<(SubmitInput, bool)> {
-        let retained = attachment
-            .draft
-            .unresolved
-            .lock()
-            .expect("Web submission poisoned")
-            .clone();
-        let retry = retained.is_some();
-        let request = if let Some(request) = retained {
-            request
-        } else {
-            rsi_session_protocol::validate_session_input(&content).map_err(error)?;
-            let drafts = self.drafts.lock().expect("Web drafts poisoned");
-            let retained_bytes: usize = drafts
-                .values()
-                .filter_map(|draft| {
-                    draft
-                        .unresolved
-                        .lock()
-                        .expect("Web submission poisoned")
-                        .as_ref()
-                        .map(|request| {
-                            request
-                                .content
-                                .iter()
-                                .map(|input| match input {
-                                    SessionInput::Text { text } => text.len(),
-                                    SessionInput::Image { .. } => 0,
-                                })
-                                .sum::<usize>()
-                        })
-                })
-                .sum();
-            if retained_bytes + text.len() > 2 * 1024 * 1024 {
-                return Err("Unresolved submissions exceed this pane's 2 MiB limit".into());
-            }
-            let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
-            let mut owned = attachment
-                .draft
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned");
-            if owned.len() == 1024 {
-                return Err("Pending message identity capacity is full; cancel or reconcile before submitting".into());
-            }
-            owned.insert(id.clone());
-            let request = SubmitInput {
-                message_id: id,
-                content,
-                delivery: if steer {
-                    MessageDelivery::Steer
-                } else {
-                    MessageDelivery::NextTurn
-                },
-                model: (!steer)
-                    .then(|| attachment.model.lock().expect("Web model poisoned").clone()),
-                sandbox: None,
-            };
-            *attachment
-                .draft
-                .unresolved
-                .lock()
-                .expect("Web submission poisoned") = Some(request.clone());
-            request
-        };
-        Ok((request, retry))
     }
     fn attachment(&self, generation: &str) -> Result<Arc<Attachment>> {
         self.current
@@ -274,22 +151,14 @@ impl Pane {
             .state
             .lock()
             .expect("Web renderer poisoned");
-        let input = current.draft.input.lock().expect("Web draft poisoned");
-        let unresolved = current
-            .draft
-            .unresolved
-            .lock()
-            .expect("Web submission poisoned");
         serde_json::json!({
-            "generation": current.generation.to_string(), "session":current.id, "path":current.path,
+            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
             "ui_cards": ui.has_block_renderers(&current.ui_target),
             "commands":*current.commands.lock().expect("Web commands poisoned"),
-            "command_submission":current.draft.command.view(),
+            "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
+            "header":current.header, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
-            "unresolved_text":unresolved.as_ref().map(|request| request.content.iter().find_map(|input| match input { SessionInput::Text { text } => Some(text.clone()), SessionInput::Image { .. } => None }).unwrap_or_default()),
-            "unresolved_images":unresolved.as_ref().map(|request| request.content.iter().filter_map(|item| match item { SessionInput::Image { media } => Some(media), SessionInput::Text { .. } => None }).collect::<Vec<_>>()),
-            "draft":input.text, "images_revision":input.revision.to_string(), "images":input.images,
             "model":*current.model.lock().expect("Web model poisoned"),
             "transcript":state.history.as_ref().unwrap_or(&state.transcript), "historical":state.history.is_some(),
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
@@ -297,11 +166,58 @@ impl Pane {
     }
 }
 
-impl WebApplication {
-    fn pane(&self, pane: u8) -> Result<&Arc<Pane>> {
+async fn finish_retirement(
+    panes: &Mutex<BTreeMap<crate::SurfaceId, Arc<Pane>>>,
+    id: crate::SurfaceId,
+    cleanup: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    let result = cleanup.await;
+    panes.lock().expect("GUI surfaces poisoned").remove(&id);
+    result
+}
+
+impl GuiApplication {
+    fn pane(&self, pane: crate::SurfaceId) -> Result<Arc<Pane>> {
         self.panes
-            .get(usize::from(pane))
-            .ok_or_else(|| "Unknown Web pane".into())
+            .lock()
+            .expect("GUI surfaces poisoned")
+            .get(&pane)
+            .filter(|pane| !pane.closed.load(std::sync::atomic::Ordering::Acquire))
+            .cloned()
+            .ok_or_else(|| "Unknown or retiring GUI surface".into())
+    }
+    pub(crate) fn add_surface(&self, id: crate::SurfaceId) -> Result<()> {
+        let mut surfaces = self.panes.lock().expect("GUI surfaces poisoned");
+        if surfaces.contains_key(&id) {
+            return Err("Surface identity is already in use".into());
+        }
+        if surfaces.len() >= 2 {
+            return Err("Close a conversation surface before opening another".into());
+        }
+        surfaces.insert(id, Arc::new(Pane::default()));
+        Ok(())
+    }
+    pub(crate) async fn close_surface(&self, id: crate::SurfaceId) -> Result<()> {
+        let pane = self.pane(id)?;
+        let _switching = pane.switching.lock().await;
+        if pane.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Err("Surface is already retiring".into());
+        }
+        let current = pane.current.lock().expect("GUI surface poisoned").take();
+        finish_retirement(&self.panes, id, async {
+            if let Some(current) = current {
+                let detached = self
+                    .details
+                    .lock()
+                    .expect("GUI details poisoned")
+                    .detach(id, &current.generation.to_string());
+                let closed = current.close().await;
+                detached.and(closed)
+            } else {
+                Ok(())
+            }
+        })
+        .await
     }
     #[allow(clippy::too_many_lines)] // Closed pane command dispatch keeps authority-bearing arguments visible together.
     pub(crate) async fn pane_command(&self, command: Command) -> Result<()> {
@@ -329,22 +245,18 @@ impl WebApplication {
                 *attached.commands.lock().expect("Web commands poisoned") = Some(commands);
                 Ok(())
             }
-            Command::RefreshCommandResult { pane, generation } => {
-                let attached = self.pane(pane)?.attachment(&generation)?;
-                attached
-                    .draft
-                    .command
-                    .refresh(&attached.controller)
-                    .await
-                    .map_err(error)?;
-                Ok(())
-            }
             Command::Open { pane, session } => self.open(pane, session, None).await,
             Command::Create {
                 pane,
                 workspace,
                 trust,
+                reuse,
             } => {
+                if let Some(reuse) = reuse
+                    && self.reuse_draft(pane, &workspace, trust, &reuse).await?
+                {
+                    return Ok(());
+                }
                 let id = SessionId::new(rsi_ui::fresh_identity("web")?).map_err(error)?;
                 self.open(
                     pane,
@@ -352,6 +264,7 @@ impl WebApplication {
                     Some(rsi_session_protocol::CreateSession {
                         session_id: id,
                         workspace_id: workspace,
+                        // Saved Fresh intent follows the default-preset contract in ../README.md.
                         agent_preset_id: None,
                         workspace_trust: if trust {
                             WorkspaceTrust::Trusted
@@ -362,27 +275,11 @@ impl WebApplication {
                 )
                 .await
             }
-            Command::Draft {
-                pane,
-                generation,
-                text,
-            } => {
-                let pane = self.pane(pane)?;
-                pane.set_draft(&pane.attachment(&generation)?.draft, text)
-            }
-            Command::ImageEdit {
-                pane,
-                generation,
-                revision,
-                from,
-                to,
-            } => self.edit_image(pane, &generation, &revision, from, to),
             Command::InspectImage {
                 pane,
                 generation,
-                index,
                 media,
-            } => self.inspect_image(pane, &generation, index, media),
+            } => self.inspect_image(pane, &generation, media),
             Command::Model {
                 pane,
                 generation,
@@ -397,12 +294,6 @@ impl WebApplication {
                     .expect("Web model poisoned") = model;
                 Ok(())
             }
-            Command::Submit {
-                pane,
-                generation,
-                text,
-                steer,
-            } => self.submit(pane, &generation, text, steer).await,
             Command::Cancel { pane, generation } => self.cancel(pane, &generation).await,
             Command::History { pane, generation } => self.history(pane, &generation).await,
             Command::Live { pane, generation } => {
@@ -492,14 +383,23 @@ impl WebApplication {
     #[allow(clippy::too_many_lines)] // Keep surface acquisition, generation publication and old-owner retirement together.
     async fn open(
         &self,
-        index: u8,
+        index: crate::SurfaceId,
         id: SessionId,
         create: Option<rsi_session_protocol::CreateSession>,
     ) -> Result<()> {
         let pane = self.pane(index)?;
         let _switching = pane.switching.lock().await;
-        let draft = pane.draft(&id)?;
-        let durable = create.is_none();
+        if pane.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Surface is retiring".into());
+        }
+        let draft = pane.submission(&id)?;
+        let reopening = create.is_none();
+        let before_defaults = if reopening {
+            None
+        } else {
+            self.defaults_stamp().await
+        };
+        let creation = create.clone();
         let handle = match create {
             Some(create) => self.session.create(create).await.map_err(error)?,
             None => {
@@ -508,9 +408,24 @@ impl WebApplication {
                     .map_err(error)?
             }
         };
-        let header = rsi_client::read_with_capacity_retry(&self.execution, || handle.header())
-            .await
-            .map_err(error)?;
+        let unpublished = if reopening {
+            match rsi_client::read_with_capacity_retry(&self.execution, || handle.draft_snapshot())
+                .await
+            {
+                Ok(draft) => Some(draft.header),
+                Err(rsi_session_protocol::SessionError::NotFound(_)) => None,
+                Err(reason) => return Err(error(reason)),
+            }
+        } else {
+            None
+        };
+        let durable = reopening && unpublished.is_none();
+        let header = match unpublished {
+            Some(header) => header,
+            None => rsi_client::read_with_capacity_retry(&self.execution, || handle.header())
+                .await
+                .map_err(error)?,
+        };
         let mut transcript = Transcript::default();
         let (cursor, before, more) = if durable {
             let inspection =
@@ -546,22 +461,18 @@ impl WebApplication {
         } else {
             (None, None, false)
         };
-        let generation = {
-            let mut generation = pane.generation.lock().expect("Web generation poisoned");
-            *generation = generation
-                .checked_add(1)
-                .ok_or("Pane generation exhausted")?;
-            *generation
-        };
+        let generation = self
+            .attachment_generation
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |value| value.checked_add(1),
+            )
+            .map_err(|_| "Surface attachment generation exhausted")?
+            + 1;
         let surface = self
             .shell
-            .open(surface_program(
-                index,
-                generation,
-                &id,
-                cursor,
-                self.has_files,
-            ))
+            .open(surface_program(&id, cursor, self.has_files))
             .await
             .map_err(error)?;
         let controller = surface
@@ -580,11 +491,17 @@ impl WebApplication {
             generation,
             id,
             path: header.canonical_cwd().into(),
+            header: header.fingerprint().map_err(error)?,
+            creation,
+            defaults: match (before_defaults, self.defaults_stamp().await) {
+                (Some(before), Some(after)) if before == after => Some(after),
+                _ => None,
+            },
             surface: Mutex::new(Some(surface)),
             handle,
             controller,
             renderer,
-            draft,
+            submission: draft,
             model: Mutex::new(header.settings().default_model().clone()),
             durable: std::sync::atomic::AtomicBool::new(durable),
             history_work: tokio::sync::Semaphore::new(1),
@@ -599,6 +516,13 @@ impl WebApplication {
             }
             current.replace(attachment)
         };
+        pane.selection
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |value| value.checked_add(1),
+            )
+            .map_err(|_| "Surface selection capacity exhausted")?;
         pane.changed();
         self.changed();
         if let Some(old) = old {
@@ -606,107 +530,87 @@ impl WebApplication {
         }
         Ok(())
     }
-    async fn submit(&self, index: u8, generation: &str, text: String, steer: bool) -> Result<()> {
-        let attachment = self.pane(index)?.attachment(generation)?;
-        let _submission = attachment
-            .draft
-            .submissions
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "A submission is still awaiting its receipt")?;
-        self.pane(index)?
-            .set_draft(&attachment.draft, text.clone())?;
-        let text_only = attachment
-            .draft
-            .input
-            .lock()
-            .expect("Web draft poisoned")
-            .images
-            .is_empty();
-        if text_only && attachment.slash(&text).await? {
-            return Ok(());
-        }
-        let content = attachment
-            .draft
-            .input
-            .lock()
-            .expect("Web draft poisoned")
-            .content();
-        if attachment
-            .durable
-            .load(std::sync::atomic::Ordering::Acquire)
-            && let Ok(inspection) = rsi_client::read_with_capacity_retry(&self.execution, || {
-                attachment.handle.inspect()
-            })
-            .await
-        {
-            attachment
-                .draft
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned")
-                .retain(|id| {
-                    inspection
-                        .pending
-                        .iter()
-                        .any(|pending| &pending.message_id == id)
-                });
-        }
-        let (request, retry) =
-            self.pane(index)?
-                .submit_request(&attachment, &text, content, steer)?;
-        let id = request.message_id.clone();
-        attachment
-            .draft
-            .owned
-            .lock()
-            .expect("Web pending identities poisoned")
-            .insert(id.clone());
-        attachment
-            .durable
-            .store(true, std::sync::atomic::Ordering::Release);
-        let result = if retry {
-            attachment.controller.retry(request.clone()).await
-        } else {
-            attachment.controller.submit(request.clone()).await
-        };
-        let unknown = matches!(
-            &result,
-            Err(
-                rsi_session_protocol::SessionError::MessageOutcomeUnknown { .. }
-                    | rsi_session_protocol::SessionError::Api(
-                        rsi_api_protocol::ApiError::OutcomeUnknown
-                    )
-            )
-        );
-        if result.is_err() && !unknown {
-            attachment
-                .draft
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned")
-                .remove(&id);
-        }
-        if !unknown {
-            *attachment
-                .draft
-                .unresolved
-                .lock()
-                .expect("Web submission poisoned") = None;
-        }
-        result.map_err(error)?;
-        attachment
-            .draft
-            .input
-            .lock()
-            .expect("Web draft poisoned")
-            .clear_submitted(&request.content)
+    async fn defaults_stamp(&self) -> Option<[rsi_settings_protocol::SettingsVersion; 2]> {
+        Some([
+            self.settings.read("rsi.agent").await.ok()?.version(),
+            self.settings
+                .read("rsi.agent-presets")
+                .await
+                .ok()?
+                .version(),
+        ])
     }
-    async fn cancel(&self, index: u8, generation: &str) -> Result<()> {
+    async fn reuse_draft(
+        &self,
+        index: crate::SurfaceId,
+        workspace: &rsi_workspace_protocol::WorkspaceId,
+        trust: bool,
+        reuse: &ReuseDraft,
+    ) -> Result<bool> {
+        let pane = self.pane(index)?;
+        let _switching = pane.switching.lock().await;
+        if pane.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Surface is retiring".into());
+        }
+        let Some(attached) = pane.current.lock().expect("Web pane poisoned").clone() else {
+            return Ok(false);
+        };
+        let Some(creation) = &attached.creation else {
+            return Ok(false);
+        };
+        if attached.generation.to_string() != reuse.generation
+            || attached.header != reuse.header
+            || &creation.workspace_id != workspace
+            || (creation.workspace_trust == WorkspaceTrust::Trusted) != trust
+            || attached.durable.load(std::sync::atomic::Ordering::Acquire)
+            || !attached
+                .submission
+                .owned
+                .lock()
+                .expect("Web pending identities poisoned")
+                .is_empty()
+            || attached.defaults.is_none()
+        {
+            return Ok(false);
+        }
+        let Ok(_submission) = attached.submission.submissions.try_acquire() else {
+            return Ok(false);
+        };
+        if attached.defaults != self.defaults_stamp().await {
+            return Ok(false);
+        }
+        let Ok(draft) = attached.handle.draft_snapshot().await else {
+            return Ok(false);
+        };
+        if draft.revision != 0
+            || draft.header.fingerprint().map_err(error)? != attached.header
+            || *attached.model.lock().expect("Web model poisoned")
+                != *draft.header.settings().default_model()
+        {
+            return Ok(false);
+        }
+        pane.selection
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |value| value.checked_add(1),
+            )
+            .map_err(|_| "Surface selection capacity exhausted")?;
+        pane.changed();
+        self.changed();
+        Ok(true)
+    }
+    async fn cancel(&self, index: crate::SurfaceId, generation: &str) -> Result<()> {
         let attachment = self.pane(index)?.attachment(generation)?;
         if !attachment
             .durable
             .load(std::sync::atomic::Ordering::Acquire)
+            && attachment
+                .submission
+                .owned
+                .lock()
+                .expect("Web pending identities poisoned")
+                .is_empty()
         {
             return Ok(());
         }
@@ -715,11 +619,17 @@ impl WebApplication {
                 .await
                 .map_err(error)?;
         let pending = {
-            let owned = attachment
-                .draft
+            let mut owned = attachment
+                .submission
                 .owned
                 .lock()
                 .expect("Web pending identities poisoned");
+            owned.retain(|id| {
+                inspection
+                    .pending
+                    .iter()
+                    .any(|pending| &pending.message_id == id)
+            });
             inspection
                 .pending
                 .iter()
@@ -746,7 +656,7 @@ impl WebApplication {
         }
         Ok(())
     }
-    async fn history(&self, index: u8, generation: &str) -> Result<()> {
+    async fn history(&self, index: crate::SurfaceId, generation: &str) -> Result<()> {
         let attachment = self.pane(index)?.attachment(generation)?;
         let _work = attachment
             .history_work
@@ -789,7 +699,7 @@ impl WebApplication {
     }
     fn inspect_interaction(
         &self,
-        index: u8,
+        index: crate::SurfaceId,
         generation: &str,
         owner: &str,
         id: &str,
@@ -829,38 +739,58 @@ impl WebApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn draft_capacity_rejects_before_replacing_text_and_other_panes_remain_independent() {
-        let pane = Pane::default();
-        let other = Pane::default();
-        let id = SessionId::new("one").unwrap();
-        let draft = pane.draft(&id).unwrap();
-        pane.set_draft(&draft, "x".repeat(1024 * 1024)).unwrap();
-        let second = pane.draft(&SessionId::new("two").unwrap()).unwrap();
-        pane.set_draft(&second, "y".repeat(1024 * 1024)).unwrap();
-        let third = pane.draft(&SessionId::new("three").unwrap()).unwrap();
-        assert!(pane.set_draft(&third, "excess".into()).is_err());
-        assert!(third.input.lock().unwrap().is_empty());
-        assert!(Arc::ptr_eq(&draft, &pane.draft(&id).unwrap()));
-        assert!(other.draft(&id).unwrap().input.lock().unwrap().is_empty());
-        assert!(pane.set_draft(&draft, "z".repeat(1024 * 1024 + 1)).is_err());
-        assert_eq!(draft.input.lock().unwrap().text.as_bytes()[0], b'x');
-        assert!(pane.attachment("999").is_err());
+    #[tokio::test]
+    async fn failed_cleanup_releases_the_surface_only_after_its_owner_finishes() {
+        let id = crate::SurfaceId::MAIN;
+        let panes = Mutex::new(BTreeMap::from([(id, Arc::new(Pane::default()))]));
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let retiring = finish_retirement(&panes, id, async {
+            wait.await.unwrap();
+            Err("injected cleanup failure".into())
+        });
+        tokio::pin!(retiring);
+        assert!(futures_util::poll!(&mut retiring).is_pending());
+        assert_eq!(
+            panes.lock().unwrap().len(),
+            1,
+            "cleanup still owns capacity"
+        );
+        release.send(()).unwrap();
+        assert_eq!(retiring.await.unwrap_err(), "injected cleanup failure");
+        assert!(
+            panes.lock().unwrap().is_empty(),
+            "failed cleanup burned a surface slot"
+        );
+        assert!(
+            panes
+                .lock()
+                .unwrap()
+                .insert(id, Arc::new(Pane::default()))
+                .is_none()
+        );
     }
     #[test]
-    fn saved_draft_count_and_evicted_empty_cell_are_fenced() {
+    fn occupied_submission_owners_are_bounded_and_retained_across_admission_failure() {
         let pane = Pane::default();
-        let empty = pane.draft(&SessionId::new("empty").unwrap()).unwrap();
-        for index in 0..63 {
-            let draft = pane
-                .draft(&SessionId::new(format!("session-{index}")).unwrap())
-                .unwrap();
-            pane.set_draft(&draft, "saved".into()).unwrap();
+        let mut owners = Vec::new();
+        let mut permits = Vec::new();
+        for index in 0..64 {
+            let id = SessionId::new(format!("session-{index}")).unwrap();
+            let owner = pane.submission(&id).unwrap();
+            permits.push(owner.submissions.clone().try_acquire_owned().unwrap());
+            owners.push((id, owner));
         }
-        let final_draft = pane.draft(&SessionId::new("final").unwrap()).unwrap();
-        pane.set_draft(&final_draft, "saved".into()).unwrap();
-        assert!(pane.set_draft(&empty, "late input".into()).is_err());
-        assert!(pane.draft(&SessionId::new("overflow").unwrap()).is_err());
-        assert_eq!(pane.drafts.lock().unwrap().len(), 64);
+        assert!(
+            pane.submission(&SessionId::new("overflow").unwrap())
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(
+            &owners[0].1,
+            &pane.submission(&owners[0].0).unwrap()
+        ));
+        drop(permits);
+        pane.submission(&SessionId::new("replacement").unwrap())
+            .unwrap();
+        assert_eq!(pane.submissions.lock().unwrap().len(), 1);
     }
 }

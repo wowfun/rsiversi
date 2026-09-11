@@ -29,12 +29,24 @@ pub(crate) struct Block {
     sources: SourceIndex,
     source_bytes: VecDeque<usize>,
     first_seq: u64,
+    markdown: std::sync::OnceLock<Option<Vec<crate::markdown::Node>>>,
+    #[cfg(test)]
+    markdown_parses: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Serialize for Block {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let markdown = (self.role == "assistant")
-            .then(|| crate::markdown::parse(&self.text))
+            .then(|| {
+                self.markdown
+                    .get_or_init(|| {
+                        #[cfg(test)]
+                        self.markdown_parses
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        crate::markdown::parse(&self.text)
+                    })
+                    .as_ref()
+            })
             .flatten();
         let mut view = serializer.serialize_struct(
             "Block",
@@ -131,6 +143,9 @@ impl Transcript {
                 sources: SourceIndex::default(),
                 source_bytes: VecDeque::new(),
                 first_seq: self.seq,
+                markdown: std::sync::OnceLock::new(),
+                #[cfg(test)]
+                markdown_parses: std::sync::Arc::default(),
             });
             self.blocks.len() - 1
         });
@@ -138,6 +153,7 @@ impl Transcript {
         if !block.sources.is_empty() {
             return;
         }
+        block.markdown.take();
         block.title = short(title, 512).into();
         if !append {
             block.text.clear();
@@ -614,3 +630,7 @@ mod tests {
 #[cfg(test)]
 #[path = "projection_media_tests.rs"]
 mod media_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "projection_performance.rs"]
+mod performance;

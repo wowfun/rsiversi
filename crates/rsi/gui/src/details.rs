@@ -9,7 +9,7 @@ const SOURCE_PAGE_COUNT: usize = 64;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct BlockSources {
-    pub pane: u8,
+    pub pane: crate::SurfaceId,
     pub generation: String,
     pub ticket: String,
     pub start: usize,
@@ -19,7 +19,12 @@ pub(crate) struct BlockSources {
     sources: SourceIndex,
 }
 impl BlockSources {
-    pub fn new(pane: u8, generation: String, ticket: String, sources: SourceIndex) -> Self {
+    pub fn new(
+        pane: crate::SurfaceId,
+        generation: String,
+        ticket: String,
+        sources: SourceIndex,
+    ) -> Self {
         Self {
             pane,
             generation,
@@ -51,7 +56,7 @@ impl BlockSources {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SourceDetail {
-    pub pane: u8,
+    pub pane: crate::SurfaceId,
     pub generation: String,
     pub source: SourceRef,
     pub ticket: String,
@@ -85,8 +90,8 @@ pub(crate) struct SettingsCatalog {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct UiDetail {
-    pub pane: u8,
-    pub generation: String,
+    pub pane: Option<crate::SurfaceId>,
+    pub generation: Option<String>,
     pub ticket: String,
     #[serde(skip)]
     pub view: Option<rsi_ui::BoundView>,
@@ -111,7 +116,7 @@ pub(crate) struct RemotePresentation {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct RemoteCatalog {
-    pub pane: u8,
+    pub pane: crate::SurfaceId,
     pub generation: String,
     pub ticket: String,
     pub page: Option<rsi_ui_api::CatalogPage>,
@@ -162,7 +167,7 @@ impl Details {
             }
         }
     }
-    pub fn detach(&mut self, pane: u8, generation: &str) -> Result<()> {
+    pub fn detach(&mut self, pane: crate::SurfaceId, generation: &str) -> Result<()> {
         if self
             .remote_catalog
             .as_ref()
@@ -171,10 +176,9 @@ impl Details {
                 .image
                 .as_ref()
                 .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
-            || self
-                .ui
-                .as_ref()
-                .is_some_and(|detail| detail.pane == pane && detail.generation == generation)
+            || self.ui.as_ref().is_some_and(|detail| {
+                detail.pane == Some(pane) && detail.generation.as_deref() == Some(generation)
+            })
             || self
                 .source
                 .as_ref()
@@ -183,10 +187,9 @@ impl Details {
                 .block_sources
                 .as_ref()
                 .is_some_and(|sources| sources.pane == pane && sources.generation == generation)
-            || self
-                .interaction
-                .as_ref()
-                .is_some_and(|detail| detail["pane"] == pane && detail["generation"] == generation)
+            || self.interaction.as_ref().is_some_and(|detail| {
+                detail["pane"] == pane.as_str() && detail["generation"] == generation
+            })
         {
             self.begin()?;
         }
@@ -219,9 +222,9 @@ impl Details {
             catalog.error = Some(error);
         }
     }
-    pub fn settle(&mut self, pane: u8, generation: &str, owner: &str, id: &str) {
+    pub fn settle(&mut self, pane: crate::SurfaceId, generation: &str, owner: &str, id: &str) {
         if self.interaction.as_ref().is_some_and(|detail| {
-            detail["pane"] == pane
+            detail["pane"] == pane.as_str()
                 && detail["generation"] == generation
                 && detail["request"]["id"] == id
                 && (detail["request"]["session_id"] == owner
@@ -240,7 +243,7 @@ impl Drop for Details {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ImageDetail {
-    pub pane: u8,
+    pub pane: crate::SurfaceId,
     pub generation: String,
     pub ticket: String,
     pub media: rsi_media_protocol::MediaRef,
@@ -254,13 +257,13 @@ mod tests {
         let mut detail = Details::default();
         detail.begin().unwrap();
         detail.interaction = Some(
-            serde_json::json!({"pane":1,"generation":"2","request":{"id":"question","session_id":"other-session"}}),
+            serde_json::json!({"pane":"compare","generation":"2","request":{"id":"question","session_id":"other-session"}}),
         );
-        detail.settle(0, "1", "first-session", "question");
+        detail.settle(crate::SurfaceId::MAIN, "1", "first-session", "question");
         assert!(detail.interaction.is_some());
-        detail.settle(1, "1", "other-session", "question");
+        detail.settle(crate::SurfaceId::COMPARE, "1", "other-session", "question");
         assert!(detail.interaction.is_some());
-        detail.settle(1, "2", "other-session", "question");
+        detail.settle(crate::SurfaceId::COMPARE, "2", "other-session", "question");
         assert!(detail.interaction.is_none());
     }
     #[test]
