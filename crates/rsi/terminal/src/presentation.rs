@@ -284,7 +284,7 @@ mod tests {
     fn scene() -> (Request, Vec<u8>) {
         scene_with(&rsi_terminal_ui::transcript::Transcript::default())
     }
-    fn scene_with(transcript: &rsi_terminal_ui::transcript::Transcript) -> (Request, Vec<u8>) {
+    fn capture_scene(transcript: &rsi_terminal_ui::transcript::Transcript) -> Scene {
         use rsi_agent_session_protocol::{
             AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
         };
@@ -303,7 +303,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let source = Scene::capture(
+        Scene::capture(
             &rsi_terminal_ui::Input {
                 header: &header,
                 transcript,
@@ -328,8 +328,9 @@ mod tests {
             24,
         )
         .unwrap()
-        .encode()
-        .unwrap();
+    }
+    fn scene_with(transcript: &rsi_terminal_ui::transcript::Transcript) -> (Request, Vec<u8>) {
+        let source = capture_scene(transcript).encode().unwrap();
         (
             Request {
                 identity: wire::Identity {
@@ -366,25 +367,37 @@ mod tests {
                 .unwrap(),
             );
         }
-        let renderer = Linked(std::sync::Mutex::default());
-        let start = std::time::Instant::now();
-        let mut capture = std::time::Duration::ZERO;
+        let mut renderer = rsi_terminal_ui::scene::Renderer::default();
+        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         let mut scene_bytes = 0;
-        for _ in 0..10 {
-            let before = std::time::Instant::now();
-            let (request, source) = scene_with(&transcript);
-            capture += before.elapsed();
+        for _ in 0..100 {
+            let started = std::time::Instant::now();
+            let scene = capture_scene(&transcript);
+            samples[0].push(started.elapsed());
+            let started = std::time::Instant::now();
+            let source = scene.encode().unwrap();
+            samples[1].push(started.elapsed());
             scene_bytes = source.len();
-            let frame = renderer
-                .render(request, source, CancellationToken::new())
-                .await
-                .unwrap();
-            std::hint::black_box(frame);
+            let started = std::time::Instant::now();
+            let decoded = Scene::decode(&source).unwrap();
+            samples[2].push(started.elapsed());
+            let started = std::time::Instant::now();
+            std::hint::black_box(renderer.render(decoded, 80, 24).unwrap());
+            samples[3].push(started.elapsed());
         }
-        eprintln!(
-            "linked 10 frames: scene_bytes={scene_bytes}, capture_and_encode={capture:?}, total={:?}",
-            start.elapsed()
-        );
+        for (phase, mut values) in ["capture", "encode", "decode", "render"]
+            .into_iter()
+            .zip(samples)
+        {
+            values.sort_unstable();
+            eprintln!(
+                "terminal phase={phase} frames=100 scene_bytes={scene_bytes} optimized={} p50={:?} p95={:?} p99={:?}",
+                !cfg!(debug_assertions),
+                values[50],
+                values[95],
+                values[99]
+            );
+        }
     }
     #[tokio::test]
     async fn poisoned_linked_renderer_returns_a_recoverable_failure() {

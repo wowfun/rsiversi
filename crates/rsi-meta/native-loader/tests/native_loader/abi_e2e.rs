@@ -93,6 +93,67 @@ async fn explicit_artifact_path_dynamically_provides_echo_without_a_loader_servi
 }
 
 #[tokio::test]
+#[ignore = "report-only real native echo latency measurement"]
+async fn real_native_echo_callback_cost() {
+    let (_cache, catalog) = catalog();
+    let runtime = Runtime::default();
+    let upstream = runtime
+        .root()
+        .apply(upstream_factory(), Value::Null)
+        .await
+        .unwrap();
+    wait_active(&upstream).await;
+    let native = runtime
+        .root()
+        .apply(
+            catalog.load(native_fixture()).unwrap(),
+            json!({"prefix":"native:"}),
+        )
+        .await
+        .unwrap();
+    wait_active(&native).await;
+    let slot = Arc::new(Mutex::new(None));
+    let consumer = runtime
+        .root()
+        .apply(
+            crate::resolved(Arc::new(CaptureFactory::new(
+                "probe",
+                Requirement::new("echo", "fixture.echo", V1),
+                slot.clone(),
+            ))),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    wait_active(&consumer).await;
+    let echo = slot.lock().unwrap().take().unwrap();
+    let mut samples = Vec::new();
+    let start = std::time::Instant::now();
+    for _ in 0..1000 {
+        let started = std::time::Instant::now();
+        let response = echo
+            .invoke(Message::new(b"hello".as_slice()))
+            .await
+            .unwrap();
+        samples.push(started.elapsed());
+        assert_eq!(response.as_bytes(), b"native:upstream:hello");
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "native_echo calls=1000 optimized={} p50={:?} p95={:?} p99={:?} total={:?}",
+        !cfg!(debug_assertions),
+        samples[500],
+        samples[950],
+        samples[990],
+        start.elapsed()
+    );
+    drop(echo);
+    assert!(runtime.shutdown().await.is_clean());
+    wait_for_callback_quiescence(&catalog);
+    assert_eq!(catalog.snapshot().active_callbacks, 0);
+}
+
+#[tokio::test]
 async fn nested_native_bridge_preserves_transferred_capability_and_bidi_terminal() {
     let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(2));
     let runtime = Runtime::default();

@@ -25,19 +25,23 @@ fn native_fixture() -> &'static PathBuf {
         let root = loader.join("../../..");
         let manifest = root.join("fixtures/rsi-meta/echo-bidi/Cargo.toml");
         let target = root.join("target/native-fixture-test");
+        let release = !cfg!(debug_assertions);
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "--locked", "--manifest-path"])
             .arg(&manifest)
             .arg("--target-dir")
             .arg(&target)
+            .args(if release { vec!["--release"] } else { vec![] })
             .status()
             .expect("build native fixture");
         assert!(status.success(), "native fixture build failed");
-        target.join("debug").join(format!(
-            "{}rsi_meta_fixture_echo_bidi{}",
-            std::env::consts::DLL_PREFIX,
-            std::env::consts::DLL_SUFFIX
-        ))
+        target
+            .join(if release { "release" } else { "debug" })
+            .join(format!(
+                "{}rsi_meta_fixture_echo_bidi{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ))
     })
 }
 

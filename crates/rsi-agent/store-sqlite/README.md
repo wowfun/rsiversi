@@ -51,7 +51,12 @@ so rollback cannot publish validation of discarded state.
 explicit no-create full-store check for SQLite integrity, foreign keys, all
 bounded Headers, mechanical watermarks, recomputed canonical Fact-prefix
 digests, Fact/turn relationships, and per-root Agent-tree cardinality. The audit streams and validates every
-Fact body. Mailbox-index verification compares each canonical control with its
+Fact body. Session enumeration retains at most 256 identities per keyset page.
+SQLite checks each identity's stored UTF-8 byte length before materializing its
+text; invalid identities fail the audit as corruption instead of being skipped,
+including invalid UTF-8 and incompatible SQLite value types. The exclusive
+immutable audit still checks every Session.
+Mailbox-index verification compares each canonical control with its
 indexed row and a final cardinality check. Replay retains only bounded pending
 message payloads; completed entries are compared and released as they close. It opens the existing writer-lock file and database read-only,
 performs no writes, and does not perform WAL recovery. A nonempty WAL makes the

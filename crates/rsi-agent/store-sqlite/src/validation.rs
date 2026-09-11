@@ -408,25 +408,61 @@ pub(super) fn validate_database(connection: &Connection) -> Result<()> {
             "Agent tree exceeds its durable node bound".into(),
         ));
     }
-    let session_ids = {
-        let mut statement = connection
-            .prepare("SELECT session_id FROM sessions ORDER BY session_id")
-            .map_err(sql_error)?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(sql_error)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(sql_error)?
-    };
-    for encoded_session_id in session_ids {
-        let session_id = SessionId::new(encoded_session_id).map_err(|error| {
-            StoreError::Corrupt(format!("durable session identity is invalid: {error}"))
-        })?;
-        validate_session(connection, &session_id)?;
-        validate_canonical_fact_prefix(connection, &session_id)?;
-        validate_canonical_control_prefix(connection, &session_id)?;
+    let mut cursor = None;
+    loop {
+        let page = session_id_page(connection, cursor.as_ref())?;
+        if page.is_empty() {
+            break;
+        }
+        for session_id in &page {
+            validate_session(connection, session_id)?;
+            validate_canonical_fact_prefix(connection, session_id)?;
+            validate_canonical_control_prefix(connection, session_id)?;
+        }
+        cursor = page.last().cloned();
     }
     Ok(())
+}
+
+// Separate keyset statements keep the continuation an indexed range scan. The
+// length predicate gates projection, never row selection: corruption cannot hide.
+pub(super) fn session_id_page(
+    connection: &Connection,
+    after: Option<&SessionId>,
+) -> Result<Vec<SessionId>> {
+    let projection =
+        "SELECT CASE WHEN length(CAST(session_id AS BLOB)) <= ?1 THEN session_id END FROM sessions";
+    let sql = if after.is_some() {
+        format!("{projection} WHERE session_id > ?2 ORDER BY session_id LIMIT 256")
+    } else {
+        format!("{projection} ORDER BY session_id LIMIT 256")
+    };
+    let maximum = i64::try_from(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES)
+        .expect("identity bound fits SQLite INTEGER");
+    let mut statement = connection.prepare(&sql).map_err(sql_error)?;
+    let mut rows = if let Some(after) = after {
+        statement.query(params![maximum, after.as_str()])
+    } else {
+        statement.query([maximum])
+    }
+    .map_err(sql_error)?;
+    let mut page = Vec::with_capacity(256);
+    while let Some(row) = rows.next().map_err(sql_error)? {
+        let encoded = row
+            .get::<_, Option<String>>(0)
+            .map_err(|error| {
+                StoreError::Corrupt(format!("invalid durable session identity: {error}"))
+            })?
+            .ok_or_else(|| {
+                StoreError::Corrupt(
+                    "durable session identity is missing or exceeds its byte bound".into(),
+                )
+            })?;
+        page.push(SessionId::new(encoded).map_err(|error| {
+            StoreError::Corrupt(format!("durable session identity is invalid: {error}"))
+        })?);
+    }
+    Ok(page)
 }
 
 #[derive(Default)]

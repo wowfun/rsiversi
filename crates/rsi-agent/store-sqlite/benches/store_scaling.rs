@@ -526,6 +526,7 @@ async fn benchmark_control_history(count: u64) {
     let mut cold_pages = Vec::new();
     let mut warm_pages = Vec::new();
     let mut concurrent_headers = Vec::new();
+    let mut concurrent_facts = Vec::new();
     let mut returned = 0;
     for _ in 0..20 {
         let store = SqliteStore::open(root.path()).unwrap();
@@ -543,6 +544,12 @@ async fn benchmark_control_history(count: u64) {
             concurrent_headers.push(
                 timed_async(async {
                     black_box(store.header(&warm).await.unwrap());
+                })
+                .await,
+            );
+            concurrent_facts.push(
+                timed_async(async {
+                    black_box(store.read_facts(&warm, 0, 1).await.unwrap());
                 })
                 .await,
             );
@@ -566,5 +573,6 @@ async fn benchmark_control_history(count: u64) {
     report("warm_control_one_fact_page", &warm_pages);
     if !concurrent_headers.is_empty() {
         report("concurrent_warm_header", &concurrent_headers);
+        report("concurrent_warm_fact_page", &concurrent_facts);
     }
 }

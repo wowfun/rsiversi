@@ -19,6 +19,7 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 rsi-agent-testkit = { path = "../testkit" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }

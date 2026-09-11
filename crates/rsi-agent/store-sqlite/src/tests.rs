@@ -1,4 +1,171 @@
 use super::*;
+
+#[tokio::test]
+#[ignore = "report-only actual SQLite validation VM and full-scan work"]
+async fn online_validation_sql_work() {
+    use rusqlite::{
+        StatementStatus,
+        trace::{TraceEvent, TraceEventCodes},
+    };
+    static VM: AtomicU64 = AtomicU64::new(0);
+    static SCANS: AtomicU64 = AtomicU64::new(0);
+    fn count(event: TraceEvent<'_>) {
+        if let TraceEvent::Profile(statement, _) = event {
+            VM.fetch_add(
+                u64::try_from(statement.get_status(StatementStatus::VmStep)).unwrap(),
+                Ordering::Relaxed,
+            );
+            SCANS.fetch_add(
+                u64::try_from(statement.get_status(StatementStatus::FullscanStep)).unwrap(),
+                Ordering::Relaxed,
+            );
+        }
+    }
+    for size in [257, 512] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        let mut sessions = Vec::new();
+        for index in 0..size {
+            sessions.push(seed_session(&store, &format!("scan-{index}")).await);
+        }
+        drop(store);
+        let store = SqliteStore::open(root.path()).unwrap();
+        for connection in [
+            &store.inner.connections.validation_reader,
+            &store.inner.connections.reader,
+        ] {
+            connection
+                .lock()
+                .unwrap()
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+        }
+        for cycle in 0..3 {
+            VM.store(0, Ordering::Relaxed);
+            SCANS.store(0, Ordering::Relaxed);
+            let start = std::time::Instant::now();
+            for id in &sessions {
+                assert_eq!(store.read_facts(id, 0, 1).await.unwrap().facts.len(), 1);
+            }
+            eprintln!(
+                "sqlite sessions={size} cycle={cycle} fact_page_calls={size} validation_runs={} vm_steps={} full_scan_steps={} elapsed={:?}",
+                store.inner.validation_runs.load(Ordering::Relaxed),
+                VM.load(Ordering::Relaxed),
+                SCANS.load(Ordering::Relaxed),
+                start.elapsed()
+            );
+        }
+        VM.store(0, Ordering::Relaxed);
+        SCANS.store(0, Ordering::Relaxed);
+        let validated = store.inner.validation_runs.load(Ordering::Relaxed);
+        for _ in 0..100 {
+            store
+                .read_facts(sessions.last().unwrap(), 0, 1)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.inner.validation_runs.load(Ordering::Relaxed),
+            validated
+        );
+        eprintln!(
+            "sqlite sessions={size} warm_same_session_calls=100 vm_steps={} full_scan_steps={}",
+            VM.load(Ordering::Relaxed),
+            SCANS.load(Ordering::Relaxed)
+        );
+    }
+}
+
+#[tokio::test]
+async fn offline_validation_pages_every_session_and_rejects_late_corruption() {
+    for count in [0, 256, 257, 513] {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(root.path()).unwrap();
+        for index in 0..count {
+            let header = test_header(&format!("page-{index:04}"));
+            store
+                .append(AppendBatch {
+                    session_id: header.session_id().clone(),
+                    expected_seq: 0,
+                    header: Some(header),
+                    facts: vec![test_fact(1).into()],
+                })
+                .await
+                .unwrap();
+        }
+        drop(store);
+        let database = root.path().join("sessions.sqlite3");
+        let before = std::fs::read(&database).unwrap();
+        SqliteStore::verify(root.path()).unwrap();
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        if count > 256 {
+            let db = Connection::open(&database).unwrap();
+            db.execute(
+                "UPDATE sessions SET header_json='{}' WHERE session_id=?1",
+                [format!("page-{:04}", count - 1)],
+            )
+            .unwrap();
+            drop(db);
+            assert!(matches!(
+                SqliteStore::verify(root.path()),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn offline_identity_pages_bound_retention_and_do_not_skip_invalid_rows() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY)")
+        .unwrap();
+    for index in 0..513 {
+        db.execute(
+            "INSERT INTO sessions VALUES (?1)",
+            [format!("page-{index:04}")],
+        )
+        .unwrap();
+    }
+    let mut cursor = None;
+    let mut sizes = Vec::new();
+    loop {
+        let page = crate::validation::session_id_page(&db, cursor.as_ref()).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        sizes.push(page.len());
+        cursor = page.last().cloned();
+    }
+    assert_eq!(sizes, [256, 256, 1]);
+    for invalid in ["z".repeat(257), "z\0invalid".into(), "z invalid".into()] {
+        db.execute("INSERT INTO sessions VALUES (?1)", [&invalid])
+            .unwrap();
+        assert!(matches!(
+            crate::validation::session_id_page(&db, cursor.as_ref()),
+            Err(StoreError::Corrupt(_))
+        ));
+        db.execute("DELETE FROM sessions WHERE session_id=?1", [&invalid])
+            .unwrap();
+    }
+}
+
+#[test]
+fn offline_identity_pages_classify_non_text_and_invalid_utf8_as_corruption() {
+    for sql in [
+        "INSERT INTO sessions VALUES (X'616263')",
+        "INSERT INTO sessions VALUES (CAST(X'ff' AS TEXT))",
+        "INSERT INTO sessions VALUES (NULL)",
+    ] {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY)")
+            .unwrap();
+        db.execute_batch(sql).unwrap();
+        let result = crate::validation::session_id_page(&db, None);
+        assert!(
+            matches!(result, Err(StoreError::Corrupt(_))),
+            "{sql}: {result:?}"
+        );
+    }
+}
 use crate::session_store::{
     LIST_AGENT_CHILDREN_AFTER_SQL, LIST_READY_MESSAGES_AFTER_SQL, LIST_READY_ROOTS_AFTER_SQL,
     LIST_WAITING_ACTIVATIONS_AFTER_SQL,

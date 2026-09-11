@@ -17,6 +17,12 @@ and native presentation code. Tests exercise grapheme editing, retention, wrappi
 and exact source mappings; terminal restoration and writer backpressure belong
 to the resident application tests.
 
+The opt-in Linux `deterministic_render_cost` test records ten 16/64/128-block
+runs through the actual projection, editor and cached renderer at 120 × 40 cells.
+`RSI_TUI_PERFORMANCE_REPORT` selects a new report file. Thread CPU and edit-to-cell
+render time exclude PTY writes, terminal-emulator painting and display scanout;
+they must not be compared directly with browser input-to-paint measurements.
+
 The portable renderer accepts a closed scene source, in contiguous binary chunks
 of at most 64 KiB. A scene contains a bounded transcript window (at most 512 KiB
 of text), a cursor window of the current draft, and bounded menu/detail values.

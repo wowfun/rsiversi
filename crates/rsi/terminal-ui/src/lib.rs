@@ -2,6 +2,8 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)] // Bounds and error categories are owned by the package contract.
 pub mod editor;
+#[cfg(all(test, target_os = "linux"))]
+mod performance;
 pub mod render;
 pub mod scene;
 #[cfg(test)]

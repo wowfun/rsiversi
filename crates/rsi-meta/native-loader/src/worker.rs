@@ -499,6 +499,57 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[tokio::test]
+    #[ignore = "report-only native callback thread/latency measurement"]
+    async fn callback_thread_cost() {
+        let executor = NativeExecutor::new(1, 1, 1, 1).unwrap();
+        for blocking in [false, true] {
+            let mut samples = Vec::new();
+            let mut threads = std::collections::HashSet::new();
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                let started = std::time::Instant::now();
+                let id = if blocking {
+                    executor
+                        .spawn_blocking_callback("probe", || std::thread::current().id())
+                        .unwrap()
+                        .recv()
+                        .unwrap()
+                } else {
+                    executor
+                        .spawn_callback("probe", || std::thread::current().id())
+                        .unwrap()
+                        .await
+                        .unwrap()
+                };
+                samples.push(started.elapsed());
+                threads.insert(id);
+                while executor.callback_permits.available_permits() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            samples.sort_unstable();
+            let rss = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("VmRSS:"))
+                        .map(str::to_owned)
+                });
+            eprintln!(
+                "callback blocking={blocking} calls=1000 unique_thread_starts={} p50={:?} p95={:?} p99={:?} total={:?} sampled_rss={rss:?}",
+                threads.len(),
+                samples[500],
+                samples[950],
+                samples[990],
+                start.elapsed()
+            );
+            assert_eq!(threads.len(), 1000);
+            assert_eq!(executor.snapshot().active_callbacks, 0);
+        }
+    }
+
     #[test]
     fn production_callback_thread_names_fit_linux_comm_and_retain_operation() {
         for operation in ["load", "prepare", "serve", "create", "activate"] {

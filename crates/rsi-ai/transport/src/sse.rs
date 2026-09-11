@@ -558,11 +558,24 @@ impl AdmissionPool {
     }
 }
 
+#[cfg(test)]
+thread_local! { static ADMISSION_WORK: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) }; }
+#[cfg(test)]
+fn count_admission_work(index: usize, amount: usize) {
+    ADMISSION_WORK.with(|work| {
+        let mut counts = work.get();
+        counts[index] += amount as u64;
+        work.set(counts);
+    });
+}
+
 fn select_waiter(state: &AdmissionState, total_units: usize) -> Option<u64> {
     [WaitKind::Growth, WaitKind::Begin]
         .into_iter()
         .find_map(|kind| {
             state.waiters.iter().find_map(|(ticket, waiter)| {
+                #[cfg(test)]
+                count_admission_work(0, 1);
                 (waiter.kind == kind && safe_after_grant(state, waiter, total_units))
                     .then_some(*ticket)
             })
@@ -570,6 +583,8 @@ fn select_waiter(state: &AdmissionState, total_units: usize) -> Option<u64> {
 }
 
 fn safe_after_grant(state: &AdmissionState, waiter: &Waiter, total_units: usize) -> bool {
+    #[cfg(test)]
+    count_admission_work(1, 1);
     let Some(current) = state.claims.get(&waiter.claim) else {
         return false;
     };
@@ -587,6 +602,8 @@ fn safe_after_grant(state: &AdmissionState, waiter: &Waiter, total_units: usize)
     let mut used = state.fixed_units;
     let mut unfinished = Vec::with_capacity(state.claims.len());
     for (id, claim) in &state.claims {
+        #[cfg(test)]
+        count_admission_work(2, 1);
         let allocated = if *id == waiter.claim {
             waiter.target_units
         } else {
@@ -607,6 +624,8 @@ fn safe_after_grant(state: &AdmissionState, waiter: &Waiter, total_units: usize)
     let Some(mut work) = total_units.checked_sub(used) else {
         return false;
     };
+    #[cfg(test)]
+    count_admission_work(3, unfinished.len());
     unfinished.sort_unstable_by_key(|(_, remaining)| *remaining);
     for (allocated, remaining) in unfinished {
         if remaining > work {
@@ -721,6 +740,57 @@ impl Drop for FrameLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "report-only production SSE admission work counters"]
+    async fn contended_admission_cost() {
+        use futures_util::FutureExt as _;
+        for count in [32, 128, 256] {
+            let pool = Arc::new(AdmissionPool::new(1, count + 1));
+            let mut growing = FrameAdmission::begin(pool.clone(), count + 1)
+                .await
+                .unwrap();
+            let mut residents = Vec::new();
+            for _ in 1..count {
+                residents.push(FrameAdmission::begin(pool.clone(), 2).await.unwrap());
+            }
+            ADMISSION_WORK.with(|work| work.set([0; 4]));
+            let started = std::time::Instant::now();
+            let mut growth = Box::pin(growing.ensure_bytes(2));
+            assert!(growth.as_mut().now_or_never().is_none());
+            eprintln!(
+                "sse phase=growth claims={count} elapsed={:?} work={:?}",
+                started.elapsed(),
+                ADMISSION_WORK.with(std::cell::Cell::get)
+            );
+            ADMISSION_WORK.with(|work| work.set([0; 4]));
+            let started = std::time::Instant::now();
+            let mut begins = Vec::new();
+            for _ in 0..count {
+                let mut begin = Box::pin(FrameAdmission::begin(pool.clone(), count + 1));
+                assert!(begin.as_mut().now_or_never().is_none());
+                begins.push(begin);
+            }
+            eprintln!(
+                "sse phase=begin retained={count} waiting={count} elapsed={:?} work={:?}",
+                started.elapsed(),
+                ADMISSION_WORK.with(std::cell::Cell::get)
+            );
+            ADMISSION_WORK.with(|work| work.set([0; 4]));
+            let started = std::time::Instant::now();
+            drop(begins);
+            eprintln!(
+                "sse phase=cancel waiting={count} elapsed={:?} work={:?}",
+                started.elapsed(),
+                ADMISSION_WORK.with(std::cell::Cell::get)
+            );
+            drop(growth);
+            drop(growing);
+            drop(residents);
+            assert!(pool.lock().claims.is_empty());
+            assert!(pool.lock().waiters.is_empty());
+        }
+    }
 
     #[test]
     fn safe_state_rejects_partial_allocation_deadlock() {
