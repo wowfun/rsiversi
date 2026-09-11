@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": [
+      "vite/client"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@rsi/dsh-slots": [
+        "vendor/dsh/slots/index.ts"
+      ],
+      "@rsi/dsh-store-contract": [
+        "vendor/dsh/store-contract.ts"
+      ]
+    },
+    "allowJs": true
+  },
+  "include": [
+    "src",
+    "vendor/dsh",
+    "vite.config.ts"
+  ]
+}

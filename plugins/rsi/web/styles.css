@@ -142,5 +142,13 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .draft-image { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 5px 12px; font-size: .75rem; }
 .draft-image > span { width: 100%; }
 .draft-image button { font-size: .7rem; padding: 3px 6px; }
+.draft-status { padding: 0 12px; max-height: 9rem; overflow: auto; font-size: .75rem; overflow-wrap: anywhere; }
+.draft-status:empty { display: none; }
+.draft-status button { margin: 0 5px 8px 0; font-size: .72rem; }
+.draft-recovery { flex-shrink: 0; max-height: 30vh; overflow: auto; margin: 0 18px; padding: 10px; border: 1px solid var(--teal); border-radius: 6px; }
+.saved-draft { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 0; border-top: 1px solid #edf1f1; font-size: .75rem; }
+.saved-draft > span { width: 100%; overflow-wrap: anywhere; }
+.saved-draft button { font-size: .7rem; }
+.saved-draft textarea { width: 100%; max-height: 12rem; font-size: .75rem; }
 .frozen-images:not(:empty) { padding: 0 12px; }
 .image-preview { display: block; max-width: 100%; max-height: 55dvh; object-fit: contain; margin: 12px auto; }

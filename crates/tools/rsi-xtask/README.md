@@ -1,5 +1,23 @@
 # rsi-xtask
 
+`cargo xtask dist desktop /absolute/output [--debug]` creates a new Linux paired
+distribution from an immutable capture of all current tracked and non-ignored
+untracked files, including dirty contents. It never stages or commits them. The
+capture records file bytes, modes, symlink destinations, Rust/Cargo/Node/npm and
+GTK/WebKit development versions, target and build flags before either executable
+is built. Toolchain probes use the same cleared build environment and frozen
+working directory as the builds. Symlinks escaping the
+capture and a changing source file are rejected. Internal symlinks are preserved
+literally; an ignored or absent destination remains absent in the frozen tree.
+The capture never follows that link to import ignored local state. A build that
+needs an omitted input must fail in the frozen tree. Both executable builds consume
+that same capture and the same family manifest. Their actual SHA-256 values are
+recorded separately in the distribution receipt. The headless executable beside
+the GUI is the canonical apply-patch helper. Existing output directories are
+rejected; build failure retains the isolated capture and log for diagnosis.
+The command requires Python 3, npm and matching wasm-bindgen on PATH (or the
+explicit RSI_WASM_BINDGEN path); credentials are not forwarded to build children.
+
 `cargo xtask dev tui` and `cargo xtask dev web` create an isolated development
 directory, build and copy the real `rsi` executable once, configure a deterministic
 native provider, and supervise the selected application. A successful default run
@@ -32,7 +50,14 @@ TUI development selects its independent native presentation Profile. Its existin
 addon watcher builds and enables successful artifacts from an explicit SourceRoot;
 the application's normal staging owner publishes replacements. Build output goes
 to the development log. The watch set is explicit and does not infer a Cargo
-dependency graph. `--no-watch` leaves a fixed presentation. Web Worker/bootstrap
+dependency graph. Web development also supervises Vite on the selected loopback
+port and places its isolated API service on a separate ephemeral loopback port.
+The service trusts only the frontend origin; the proxy preserves Origin and Host
+headers. Feature components and styles support HMR. Root composition, transport,
+Worker and saved-input schema changes reload the document. Production CSP and
+renderer publication remain independent of Vite. npm installs the committed lock
+without lifecycle scripts before building the frontend.
+`--no-watch` leaves a fixed presentation. Web Worker/WASM
 changes require rebuilding the Web bundle and restarting its application; renderer
 graphs use their separately owned generation publication. The Web application
 and source watcher each have a separate process group; the launcher supervises
@@ -54,6 +79,11 @@ Generated build directories and installed `node_modules` are excluded from
 documentation traversal; authored fixture documentation is still checked.
 Standalone Cargo fixtures must occupy `fixtures/<product>/<fixture>` under an
 existing `crates/<product>` namespace and retain their own package README.
+
+The distribution verifies captured paths again after building and rejects added
+source files; dependency/build output directories and the desktop package's
+generated Tauri schemas are excluded from that check.
+Cargo also verifies recorded bytes before embedding a build-family identity.
 
 ## Agent Note archives
 

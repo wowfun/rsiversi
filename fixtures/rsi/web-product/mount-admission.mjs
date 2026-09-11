@@ -53,7 +53,7 @@ export async function verifyMountAdmission(browser, root) {
           invoke: async () => "done", source: async () => new Uint8Array([255]),
         } };
       };
-      let table = new MountTable(); const slot = source();
+      let table = await MountTable.open(); const slot = source();
       check(await table.render(offer(1), []) === undefined, "unexercised cold generation accepted");
       await rejects(() => table.render(offer(1), Array.from({ length: 17 }, (_, i) => source(`s${i}`))), "17 mounts admitted");
       await rejects(() => table.render(offer(1), [slot, slot]), "duplicate slots admitted");
@@ -70,18 +70,6 @@ export async function verifyMountAdmission(browser, root) {
       const bad = { ...slot, snapshot: { model: { ...slot.snapshot.model, data: { fail: true } } } };
       check(!(await table.render(offer(2), [bad])).accept, "failed candidate accepted");
       check(window.live === 1 && slot.root.textContent === "mounted", "failed candidate removed old DOM");
-      const added = source("added", { fail: true });
-      added.snapshot.model.renderer = "new-renderer";
-      const expanded = offer(2);
-      expanded.catalog.renderers.push({ ...expanded.catalog.renderers[0], id: "new-renderer" });
-      // Use a fresh table to exercise rejection of a newly introduced renderer.
-      const warm = new MountTable();
-      await warm.render(offer(1), [slot]);
-      check(!(await warm.render(expanded, [slot, added])).accept, "broken new renderer accepted");
-      check(added.root.textContent.includes("Renderer unavailable: new-renderer"), "warm missing renderer has no placeholder");
-      check(slot.root.textContent === "mounted", "warm failure removed working renderer");
-      check(await warm.render(expanded, [slot, added]) === undefined, "warm rejected offer acknowledged twice");
-      await warm.close();
       check((await table.render(offer(3), [slot])).accept, "replacement failed");
       check(window.hosts.at(-1).input("draft") === "kept", "draft lost on code replacement");
       const current = window.hosts.at(-1);
@@ -119,7 +107,20 @@ export async function verifyMountAdmission(browser, root) {
       release.forEach(resolve => resolve()); await Promise.all(admitted); await closing;
       check(window.live === 0, "action drain leaked mount");
 
-      table = new MountTable();
+      const added = source("added", { fail: true });
+      added.snapshot.model.renderer = "new-renderer";
+      const expanded = offer(2);
+      expanded.catalog.renderers.push({ ...expanded.catalog.renderers[0], id: "new-renderer" });
+      // Use a fresh table to exercise rejection of a newly introduced renderer.
+      const warm = await MountTable.open();
+      await warm.render(offer(1), [slot]);
+      check(!(await warm.render(expanded, [slot, added])).accept, "broken new renderer accepted");
+      check(added.root.textContent.includes("Renderer unavailable: new-renderer"), "warm missing renderer has no placeholder");
+      check(slot.root.textContent === "mounted", "warm failure removed working renderer");
+      check(await warm.render(expanded, [slot, added]) === undefined, "warm rejected offer acknowledged twice");
+      await warm.close();
+
+      table = await MountTable.open();
       const idleSlot = source("idle");
       await table.render(offer(1), [idleSlot]);
       check(await table.render(offer(2), []) === undefined, "idle replacement was accepted without a mount");
@@ -127,7 +128,7 @@ export async function verifyMountAdmission(browser, root) {
       check(!(await table.render(offer(2), [idleSlot])).accept, "broken idle replacement accepted");
       check(idleSlot.root.textContent === "mounted", "idle replacement lost the prior generation");
       await table.close();
-      table = new MountTable();
+      table = await MountTable.open();
       check(await table.render(offer(2), []) === undefined, "broken cold offer accepted before use");
       const coldSlot = source("cold");
       check(!(await table.render(offer(2), [coldSlot])).accept, "broken cold offer accepted on use");
@@ -137,7 +138,7 @@ export async function verifyMountAdmission(browser, root) {
       check((await table.render(offer(3), [coldSlot])).accept, "cold failure blocked a subsequent valid offer");
       await table.close();
 
-      table = new MountTable();
+      table = await MountTable.open();
       const dotted = source(".slot");
       dotted.snapshot.model.renderer = ".renderer";
       dotted.snapshot.model.schema.name = ".schema";
@@ -149,7 +150,7 @@ export async function verifyMountAdmission(browser, root) {
       await window.hosts.at(-1).invoke(".apply", {});
       await table.close();
 
-      table = new MountTable();
+      table = await MountTable.open();
       const staticOffer = { ...offer(90), catalog: null }, staticSlot = source("static");
       check((await table.render(staticOffer, [])).accept, "static application rejected");
       await table.render(staticOffer, [staticSlot]);
@@ -159,7 +160,7 @@ export async function verifyMountAdmission(browser, root) {
       check(staticSlot.root.textContent === "mounted", "rejected static replacement removed the old renderer");
       await table.close();
 
-      table = new MountTable();
+      table = await MountTable.open();
       const rendering = table.render(offer(4), [source("pending", { pause: true })]);
       // The rejection is expected when close retires this unfinished candidate.
       const rendered = rendering.then(() => false, () => true);
@@ -172,23 +173,43 @@ export async function verifyMountAdmission(browser, root) {
       check(await rendered, "closed candidate was committed"); await pendingClose;
       check(window.live === 0, "closed candidate leaked a renderer");
 
+      table = await MountTable.open();
+      const held = source("held", { disposePause: true });
+      await table.render(offer(1), [held]);
+      const oldHostCount = window.hosts.length;
+      const heldClose = table.close();
+      let replacement;
+      const reopened = MountTable.open().then(async next => {
+        replacement = next;
+        await next.render(offer(1), [source("reopened")]);
+      });
+      while (!window.finishDisposal) await new Promise(resolve => setTimeout(resolve, 1));
+      check(window.hosts.length === oldHostCount, "same-generation replacement mounted before document cleanup");
+      await rejects(() => MountTable.open(), "duplicate reconnect queued behind cleanup");
+      window.finishDisposal(); await heldClose; await reopened;
+      check(window.live === 1, "replacement did not acquire clean ownership");
+      await replacement.close();
+
       // Reconnecting a Worker does not unload document ESM records.
       for (let generation = 5; generation <= 32; generation++) {
-        table = new MountTable(); await table.render(offer(generation), [source(`g${generation}`)]); await table.close();
+        table = await MountTable.open(); await table.render(offer(generation), [source(`g${generation}`)]); await table.close();
       }
-      table = new MountTable();
+      table = await MountTable.open();
       check(!(await table.render(offer(33), [source("overflow")])).accept, "document module budget reset on reconnect");
       await table.close(); check(window.live === 0, "module limit leaked renderer");
-      table = new MountTable(); window.mountStarted = false; window.mountAborted = false;
+      table = await MountTable.open(); window.mountStarted = false; window.mountAborted = false;
       const disposalRender = table.render(offer(1), [source("bad-dispose", { pause: true, disposeFail: true })]).catch(() => {});
       while (!window.mountStarted) await new Promise(resolve => setTimeout(resolve, 1));
       const failedClose = table.close(); failedClose.catch(() => {});
       while (!window.mountAborted) await new Promise(resolve => setTimeout(resolve, 1));
       window.finishMount(); await disposalRender;
       await rejects(() => failedClose, "failed candidate disposal reported clean closure");
+      await rejects(() => MountTable.open(), "explicit disposal rejection allowed replacement");
       return { live: window.live, disposals: window.disposals, imported_generation_limit: 32, pending_mount_joined: true };
     });
     assert.equal(result.live, 0); assert.equal(result.pending_mount_joined, true);
+    await page.reload();
+    await page.evaluate(() => { window.hosts = []; window.live = 0; window.disposals = 0; });
     await page.clock.install();
     await page.evaluate(async () => {
       const { MountTable } = await import("/mounts.js");
@@ -200,9 +221,9 @@ export async function verifyMountAdmission(browser, root) {
       const slot = { key: "hung", root, binding: "hung", surface: "pane", host: {}, snapshot: { model: {
         renderer: "fixture", schema: { name: "fixture.model", version: 1 }, actions: [], sources: [], data: { disposePause: true },
       } } };
-      const table = new MountTable(); await table.render(offer, [slot]);
+      const table = await MountTable.open(); await table.render(offer, [slot]);
       window.deadlineResult = table.close().then(() => "incorrect success", error => error.message);
-      window.retryAfterDeadline = () => new MountTable().render(offer, [slot]).then(() => "incorrect success", error => error.message);
+      window.retryAfterDeadline = () => MountTable.open().then(table => table.render(offer, [slot])).then(() => "incorrect success", error => error.message);
     });
     await page.clock.fastForward(30001);
     assert.match(await page.evaluate(() => window.deadlineResult), /cleanup exceeded 30 seconds/);
@@ -210,6 +231,7 @@ export async function verifyMountAdmission(browser, root) {
     await page.evaluate(() => window.finishDisposal());
     await page.clock.fastForward(10);
     assert.equal(await page.evaluate(() => window.live), 0);
+    assert.match(await page.evaluate(() => window.retryAfterDeadline()), /reload the page/);
     return { ...result, stalled_disposal_deadline: true };
   } finally { await context.close(); }
 }

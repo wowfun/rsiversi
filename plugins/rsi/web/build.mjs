@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readdir, copyFile } from "node:fs/promises";
 import { dirname, resolve, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { build } from "vite";
 
 const source = dirname(fileURLToPath(import.meta.url));
 const root = resolve(source, "../../..");
@@ -26,7 +27,8 @@ run(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", [
   "--target", "web", "--no-typescript", "--out-dir", output,
   join(root, `target/wasm32-unknown-unknown/${profile}/rsi_web.wasm`),
 ]);
-for (const file of ["index.html", "app.js", "worker.js", "styles.css", "mounts.js"]) {
+await build({ root: source, configFile: join(source, "vite.config.mjs"), build: { outDir: output } });
+for (const file of ["worker.js", "mounts.js", "drafts.js"]) {
   await copyFile(join(source, file), join(output, file));
 }
 await buildRenderers(output);

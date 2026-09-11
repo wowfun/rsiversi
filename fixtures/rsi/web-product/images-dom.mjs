@@ -40,20 +40,26 @@ export async function verifyImageDom(page) {
   assert.deepEqual(result, { byteBound: { objects: 4, bytes: 32, active: 4 }, reuseReads: 6,
     lru: ["4", "5", "2", "6"], released: 0, objectBound: 2, afterClose: 0, active: 0 });
   const retry = await page.evaluate(async () => {
-    const pane = panes[0];
-    const data = { generation: "images", session: "session", path: "/workspace", draft: "same text",
-      unresolved_text: "same text", images: [{ id: "edited" }], unresolved_images: [{ id: "original" }],
-      model: { deployment: "test", model: "model" }, transcript: { blocks: [], status: "Ready" }, pending: [], notice: "" };
-    pane.render(data, []); pane.input.value = "same text";
-    await pane.submit(false);
-    const edited = pane.input.value;
-    pane.render({ ...data, unresolved_images: null, unresolved_text: null }, []);
-    pane.input.value = "same text";
-    const action = pane.action;
-    pane.action = async () => { pane.imageEdits++; };
-    await pane.submit(false);
-    pane.action = action;
-    return { edited, during: pane.input.value };
+    const pane = panes.get("main"), originalCall = call;
+    const image = id => ({ id:id.repeat(64), mime:"image/png", bytes:8, width:1, height:1 });
+    const results = [];
+    try {
+      pane.edit("same text", [image("a")]); await pane.flush();
+      const editor = pane.editor;
+      await editor.update(record => editor.store.freeze(record, {kind:"message",id:"image-message",opaque:"{}",text_bytes:9,images:1}));
+      await editor.update(record => editor.store.begin(record));
+      pane.edit("same text", [image("b")]); await pane.flush();
+      call = async () => JSON.stringify({status:"complete",receipt:"{}"});
+      await pane.submit(false);
+      results.push(pane.input.value);
+      call = async (method, payload) => {
+        if (method === "prepare_submission") return JSON.stringify({kind:"message",id:"image-next",opaque:payload,text_bytes:9,images:1});
+        pane.edit("same text", [image("c")]); await pane.flush();
+        return JSON.stringify({status:"complete",receipt:"{}"});
+      };
+      await pane.submit(false); results.push(pane.input.value);
+      return results;
+    } finally { call = originalCall; }
   });
-  assert.deepEqual(retry, { edited: "same text", during: "same text" });
+  assert.deepEqual(retry, ["same text", "same text"]);
 }

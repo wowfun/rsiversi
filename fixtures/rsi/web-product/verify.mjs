@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { chromium, firefox } from "playwright";
 import { boundedRun, startService } from "./service.mjs";
+import { verifyDrafts } from "./drafts.mjs";
+import { verifyDraftMigration } from "./draft-migration.mjs";
 import { verifyDom } from "./dom.mjs";
 import { verifyFiles } from "./files.mjs";
 import { verifyImages } from "./images.mjs";
@@ -42,6 +44,8 @@ try {
     const errors = [];
     const exchanges = [];
     try {
+      await writeFile(join(report, `${name}-drafts.json`), JSON.stringify(await verifyDrafts(browser, root)));
+      await writeFile(join(report, `${name}-draft-migration.json`), JSON.stringify(await verifyDraftMigration(browser, root)));
       await verifyDom(browser, root, report, name);
       await writeFile(join(report, `${name}-worker-lifecycle.json`), JSON.stringify(await verifyWorkerLifecycle(browser, root)));
       await writeFile(join(report, `${name}-mount-admission.json`), JSON.stringify(await verifyMountAdmission(browser, root)));
@@ -61,8 +65,8 @@ try {
               if (frame.kind === "snapshot") { evidence.snapshots++; if (resync) { evidence.recovered++; resync = false; } }
               if (frame.kind === "patch") {
                 evidence.patches++;
-                evidence.blockUpserts += frame.panes.reduce((sum, pane) => sum + (pane.transcript?.upsert.length ?? 0), 0);
-                if (frame.panes.length === 0) evidence.noPaneChanges++;
+                evidence.blockUpserts += frame.surfaces.reduce((sum, pane) => sum + (pane.transcript?.upsert.length ?? 0), 0);
+                if (frame.surfaces.length === 0) evidence.noPaneChanges++;
                 if (window.resyncNextPatch) {
                   window.resyncNextPatch = false; resync = true; evidence.resyncs++;
                   event.stopImmediatePropagation();
@@ -103,11 +107,13 @@ try {
       assert.equal(await page.evaluate(() => document.cookie), "");
       assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), ["rsi.endpoint"]);
       assert.equal((await context.cookies())[0].httpOnly, true);
+      await page.locator(".workspace-add summary").click();
       await page.locator("#workspace-path").fill(service.workspace);
       await page.getByRole("button", { name: "Add workspace", exact: true }).click();
       await page.locator("#workspaces .nav-item").first().click();
-      const left = page.getByRole("region", { name: "Left conversation", exact: true });
-      const right = page.getByRole("region", { name: "Right conversation", exact: true });
+      const left = page.locator('[aria-label="Main conversation"]');
+      const right = page.locator('[aria-label="Compare conversation"]');
+      await page.getByRole("button", { name: "Trajectory", exact: true }).click();
       const extensions = left.locator(".session-extensions");
       const plan = extensions.locator('[data-producer="rsi.plan-policy.view"] pre');
       await extensions.locator("summary").click();
@@ -116,26 +122,29 @@ try {
       await page.screenshot({ path: join(report, `${name}-projection-default.png`) });
       await page.evaluate(() => { window.resyncNextPatch = true; });
       await verifyFiles(page, left, service, report, name);
-      await left.getByRole("button", { name: "Session commands", exact: true }).click();
+      await page.getByRole("button", { name: "Session commands", exact: true }).click();
       await left.getByRole("button", { name: "/plan", exact: true }).click();
-      assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "/plan ");
-      await left.getByRole("textbox", { name: "Left message" }).fill("/plan on");
+      assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "/plan ");
+      await left.getByRole("textbox", { name: "Main message" }).fill("/plan on");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".command-receipt").filter({ hasText: "Draft changed · revision 1" }).waitFor();
       assert.equal(service.provider.requests.length, 0);
       await plan.filter({ hasText: '"enabled": true' }).waitFor();
       assert.match(await extensions.locator("summary").innerText(), /Draft · revision 1/);
       await page.screenshot({ path: join(report, `${name}-plan-draft.png`) });
-      await left.getByRole("textbox", { name: "Left message" }).fill("A saved left draft");
-      await page.locator("#pane-tab-1").click();
+      await left.getByRole("textbox", { name: "Main message" }).fill("A saved left draft");
+      await page.getByRole("button", { name: "+ Compare", exact: true }).click();
+      await page.locator("#pane-tab-compare").click();
       await page.locator("#workspaces .nav-item").first().click();
-      await right.getByRole("textbox", { name: "Right message" }).fill("Review the right workspace");
+      await right.getByRole("textbox", { name: "Compare message" }).fill("Review the right workspace");
       await right.getByRole("button", { name: "Send ↗" }).click();
       await right.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
-      assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "A saved left draft");
+      await page.locator("#pane-tab-main").click();
+      assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "A saved left draft");
+      await page.locator("#pane-tab-compare").click();
       assert.match(await right.locator(".transcript").innerText(), /Reviewed: Review the right workspace/);
       assert.equal(await page.evaluate(() => window.untrustedExecuted), undefined);
-      await right.getByRole("textbox", { name: "Right message" }).fill("Show a Markdown example");
+      await right.getByRole("textbox", { name: "Compare message" }).fill("Show a Markdown example");
       await right.getByRole("button", { name: "Send ↗" }).click();
       const markdown = right.locator(".message-text.markdown").filter({ hasText: "Review notes" });
       await markdown.locator("h2").filter({ hasText: "Review notes" }).waitFor();
@@ -150,7 +159,8 @@ try {
       await page.screenshot({ path: join(report, `${name}-markdown.png`) });
       await verifyImages(page, right, service, report, name);
       await verifyTree(page, right, service, report, name);
-      await left.getByRole("textbox", { name: "Left message" }).fill("Please ask a question about the workspace");
+      await page.locator("#pane-tab-main").click();
+      await left.getByRole("textbox", { name: "Main message" }).fill("Please ask a question about the workspace");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".pending button").filter({ hasText: "Answer:" }).click();
       await page.getByRole("button", { name: "Teal", exact: true }).click();
@@ -160,26 +170,26 @@ try {
       await page.locator("#detail").waitFor({ state: "hidden" });
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-two-panes.png`) });
-      await left.getByRole("textbox", { name: "Left message" }).fill("/plan off");
+      await left.getByRole("textbox", { name: "Main message" }).fill("/plan off");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".command-receipt").filter({ hasText: "Committed · control" }).waitFor();
       await plan.filter({ hasText: '"enabled": false' }).waitFor();
       assert.match(await extensions.locator("summary").innerText(), /Durable · Fact/);
       await page.screenshot({ path: join(report, `${name}-plan-durable.png`) });
-      await left.getByRole("textbox", { name: "Left message" }).fill("Keep this draft while switching");
+      await left.getByRole("textbox", { name: "Main message" }).fill("Keep this draft while switching");
       const leftIdentity = await left.locator(".pane-session").innerText();
       await page.locator("#refresh").click();
       await page.locator("#sessions .nav-item").filter({ has: page.locator("small", { hasText: (await right.locator(".pane-session").innerText()).split(" · ").at(-1) }) }).click();
       await left.locator(".pane-session").filter({ hasText: (await right.locator(".pane-session").innerText()).split(" · ").at(-1) }).waitFor();
       await page.locator("#sessions .nav-item").filter({ has: page.locator("small", { hasText: leftIdentity.split(" · ").at(-1) }) }).click();
       await left.locator(".pane-session").filter({ hasText: leftIdentity.split(" · ").at(-1) }).waitFor();
-      assert.equal(await left.getByRole("textbox", { name: "Left message" }).inputValue(), "Keep this draft while switching");
-      await left.getByRole("textbox", { name: "Left message" }).fill("hold this turn until I cancel");
+      assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "Keep this draft while switching");
+      await left.getByRole("textbox", { name: "Main message" }).fill("hold this turn until I cancel");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".transcript").getByText("Waiting for cancellation.", { exact: true }).waitFor();
       await left.getByRole("button", { name: "Cancel", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "Cancelled" }).waitFor();
-      await left.getByRole("textbox", { name: "Left message" }).fill("Produce a long streamed reply");
+      await left.getByRole("textbox", { name: "Main message" }).fill("Produce a long streamed reply");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
       await page.locator("#refresh").click();
@@ -218,6 +228,8 @@ try {
       assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
       assert.equal(await left.locator(".transcript > :first-child").getAttribute("class"), "omitted");
       await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.locator(".advanced-settings summary").click();
+      await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
       await page.getByRole("button", { name: "rsi.agent", exact: true }).click();
       await page.locator(".settings-applies").filter({ hasText: "Applies to new conversations" }).waitFor();
       assert.equal(await page.locator(".settings-description summary").allTextContents().then(labels => labels.join(",")), "Schema,Defaults");
@@ -231,8 +243,9 @@ try {
       await savingEditor.dispose();
       await editor.waitFor();
       await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await page.locator("#workspaces .nav-item").first().click();
-      await left.getByRole("textbox", { name: "Left message" }).fill("Please run the failing command");
+      await left.getByRole("textbox", { name: "Main message" }).fill("Please run the failing command");
       await left.getByRole("button", { name: "Send ↗" }).click();
       await left.locator(".pending button").filter({ hasText: "Review:" }).click();
       await page.screenshot({ path: join(report, `${name}-approval.png`) });
@@ -244,7 +257,7 @@ try {
       assert.match(failedTool, /fixture stdout/);
       assert.match(failedTool, /fixture stderr/);
       await page.screenshot({ path: join(report, `${name}-tool-failure.png`) });
-      await left.getByRole("button", { name: "Session details", exact: true }).click();
+      await page.getByRole("button", { name: "Session details", exact: true }).click();
       await page.locator(".ui-contribution").filter({ hasText: "Session:" }).waitFor();
       await page.screenshot({ path: join(report, `${name}-contributed-session.png`) });
       await page.getByRole("button", { name: "Close details", exact: true }).click();
@@ -316,10 +329,12 @@ try {
       }), true, "narrow composer actions must be reachable by scrolling the workbench");
       await page.screenshot({ path: join(report, `${name}-narrow-actions.png`) });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-      await page.locator("#pane-tab-1").click();
+      await page.locator("#pane-tab-compare").click();
       assert.match(await right.locator(".transcript").innerText(), /Review the right workspace/);
       await page.setViewportSize({ width: 1440, height: 980 });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.locator(".advanced-settings summary").click();
+      await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
       await page.getByRole("button", { name: "rsi.client", exact: true }).click();
       await page.locator("#detail .hint").filter({ hasText: "Reconnect Web or restart TUI" }).waitFor();
       const preferenceEditor = page.getByRole("textbox", { name: "Settings JSON" });
@@ -331,6 +346,7 @@ try {
       await page.waitForFunction(previous => !previous.isConnected, previousPreferences);
       await previousPreferences.dispose();
       await page.getByRole("button", { name: "Close details", exact: true }).click();
+      await page.getByRole("button", { name: "Close settings", exact: true }).click();
       assert.match(await left.locator(".composer-hint").innerText(), /Ctrl.*Enter to send/);
       await page.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));
       await page.locator("#sign-out").click();
@@ -342,12 +358,12 @@ try {
       await page.locator("#receipt").fill(JSON.stringify(receipt));
       await page.locator("#connect").click();
       await page.locator("#workbench").waitFor({ state: "visible" });
-      await page.locator("#pane-tab-0").click();
+      await page.locator("#pane-tab-main").click();
       await page.locator("#workspaces .nav-item").first().click();
       await left.locator(".composer-hint").filter({ hasText: "Enter to send · Shift Enter for a new line" }).waitFor();
-      await left.getByRole("button", { name: "Workspace files", exact: true }).waitFor();
-      await left.getByRole("button", { name: "Session details", exact: true }).waitFor();
-      const input = left.getByRole("textbox", { name: "Left message" });
+      await page.getByRole("button", { name: "Workspace files", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Session details", exact: true }).waitFor();
+      const input = left.getByRole("textbox", { name: "Main message" });
       await input.fill("Preference applies");
       await input.press("Shift+Enter");
       await input.pressSequentially("after reconnect");
@@ -415,7 +431,7 @@ if (!process.env.RSI_RENDERER_ASSETS) {
 }
 for (const name of ["chromium", "firefox"]) {
   if (process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER !== name) continue;
-  for (const probe of ["renderers", "rust-renderer"]) {
+  for (const probe of ["renderers", "rust-renderer", "recovery"]) {
     boundedRun("node", [join(root, `fixtures/rsi/web-product/${probe}.mjs`)], {
       cwd: root, stdio: "inherit", timeout: 180_000,
       env: { ...process.env, RSI_WEB_ASSETS: assets, RSI_WEB_BINARY: sourceBinary, RSI_WEB_BROWSER: name, RSI_RENDERER_ASSETS: rendererAssets, RSI_NATIVE_UI_ARTIFACT: nativeUiArtifact, RSI_WEB_REPORT: join(report, `${name}-${probe}`) },

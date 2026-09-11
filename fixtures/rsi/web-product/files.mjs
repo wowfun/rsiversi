@@ -16,7 +16,7 @@ export async function verifyFiles(page, pane, service, report, browser) {
   const card = page.locator(".ui-contribution");
   const open = async () => {
     if (await page.locator("#detail").isVisible()) await page.getByRole("button", { name: "Close details", exact: true }).click();
-    await pane.getByRole("button", { name: "Workspace files", exact: true }).click();
+    await page.getByRole("button", { name: "Workspace files", exact: true }).click();
     await card.getByRole("textbox", { name: "Workspace-relative path", exact: true }).fill("browse");
     await card.getByRole("button", { name: "List directory", exact: true }).click();
     await card.filter({ hasText: "0–16 of 22" }).waitFor();

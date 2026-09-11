@@ -1,12 +1,18 @@
+import { publish, installActions, selectSurface } from "./src/bridge.ts";
+import { NativeDocument } from "./src/native.ts";
 import { MountTable } from "/mounts.js";
+import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
+export function initialize() {
 const $ = id => document.getElementById(id);
-const pending = new Map();
+let pending = new Map();
+let connection;
+let connecting = false;
 let worker;
 let requestId = 0;
 let view;
-let mounts = new MountTable();
+let mounts;
 let rendererSlots = [];
-let selected = 0;
+let selected = "main";
 let connected = false;
 let closing = false;
 let catalogKey;
@@ -87,32 +93,46 @@ function button(label, run, className) {
   node.addEventListener("click", () => perform(run));
   return node;
 }
-function notify(message) { $("notice").textContent = message; $("notice").hidden = !message; }
+function notify(message) {
+  const storage = connection && !connection.closing ? connection.storageNotice : undefined;
+  const text = [message, storage].filter(Boolean).join("\n");
+  $("notice").textContent = text; $("notice").hidden = !text;
+}
 async function perform(run) {
   try { await run(); } catch (error) { notify(String(error.message ?? error)); }
 }
 function clearView() {
-  view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
+  publish(undefined); view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
   clearImages();
-  for (const pane of panes) pane.reset();
+  for (const pane of panes.values()) pane.reset();
   $("detail").close();
 }
-function failWorker(error) {
-  void mounts.close().catch(error => notify(`Renderer cleanup failed: ${error.message}`));
-  connected = false;
-  for (const waiter of pending.values()) waiter.reject(new Error(error));
-  pending.clear();
-  worker?.terminate(); worker = undefined;
+function failWorker(error, current = connection) {
+  if (current) {
+    current.closing = true;
+    current.authenticationDone?.();
+    current.teardown ??= current.mounts.close();
+    current.teardown.catch(cleanup => {
+      if (connection === current) notify(`Renderer cleanup failed: ${cleanup.message}`);
+    });
+    for (const waiter of current.pending.values()) waiter.reject(new Error(error));
+    current.pending.clear();
+    current.worker.terminate();
+  }
+  if (current !== connection) return;
+  connected = false; closing = true; worker = undefined;
   clearView();
   $("connection-state").textContent = "Connection failed";
   $("connection-state").classList.remove("connected");
   $("login").hidden = false;
   $("workbench").hidden = true;
   $("sign-out").hidden = true;
-  notify(`${error}. Reconnect explicitly to start a new connection.`);
+  notify(`${error}. Reconnect explicitly after renderer cleanup succeeds.`);
 }
+
 let frameId;
-async function presentFrame(frame, assets) {
+async function presentFrame(frame, assets, current = connection) {
+  if (current && (connection !== current || current.closing)) return false;
   if (typeof frame.frame_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(frame.frame_id) || BigInt(frame.frame_id) > 18446744073709551615n) throw new Error("Invalid presentation frame ID");
   let next;
   if (frame.kind === "snapshot") {
@@ -120,10 +140,10 @@ async function presentFrame(frame, assets) {
   } else if (frame.kind === "patch") {
     if (!view || frame.base_frame_id !== frameId) return false;
     if (BigInt(frame.frame_id) !== BigInt(frameId) + 1n) return false;
-    next = { ...view, ...frame.sections, panes: [...view.panes] };
-    for (const change of frame.panes) {
-      if (![0, 1].includes(change.index) || !next.panes[change.index]) throw new Error("Invalid pane patch");
-      const pane = { ...next.panes[change.index], ...change.fields };
+    next = { ...view, ...frame.sections, surfaces: { ...view.surfaces } };
+    for (const change of frame.surfaces) {
+      if (!Object.hasOwn(next.surfaces, change.surface)) throw new Error("Invalid pane patch");
+      const pane = { ...next.surfaces[change.surface], ...change.fields };
       if (change.transcript) {
         const delta = change.transcript;
         const blocks = new Map(pane.transcript.blocks.map(block => [block.key, block]));
@@ -133,64 +153,92 @@ async function presentFrame(frame, assets) {
         if (new Set(order).size !== order.length || order.length !== blocks.size || order.some(key => !blocks.has(key))) throw new Error("Invalid block order");
         pane.transcript = { ...pane.transcript, ...delta.fields, blocks: order.map(key => blocks.get(key)) };
       }
-      next.panes[change.index] = pane;
+      next.surfaces[change.surface] = pane;
     }
   } else { throw new Error("Unknown presentation frame"); }
-  if (!Array.isArray(next?.panes) || next.panes.length !== 2) throw new Error("Invalid presentation snapshot");
+  if (!next?.surfaces || Array.isArray(next.surfaces) || Object.keys(next.surfaces).length > 2 || Object.keys(next.surfaces).some(key => !/^[a-z0-9_-]{1,32}$/.test(key))) throw new Error("Invalid presentation snapshot");
   render(next);
-  const renderer = await mounts.render(assets, rendererSlots);
+  const renderer = await (current?.mounts ?? mounts).render(assets, rendererSlots);
+  if (current && (connection !== current || current.closing)) return false;
   if (renderer?.error) notify(`Renderer update failed: ${renderer.error}`);
   frameId = frame.frame_id;
   return { accepted: true, renderer };
 }
-function makeWorker() {
-  frameId = undefined;
-  closing = false;
-  mounts = new MountTable();
-  const current = new Worker("/worker.js", { type: "module" });
-  current.onmessage = async ({ data }) => {
-    if (worker !== current) return;
+async function makeWorker() {
+  const table = await MountTable.open();
+  const current = { mounts: table, pending: new Map(), closing: false, worker: undefined };
+  current.authenticated = new Promise(resolve => { current.authenticationDone = resolve; });
+  try { current.worker = location.protocol === "rsi:" ? new NativeDocument() : new Worker("/worker.js", { type: "module" }); }
+  catch (error) { await table.close(); throw error; }
+  connection = current;
+  mounts = table; pending = current.pending; worker = current.worker;
+  frameId = undefined; closing = false;
+  current.worker.onmessage = async ({ data }) => {
+    if (connection !== current) return;
     if (data.kind === "view") {
-      if (closing) return;
+      await current.authenticated;
+      if (connection !== current || current.closing) return;
       try {
         const frame = JSON.parse(data.view);
-        const presented = await presentFrame(frame, JSON.parse(data.assets));
-        if (!closing && worker === current) current.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !presented?.accepted, renderer: presented?.renderer });
-      } catch (error) { if (worker === current && !closing) failWorker(`View rendering failed: ${error.message}`); }
+        const presented = await presentFrame(frame, JSON.parse(data.assets), current);
+        if (!current.closing && connection === current) current.worker.postMessage({ kind: "ack", frame_id: frame.frame_id, resync: !presented?.accepted, renderer: presented?.renderer });
+      } catch (error) { if (connection === current && !current.closing) failWorker(`View rendering failed: ${error.message}`, current); }
     } else if (data.kind === "reply") {
-      const waiter = pending.get(data.id); pending.delete(data.id);
-      if (data.error) waiter?.reject(new Error(data.error)); else waiter?.resolve(data.result);
-    } else if (data.kind === "failed") { if (!closing) failWorker(data.error); }
+      const waiter = current.pending.get(data.id); current.pending.delete(data.id);
+      if (data.error) waiter?.reject(Object.assign(new Error(data.error), { notAdmitted: data.notAdmitted === true })); else waiter?.resolve(data.result);
+    } else if (data.kind === "failed") { if (!current.closing) failWorker(data.error, current); }
   };
-  current.onerror = event => { event.preventDefault(); if (worker === current) failWorker("Browser Worker stopped"); };
+  current.worker.onerror = event => { event.preventDefault(); if (connection === current) failWorker("Browser Worker stopped", current); };
   return current;
 }
 function call(method, payload, transfer = []) {
-  if (closing && method !== "disconnect" && method !== "resources") return Promise.reject(new Error("The application is disconnecting"));
-  if (!worker) return Promise.reject(new Error("Connect to your service first"));
-  if (pending.size >= 8) return Promise.reject(new Error("Input is busy; wait for the current action"));
+  const lifecycle = method === "connect" || method === "disconnect";
+  if (closing && method !== "disconnect" && method !== "resources") return Promise.reject(Object.assign(new Error("The application is disconnecting"), { notAdmitted: true }));
+  if (!worker) return Promise.reject(Object.assign(new Error("Connect to your service first"), { notAdmitted: true }));
+  const ordinary = [...pending.values()].filter(waiter => !waiter.lifecycle).length;
+  if (lifecycle ? [...pending.values()].some(waiter => waiter.lifecycle) : ordinary >= 8) return Promise.reject(Object.assign(new Error("Input is busy; wait for the current action"), { notAdmitted: true }));
   const id = ++requestId;
+  const waiters = pending;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    worker.postMessage({ kind: "call", id, method, payload }, transfer);
+    waiters.set(id, { resolve, reject, lifecycle });
+    try { worker.postMessage({ kind: "call", id, method, payload }, transfer); }
+    catch (error) { waiters.delete(id); reject(Object.assign(error, { notAdmitted: true })); }
   });
 }
+
 function command(value) { return call("command", JSON.stringify(value)); }
 
 async function connectWith(receipt) {
+  if (connecting || (connection && !connection.closing)) throw new Error("A connection is already active or opening");
+  connecting = true;
   $("connect").disabled = true; $("reconnect").disabled = true;
   notify(""); $("connection-state").textContent = "Connecting…";
-  if (!worker) worker = makeWorker();
+  let current;
   try {
-    endpoint = await call("connect", { receipt, devHttp: $("dev-http").checked });
+    current = await makeWorker();
+    const identity = JSON.parse(await call("connect", { receipt, devHttp: $("dev-http").checked }));
+    endpoint = identity.endpoint_id;
+    try { current.drafts = await DraftStore.open(endpoint, identity.principal); }
+    catch (error) {
+      current.drafts = new DraftStore(undefined, endpoint, identity.principal.kind === "local" ? "local" : `device:${identity.principal.device_id}`);
+      current.storageNotice = `Draft storage is unavailable. Input cannot be saved or sent: ${error.message}`;
+    }
+    current.authenticationDone();
+    if (connection !== current || current.closing) return;
     try { localStorage.setItem("rsi.endpoint", endpoint); } catch { /* Storage is optional. */ }
     connected = true;
     $("connection-state").textContent = "Connected";
     $("connection-state").classList.add("connected");
     $("login").hidden = true; $("workbench").hidden = false; $("sign-out").hidden = false;
     $("reconnect").hidden = false;
-  } catch (error) { failWorker(error.message); }
-  finally { $("connect").disabled = false; $("reconnect").disabled = false; }
+    if (current.storageNotice) notify("");
+  } catch (error) {
+    if (current) { current.authenticationDone(); failWorker(error.message, current); }
+    else notify(error.message);
+  } finally {
+    connecting = false;
+    if (!current || connection === current) { $("connect").disabled = false; $("reconnect").disabled = false; }
+  }
 }
 $("login-form").addEventListener("submit", event => {
   event.preventDefault();
@@ -202,14 +250,32 @@ $("login-form").addEventListener("submit", event => {
 $("dev-http-label").hidden = location.protocol !== "http:";
 $("reconnect").hidden = !endpoint;
 $("reconnect").addEventListener("click", () => perform(() => connectWith(JSON.stringify({ endpoint_id: endpoint }))));
-$("sign-out").addEventListener("click", () => perform(async () => {
+async function disconnectDocument() {
+  if (closing) return;
   $("sign-out").disabled = true;
   try {
-    await Promise.all(panes.map(pane => pane.flush()));
     let resources;
     closing = true;
-    try { [resources] = await Promise.all([call("disconnect", true), mounts.close()]); }
+    const current = connection;
+    if (current) current.closing = true;
+    try {
+      const drafts = await Promise.allSettled([...panes.values()].map(pane => pane.flush(true)));
+      const failed = drafts.find(result => result.status === "rejected");
+      if (failed) {
+        closing = false;
+        if (current) current.closing = false;
+        if (location.protocol === "rsi:") {
+          const cancelled = await fetch("/_close_cancel", {method:"POST",body:""});
+          if (!cancelled.ok) throw new Error("Could not cancel native close after a failed draft save");
+        }
+        notify(`Draft is not saved: ${failed.reason?.message ?? failed.reason}. Recover the draft before closing.`);
+        return;
+      }
+      await mounts.close();
+      resources = await call("disconnect", true);
+    }
     catch (error) { failWorker(String(error.message ?? error)); return; }
+    if (current && connection !== current) return;
     document.dispatchEvent(new CustomEvent("rsi-disconnected", { detail: resources }));
     connected = false;
     worker.terminate(); worker = undefined;
@@ -219,22 +285,27 @@ $("sign-out").addEventListener("click", () => perform(async () => {
     $("workbench").hidden = true; $("login").hidden = false; $("sign-out").hidden = true;
     notify("");
   } finally { $("sign-out").disabled = false; }
-}));
+}
+$("sign-out").addEventListener("click", () => perform(disconnectDocument));
+window.addEventListener("rsi-native-close", () => perform(disconnectDocument));
+
+function draftRecovery(editor, resolved = () => {}) {
+  const choose = useSaved => async () => { await editor.resolve(useSaved); await resolved(); };
+  return [element("p", "draft-error", `Input is not saved. ${editor.failure?.message ?? "Resolve this tab's input before recovering the conversation."}`),
+    button("Use saved input", choose(true), "quiet"),
+    button("Replace saved text and images", choose(false), "quiet")];
+}
 
 class Pane {
   constructor(index) {
     this.index = index;
     this.blocks = new Map();
     this.generation = undefined;
-    this.unsent = false;
-    this.draftWork = undefined;
-    this.draftError = undefined;
-    this.draftEcho = undefined;
+    this.editors = new Map();
     this.enterSubmit = false;
     this.images = [];
-    this.imageEdits = 0;
     this.node = element("section", "pane");
-    this.node.setAttribute("aria-label", `${index ? "Right" : "Left"} conversation`);
+    this.node.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} conversation`);
     this.node.addEventListener("focusin", () => select(index));
     const header = element("header", "pane-header");
     const heading = element("div", "pane-heading");
@@ -248,7 +319,8 @@ class Pane {
     this.live = button("Back to live", () => this.action("live"), "quiet");
     this.commands = button("Session commands", () => this.action("commands"), "quiet");
     this.uiMenu = element("span", "ui-menu");
-    tools.append(this.history, this.live, this.commands, this.uiMenu);
+    this.restore = button("Restore drafts", () => this.restoreDrafts(), "quiet");
+    tools.append(this.history, this.live, this.commands, this.uiMenu, this.restore);
     this.commandView = element("div", "session-commands");
     this.extensionView = element("details", "session-extensions");
     this.extensionView.setAttribute("aria-label", "Extension state");
@@ -259,12 +331,12 @@ class Pane {
     this.notice = element("div", "pane-notice");
     this.composer = element("form", "composer");
     this.input = element("textarea");
-    this.input.setAttribute("aria-label", `${index ? "Right" : "Left"} message`);
+    this.input.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} message`);
     this.input.placeholder = "Describe the work…";
     this.input.maxLength = 1024 * 1024;
     this.input.addEventListener("input", () => {
-      this.unsent = true; this.draftError = undefined;
-      this.pump();
+      try { this.edit(this.input.value); }
+      catch (error) { this.input.value = this.editor?.text ?? ""; notify(error.message); }
     });
     this.input.addEventListener("keydown", event => {
       if (event.isComposing || event.keyCode === 229) return;
@@ -272,11 +344,11 @@ class Pane {
     });
     this.composer.addEventListener("submit", event => { event.preventDefault(); perform(() => this.submit(false)); });
     const bar = element("div", "composer-bar");
-    this.model = element("select"); this.model.setAttribute("aria-label", `${index ? "Right" : "Left"} model`);
+    this.model = element("select"); this.model.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} model`);
     this.model.addEventListener("change", () => perform(() => this.action("model", { model: JSON.parse(this.model.value) })));
     const actions = element("div", "actions");
     this.imageInput = element("input"); this.imageInput.type = "file"; this.imageInput.accept = "image/*"; this.imageInput.multiple = true;
-    this.imageInput.hidden = true; this.imageInput.setAttribute("aria-label", `${index ? "Right" : "Left"} image files`);
+    this.imageInput.hidden = true; this.imageInput.setAttribute("aria-label", `${index === "compare" ? "Compare" : "Main"} image files`);
     this.imageInput.addEventListener("change", () => {
       const files = [...this.imageInput.files]; this.imageInput.value = "";
       perform(() => this.upload(files));
@@ -284,13 +356,16 @@ class Pane {
     this.attach = button("Add images", () => this.imageInput.click(), "quiet");
     this.imageList = element("div", "draft-images");
     this.frozenImages = element("p", "hint frozen-images");
+    this.draftStatus = element("div", "draft-status");
+    this.recovery = element("div", "draft-recovery");
+    this.recovery.hidden = true;
     this.cancel = button("Cancel", () => this.action("cancel"), "quiet");
     this.steer = button("Steer", () => this.submit(true));
     this.send = button("Send ↗", () => this.submit(false), "primary");
     actions.append(this.attach, this.cancel, this.steer, this.send); bar.append(this.model, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
-    this.composer.append(this.input, this.imageInput, this.imageList, this.frozenImages, bar, this.hint);
-    this.node.append(header, tools, this.commandView, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
+    this.composer.append(this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
+    this.node.append(header, tools, this.commandView, this.recovery, this.extensionView, this.transcript, this.waiting, this.notice, this.composer);
     $("panes").append(this.node);
     this.render(null, []);
   }
@@ -298,104 +373,222 @@ class Pane {
     if (!this.generation) throw new Error("Open a conversation first");
     return command({ action, pane: this.index, generation: this.generation, ...fields });
   }
-  pump() {
-    if (this.draftWork || !this.unsent || !this.generation) return;
-    const generation = this.generation;
-    this.draftWork = (async () => {
-      while (this.unsent && generation === this.generation) {
-        const text = this.input.value;
-        this.draftEcho = text;
-        this.unsent = false;
-        try { await this.action("draft", { text }); }
-        catch (error) { this.unsent = true; this.draftError = error; notify(error.message); break; }
-      }
-    })().finally(() => { this.draftWork = undefined; });
+  edit(text, images = this.editor?.images ?? []) {
+    if (!this.editor) throw new Error("The saved draft is still loading");
+    const textBytes = validateEditor(text, images);
+    const total = [...this.editors.values()].reduce((sum, editor) => sum + (editor === this.editor ? textBytes : editor.textBytes), 0);
+    if (total > 2 * 1024 * 1024) throw new Error("Local drafts exceed this pane's 2 MiB limit");
+    this.editor.edit(text, images);
   }
-  async flush() {
-    this.pump(); await this.draftWork;
-    if (this.unsent) throw this.draftError ?? new Error("Draft has not reached the application");
+  async bindDraft(data) {
+    const generation = this.generation, current = connection;
+    this.editor = undefined;
+    if (!data || !current?.drafts) return;
+    const store = current.drafts, key = JSON.stringify(store.key(this.index, data.session));
+    let editor = this.editors.get(key);
+    if (!editor?.dirty && !editor?.failure) {
+      if (!editor && this.editors.size >= 64) {
+        for (const [key, entry] of this.editors) if (!entry.dirty && !entry.failure && !entry.saving) this.editors.delete(key);
+        if (this.editors.size >= 64) throw new Error("Local draft capacity is full; save or clear an unsaved draft first");
+      }
+      let record, failure;
+      try { record = await store.ensure(this.index, data.session, data.header, data.creation); }
+      catch (error) { failure = error; record = editor?.record ?? store.blank(this.index, data.session, data.header, data.creation); }
+      editor = new DraftEditor(store, record);
+      editor.failure = failure;
+      this.editors.set(key, editor);
+    }
+    if (this.generation !== generation || connection !== current || current.closing) return;
+    this.editor = editor;
+    this.bindingError = editor.record.header !== data.header ? "Saved Session Header changed. The draft is retained and cannot be sent to this Session." : undefined;
+    editor.changed = () => { if (this.editor === editor) this.renderComposer(); };
+    this.renderComposer();
+    if (editor.record.pending && editor.record.pending.phase !== "prepared" && !editor.failure && !this.bindingError) {
+      void this.reconcile("query").catch(error => notify(error.message));
+    }
+  }
+  async flush(all = false) {
+    await this.binding;
+    const editors = all ? [...this.editors.values()] : this.editor ? [this.editor] : [];
+    const results = await Promise.allSettled(editors.map(editor => editor.flush()));
+    const failure = results.find(result => result.status === "rejected");
+    if (failure) throw failure.reason;
+  }
+  renderComposer() {
+    const editor = this.editor, pending = editor?.record.pending;
+    if (this.input.value !== (editor?.text ?? "")) this.input.value = editor?.text ?? "";
+    this.input.disabled = !this.generation || !editor || editor.transferring || this.switching;
+    this.send.disabled = !editor || !!editor.failure || editor.transferring || !!this.bindingError || this.submitting || this.uploading || this.switching;
+    this.steer.disabled = this.send.disabled || !!pending;
+    const sendLabel = pending ? (pending.phase === "prepared" ? "Send saved request" : pending.kind === "message" ? "Retry previous" : "Check command result") : "Send ↗";
+    if (this.send.textContent !== sendLabel) this.send.textContent = sendLabel;
+    this.draftStatus.replaceChildren();
+    if (this.bindingError) this.draftStatus.append(element("p", "draft-error", this.bindingError));
+    if (editor?.failure) {
+      this.draftStatus.append(...draftRecovery(editor));
+    } else if (editor?.dirty) this.draftStatus.append(element("p", "hint", "Saving draft…"));
+    if (pending) {
+      this.draftStatus.append(element("p", "hint", `${pending.kind === "command" ? "Command" : "Message"} ${pending.id} · ${pending.phase === "prepared" ? "Saved before execution" : "Awaiting confirmation"}`));
+      if (pending.phase === "prepared") this.draftStatus.append(button("Cancel saved request", () => editor.update(record => editor.store.cancelPrepared(record)), "quiet"));
+      else this.draftStatus.append(button("Check previous result", () => this.reconcile("query"), "quiet"));
+    }
+    this.renderImages(view?.surfaces[this.index]);
+    this.renderCommands(view?.surfaces[this.index]);
   }
   async submit(steer) {
     if (this.submitting || this.uploading) return;
-    this.submitting = true; this.send.disabled = true; this.steer.disabled = true;
+    this.submitting = true; this.renderComposer();
     try {
       await this.flush();
-      const generation = this.generation;
-      const text = this.input.value;
-      const submittedText = this.retryText ?? text;
-      const images = JSON.stringify(this.images);
-      const imageEdits = this.imageEdits;
-      const submittedImages = JSON.stringify(this.retryImages ?? this.images);
-      await this.action("submit", { text, steer });
-      if (this.generation === generation && this.input.value === text && text === submittedText && images === submittedImages && imageEdits === this.imageEdits) {
-        this.input.value = ""; this.draftEcho = "";
+      if (!this.editor || this.bindingError) throw new Error(this.bindingError ?? "Open a conversation first");
+      const editor = this.editor, generation = this.generation, current = connection;
+      if (!editor.record.pending) {
+        const captured = editor.record;
+        const prepared = JSON.parse(await call("prepare_submission", JSON.stringify({ pane: this.index, generation, text: editor.text, images: editor.images, steer })));
+        if (connection !== current || current.closing || this.editor !== editor) throw new Error("Conversation changed before request preparation completed");
+        await editor.update(() => editor.store.freeze(captured, prepared));
       }
-    } finally { this.submitting = false; this.send.disabled = !this.generation; this.steer.disabled = !this.generation || this.retryText != null; }
+      const mode = editor.record.pending.phase === "prepared" ? "dispatch" : editor.record.pending.kind === "message" ? "retry_message" : "query";
+      await this.executePending(editor, generation, current, mode);
+    } finally { this.submitting = false; this.renderComposer(); }
+  }
+  async reconcile(mode) {
+    if (this.submitting || !this.editor || this.bindingError) return;
+    const editor = this.editor, generation = this.generation, current = connection;
+    this.submitting = true; this.renderComposer();
+    try { await editor.flush(); await this.executePending(editor, generation, current, mode); }
+    finally { this.submitting = false; this.renderComposer(); }
+  }
+  async executePending(editor, generation, current, mode) {
+    if (!editor.record.pending) return;
+    if (mode === "dispatch") await editor.update(record => editor.store.begin(record));
+    const expected = editor.record;
+    let result;
+    if (connection !== current || current.closing || this.editor !== editor) {
+      result = { status: mode === "dispatch" ? "not_admitted" : "unknown", error: "Connection changed before dispatch" };
+    } else {
+      try { result = JSON.parse(await call("dispatch_submission", { pane: this.index, generation, opaque: expected.pending.opaque, mode })); }
+      catch (error) { result = { status: error.notAdmitted && mode === "dispatch" ? "not_admitted" : "unknown", error: error.message }; }
+    }
+    await editor.update(() => editor.store.settle(expected, result));
+    if (result.status !== "complete") throw new Error(result.error ?? "The original submission still needs confirmation");
   }
   async upload(files) {
     if (!files.length) return;
-    if (this.uploading || !this.generation) throw new Error("Image import is unavailable while this pane is busy");
-    const limits = view.media_limits;
-    if (this.images.length + files.length > limits.images) throw new Error(`A draft can hold at most ${limits.images} images`);
+    if (this.uploading || !this.generation || !this.editor) throw new Error("Image import is unavailable while this pane is busy");
+    const limits = view.media_limits, editor = this.editor, generation = this.generation, current = connection;
+    if (editor.images.length + files.length > limits.images) throw new Error(`A draft can hold at most ${limits.images} images`);
     if (files.some(file => !file.size || file.size > limits.upload_bytes)) throw new Error("Each image source must contain 1 byte to 16 MiB");
-    const generation = this.generation;
-    this.imageEdits++;
-    this.uploading = true; this.attach.disabled = true; this.send.disabled = true; this.steer.disabled = true;
+    this.uploading = true; this.renderComposer();
     try {
-      await this.flush();
       for (const file of files) {
         const bytes = await file.arrayBuffer();
-        if (this.generation !== generation) throw new Error("Pane changed; remaining images were not imported");
-        await call("import_image", { pane: this.index, generation, bytes }, [bytes]);
+        if (connection !== current || current.closing || this.generation !== generation) throw new Error("Pane changed; remaining images were not imported");
+        const media = JSON.parse(await call("import_image", { pane: this.index, generation, bytes }, [bytes]));
+        editor.edit(editor.text, [...editor.images, media]);
+        await editor.flush();
       }
-    } finally {
-      this.uploading = false;
-      this.render(view?.panes[this.index], view?.catalog.models ?? []);
+    } finally { this.uploading = false; this.renderComposer(); }
+  }
+  async restoreDrafts() {
+    const current = connection, store = current?.drafts;
+    if (!store) throw new Error("Connect to your service first");
+    const records = await store.list(this.index);
+    if (connection !== current || current.closing) return;
+    this.recovery.hidden = false;
+    this.recovery.replaceChildren(element("p", "hint", "Saved drafts for this device"), button("Close saved drafts", () => { this.recovery.hidden = true; }, "quiet"));
+    for (const record of records) {
+      const row = element("div", "saved-draft");
+      const open = button("Open saved conversation", async () => {
+        await this.flush().catch(() => {});
+        this.switching = true; this.renderComposer();
+        try {
+          const result = JSON.parse(await call("restore_session", JSON.stringify({ action: "open", pane: this.index, session: record.key[3], header: record.header })));
+          if (result.status === "expired") {
+            row.append(element("p", "hint", "The original Session is no longer available. Your input is still saved."));
+            if (record.creation && !record.everDispatched && !record.pending && !row.querySelector(".recreate")) {
+              row.append(button("Start a new conversation with this draft", async () => {
+                await this.recreateDraft(record, current); row.remove();
+              }, "quiet recreate"));
+            }
+          } else { this.recovery.hidden = true; }
+        } finally { this.switching = false; this.renderComposer(); }
+      }, "quiet");
+      row.append(element("span", "", `${record.key[3]} · ${record.pending ? "awaiting confirmation" : `${record.text.slice(0, 80)}${record.images.length ? ` · ${record.images.length} images` : ""}`}`), open);
+      const local = this.editors.get(JSON.stringify(record.key));
+      if (local?.dirty || local?.failure) {
+        const input = element("textarea"); input.readOnly = true; input.rows = 3; input.value = local.text;
+        input.setAttribute("aria-label", "Unsaved recovered input");
+        row.append(input, ...draftRecovery(local, () => this.restoreDrafts()));
+      }
+      if (!record.text && !record.images.length && !record.pending) row.append(button("Remove empty draft", async () => { await store.removeEmpty(record); row.remove(); }, "quiet"));
+      this.recovery.append(row);
     }
+    if (!records.length) this.recovery.append(element("p", "hint", "No saved drafts"));
+  }
+  async recreateDraft(record, current) {
+    if (connection !== current || current.closing) throw new Error("Connection changed; the draft was left untouched");
+    if (this.recreating || this.submitting || this.uploading || this.switching) throw new Error("Wait for this pane's current operation before recovering the draft");
+    const store = current.drafts, key = JSON.stringify(record.key);
+    const source = this.editors.get(key) ?? new DraftEditor(store, record);
+    this.recreating = true; this.switching = true; this.renderComposer();
+    try {
+      await source.transfer(async expected => {
+        if (source.record.incarnation !== record.incarnation) throw new Error("The saved draft was replaced; reopen the recovery list");
+        if (!expected.creation || expected.everDispatched || expected.pending) throw new Error("This draft is no longer eligible for a new conversation");
+        if (connection !== current || current.closing) throw new Error("Connection changed; the draft was left untouched");
+        const fresh = JSON.parse(await call("restore_session", JSON.stringify({ action: "create", pane: this.index, creation: expected.creation })));
+        const blank = await store.ensure(this.index, fresh.session, fresh.header, fresh.creation);
+        const moved = await store.moveFresh(expected, blank);
+        await this.binding;
+        if (connection === current && this.editor && JSON.stringify(this.editor.record.key) === JSON.stringify(moved.key)) {
+          if (this.editor.dirty || this.editor.failure) { this.editor.failure = new Error("Saved input was restored while you were typing; choose which editor to keep"); }
+          else { this.editor.record = moved; this.editor.text = moved.text; this.editor.images = structuredClone(moved.images); }
+        }
+        if (this.editor === source) this.editor = undefined;
+        this.editors.delete(key);
+      });
+    } finally { this.recreating = false; this.switching = false; this.renderComposer(); }
   }
   renderImages(data) {
-    this.images = data?.images ?? [];
-    this.retryImages = data?.unresolved_images;
+    this.images = this.editor?.images ?? [];
+    this.retryImages = this.editor?.record.pending?.images;
     this.attach.hidden = !view?.has_media;
-    this.attach.disabled = !data || this.uploading || this.submitting || this.switching;
-    this.frozenImages.textContent = this.retryImages?.length ? `Previous submission retains ${this.retryImages.length} image(s) in its original order. Draft changes apply to the next submission.` : "";
-    const key = JSON.stringify([data?.generation, data?.images_revision, this.images]);
+    this.attach.disabled = !data || !this.editor || this.uploading || this.submitting || this.switching;
+    this.frozenImages.textContent = this.retryImages ? `Previous submission retains ${this.retryImages} image(s) in its original order. Draft changes apply to the next submission.` : "";
+    const key = JSON.stringify([this.generation, this.editor?.revision, this.images]);
     if (key === this.imagesKey) return;
     this.imagesKey = key;
     this.imageList.replaceChildren(...this.images.map((media, index) => {
       const row = element("div", "draft-image");
       row.append(element("span", "", `${index + 1}. ${media.width} × ${media.height} · ${media.bytes} bytes`));
-      const edit = to => { this.imageEdits++; return this.action("image_edit", { revision: data.images_revision, from: index, to }); };
+      const edit = to => { const images = [...this.editor.images]; const [media] = images.splice(index, 1); if (to !== null) images.splice(to, 0, media); this.edit(this.editor.text, images); };
       const earlier = button("Move image earlier", () => edit(index - 1), "quiet"); earlier.disabled = index === 0;
       const later = button("Move image later", () => edit(index + 1), "quiet"); later.disabled = index + 1 === this.images.length;
-      row.append(button("Preview image", () => this.action("inspect_image", { index, media }), "quiet"), earlier, later, button("Remove image", () => edit(null), "quiet"));
+      row.append(button("Preview image", () => this.action("inspect_image", { media }), "quiet"), earlier, later, button("Remove image", () => edit(null), "quiet"));
       return row;
     }));
   }
-  reset() { this.generation = undefined; this.unsent = false; this.draftError = undefined; this.draftEcho = undefined; this.input.value = ""; this.render(null, []); }
+  reset() { this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.generation = undefined; this.input.value = ""; this.render(null, []); }
   renderCommands(data) {
     this.commands.disabled = !data || this.switching;
-    const key = JSON.stringify([data?.generation, data?.commands, data?.command_submission]);
+    const key = JSON.stringify([data?.generation, data?.commands, data?.command_receipt]);
     if (key === this.commandKey) return;
     this.commandKey = key;
     this.commandView.replaceChildren();
     for (const item of data?.commands?.commands ?? []) {
       const select = button(`/${item.name}`, () => {
         this.input.value = `/${item.name} `;
-        this.unsent = true; this.draftError = undefined; this.pump(); this.input.focus();
+        this.edit(this.input.value); this.input.focus();
       }, "quiet");
       select.title = item.description;
       select.disabled = data.commands.revision.kind === "draft" && !item.draft_safe;
       this.commandView.append(select, element("span", "command-description", item.description));
     }
-    const state = data?.command_submission;
-    if (state?.pending) {
-      this.commandView.append(element("p", "", `Command result unresolved · ${state.pending.request_id}`),
-        element("pre", "command-input", JSON.stringify(state.pending, null, 2)),
-        button("Refresh command result", () => this.action("refresh_command_result"), "quiet"));
-    } else if (state?.receipt) {
-      const result = state.receipt.outcome;
-      this.commandView.append(element("p", "command-receipt", `${state.receipt.command} · ${result.kind === "draft_changed" ? `Draft changed · revision ${result.revision}` : `Committed · control ${result.control_seq}`} · ${state.receipt.request_id}`));
+    const receipt = data?.command_receipt;
+    if (receipt) {
+      const result = receipt.outcome;
+      this.commandView.append(element("p", "command-receipt", `${receipt.command} · ${result.kind === "draft_changed" ? `Draft changed · revision ${result.revision}` : `Committed · control ${result.control_seq}`} · ${receipt.request_id}`));
     }
     this.commandView.hidden = this.commandView.childElementCount === 0;
   }
@@ -419,12 +612,11 @@ class Pane {
   }
   render(data, models) {
     const changed = this.generation !== data?.generation;
+    if (this.selection !== data?.selection) { this.selection = data?.selection; this.switching = false; }
     if (changed) {
       this.switching = false;
       this.generation = data?.generation;
-      this.draftEcho = undefined;
-      this.unsent = false; this.draftError = undefined;
-      this.input.value = data?.draft ?? "";
+      this.binding = this.bindDraft(data).catch(error => notify(error.message));
       this.blocks.clear(); this.transcript.replaceChildren();
       this.pendingKey = undefined;
     }
@@ -442,27 +634,22 @@ class Pane {
     this.status.textContent = data?.historical ? "History" : (data?.transcript.status || "Ready");
     this.history.disabled = !data || (!data.history_more && data.historical);
     this.live.hidden = !data?.historical;
-    this.input.disabled = !data || this.switching; this.model.disabled = !data || this.switching;
-    this.send.disabled = !data || this.submitting || this.uploading || this.switching; this.steer.disabled = !data || this.submitting || this.uploading || this.switching;
-    this.retryText = data?.unresolved_text;
-    this.send.textContent = this.retryText != null ? "Retry previous" : "Send ↗";
-    this.steer.disabled ||= this.retryText != null;
+    this.model.disabled = !data || this.switching;
     this.cancel.disabled = !data;
     this.renderCommands(data);
     this.renderImages(data);
     this.renderExtensions(data);
+    this.renderComposer();
     if (!data) {
       if (!this.transcript.querySelector(".empty-pane")) {
         const empty = element("div", "empty-pane");
         const glyph = element("div", "empty-glyph"); glyph.setAttribute("aria-hidden", "true"); glyph.append(element("span"), element("span"));
-        empty.append(glyph, element("h3", "", this.index ? "A second line of thought." : "Make room for the work."),
+        empty.append(glyph, element("h3", "", this.index === "compare" ? "Compare another conversation." : "Start a conversation."),
           element("p", "", "Choose a workspace or reopen a conversation from the sidebar."));
         this.transcript.replaceChildren(empty);
       }
       this.waiting.replaceChildren(); this.pendingKey = undefined; this.notice.textContent = ""; return;
     }
-    if (data.draft === this.draftEcho) this.draftEcho = undefined;
-    if (this.draftEcho === undefined && !this.unsent && !this.draftWork && !this.submitting && document.activeElement !== this.input && this.input.value !== data.draft) this.input.value = data.draft;
     const allModels = models.some(model => sameModel(model, data.model)) ? models : [data.model, ...models];
     const modelKey = JSON.stringify(allModels);
     if (modelKey !== this.modelKey) {
@@ -532,24 +719,27 @@ class Pane {
 }
 function basename(path) { return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path; }
 function sameModel(left, right) { return left.deployment === right.deployment && left.model === right.model; }
-const panes = [new Pane(0), new Pane(1)];
+const panes = new Map();
 function select(index) {
   selected = index;
-  panes.forEach((pane, i) => { pane.node.classList.toggle("selected", index === i); $(`pane-tab-${i}`).setAttribute("aria-pressed", String(index === i)); });
+  for (const [key, pane] of panes) { pane.node.classList.toggle("selected", key === index); pane.node.hidden = key !== index; }
+  selectSurface(index);
 }
-select(0);
-for (let i = 0; i < 2; i++) $(`pane-tab-${i}`).addEventListener("click", () => select(i));
 async function openInSelected(fields) {
-  const pane = panes[selected];
+  const pane = panes.get(selected);
+  if (!pane) throw new Error("Open a conversation surface first");
   if (pane.switching) throw new Error("This pane is still opening a conversation");
   pane.switching = true;
   pane.input.disabled = true; pane.model.disabled = true; pane.send.disabled = true; pane.steer.disabled = true;
   try {
-    await pane.flush();
-    await command({ ...fields, pane: pane.index });
+    await pane.flush().catch(() => {});
+    const editor = pane.editor;
+    const reuse = fields.action === "create" && editor && !editor.dirty && !editor.failure && !editor.record.pending && !editor.text && !editor.images.length && !pane.submitting && !pane.uploading
+      ? {generation:pane.generation,header:editor.record.header} : undefined;
+    await command({ ...fields, pane: pane.index, ...(reuse ? {reuse} : {}) });
   } catch (error) {
     pane.switching = false;
-    pane.render(view?.panes[pane.index], view?.catalog.models ?? []);
+    pane.render(view?.surfaces[pane.index], view?.catalog.models ?? []);
     throw error;
   }
 }
@@ -557,38 +747,28 @@ function render(next) {
   rendererSlots = [];
   view = next;
   if (next.notice !== lastNotice) { lastNotice = next.notice; notify(next.notice); }
-  const key = JSON.stringify(next.catalog);
-  if (key !== catalogKey) {
-    catalogKey = key;
-    renderNavigation(next.catalog);
+  for (const [key, pane] of panes) if (!Object.hasOwn(next.surfaces, key)) { pane.reset(); pane.node.remove(); panes.delete(key); }
+  for (const [key, data] of Object.entries(next.surfaces)) {
+    if (!panes.has(key)) panes.set(key, new Pane(key));
+    const pane = panes.get(key);
+    pane.enterSubmit = next.preferences?.enter_submit ?? false;
+    pane.hint.textContent = pane.enterSubmit ? "Enter to send · Shift Enter for a new line" : "Ctrl / ⌘ Enter to send · Enter for a new line";
+    pane.render(data, next.catalog.models);
   }
-  next.panes.forEach((data, i) => {
-    panes[i].enterSubmit = next.preferences?.enter_submit ?? false;
-    panes[i].hint.textContent = panes[i].enterSubmit ? "Enter to send · Shift Enter for a new line" : "Ctrl / ⌘ Enter to send · Enter for a new line";
-    panes[i].render(data, next.catalog.models);
-  });
+  if (!panes.has(selected)) selected = panes.keys().next().value;
+  select(selected);
+  publish(next);
   renderDetail(next);
 }
-function navItem(name, subtitle, run) {
-  const item = button("", run, "nav-item"); item.title = subtitle;
-  item.append(element("strong", "", name), element("small", "mono", subtitle)); return item;
-}
-function renderNavigation(catalog) {
-  $("workspaces").replaceChildren(...catalog.workspaces.map(item => navItem(basename(item.path), item.path,
-    () => openInSelected({ action: "create", workspace: item.id, trust: $("workspace-trust").checked }))));
-  if (!catalog.workspaces.length) $("workspaces").append(element("p", "hint", "Add a directory on your service to start."));
-  $("sessions").replaceChildren(...catalog.sessions.map(item => navItem(basename(item.path), item.id,
-    () => openInSelected({ action: "open", session: item.id }))));
-  if (!catalog.sessions.length) $("sessions").append(element("p", "hint", "Send a message, then refresh to list the conversation."));
-  $("workspaces-next").hidden = !catalog.workspaces_more; $("sessions-next").hidden = !catalog.sessions_more;
-  $("models-next").hidden = !catalog.models_more;
-}
-$("refresh").addEventListener("click", () => perform(() => command({ action: "refresh" })));
-$("workspaces-next").addEventListener("click", () => perform(() => command({ action: "workspaces_next" })));
-$("sessions-next").addEventListener("click", () => perform(() => command({ action: "sessions_next" })));
-$("models-next").addEventListener("click", () => perform(() => command({ action: "models_next" })));
-$("workspace-form").addEventListener("submit", event => {
-  event.preventDefault(); perform(async () => { await command({ action: "register_workspace", path: $("workspace-path").value }); $("workspace-path").value = ""; });
+installActions({ command, open: openInSelected, select, call,
+  async closeSurface(key) {
+    const pane = panes.get(key);
+    if (pane?.switching || pane?.submitting || pane?.uploading) throw new Error("Wait for this conversation's current operation before closing");
+    if (pane) { pane.switching = true; pane.renderComposer(); }
+    try { if (pane) await pane.flush(true); await command({action:"close_surface",pane:key}); }
+    catch (error) { if (pane) { pane.switching = false; pane.renderComposer(); } throw error; }
+  },
+  async addSurface(key) { await command({action:"add_surface",pane:key}); select(key); },
 });
 
 function showDialog(key, title, body) {
@@ -599,7 +779,6 @@ function showDialog(key, title, body) {
 async function closeDetail() { await command({ action: "close_detail" }); dialogKey = undefined; $("detail").close(); }
 $("detail-close").addEventListener("click", () => perform(closeDetail));
 $("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
-$("settings-open").addEventListener("click", () => perform(() => command({ action: "settings_list" })));
 function renderDetail(next) {
   if (next.image_detail) {
     const detail = next.image_detail;
@@ -759,4 +938,11 @@ function renderUiDetail(detail) {
       return command({ action: "ui_invoke", ticket: detail.ticket, name: action, input });
     }, source(name, offset, maximum) { return call("ui_source", JSON.stringify({ ticket: detail.ticket, name, offset, maximum })); } }
   });
+}
+
+if (location.protocol === "rsi:") {
+  $("login").hidden = true;
+  $("sign-out").textContent = "Close application";
+  perform(() => connectWith("{}"));
+}
 }

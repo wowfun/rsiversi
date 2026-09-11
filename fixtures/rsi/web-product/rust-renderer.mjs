@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, firefox } from "playwright";
-import { startService } from "./service.mjs";
+import { startService, waitUntil } from "./service.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const directory = await mkdtemp(join(tmpdir(), "rsi-rust-renderer-"));
@@ -28,7 +28,7 @@ let page;
 try {
   service = await startService({ binary, assets, report, configure: async ({ config, run }) => {
     const profile = join(config, "application-profiles/web/application.profile.toml");
-    const all = ["index.html", "app.js", "worker.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "standard.js", "ui-renderers.json", ...files];
+    const all = ["index.html", "app.js", "worker.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", ...files];
     const text = await readFile(profile, "utf8");
     await writeFile(profile, text.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(all)}`));
     const source = join(config, "native-ui-source"); await mkdir(source);
@@ -52,13 +52,16 @@ try {
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await page.locator("#workbench").waitFor({ state: "visible" });
   await page.waitForFunction(() => window.admittedOffer);
-  const result = await page.evaluate(async () => {
+  // Synthetic slots have their own document owner; the real product keeps its own.
+  const abiPage = await context.newPage();
+  await abiPage.route(`${service.origin}/abi-fixture`, route => route.fulfill({ contentType: "text/html", body: '<!doctype html><link rel="stylesheet" href="/styles.css"><title>Rust renderer ABI</title>' }));
+  await abiPage.goto(`${service.origin}/abi-fixture`);
+  const result = await abiPage.evaluate(async offer => {
     const { MountTable } = await import("/mounts.js");
-    const offer = window.admittedOffer;
     const module = await import(`/rsi-renderers/${offer.revision}/rust-entry.js`);
-    const table = new MountTable();
+    const table = await MountTable.open();
     const panel = document.createElement("main"); panel.className = "login"; panel.setAttribute("aria-label", "Rust document renderers");
-    document.body.append(panel); document.getElementById("workbench").hidden = true;
+    document.body.append(panel);
     const slots = ["root", "pane", "sidebar", "dialog"].map((surface, index) => {
       const root = document.createElement("section"); panel.append(root);
       return { key: surface, surface, root, binding: surface, host: {}, snapshot: { model: { renderer: "fixture.rust", schema: { name: "fixture.counter", version: 1 }, data: { label: `Rust ${surface} presentation`, count: index + 1 }, actions: [{ name: "refresh", title: "Refresh" }], sources: [{ name: "raw", title: "Raw bytes", media_type: "application/octet-stream" }], standard_view: null } } };
@@ -78,23 +81,25 @@ try {
     let invalidRejected = false;
     try { await table.render(offer, invalid); } catch { invalidRejected = true; }
     const preserved = visible === panel.innerText;
-    window.finishRustFixture = async () => { await table.close(); const alive = module.live_renderers(); panel.remove(); document.getElementById("workbench").hidden = false; return alive; };
+    window.finishRustFixture = async () => { await table.close(); const alive = module.live_renderers(); panel.remove(); return alive; };
     return { mounted, unchangedNode, busyInputsBlocked, readyInputsEnabled, invalidRejected, preserved, visible };
-  });
+  }, await page.evaluate(() => window.admittedOffer));
   assert.equal(result.mounted, 4); assert.equal(result.unchangedNode, true); assert.equal(result.invalidRejected, true); assert.equal(result.preserved, true);
   assert.equal(result.busyInputsBlocked, true, "source and action input must wait for the refreshed model's usable ticket");
   assert.equal(result.readyInputsEnabled, true);
   assert.equal((result.visible.match(/Rust\/WASM count: 42/g) ?? []).length, 4);
-  await page.screenshot({ path: join(report, "four-rust-wasm-mounts.png") });
-  assert.equal(await page.evaluate(() => window.finishRustFixture()), 0);
-  await page.locator("#workspace-path").fill(service.workspace);
+  await abiPage.screenshot({ path: join(report, "four-rust-wasm-mounts.png") });
+  assert.equal(await abiPage.evaluate(() => window.finishRustFixture()), 0);
+  await abiPage.close();
+  await page.locator(".workspace-add summary").click();
+      await page.locator("#workspace-path").fill(service.workspace);
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
   await page.locator("#workspaces .nav-item").first().click();
-  const pane = page.getByRole("region", { name: "Left conversation", exact: true });
+  const pane = page.getByRole("region", { name: "Main conversation", exact: true });
   await pane.locator(".pane-session").filter({ hasText: service.workspace }).waitFor();
   const session = (await pane.locator(".pane-session").innerText()).split(" · ").at(-1);
   for (let cycle = 0; cycle < 3; cycle++) {
-    await pane.getByRole("button", { name: "Service extensions", exact: true }).click();
+    await page.getByRole("button", { name: "Service extensions", exact: true }).click();
     await page.locator("#detail").getByRole("button", { name: "Native Session model", exact: true }).click();
     const detail = page.locator("#detail");
     await page.waitForFunction(() => window.nativeDetail?.error || window.nativeDetail?.model);
@@ -108,7 +113,7 @@ try {
     await detail.locator("[data-fixture-bytes]").filter({ hasText: "00 ff 41 42 43" }).waitFor();
     if (cycle === 0) await page.screenshot({ path: join(report, "native-session-rust-wasm.png") });
     await page.getByRole("button", { name: "Close details", exact: true }).click();
-    await page.waitForFunction(async () => (await import(`/rsi-renderers/${window.admittedOffer.revision}/rust-entry.js`)).live_renderers() === 0);
+    await waitUntil(() => page.evaluate(async () => (await import(`/rsi-renderers/${window.admittedOffer.revision}/rust-entry.js`)).live_renderers() === 0), "Rust renderer disposal");
   }
   assert.equal(await page.evaluate(() => window.workerStarts), 1);
   await page.evaluate(() => { document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }); });

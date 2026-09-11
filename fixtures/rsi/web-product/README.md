@@ -1,6 +1,8 @@
 # Web product verification
 
-`npm ci && npm test` builds the actual Rust Web bundle and native RSI executable,
+First install the shared document's pinned build dependencies with
+`npm ci --ignore-scripts --prefix ../../../plugins/rsi/web` from this directory.
+Then `npm ci && npm test` builds the actual Rust Web bundle and native RSI executable,
 then drives the product document and Dedicated Worker in Chromium and Firefox.
 The runner also exercises document-only reset/reopen and unresolved-submission
 button projection using the shipped JavaScript; those checks are distinct from
@@ -45,7 +47,25 @@ document-created URL was revoked. Synthetic document cases separately exercise
 object-count/byte retention, LRU reuse/eviction, late-read fencing and edited
 attachment preservation during unresolved submission; they do not validate Media
 bytes. Rust public-application tests cover import ownership, limits, image-only
-unknown retries, stale ordering revisions, and detail/application cancellation.
+unknown retries, frozen request boundaries, and detail/application cancellation.
+
+Persistent composer checks use real IndexedDB transactions in two documents,
+including revision conflicts, record reincarnation, origin quotas, opaque u64
+requests and receipts, transaction aborts and malformed durable metadata.
+Document composer tests gate saves before repeated Send/reconcile input and
+automatic recovery, checking single admission and the absence of false conflicts.
+They also check cached UTF-8 accounting without re-encoding inactive editors.
+These use the shipped document methods with a controlled Worker reply, not a
+live Session or provider. `recovery.mjs` owns
+a separate frozen executable and Service, restores a live Fresh Session and its
+canonical image, checks cross-tab conflict controls and device-cookie fencing,
+then restarts the actual Service to expire the Fresh Session. Explicit recreation
+moves the saved input only after the replacement opens. An aborted save before
+restart must retain the cached local editor and require explicit conflict
+resolution before recreation. Corrupt counters must show a storage-unavailable
+notice immediately on connection, before opening a composer. A dropped real dispatch
+reply followed by reload must query the original message without another provider
+request. Both browsers capture desktop and narrow recovery controls.
 
 The runner freezes and hashes its native executable before starting either
 service. Concurrent Cargo builds cannot change that owner's executable gate.
@@ -97,7 +117,23 @@ UI API into the Rust/WASM DOM renderer. Synthetic four-slot ABI evidence and thi
 actual business path are reported separately. The runner builds both standalone
 fixtures with their own lockfiles; `RSI_RENDERER_ASSETS` and `RSI_NATIVE_UI_ARTIFACT`
 can select prebuilt diagnostic artifacts.
+Synthetic Rust/WASM slots use a separate document owner from the product. Async
+disposal and graph-release predicates use bounded, awaited polling rather than
+passing a Promise to Playwright's synchronous `waitForFunction` predicate.
 
 Renderer verification also drops the HTTP reply after a real server commit. The
 actual WASM owner closes without replay, explicit reconnect starts a new observer,
 and the new renderer and Session send/cancel actions work before clean sign-out.
+
+The isolated Service fixture explicitly grants each product-test device configuration
+authority through the Local Devices application before exercising Settings writes.
+Registration itself remains unprivileged. Grant bypass and revocation tests use the
+configuration owner's separate authenticated API fixtures.
+
+The opt-in `prepare-performance.mjs` creates instrumented copies of an explicitly
+supplied pre-migration asset directory and the current document source. It injects
+bounded synthetic 16/64/128-block projections and observes actual input through
+two animation frames. Production files are never rewritten. The comparison keeps
+the same native Host/Tauri harness and includes its WebKit web/network process
+PSS; it isolates document rendering and persistence, not provider or transport
+latency. Each engine has separate samples, artifacts and screenshots.

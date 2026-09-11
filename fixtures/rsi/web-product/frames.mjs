@@ -7,21 +7,22 @@ export async function verifyFrameDom(page, report, browser) {
     const block = (key, text) => ({ key, text, role: "assistant", title: "Assistant", sources: 0, clipped: false });
     const pane = index => ({ generation: "1", session: `frame-session-${index}`, path: "/workspace", draft: "",
       model: { deployment: "test", model: "model" }, transcript: { blocks: [block("a", "First block"), block("b", "Second block")], status: "Ready" }, pending: [], notice: "" });
-    const snapshot = { panes: [pane(0), pane(1)], notice: "", catalog: { workspaces: [], sessions: [], models: [] } };
+    const snapshot = { surfaces: {main:pane(0),compare:pane(1)}, notice: "", catalog: { workspaces: [], sessions: [], models: [] } };
     await presentFrame({ kind: "snapshot", frame_id: "1", view: snapshot }, window.testRendererOffer);
-    const first = panes[0].blocks.get("a").node, second = panes[0].blocks.get("b").node;
-    const right = panes[1].blocks.get("a").node;
-    panes[1].input.focus();
-    const patched = await presentFrame({ kind: "patch", frame_id: "2", base_frame_id: "1", sections: {}, panes: [{ index: 0, fields: {}, transcript: { fields: {}, upsert: [block("b", "Updated second")], remove: [] } }] }, window.testRendererOffer);
-    const identities = first === panes[0].blocks.get("a").node && second === panes[0].blocks.get("b").node && right === panes[1].blocks.get("a").node;
-    const focus = document.activeElement === panes[1].input;
-    const stale = await presentFrame({ kind: "patch", frame_id: "4", base_frame_id: "3", sections: { notice: "must not appear" }, panes: [] }, window.testRendererOffer);
-    const retained = frameId === "2" && view.notice === "" && panes[0].blocks.get("b").text.textContent === "Updated second";
-    const reordered = await presentFrame({ kind: "patch", frame_id: "3", base_frame_id: "2", sections: {}, panes: [{ index: 0, fields: {}, transcript: { fields: {}, upsert: [block("c", "New block")], remove: ["a"], order: ["c", "b"] } }] }, window.testRendererOffer);
-    const order = [...panes[0].transcript.querySelectorAll(".message-text")].map(node => node.textContent);
+    const first = panes.get("main").blocks.get("a").node, second = panes.get("main").blocks.get("b").node;
+    const right = panes.get("compare").blocks.get("a").node;
+    await Promise.all([...panes.values()].map(pane => pane.binding));
+    select("compare"); panes.get("compare").input.focus();
+    const patched = await presentFrame({ kind: "patch", frame_id: "2", base_frame_id: "1", sections: {}, surfaces: [{ surface: "main", fields: {}, transcript: { fields: {}, upsert: [block("b", "Updated second")], remove: [] } }] }, window.testRendererOffer);
+    const identities = first === panes.get("main").blocks.get("a").node && second === panes.get("main").blocks.get("b").node && right === panes.get("compare").blocks.get("a").node;
+    const focus = document.activeElement === panes.get("compare").input;
+    const stale = await presentFrame({ kind: "patch", frame_id: "4", base_frame_id: "3", sections: { notice: "must not appear" }, surfaces: [] }, window.testRendererOffer);
+    const retained = frameId === "2" && view.notice === "" && panes.get("main").blocks.get("b").text.textContent === "Updated second";
+    const reordered = await presentFrame({ kind: "patch", frame_id: "3", base_frame_id: "2", sections: {}, surfaces: [{ surface: "main", fields: {}, transcript: { fields: {}, upsert: [block("c", "New block")], remove: ["a"], order: ["c", "b"] } }] }, window.testRendererOffer);
+    const order = [...panes.get("main").transcript.querySelectorAll(".message-text")].map(node => node.textContent);
     const replacement = pane(0); replacement.generation = "2";
-    await presentFrame({ kind: "snapshot", frame_id: "5", view: { ...snapshot, panes: [replacement, pane(1)] } }, window.testRendererOffer);
-    const replaced = second !== panes[0].blocks.get("b").node;
+    await presentFrame({ kind: "snapshot", frame_id: "5", view: { ...snapshot, surfaces: {main:replacement,compare:pane(1)} } }, window.testRendererOffer);
+    const replaced = second !== panes.get("main").blocks.get("b").node;
     return { patched: patched.accepted, identities, focus, stale, retained, reordered: reordered.accepted, order, replaced };
   });
   assert.deepEqual(result, { patched: true, identities: true, focus: true, stale: false, retained: true, reordered: true, order: ["New block", "Updated second"], replaced: true });
@@ -54,7 +55,8 @@ export async function verifyAcknowledgementDeadline(page, service) {
         await call("connect", { receipt: JSON.stringify(receipt), devHttp: false });
         const frame = await first;
         const workspace = frame.view.catalog.workspaces[0].id;
-        for (const pane of [0, 1]) await call("command", JSON.stringify({ action: "create", pane, workspace, trust: false }));
+        await call("command", JSON.stringify({action:"add_surface",pane:"compare"}));
+        for (const pane of ["main", "compare"]) await call("command", JSON.stringify({ action: "create", pane, workspace, trust: false }));
         // A stale acknowledgement must not release the pending frame or renew its deadline.
         worker.postMessage({ kind: "ack", frame_id: "18446744073709551615" });
         const error = await failed;

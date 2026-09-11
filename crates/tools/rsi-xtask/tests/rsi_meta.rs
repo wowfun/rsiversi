@@ -211,7 +211,14 @@ fn every_workspace_package_belongs_to_one_ci_failure_domain() {
     ]);
     let workflow = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: Workflow = yaml_serde::from_str(&workflow).expect("workflow YAML");
-    let package_jobs = ["rsi-base", "rsi-ai", "rsi-agent", "rsi", "repository-tools"];
+    let package_jobs = [
+        "rsi-base",
+        "rsi-ai",
+        "rsi-agent",
+        "rsi",
+        "rsi-desktop",
+        "repository-tools",
+    ];
     let job_patterns = package_jobs
         .into_iter()
         .map(|job_name| {
@@ -451,4 +458,52 @@ fn direct_foundation_probe_invocation_is_a_second_ci_authority() {
         direct_rsi_meta_authorities(workflow),
         vec!["fixtures/rsi-meta/foundation-probe/Cargo.toml"]
     );
+}
+
+#[test]
+fn gui_jobs_exercise_document_types_and_native_failure_boundaries() {
+    #[derive(Deserialize)]
+    struct Workflow {
+        jobs: BTreeMap<String, Job>,
+    }
+    #[derive(Deserialize)]
+    struct Job {
+        steps: Vec<Step>,
+    }
+    #[derive(Deserialize)]
+    struct Step {
+        run: Option<String>,
+    }
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: Workflow = yaml_serde::from_str(&source).unwrap();
+    let scripts = |name: &str| {
+        workflow.jobs[name]
+            .steps
+            .iter()
+            .filter_map(|step| step.run.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let browser = scripts("rsi-meta-browser");
+    for command in [
+        "npm run typecheck --prefix ../../../plugins/rsi/web",
+        "npm test --prefix ../../../plugins/rsi/web",
+    ] {
+        assert!(
+            browser.contains(command),
+            "document check omitted: {command}"
+        );
+    }
+    let desktop = scripts("rsi-desktop");
+    for seam in [
+        "fixtures/rsi/desktop-admission/Cargo.toml",
+        "--foreign-binary",
+        "--ack-timeout",
+        "--startup-close",
+        "--save-failure",
+        "--restart",
+        "--refresh-during-click",
+    ] {
+        assert!(desktop.contains(seam), "native boundary omitted: {seam}");
+    }
 }

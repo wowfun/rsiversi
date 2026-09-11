@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
 import { join } from "node:path";
 
-function png(width, height, color) {
+export function png(width, height, color) {
   const chunk = (name, data) => {
     const body = Buffer.concat([Buffer.from(name), data]);
     let crc = 0xffffffff;

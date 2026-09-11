@@ -6,50 +6,9 @@
   <meta name="color-scheme" content="light">
   <title>RSI — coding workspace</title>
   <link rel="stylesheet" href="/styles.css">
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/src/main.tsx"></script>
 </head>
 <body>
-  <header class="app-header">
-    <a class="wordmark" href="/" aria-label="RSI home">rsi<span class="wordmark-dot">.</span></a>
-    <span class="app-purpose">Coding workspace</span>
-    <span id="connection-state" class="connection-state" role="status">Disconnected</span>
-    <button id="sign-out" class="quiet" hidden>Sign out</button>
-  </header>
-  <div id="notice" class="notice" role="alert" hidden></div>
-  <main id="login" class="login">
-    <div class="login-heading"><span class="eyebrow">Your workspace, connected</span><h1>Pick up the work.</h1>
-      <p>Connect to your RSI service to open conversations and work on your code.</p></div>
-    <form id="login-form" class="login-form">
-      <label for="receipt">Device registration receipt</label>
-      <textarea id="receipt" rows="6" spellcheck="false" autocomplete="off" placeholder="Paste the JSON receipt from your service"></textarea>
-      <p class="hint">On the service computer, run <code>rsi --profile devices -- register browser</code>.</p>
-      <label id="dev-http-label" class="check" hidden><input id="dev-http" type="checkbox"> Allow local HTTP for development</label>
-      <div class="actions"><button id="connect" class="primary" type="submit">Connect</button>
-        <button id="reconnect" type="button" hidden>Reconnect with this browser</button></div>
-      <p class="hint">The receipt is used once. Your device token is never saved in browser storage.</p>
-    </form>
-  </main>
-  <main id="workbench" class="workbench" hidden>
-    <aside class="sidebar" aria-label="Workspace navigation">
-      <div class="section-heading"><h2>Workspaces</h2><button id="refresh" class="icon-button" aria-label="Refresh workspaces and conversations">↻</button></div>
-      <p class="hint">Open in the selected pane.</p>
-      <div id="workspaces" class="nav-list"></div>
-      <button id="workspaces-next" class="quiet" hidden>More workspaces</button>
-      <form id="workspace-form" class="workspace-form"><label for="workspace-path">Server directory</label>
-        <input id="workspace-path" placeholder="/path/to/project" required spellcheck="false">
-        <button type="submit">Add workspace</button></form>
-      <label class="check trust"><input id="workspace-trust" type="checkbox"> Trust project instructions</label>
-      <div class="section-heading conversations-heading"><h2>Conversations</h2></div>
-      <div id="sessions" class="nav-list"></div>
-      <button id="sessions-next" class="quiet" hidden>More conversations</button>
-      <button id="models-next" class="quiet" hidden>More models</button>
-      <div class="sidebar-footer"><button id="settings-open" class="quiet">Settings</button><span>RSI workspace</span></div>
-    </aside>
-    <section class="workspace-main" aria-label="Conversations">
-      <nav class="pane-tabs" aria-label="Selected pane"><button id="pane-tab-0" aria-pressed="true">Left conversation</button><button id="pane-tab-1" aria-pressed="false">Right conversation</button></nav>
-      <div id="panes" class="panes"></div>
-    </section>
-  </main>
-  <dialog id="detail" class="detail-dialog"><div class="dialog-heading"><h2 id="detail-title">Details</h2><button id="detail-close" aria-label="Close details">×</button></div><div id="detail-body"></div></dialog>
+<div id="root"></div>
 </body>
 </html>

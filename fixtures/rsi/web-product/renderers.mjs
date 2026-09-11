@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, firefox } from "playwright";
-import { startService } from "./service.mjs";
+import { startService, waitUntil } from "./service.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const directory = await mkdtemp(join(tmpdir(), "rsi-renderer-product-"));
@@ -31,7 +31,7 @@ const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chr
 try {
   service = await startService({ binary, assets, report, configure: async ({ config }) => {
     const profile = join(config, "application-profiles/web/application.profile.toml");
-    const files = ["index.html", "app.js", "worker.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "standard.js", "ui-renderers.json", "lazy.js"];
+    const files = ["index.html", "app.js", "worker.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", "lazy.js"];
     const content = await readFile(profile, "utf8");
     await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, watch = true, files = ${JSON.stringify(files)}`));
   } });
@@ -50,16 +50,17 @@ try {
   await page.locator("#receipt").fill(JSON.stringify(service.register("renderer reload")));
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await page.locator("#workbench").waitFor({ state: "visible" });
-  await page.locator("#workspace-path").fill(service.workspace);
+  await page.locator(".workspace-add summary").click();
+      await page.locator("#workspace-path").fill(service.workspace);
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
   await page.locator("#workspaces .nav-item").first().click();
-  const pane = page.getByRole("region", { name: "Left conversation", exact: true });
-  await pane.getByRole("textbox", { name: "Left message" }).fill("hold this turn");
+  const pane = page.getByRole("region", { name: "Main conversation", exact: true });
+  await pane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
   await pane.getByRole("button", { name: "Send ↗" }).click();
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
-  await pane.getByRole("textbox", { name: "Left message" }).fill("resident draft 界");
+  await pane.getByRole("textbox", { name: "Main message" }).fill("resident draft 界");
   const session = await pane.locator(".pane-session").innerText();
-  await pane.getByRole("button", { name: "Workspace files", exact: true }).click();
+  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   const form = page.locator(".ui-contribution");
   await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).fill("kept form draft");
   await page.locator('[data-renderer-revision="A"]').waitFor();
@@ -73,11 +74,11 @@ try {
   await page.evaluate(() => window.finishCandidate());
   await page.locator('[data-renderer-revision="B"]').waitFor();
   assert.equal(await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).inputValue(), "kept form draft");
-  assert.equal(await pane.getByRole("textbox", { name: "Left message" }).inputValue(), "resident draft 界");
+  assert.equal(await pane.getByRole("textbox", { name: "Main message" }).inputValue(), "resident draft 界");
   assert.equal(await pane.locator(".pane-session").innerText(), session);
   assert.equal(await page.evaluate(() => window.workerStarts), 1);
   assert.equal(service.provider.requests.length, 1);
-  await page.waitForFunction(async url => (await fetch(url)).status === 404, oldLazy);
+  await waitUntil(() => page.evaluate(async url => (await fetch(url)).status === 404, oldLazy), "retired renderer graph release");
   await page.screenshot({ path: join(report, "renderer-b-preserved-controller-and-drafts.png") });
   await writeGeneration("C", false, true);
   await page.locator("#notice").filter({ hasText: "intentional candidate mount failure" }).waitFor();
@@ -96,7 +97,7 @@ try {
     assert.equal(await committed.text(), "true");
     await route.abort("failed");
   });
-  await pane.getByRole("button", { name: "Workspace files", exact: true }).click();
+  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   await page.locator('[data-renderer-revision="B"]').waitFor();
   await writeGeneration("D");
   await page.locator("#connection-state").filter({ hasText: "Connection failed" }).waitFor();
@@ -108,13 +109,13 @@ try {
   await page.locator("#reconnect").click();
   await page.locator("#workbench").waitFor({ state: "visible" });
   await page.locator("#workspaces .nav-item").first().click();
-  await pane.getByRole("button", { name: "Workspace files", exact: true }).click();
+  await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   await page.locator('[data-renderer-revision="D"]').waitFor();
   assert.equal(await page.evaluate(() => window.workerStarts), 2);
   await page.screenshot({ path: join(report, "lost-commit-reconnected-renderer-d.png") });
   await page.getByRole("button", { name: "Close details", exact: true }).click();
   await page.locator("#detail").waitFor({ state: "hidden" });
-  await pane.getByRole("textbox", { name: "Left message" }).fill("hold this turn after recovery");
+  await pane.getByRole("textbox", { name: "Main message" }).fill("hold this turn after recovery");
   await pane.getByRole("button", { name: "Send ↗" }).click();
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
   await pane.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -135,7 +136,7 @@ try {
     service = await startService({ binary, assets, report: join(report, mode), configure: async ({ config }) => {
       const profile = join(config, "application-profiles/web/application.profile.toml");
       const content = await readFile(profile, "utf8");
-      const files = ["index.html", "app.js", "worker.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js"];
+      const files = ["index.html", "app.js", "worker.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
       if (mode === "broken") files.push("standard.js", "ui-renderers.json", "lazy.js");
       await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(files)}`));
     } });
@@ -146,16 +147,17 @@ try {
     await cold.locator("#receipt").fill(JSON.stringify(service.register(`${mode} renderer`)));
     await cold.getByRole("button", { name: "Connect", exact: true }).click();
     await cold.locator("#workbench").waitFor({ state: "visible" });
+    await cold.locator(".workspace-add summary").click();
     await cold.locator("#workspace-path").fill(service.workspace);
     await cold.getByRole("button", { name: "Add workspace", exact: true }).click();
     await cold.locator("#workspaces .nav-item").first().click();
-    const coldPane = cold.getByRole("region", { name: "Left conversation", exact: true });
-    await coldPane.getByRole("button", { name: "Workspace files", exact: true }).click();
+    const coldPane = cold.getByRole("region", { name: "Main conversation", exact: true });
+    await cold.getByRole("button", { name: "Workspace files", exact: true }).click();
     await cold.locator(".renderer-mount").filter({ hasText: "Renderer unavailable: rsi.standard" }).waitFor();
     await cold.screenshot({ path: join(report, `${mode}-catalog-diagnostic.png`) });
     await cold.getByRole("button", { name: "Close details", exact: true }).click();
     await cold.locator("#detail").waitFor({ state: "hidden" });
-    await coldPane.getByRole("textbox", { name: "Left message" }).fill("hold this turn");
+    await coldPane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
     await coldPane.getByRole("button", { name: "Send ↗" }).click();
     await coldPane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
     await coldPane.getByRole("button", { name: "Cancel", exact: true }).click();

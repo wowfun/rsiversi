@@ -1,0 +1,82 @@
+{
+  "repository": "https://github.com/deepseek-ai/deepseek-harness",
+  "revision": "c291e7961a515f6d7af9304e7fd1d257929aef26",
+  "changes": [
+    "Import aliases target the selected local closure.",
+    "ScopedStandardSourceBinding.ctx is an opaque RSI object instead of a Cordis Context."
+  ],
+  "files": [
+    {
+      "path": "slots/index.ts",
+      "source": "packages/client/ui-slots/src/index.ts",
+      "source_sha256": "07b7aec2248b6ee6b56626f7aaba5dbc97cf765f1967dc7e60d6cef07ba7c81e",
+      "adapted_sha256": "7c54e9bb08e5b4a6d375c6bf01185e5b35f96f4d091310a93fd532971bb0fb3b"
+    },
+    {
+      "path": "slots/renderer.ts",
+      "source": "packages/client/ui-slots/src/renderer.ts",
+      "source_sha256": "66201b2ded3ab3ea133881de76737b3a0253f94f59b84594462109f052c63b19",
+      "adapted_sha256": "d5594ae40b4cc8dff966d8d27631a1f4ab188acfae861add113a84ca3e70f6d8"
+    },
+    {
+      "path": "slots/store.ts",
+      "source": "packages/client/ui-slots/src/store.ts",
+      "source_sha256": "4233ae32911848aa771910286e5f41b4c683e8c5b16da190935082ac4249cca0",
+      "adapted_sha256": "bfb685d259acf41d8a672f6d0ef5fa50ebca38c6b1a5d3245cc5258d5a5799bb"
+    },
+    {
+      "path": "store-contract.ts",
+      "source": "packages/client/store/src/contract.ts",
+      "source_sha256": "3e074338c2ae8617ff27e9f5f1e32c452d04c45894e930792b798c677078f503",
+      "adapted_sha256": "3e074338c2ae8617ff27e9f5f1e32c452d04c45894e930792b798c677078f503"
+    },
+    {
+      "path": "renderer/bind.ts",
+      "source": "packages/client/ui-renderer/src/client/bind.ts",
+      "source_sha256": "bc1ced1819b2496f139299b789bc13cb3295a47397ea2e0d65b5bb4000e8d389",
+      "adapted_sha256": "620b6f9ed95e7d1c733d2ecac4fe35c430f42acad658e8c2e703d84f8ca866bd"
+    },
+    {
+      "path": "renderer/bindings.tsx",
+      "source": "packages/client/ui-renderer/src/client/bindings.tsx",
+      "source_sha256": "340e2a707170519910416a183eba432dede46996c479e75c4ab687eeefd36495",
+      "adapted_sha256": "e31a22deb115acd6fea9c560bdcc2cb00ed081e62df06da0f59540f93f2d3cc1"
+    },
+    {
+      "path": "renderer/scoped-slots.tsx",
+      "source": "packages/client/ui-renderer/src/client/scoped-slots.tsx",
+      "source_sha256": "bcdd61674a52fae843ef21b258a8a8568a49e310217cda187c73159e925fa8a0",
+      "adapted_sha256": "1c0bd5ea6394cf34e0520890f0598c7ee42fe7cb23d44c64f8b49a3984f1196e"
+    },
+    {
+      "path": "primitives/Button.tsx",
+      "source": "packages/client/ui-primitives/src/Button.tsx",
+      "source_sha256": "5f1db06042fa372c45d777feffaab3b1d0c9395a89fa00b735bd9cbc8a389371",
+      "adapted_sha256": "5f1db06042fa372c45d777feffaab3b1d0c9395a89fa00b735bd9cbc8a389371"
+    },
+    {
+      "path": "primitives/Button.module.css",
+      "source": "packages/client/ui-primitives/src/Button.module.css",
+      "source_sha256": "a32017eff252569cef883d7d3308b2ca01fc41b167b568ad00b923603a902f99",
+      "adapted_sha256": "a32017eff252569cef883d7d3308b2ca01fc41b167b568ad00b923603a902f99"
+    },
+    {
+      "path": "primitives/StateDot.tsx",
+      "source": "packages/client/ui-primitives/src/StateDot.tsx",
+      "source_sha256": "94e287b278d5481d6812dae820a95afee6856d34b4056bfd84017f43a5b43ad2",
+      "adapted_sha256": "94e287b278d5481d6812dae820a95afee6856d34b4056bfd84017f43a5b43ad2"
+    },
+    {
+      "path": "primitives/StateDot.module.css",
+      "source": "packages/client/ui-primitives/src/StateDot.module.css",
+      "source_sha256": "21c9dca85dffbae6e31da3bfd4c4578739282f9ed3b9a3bbf68b6b12338879de",
+      "adapted_sha256": "21c9dca85dffbae6e31da3bfd4c4578739282f9ed3b9a3bbf68b6b12338879de"
+    },
+    {
+      "path": "LICENSE",
+      "source": "LICENSE",
+      "source_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+      "adapted_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be"
+    }
+  ]
+}

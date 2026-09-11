@@ -2,7 +2,8 @@
 const encoder = new TextEncoder();
 // ESM records outlive a Worker/MountTable, so admission belongs to the document.
 const importedGenerations = new Set();
-let cleanupBlocked = false;
+const owner = { current: undefined, closing: undefined, opening: false, blocked: false };
+const ownership = Symbol("document mount ownership");
 const surfaces = new Set(["root", "pane", "sidebar", "dialog"]);
 const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const name = value => typeof value === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(value);
@@ -34,6 +35,7 @@ async function drain(entry) {
   entry.abort.abort();
   entry.cleanup ??= (async () => {
     try { await entry.mounted?.dispose(); }
+    catch (error) { owner.blocked = true; throw error; }
     finally { await Promise.allSettled([...entry.work]); }
   })();
   await entry.cleanup;
@@ -80,9 +82,26 @@ function binding(slot, renderer, input) {
   return entry;
 }
 export class MountTable {
-  constructor() { this.entries = new Map(); this.offer = undefined; this.rejected = undefined; this.busy = false; this.closed = false; }
+  static async open() {
+    if (owner.opening) throw new Error("Renderer connection is already opening");
+    owner.opening = true;
+    try {
+      if (owner.closing) await owner.closing;
+      if (owner.blocked) throw new Error("Renderer cleanup incomplete; reload the page");
+      if (owner.current) throw new Error("A renderer connection is already active");
+      const table = new MountTable(ownership);
+      owner.current = table;
+      return table;
+    } catch (error) {
+      if (owner.blocked) throw new Error("Renderer cleanup incomplete; reload the page", { cause: error });
+      throw error;
+    } finally { owner.opening = false; }
+  }
+  constructor(token) {
+    if (token !== ownership) throw new Error("Open renderers through the document owner");
+    this.entries = new Map(); this.offer = undefined; this.rejected = undefined; this.busy = false; this.closed = false; }
   async render(offer, slots) {
-    if (cleanupBlocked) throw new Error("Renderer cleanup incomplete; reload the page");
+    if (owner.blocked) throw new Error("Renderer cleanup incomplete; reload the page");
     if (this.closed || this.busy) throw new Error("Presentation mount table is unavailable");
     if (!digest(offer?.revision) || slots.length > 16 || new Set(slots.map(slot => slot.key)).size !== slots.length || slots.some(slot => !name(slot.key) || !surfaces.has(slot.surface) || !(slot.root instanceof Element))) throw new Error("Invalid presentation slots");
     bounded(offer, 256 * 1024);
@@ -171,6 +190,7 @@ export class MountTable {
     }
   }
   async close() {
+    if (this.closeResult) return this.closeResult;
     this.closed = true;
     for (const entry of [...this.entries.values(), ...(this.staged?.values() ?? [])]) {
       entry.active = false; entry.abort.abort();
@@ -188,12 +208,22 @@ export class MountTable {
       try {
         await Promise.race([this.closing, new Promise((_, reject) => {
           timer = setTimeout(() => {
-            cleanupBlocked = true;
+            owner.blocked = true;
             reject(new Error("Renderer cleanup exceeded 30 seconds; reload the page"));
           }, 30000);
         })]);
+      } catch (error) {
+        owner.blocked = true;
+        throw error;
       } finally { clearTimeout(timer); }
     })();
+    owner.closing = this.closeResult;
+    this.closeResult.then(() => {
+      if (owner.current === this) {
+        owner.current = undefined;
+        owner.closing = undefined;
+      }
+    }, () => {});
     await this.closeResult;
   }
 }

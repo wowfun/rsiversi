@@ -558,6 +558,13 @@ async fn prepare_tui(dev: &Development, target: &str, signals: &mut Signals) -> 
 }
 async fn prepare_web(dev: &Development, watch: bool, signals: &mut Signals) -> Result<(), String> {
     let assets = dev.directory.join("web");
+    let mut install = tokio::process::Command::new("npm");
+    install
+        .env_clear()
+        .envs(dev.build_environment())
+        .current_dir(dev.root.join("plugins/rsi/web"))
+        .args(["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
+    logged(install, &dev.log, signals).await?;
     let mut command = tokio::process::Command::new("node");
     command
         .env_clear()
@@ -613,10 +620,27 @@ async fn launch(dev: &Development, options: &Options, signals: &mut Signals) -> 
     } else {
         None
     };
+    let mut frontend = None;
     let mut command = dev.command(&["--profile", &format!("dev-{}", options.surface)]);
     if options.surface == "web" {
-        let bind = format!("127.0.0.1:{}", options.port);
-        let origin = format!("http://{bind}");
+        let origin = format!("http://127.0.0.1:{}", options.port);
+        let bind = if options.watch {
+            let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(problem)?;
+            let address = reserved.local_addr().map_err(problem)?;
+            let upstream = format!("http://{address}");
+            let mut vite = tokio::process::Command::new("node");
+            vite.env_clear()
+                .envs(dev.build_environment())
+                .env("RSI_DEV_UPSTREAM", upstream)
+                .current_dir(dev.root.join("plugins/rsi/web"))
+                .arg("node_modules/vite/bin/vite.js")
+                .args(["--host", "127.0.0.1", "--port", &options.port.to_string()]);
+            redirect(&mut vite, &dev.directory.join("logs/vite.log"))?;
+            frontend = Some(Child::spawn(vite, true)?);
+            address.to_string()
+        } else {
+            format!("127.0.0.1:{}", options.port)
+        };
         command.args(["--bind", &bind, "--origin", &origin, "--dev-http"]);
         eprintln!(
             "Open {origin}. In another terminal, run {} --profile devices register dev-web and paste the receipt into the sign-in form. Select 'Allow local HTTP for development' before connecting.",
@@ -634,7 +658,15 @@ async fn launch(dev: &Development, options: &Options, signals: &mut Signals) -> 
     } else {
         None
     };
-    let result = tokio::select! {biased; ()=signals.interrupted()=>{application.stop().await?;true}, result=application.wait()=>application_succeeded(result.map_err(problem)?), stopped=async{match &mut watcher{Some(watcher)=>watcher.wait().await,None=>std::future::pending().await}}=>{stopped.map_err(problem)?;application.stop().await?;return Err("frontend source watcher stopped; inspect logs/watch.log".into());}};
+    let result = tokio::select! {biased;
+        ()=signals.interrupted()=>{application.stop().await?;true},
+        result=application.wait()=>application_succeeded(result.map_err(problem)?),
+        stopped=async{match &mut watcher{Some(watcher)=>watcher.wait().await,None=>std::future::pending().await}}=>{stopped.map_err(problem)?;application.stop().await?;return Err("frontend source watcher stopped; inspect logs/watch.log".into());},
+        stopped=async{match &mut frontend{Some(frontend)=>frontend.wait().await,None=>std::future::pending().await}}=>{stopped.map_err(problem)?;application.stop().await?;return Err("Vite stopped; inspect logs/vite.log".into());},
+    };
+    if let Some(frontend) = &mut frontend {
+        frontend.stop().await?;
+    }
     if let Some(watcher) = &mut watcher {
         watcher.stop().await?;
     }

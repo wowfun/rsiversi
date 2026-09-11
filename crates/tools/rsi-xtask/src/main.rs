@@ -11,6 +11,7 @@ mod cargo_step;
 mod code_check;
 #[cfg(unix)]
 mod dev;
+mod dist;
 mod documentation;
 #[cfg(not(unix))]
 mod dev {
@@ -55,6 +56,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
+        [command, rest @ ..] if command == "dist" => dist::run(rest),
         [command, rest @ ..] if command == "dev" => dev::run(rest),
         [command] if command == "verify-agent-notes" => {
             let repository = env::current_dir()
@@ -93,7 +95,7 @@ fn run() -> Result<(), String> {
             code_check::run(&repository).map_err(|error| format!("code-check:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask dev tui|web [--directory PATH] [--prepare-only|--smoke] [--no-watch] [--port PORT] | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta conformance"
+            "usage: rsi-xtask dist desktop /absolute/output [--debug] | rsi-xtask dev tui|web [--directory PATH] [--prepare-only|--smoke] [--no-watch] [--port PORT] | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-docs | rsi-xtask rsi-meta conformance"
                 .into(),
         ),
     }

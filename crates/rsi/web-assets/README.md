@@ -3,7 +3,7 @@
 WebAssetsFactory is an ordinary native provider of immutable HttpAssets. It reads
 an explicit absolute bundle directory and a closed list of flat filenames at
 activation. The default bundle contains index.html, app.js, worker.js, styles.css,
-rsi_web.js, rsi_web_bg.wasm, mounts.js, standard.js and ui-renderers.json. Only HTML, JavaScript, CSS, WASM, JSON and PNG
+rsi_web.js, rsi_web_bg.wasm, mounts.js, drafts.js, standard.js and ui-renderers.json. Only HTML, JavaScript, CSS, WASM, JSON and PNG
 extensions are accepted; names contain ASCII letters, digits, dot, dash or
 underscore and cannot begin with dot. At most 128 files, 128 bytes per name and
 64 MiB of aggregate retained file capacity are admitted. The root document must
