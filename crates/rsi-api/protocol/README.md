@@ -72,6 +72,11 @@ operation descriptor before sending input. Client retirement cancels observation
 and rejects new calls; it never grants authority to stop the remote deployment.
 The connection description and catalog DTOs are shared between transports and
 clients. Catalog decoding rejects duplicates and more than 2,048 entries.
+`connection.caller` v1 is an authenticated Control Read with an empty object
+request and 1 KiB request/response ceilings. Its closed `CallerIdentity` response
+is `Local` or `Device { device_id }`, derived exclusively from the trusted
+invocation origin. It is per-call identity, separate from the generation-wide
+connection description; no request field can select authority.
 
 The shared stream handoff has one item slot and a separate terminal signal.
 Its owner drives the producer independently of consumer polling, reserving the

@@ -7,7 +7,9 @@ use http::{Request, Response};
 use hyper::body::{Body as _, Incoming};
 #[cfg(unix)]
 use rsi_api_protocol::LocalCompatibilityKey;
-use rsi_api_protocol::{ApiError, AuthenticatedDevice, CallOrigin, DeviceAuthentication, Result};
+use rsi_api_protocol::{
+    ApiError, AuthenticatedDevice, CallOrigin, DeviceAuthentication, DeviceId, Result,
+};
 use rsi_credentials_protocol::SecretValue;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -62,35 +64,31 @@ impl Access {
         }
     }
     pub fn authenticate(&self, headers: &http::HeaderMap) -> Result<Caller> {
-        match self {
+        let caller = match self {
             Self::Remote { .. } => {
                 let device = self.authenticate_device(headers)?;
-                Ok(Caller {
+                Caller {
                     revoked: device.revoked.clone(),
                     origin: CallOrigin::Device(device),
-                })
+                }
             }
             #[cfg(unix)]
-            Self::Local(_) => Ok(Caller {
+            Self::Local(_) => Caller {
                 origin: CallOrigin::Local,
                 revoked: CancellationToken::new(),
-            }),
+            },
+        };
+        if let Some(expected) = expected_device(headers)?
+            && !matches!(&caller.origin, CallOrigin::Device(device) if device.id == expected)
+        {
+            return Err(ApiError::Unauthorized);
         }
+        Ok(caller)
     }
     fn authenticate_device(&self, headers: &http::HeaderMap) -> Result<AuthenticatedDevice> {
         let (policy, authentication) = self.remote()?;
         let bearer = one(headers, "authorization")?;
-        let cookies = one(headers, "cookie")?;
-        let mut cookie = None;
-        if let Some(cookies) = cookies {
-            for part in cookies.split(';') {
-                if let Some(value) = part.trim().strip_prefix("rsi-device=")
-                    && cookie.replace(value).is_some()
-                {
-                    return Err(ApiError::Unauthorized);
-                }
-            }
-        }
+        let cookie = device_cookie(headers)?;
         let token = match (bearer, cookie) {
             (Some(bearer), None) => bearer
                 .strip_prefix("Bearer ")
@@ -123,6 +121,17 @@ impl Access {
         if body.size_hint().upper() != Some(0) {
             return Err(ApiError::Invalid("cookie operations have no body".into()));
         }
+        let expected = expected_device(headers)?;
+        let cookie_present = device_cookie(headers)?.is_some();
+        if path.ends_with("/logout") && cookie_present && expected.is_none() {
+            return Err(ApiError::Unauthorized);
+        }
+        if let Some(expected) = expected
+            && (cookie_present || one(headers, "authorization")?.is_some())
+            && self.authenticate_device(headers)?.id != expected
+        {
+            return Err(ApiError::Unauthorized);
+        }
         let value = if path.ends_with("/login") {
             self.authenticate_device(headers)?;
             let bearer = one(headers, "authorization")?
@@ -142,4 +151,23 @@ impl Access {
         );
         Ok(response)
     }
+}
+
+fn expected_device(headers: &http::HeaderMap) -> Result<Option<DeviceId>> {
+    one(headers, "x-rsi-expected-device")?
+        .map(DeviceId::parse)
+        .transpose()
+}
+fn device_cookie(headers: &http::HeaderMap) -> Result<Option<&str>> {
+    let mut cookie = None;
+    if let Some(cookies) = one(headers, "cookie")? {
+        for part in cookies.split(';') {
+            if let Some(value) = part.trim().strip_prefix("rsi-device=")
+                && cookie.replace(value).is_some()
+            {
+                return Err(ApiError::Unauthorized);
+            }
+        }
+    }
+    Ok(cookie)
 }

@@ -13,11 +13,11 @@ result or retirement. Transport delivery leases retain quota independently of
 domain work. Native panic reports an unknown outcome for a dispatched mutation
 and a backend error for a read; a browser WASM trap remains whole-Worker failure.
 
-`ConnectionApiFactory` independently owns the two connection negotiation
+`ConnectionApiFactory` independently owns the description, catalog and caller
 registrations and publishes their exact `ConnectionDescriptionContract`. It
 requires the registry and deployment/generation identities. Multiple listeners
 consume this same generation; stopping one listener does not withdraw connection
-operations. Its own retirement withdraws the description and drains both
+operations. Its own retirement withdraws the description and drains all three
 registrations. Embedders use `ConnectionApi::register` with the same explicit
 identities and retain that owner independently of their transports.
 

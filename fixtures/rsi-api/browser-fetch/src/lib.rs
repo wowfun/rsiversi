@@ -23,7 +23,11 @@ pub const MALFORMED_STREAMS: &[&str] = &[
 ];
 
 pub fn malformed_specs() -> Vec<OperationSpec> {
-    let mut operations = vec![describe_operation(), operations_operation()];
+    let mut operations = vec![
+        describe_operation(),
+        operations_operation(),
+        caller_operation(),
+    ];
     for name in MALFORMED_FINITE {
         for (prefix, effect) in [
             ("read", OperationEffect::Read),

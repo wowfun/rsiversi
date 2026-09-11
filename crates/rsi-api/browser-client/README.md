@@ -9,6 +9,12 @@ calls, with exact Origin and CSRF enforcement by the HTTP endpoint. Cookie login
 and logout are explicit operations. RSI issues each Fetch once and does not
 automatically replay mutations or reauthenticate.
 
+Before publication the client reads `connection.caller` and requires a Device
+identity. Subsequent requests pin that authenticated device using the HTTP
+expected-device fence. A different tab changing the shared cookie cannot make
+an old connection execute as the replacement device. Explicit logout retains
+the same expected device even after logical connection cleanup.
+
 HTTPS browser connections require the endpoint to report actual HTTP/2 negotiation.
 HTTP/1 browser connection pools cannot preserve control progress once idle
 subscriptions occupy every socket. Explicit loopback HTTP remains a transport

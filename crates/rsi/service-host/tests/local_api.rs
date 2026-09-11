@@ -148,7 +148,7 @@ async fn listener_plugin_owns_publication_and_disposes_without_retiring_the_api_
         0o700
     );
     let client = connect(&runtime, &paths).await;
-    assert_eq!(client.operations().len(), 2);
+    assert_eq!(client.operations().len(), 3);
     let mut waiter = Box::pin(listener.stopped());
     assert!(waiter.as_mut().now_or_never().is_none());
     drop(waiter);
@@ -178,7 +178,7 @@ async fn listener_plugin_owns_publication_and_disposes_without_retiring_the_api_
             .unwrap()
             .operations()
             .len(),
-        2
+        3
     );
     assert!(matches!(
         HostOwnerLease::try_acquire(paths.clone()),

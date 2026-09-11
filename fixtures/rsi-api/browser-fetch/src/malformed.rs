@@ -13,6 +13,28 @@ extern "C" {
 }
 
 #[wasm_bindgen]
+pub async fn run_caller_fault_probe(_: bool) -> std::result::Result<String, JsValue> {
+    std::panic::set_hook(Box::new(|info| diagnostic(&info.to_string())));
+    let execution = Execution::browser().unwrap();
+    let result = BrowserClient::connect(
+        execution,
+        BrowserClientConfig {
+            endpoint_id: EndpointId::from_bytes([2; 16]),
+            allow_loopback_http: true,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ApiError::Invalid(_) | ApiError::Unauthorized)),
+        "malformed caller was admitted: {result:?}"
+    );
+    let resources = rsi_meta_execution::browser_resource_snapshot();
+    assert_eq!(resources.pending_timers, 0);
+    assert_eq!(resources.active_alarms, 0);
+    Ok(serde_json::json!({"status":"rejected","pending_timers":0,"active_alarms":0}).to_string())
+}
+
+#[wasm_bindgen]
 pub async fn run_malformed_probe(_: bool) -> std::result::Result<String, JsValue> {
     std::panic::set_hook(Box::new(|info| diagnostic(&info.to_string())));
     let execution = Execution::browser().unwrap();

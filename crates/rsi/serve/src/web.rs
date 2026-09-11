@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use rsi_api::{ApiRegistry, ConnectionApi};
 use rsi_api_protocol::{
     ApiDispatch, ApiDispatchContract, ApiError, ApiInvocation, CallOrigin,
-    ConnectionDescriptionContract, OperationCatalog, OperationId, OperationSpec,
+    ConnectionDescriptionContract, OperationCatalog, OperationId, OperationSpec, caller_operation,
     describe_operation, operations_operation,
 };
 use rsi_meta::{
@@ -38,7 +38,9 @@ impl ApiDispatch for Dispatch {
     fn operations(&self) -> Vec<OperationSpec> {
         let mut operations = self.service.operations();
         operations.retain(|spec| {
-            spec.id != describe_operation().id && spec.id != operations_operation().id
+            spec.id != describe_operation().id
+                && spec.id != operations_operation().id
+                && spec.id != caller_operation().id
         });
         operations.extend(self.local.operations());
         // A later Service generation cannot silently steal Application operations.

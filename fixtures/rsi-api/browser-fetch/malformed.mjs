@@ -6,6 +6,7 @@ import { executeWorker } from "./worker.mjs";
 export async function malformedProbe(browser, glue, wasm, catalog) {
   const calls = new Map();
   let redirects = 0;
+  let callerFault;
   const server = createServer((request, response) => {
     if (request.url === "/forbidden-replay") { redirects++; response.writeHead(500).end(); return; }
     if (request.url === "/") { response.end("<!doctype html><title>Malformed Fetch fixture</title>"); return; }
@@ -23,7 +24,22 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
       let body = Buffer.from("true");
       if (name === "describe") body = Buffer.from(JSON.stringify({ wire_version: 1, endpoint_id: "02".repeat(16), host_epoch: "03".repeat(16) }));
       else if (name === "operations") body = Buffer.from(JSON.stringify(catalog));
+      else if (name === "caller") {
+        const identity = {kind:"device",device_id:"06".repeat(16)};
+        body = Buffer.from(callerFault === "json" ? "{broken" : JSON.stringify(
+          callerFault === "local" ? {kind:"local"} :
+          callerFault === "missing-device" ? {kind:"device"} :
+          callerFault === "invalid-device" ? {...identity,device_id:"not-a-device"} :
+          callerFault === "unknown-field" ? {...identity,extra:true} : identity));
+        if (callerFault === "binary") {
+          headers["content-type"] = "application/vnd.rsi.binary";
+          const lengths = Buffer.alloc(16);
+          lengths.writeBigUInt64BE(BigInt(body.length)); lengths.writeBigUInt64BE(1n,8);
+          body = Buffer.concat([lengths,body,Buffer.from([0])]);
+        }
+      }
       else if (name.startsWith("read-") || name.startsWith("mutate-")) {
+        assert.equal(request.headers["x-rsi-expected-device"],"06".repeat(16));
         switch (name.substring(name.indexOf("-") + 1)) {
           case "json": body = Buffer.from("{broken"); break;
           case "truncated": headers["content-length"] = "20"; break;
@@ -62,7 +78,7 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     const result = await executeWorker(page, glue, wasm, "run_malformed_probe");
     assert.equal(result.malformed_cases, 27);
-    assert.equal(result.fetch_calls.length, 30);
+    assert.equal(result.fetch_calls.length, 31);
     const retransmissions = [];
     for (const [path, count] of result.fetch_calls) {
       assert.equal(count, 1, `RSI replayed Fetch ${path}`);
@@ -72,10 +88,16 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
         retransmissions.push({ path, fetch_calls: count, http_deliveries: delivered });
       } else assert.equal(delivered, 1, `unexpected HTTP replay ${path}`);
     }
-    assert.equal(calls.size, 30);
+    assert.equal(calls.size, 31);
     assert.equal(redirects, 0, "browser followed a forbidden redirect");
     delete result.fetch_calls;
-    return { ...result, retransmissions };
+    const callerFaults=[];
+    for (callerFault of ["json","binary","local","missing-device","invalid-device","unknown-field"]) {
+      const outcome=await executeWorker(page,glue,wasm,"run_caller_fault_probe");
+      assert.equal(outcome.status,"rejected");
+      callerFaults.push({fault:callerFault,...outcome});
+    }
+    return { ...result, retransmissions, callerFaults };
   } finally {
     await context.close(); server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

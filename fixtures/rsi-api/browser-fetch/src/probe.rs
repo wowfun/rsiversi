@@ -26,13 +26,24 @@ pub async fn run_bootstrap_cancel_probe(_secure: bool) -> std::result::Result<St
     let runtime = Runtime::with_execution(RuntimeLimits::default(), execution.clone()).unwrap();
     let root = runtime.root();
     let starting = execution.spawn(async move {
-        root.apply(ResolvedFactory::linked("client", "test", UpdateMode::Replayable, Arc::new(BrowserClientFactory)),
-            serde_json::json!({"endpoint_id":"02".repeat(16),"allow_loopback_http":true})).await
+        root.apply(
+            ResolvedFactory::linked(
+                "client",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(BrowserClientFactory),
+            ),
+            serde_json::json!({"endpoint_id":"02".repeat(16),"allow_loopback_http":true}),
+        )
+        .await
     });
     wait_bootstrap(&execution, 1).await;
     let mut stopping = Box::pin(execution.spawn(async move { runtime.shutdown().await }));
     wait_bootstrap(&execution, 2).await;
-    assert!(futures_util::poll!(stopping.as_mut()).is_pending(), "clean shutdown was reported while Fetch still owned an unsettled platform promise");
+    assert!(
+        futures_util::poll!(stopping.as_mut()).is_pending(),
+        "clean shutdown was reported while Fetch still owned an unsettled platform promise"
+    );
     release_bootstrap();
     assert!(stopping.await.unwrap().is_clean());
     let _ = starting.await.unwrap();
@@ -40,12 +51,21 @@ pub async fn run_bootstrap_cancel_probe(_secure: bool) -> std::result::Result<St
     let resources = rsi_meta_execution::browser_resource_snapshot();
     assert_eq!(resources.pending_timers, 0);
     assert_eq!(resources.active_alarms, 0);
-    Ok(serde_json::json!({"cancelled_bootstrap":"passed","pending_timers":0,"active_alarms":0}).to_string())
+    Ok(
+        serde_json::json!({"cancelled_bootstrap":"passed","pending_timers":0,"active_alarms":0})
+            .to_string(),
+    )
 }
 async fn wait_bootstrap(execution: &Execution, state: u32) {
-    execution.deadline_after(Duration::from_secs(5)).timeout(async {
-        while bootstrap_state() != state { execution.sleep(Duration::from_millis(1)).await; }
-    }).await.unwrap();
+    execution
+        .deadline_after(Duration::from_secs(5))
+        .timeout(async {
+            while bootstrap_state() != state {
+                execution.sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
 }
 
 #[wasm_bindgen]
@@ -83,7 +103,9 @@ pub async fn run_pool_probe(secure: bool) -> std::result::Result<String, JsValue
         .unwrap();
     until(&observer, &execution, "idle", 0).await;
     observer.close().await.unwrap();
-    BrowserClient::logout(execution, &config).await.unwrap();
+    BrowserClient::logout(execution, &config, observer.device_id())
+        .await
+        .unwrap();
     Ok(
         serde_json::json!({"subscriptions":count, "control_completed":completed, "active_requests":0})
             .to_string(),
@@ -168,9 +190,13 @@ pub async fn run_probe(secure: bool) -> std::result::Result<String, JsValue> {
         endpoint_id: EndpointId::from_bytes([2; 16]),
         allow_loopback_http: !secure,
     };
-    BrowserClient::logout(execution.clone(), &config)
-        .await
-        .unwrap();
+    BrowserClient::logout(
+        execution.clone(),
+        &config,
+        &rsi_api_protocol::DeviceId::from_bytes([1; 16]),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         BrowserClient::connect(execution.clone(), config.clone()).await,
         Err(ApiError::Unauthorized)
@@ -200,6 +226,12 @@ pub async fn run_probe(secure: bool) -> std::result::Result<String, JsValue> {
         .await
         .unwrap();
     assert_eq!(client.description().endpoint_id, config.endpoint_id);
+    assert_eq!(client.device_id(), observer.device_id());
+    assert!(matches!(
+        BrowserClient::logout(execution.clone(), &config, &DeviceId::from_bytes([2; 16])).await,
+        Err(ApiError::Unauthorized)
+    ));
+    call(&client, "stats").await.unwrap();
     assert!(!format!("{client:?}").contains(TOKEN));
     let operation = spec("binary");
     let bytes: Vec<u8> = (0..512 * 1024).map(|index| (index % 256) as u8).collect();
@@ -362,7 +394,7 @@ pub async fn run_probe(secure: bool) -> std::result::Result<String, JsValue> {
     drop(unpolled);
     assert!(runtime.shutdown().await.is_clean());
 
-    BrowserClient::logout(execution.clone(), &config)
+    BrowserClient::logout(execution.clone(), &config, client.device_id())
         .await
         .unwrap();
     assert!(matches!(

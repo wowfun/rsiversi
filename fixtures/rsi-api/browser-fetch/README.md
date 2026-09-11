@@ -38,3 +38,8 @@ counts actual HTTP deliveries separately: a completely missing response head can
 trigger browser-internal retransmission even for POST. Other malformed responses
 must still arrive once. The fixture reports those retransmission counts and
 requires OutcomeUnknown for possibly dispatched mutations and cookie exchange.
+Caller-negotiation faults separately reject malformed JSON, invalid or missing
+device identity, unknown fields, Local identity and unexpected binary payloads
+before publishing a browser client. A valid caller response supplies the exact
+pin used on subsequent calls and logout; a wrong logout pin must preserve the
+current cookie and leave the correct client's next read usable.

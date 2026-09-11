@@ -138,6 +138,91 @@ impl Harness {
 
 #[derive(Debug)]
 struct Assets(rsi_api_protocol::RetainedBytes);
+
+#[tokio::test]
+async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() {
+    let harness = Harness::start().await;
+    for (identity, status) in [
+        (DeviceId::from_bytes([1; 16]), 200),
+        (DeviceId::from_bytes([2; 16]), 401),
+    ] {
+        let response = harness
+            .request("connection/caller")
+            .header("x-rsi-expected-device", identity.as_str())
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        response.bytes().await.unwrap();
+        let response = Harness::client()
+            .post(format!("{}/api/v1/logout", harness.origin))
+            .header("origin", &harness.origin)
+            .header("x-rsi-csrf", "1")
+            .header("cookie", format!("rsi-device={TOKEN}"))
+            .header("x-rsi-expected-device", identity.as_str())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers().contains_key("set-cookie"), status == 200);
+        response.bytes().await.unwrap();
+    }
+    let response = Harness::client()
+        .post(format!("{}/api/v1/logout", harness.origin))
+        .header("origin", &harness.origin)
+        .header("x-rsi-csrf", "1")
+        .header(
+            "x-rsi-expected-device",
+            DeviceId::from_bytes([1; 16]).as_str(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        200,
+        "absent device cookie is already logged out"
+    );
+    response.bytes().await.unwrap();
+    let response = Harness::client()
+        .post(format!("{}/api/v1/logout", harness.origin))
+        .header("origin", &harness.origin)
+        .header("x-rsi-csrf", "1")
+        .header("cookie", format!("rsi-device={TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        401,
+        "clearing a present cookie requires an explicit device pin"
+    );
+    assert!(!response.headers().contains_key("set-cookie"));
+    response.bytes().await.unwrap();
+    let response = Harness::client()
+        .post(format!("{}/api/v1/logout", harness.origin))
+        .header("origin", &harness.origin)
+        .header("x-rsi-csrf", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "an absent cookie needs no pin");
+    response.bytes().await.unwrap();
+    for values in [
+        vec!["invalid".to_owned()],
+        vec!["01".repeat(16), "01".repeat(16)],
+    ] {
+        let mut request = harness.request("connection/caller");
+        for value in values {
+            request = request.header("x-rsi-expected-device", value);
+        }
+        let response = request.body("{}").send().await.unwrap();
+        assert!(response.status().is_client_error());
+        response.bytes().await.unwrap();
+    }
+    harness.close().await;
+}
 impl rsi_api_http::HttpAssets for Assets {
     fn get(&self, path: &str) -> Result<Option<rsi_api_http::HttpAsset>> {
         Ok((path == "/app.wasm").then(|| rsi_api_http::HttpAsset {
@@ -1155,7 +1240,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
         .root()
         .lookup_local::<rsi_api_protocol::ApiDispatchContract>()
         .unwrap();
-    assert_eq!(dispatcher.operations().len(), 2);
+    assert_eq!(dispatcher.operations().len(), 3);
     assert_ne!(listener.address().port(), 0);
     let socket = TcpStream::connect(listener.address()).await.unwrap();
     let mut stopped = Box::pin(listener.stopped());
@@ -1168,7 +1253,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
             .lookup_local::<HttpListenerContract>()
             .is_none()
     );
-    assert_eq!(dispatcher.operations().len(), 2);
+    assert_eq!(dispatcher.operations().len(), 3);
     assert!(
         runtime
             .root()

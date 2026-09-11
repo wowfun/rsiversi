@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 
 export async function executeWorker(page, glue, wasm, entry = "run_probe") {
-  assert(["run_probe", "run_pool_probe", "run_shared_pool_probe", "run_malformed_probe", "run_bootstrap_cancel_probe"].includes(entry));
+  assert(["run_probe", "run_pool_probe", "run_shared_pool_probe", "run_malformed_probe", "run_caller_fault_probe", "run_bootstrap_cancel_probe"].includes(entry));
   return page.evaluate(({ glue, wasm, entry }) => new Promise((resolve, reject) => {
     const source = glue + `\nconst fetchCalls = new Map();
     const nativeFetch = self.fetch.bind(self);

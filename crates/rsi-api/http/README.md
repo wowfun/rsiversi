@@ -38,6 +38,14 @@ exact configured Host; foreign Origin, query parameters, conflicting credentials
 duplicate security headers and unsupported methods are rejected before dispatch.
 Credentials never appear in URLs, diagnostics or serialized configuration.
 
+`X-Rsi-Expected-Device`, when present, must be one canonical DeviceId matching
+the authenticated caller before dispatch. It narrows a connection; it never
+authenticates a request or supplies Local origin. Cookie logout requires this pin
+and checks it before clearing a present device cookie; an absent cookie is an
+idempotent success even without a pin.
+This prevents an old connection from using or clearing another device's cookie.
+It does not order already-sent cookie responses across browser tabs.
+
 `LocalHttpService` reuses this codec and dispatcher for Unix streams. It checks
 same-UID peer credentials before HTTP admission, requires the exact opaque local
 compatibility key and Host `rsi.local`, and supplies Local origin itself. It

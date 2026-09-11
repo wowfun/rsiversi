@@ -2,8 +2,8 @@ use crate::{BrowserClientConfig, BrowserResourceSnapshot, transport::BrowserTran
 use async_trait::async_trait;
 use rsi_api_client::ClientConnection;
 use rsi_api_protocol::{
-    ApiClient, ApiError, ApiOutput, ByteBudget, ConnectionDescription, OperationClass,
-    OperationSpec, Result, RetainedBytes,
+    ApiClient, ApiError, ApiOutput, ByteBudget, CallerIdentity, ConnectionDescription, DeviceId,
+    OperationClass, OperationSpec, Result, RetainedBytes, caller_operation,
 };
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::Execution;
@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 pub struct BrowserClient {
     connection: ClientConnection,
     transport: Arc<BrowserTransport>,
+    device_id: DeviceId,
 }
 impl BrowserClient {
     /// Negotiates with the current `HttpOnly` cookie before publishing a client.
@@ -27,16 +28,55 @@ impl BrowserClient {
         config: BrowserClientConfig,
         transport: Arc<BrowserTransport>,
     ) -> Result<Self> {
-        match ClientConnection::connect(execution, config.endpoint_id, transport.clone()).await {
-            Ok(connection) => Ok(Self {
-                connection,
-                transport,
-            }),
+        let connection =
+            match ClientConnection::connect(execution, config.endpoint_id, transport.clone()).await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    transport.close().await?;
+                    return Err(error);
+                }
+            };
+        let caller = async {
+            let operation = caller_operation();
+            let input = connection.input_budget(operation.class).copy(b"{}")?;
+            let ApiOutput::Reply(reply) = connection.call(&operation, input).await? else {
+                return Err(ApiError::Invalid(
+                    "caller identity requires a finite reply".into(),
+                ));
+            };
+            if reply.binary.is_some() {
+                return Err(ApiError::Invalid(
+                    "caller identity cannot contain binary data".into(),
+                ));
+            }
+            let identity: CallerIdentity = serde_json::from_slice(reply.json.as_bytes())
+                .map_err(|_| ApiError::Invalid("invalid authenticated caller identity".into()))?;
+            match identity {
+                CallerIdentity::Device { device_id } => Ok(device_id),
+                CallerIdentity::Local => Err(ApiError::Unauthorized),
+            }
+        }
+        .await;
+        match caller {
+            Ok(device_id) => {
+                transport.pin_device(device_id.clone());
+                Ok(Self {
+                    connection,
+                    transport,
+                    device_id,
+                })
+            }
             Err(error) => {
+                connection.close().await;
                 transport.close().await?;
                 Err(error)
             }
         }
+    }
+    /// Exact non-secret device identity authenticated before publication.
+    pub fn device_id(&self) -> &DeviceId {
+        &self.device_id
     }
     /// Exchanges an explicit device token for the server's `HttpOnly` cookie once.
     /// Replacing an existing cookie requires an explicit logout first.
@@ -63,8 +103,13 @@ impl BrowserClient {
         result
     }
     /// Explicitly clears this origin's device cookie without stopping the deployment.
-    pub async fn logout(execution: Execution, config: &BrowserClientConfig) -> Result<()> {
+    pub async fn logout(
+        execution: Execution,
+        config: &BrowserClientConfig,
+        device: &DeviceId,
+    ) -> Result<()> {
         let transport = BrowserTransport::new(execution, config)?;
+        transport.pin_device(device.clone());
         let result = transport.cookie(&config.endpoint_id, None).await;
         transport.close().await?;
         result

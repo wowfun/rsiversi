@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use rsi_api_protocol::{
     ApiContext, ApiDispatch, ApiDispatchContract, ApiError, ApiHandler, ApiMessage, ApiOutput,
-    ApiRegistrar, ApiRegistrarContract, ApiRegistration, ApiResponseCapacity,
-    ConnectionDescription, ConnectionDescriptionContract, ConnectionHello, EndpointId,
-    EndpointIdentityContract, HostEpoch, HostGenerationContract, OperationCatalog, Result,
-    RetainedBytes, describe_operation, operations_operation,
+    ApiRegistrar, ApiRegistrarContract, ApiRegistration, ApiResponseCapacity, CallOrigin,
+    CallerIdentity, ConnectionDescription, ConnectionDescriptionContract, ConnectionHello,
+    EndpointId, EndpointIdentityContract, HostEpoch, HostGenerationContract, OperationCatalog,
+    Result, RetainedBytes, caller_operation, describe_operation, operations_operation,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::Deserialize;
@@ -35,16 +35,17 @@ impl ConnectionApi {
         )?;
         let operations =
             registrar.register(operations_operation(), Arc::new(Operations(dispatch)))?;
+        let caller = registrar.register(caller_operation(), Arc::new(Caller))?;
         Ok(Self {
             description,
-            registrations: vec![describe, operations],
+            registrations: vec![describe, operations, caller],
         })
     }
     /// Clones the immutable identity shared by all listeners of this generation.
     pub fn description(&self) -> Arc<ConnectionDescription> {
         self.description.clone()
     }
-    /// Fences and drains both registrations without retiring independent domain services.
+    /// Fences and drains the registrations without retiring independent domain services.
     pub async fn close(self) {
         for registration in self.registrations {
             registration.close().await;
@@ -134,6 +135,40 @@ impl ApiHandler for Describe {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+#[derive(Debug)]
+struct Caller;
+#[async_trait]
+impl ApiHandler for Caller {
+    async fn invoke(
+        &self,
+        context: ApiContext,
+        input: RetainedBytes,
+        output: ApiResponseCapacity,
+    ) -> Result<ApiOutput> {
+        let _: Empty = serde_json::from_slice(input.as_bytes())
+            .map_err(|_| ApiError::Invalid("caller expects an empty object".into()))?;
+        let identity = match context.origin {
+            CallOrigin::Local => CallerIdentity::Local,
+            CallOrigin::Device(device) => CallerIdentity::Device {
+                device_id: device.id,
+            },
+        };
+        let ApiResponseCapacity::Finite(reservation) = output else {
+            return Err(ApiError::Backend(
+                "invalid connection response class".into(),
+            ));
+        };
+        Ok(ApiOutput::Reply(ApiMessage {
+            json: reservation.encode(&identity)?,
+            binary: None,
+        }))
+    }
+}
+
 #[derive(Debug)]
 struct Operations(Arc<dyn ApiDispatch>);
 #[async_trait]
@@ -144,9 +179,6 @@ impl ApiHandler for Operations {
         input: RetainedBytes,
         output: ApiResponseCapacity,
     ) -> Result<ApiOutput> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Empty {}
         let _: Empty = serde_json::from_slice(input.as_bytes())
             .map_err(|_| ApiError::Invalid("operations expects an empty object".into()))?;
         let ApiResponseCapacity::Finite(reservation) = output else {

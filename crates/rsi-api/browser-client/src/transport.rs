@@ -9,12 +9,12 @@ use rsi_api_client::{
     response_identity,
 };
 use rsi_api_protocol::{
-    ApiError, ApiOutput, ApiResponseCapacity, ByteBudget, EndpointId, HostEpoch, OperationClass,
-    OperationEffect, OperationSpec, RequestEncoding, Result, RetainedBytes,
+    ApiError, ApiOutput, ApiResponseCapacity, ByteBudget, DeviceId, EndpointId, HostEpoch,
+    OperationClass, OperationEffect, OperationSpec, RequestEncoding, Result, RetainedBytes,
 };
 use rsi_meta::Execution;
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,7 @@ pub(crate) struct BrowserTransport {
     pub execution: Execution,
     origin: String,
     require_h2: bool,
+    expected_device: Mutex<Option<DeviceId>>,
 }
 impl BrowserTransport {
     pub fn new(execution: Execution, config: &BrowserClientConfig) -> Result<Self> {
@@ -34,7 +35,26 @@ impl BrowserTransport {
             execution,
             bridge: Bridge::new(),
             require_h2: !config.allow_loopback_http,
+            expected_device: Mutex::new(None),
         })
+    }
+    pub fn pin_device(&self, device: DeviceId) {
+        *self
+            .expected_device
+            .lock()
+            .expect("browser device pin poisoned") = Some(device);
+    }
+    fn headers(&self) -> Vec<(&'static str, String)> {
+        let mut headers = base_headers();
+        if let Some(device) = self
+            .expected_device
+            .lock()
+            .expect("browser device pin poisoned")
+            .as_ref()
+        {
+            headers.push(("x-rsi-expected-device", device.as_str().to_owned()));
+        }
+        headers
     }
     pub async fn close(&self) -> Result<()> {
         self.bridge.close(&self.execution).await
@@ -61,7 +81,7 @@ impl BrowserTransport {
         let pending = self.bridge.start(RequestData {
             url: format!("{}/api/v1/{path}", self.origin),
             class: OperationClass::Control,
-            headers: base_headers(),
+            headers: self.headers(),
             authorization: token,
             body: ByteBudget::new(1)?.copy(b"")?,
         })?;
@@ -153,7 +173,7 @@ impl ConnectionTransport for BrowserTransport {
         if retiring.is_cancelled() {
             return Err(ApiError::ShuttingDown);
         }
-        let mut headers = base_headers();
+        let mut headers = self.headers();
         headers.push((
             "content-type",
             match operation.encoding {

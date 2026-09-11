@@ -36,6 +36,19 @@ pub struct ConnectionDescription {
     pub host_epoch: HostEpoch,
 }
 
+/// Non-secret caller identity selected by trusted connection authentication.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CallerIdentity {
+    /// Trusted local invocation; never selectable by a remote request.
+    Local,
+    /// Authenticated device invocation.
+    Device {
+        /// Exact non-secret device registration identity.
+        device_id: crate::DeviceId,
+    },
+}
+
 /// Published identity of the independently owned connection API registrations.
 #[derive(Debug)]
 pub struct ConnectionDescriptionContract;
@@ -105,6 +118,10 @@ pub fn describe_operation() -> OperationSpec {
 /// Resource contract for generation-specific operation discovery.
 pub fn operations_operation() -> OperationSpec {
     connection_operation("operations", OperationClass::Data, 1024 * 1024)
+}
+/// Bounded authenticated discovery of the current invocation's principal.
+pub fn caller_operation() -> OperationSpec {
+    connection_operation("caller", OperationClass::Control, 1024)
 }
 fn connection_operation(
     name: &str,
