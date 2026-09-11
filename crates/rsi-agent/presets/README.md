@@ -1,5 +1,9 @@
 # rsi-agent-presets
 
+A product may bind a cloned catalog to its own `AgentPresetDefaultStore` with
+`with_selection_store`. This changes only future default selection; frozen roots,
+compiler identity and already pinned Session compositions remain catalog-owned.
+
 This package owns the bounded process-local catalog and authoring interface for
 Agent presets. A preset is one directory named by a validated `AgentPresetId`,
 with a required regular, no-follow `agent.profile.toml` and optional bounded

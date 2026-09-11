@@ -615,6 +615,33 @@ impl StandardAddonSet {
         }
         Ok(hex::encode(digest.finalize()))
     }
+
+    pub(crate) fn validate_application_only(&self) -> rsi_host::Result<()> {
+        for addon in self.addons.iter() {
+            if addon
+                .factories
+                .values()
+                .any(|factory| factory.description.scope != AddonScope::Application)
+                || addon
+                    .markers
+                    .iter()
+                    .any(|marker| marker.scope != AddonScope::Application)
+                || addon
+                    .fragments
+                    .iter()
+                    .any(|(scope, _)| *scope != AddonScope::Application)
+                || !addon.portable_isolations.is_empty()
+                || !addon.exports.is_empty()
+            {
+                return Err(HostError::Bootstrap("Application extras must contain only Application declarations and no domain exports".into()));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn merged_set(&self, other: &Self) -> rsi_host::Result<Self> {
+        Self::new(self.addons.iter().chain(other.addons.iter()).cloned())
+    }
 }
 
 fn component(digest: &mut Sha256, bytes: &[u8]) {

@@ -21,6 +21,9 @@ impl AgentSettingsSource for Service {
             .scope
             .get()
             .map_err(|error| SessionError::Backend(error.to_string()))?;
+        if snapshot.value.get("default_model").is_none() {
+            return Err(SessionError::Backend("Setup required: configure `rsi.agent.default_model` with its `deployment` and `model` fields".into()));
+        }
         serde_json::from_value(snapshot.value)
             .map_err(|error| SessionError::Backend(error.to_string()))
     }
@@ -67,9 +70,6 @@ impl PluginFactory for AgentSettingsFactory {
         let service = Service {
             scope: registration.scope.clone(),
         };
-        service
-            .current()
-            .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
         let service: Arc<dyn AgentSettingsSource> = Arc::new(service);
         let supply = plan
             .context()
@@ -91,7 +91,7 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
     rsi_settings_protocol::SettingsMetadata {
         schema: json!({
             "type":"object", "additionalProperties":false,
-            "required":["settings_id","system_prompt","default_model","sandbox","require_approval","turn_budget"],
+            "required":["settings_id","system_prompt","sandbox","require_approval","turn_budget"],
             "properties": {
                 "settings_id":{"type":"string","description":"Immutable settings identity captured in each Session."},
                 "system_prompt":{"type":"string"},
@@ -114,15 +114,32 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
 }
 
 fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
-    if value.get("default_model").is_none() {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Configuration {
+        settings_id: String,
+        system_prompt: String,
+        #[serde(default)]
+        default_model: Option<rsi_ai_protocol::ModelRef>,
+        sandbox: rsi_sandbox::SandboxMode,
+        require_approval: bool,
+        turn_budget: rsi_agent_session_protocol::TurnBudget,
+    }
+    let config: Configuration = serde_json::from_value(value.clone())
+        .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
+    if value.get("default_model").is_some() && config.default_model.is_none() {
         return Err(SettingsError::InvalidInput(
-            "`rsi.agent.default_model` is required; configure its `deployment` and `model` fields"
-                .into(),
+            "default_model must be absent or an exact deployment/model object".into(),
         ));
     }
-    serde_json::from_value::<FrozenAgentSettings>(value.clone())
-        .map(|_| ())
-        .map_err(|error| SettingsError::InvalidInput(error.to_string()))
+    FrozenAgentSettings::validate_policy(
+        &config.settings_id,
+        &config.system_prompt,
+        config.sandbox,
+        config.require_approval,
+        &config.turn_budget,
+    )
+    .map_err(|error| SettingsError::InvalidInput(error.to_string()))
 }
 
 fn settings_meta(error: &SettingsError) -> rsi_meta::MetaError {
@@ -202,17 +219,77 @@ mod tests {
         assert!(runtime.shutdown().await.is_clean());
     }
 
-    #[test]
-    fn missing_explicit_default_model_has_an_actionable_setting_path() {
-        let error = validate_settings(&json!({
-            "settings_id": "standard",
-            "system_prompt": "system",
-            "sandbox": "workspace-write",
-            "require_approval": false
-        }))
-        .expect_err("the standard product has no implicit provider deployment");
-        assert!(error.to_string().contains("rsi.agent.default_model"));
-        assert!(error.to_string().contains("deployment"));
-        assert!(error.to_string().contains("model"));
+    #[tokio::test]
+    async fn unconfigured_defaults_stay_active_and_become_ready_without_reactivation() {
+        use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
+        use rsi_session_protocol::AgentSettingsContract;
+        use rsi_settings_protocol::SettingsContract;
+        use std::sync::Arc;
+        let runtime = Runtime::default();
+        let root = runtime.root();
+        root.apply(
+            ResolvedFactory::linked(
+                "settings-memory",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_settings_testkit::MemorySettingsProviderFactory::new(
+                    json!({}),
+                )),
+            ),
+            json!(null),
+        )
+        .await
+        .unwrap();
+        root.apply(
+            ResolvedFactory::linked(
+                "settings",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_settings::SettingsFactory),
+            ),
+            json!(null),
+        )
+        .await
+        .unwrap();
+        let fiber = root
+            .apply(
+                ResolvedFactory::linked(
+                    "defaults",
+                    "test",
+                    UpdateMode::Replayable,
+                    Arc::new(super::AgentSettingsFactory),
+                ),
+                json!(null),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active);
+        let defaults = root.lookup_local::<AgentSettingsContract>().unwrap();
+        let error = defaults.current().unwrap_err().to_string();
+        assert!(error.contains("rsi.agent.default_model"));
+        let settings = root.lookup_local::<SettingsContract>().unwrap();
+        let scope = settings.scope("rsi.agent").unwrap();
+        let unconfigured = scope.get().unwrap().value;
+        validate_settings(&unconfigured).unwrap();
+        for change in [
+            json!({"default_model":null}),
+            json!({"sandbox":"danger-full-access"}),
+            json!({"turn_budget":{"maximum_tool_calls":999_999_999}}),
+        ] {
+            assert!(scope.replace(0, change).await.is_err());
+        }
+        scope
+            .replace(
+                0,
+                json!({"default_model":{"deployment":"fixture","model":"selected"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            defaults.current().unwrap().default_model().model(),
+            "selected"
+        );
+        assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active);
+        assert!(runtime.shutdown().await.is_clean());
     }
 }

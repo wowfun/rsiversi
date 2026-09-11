@@ -1,0 +1,33 @@
+[package]
+name = "rsi-navigation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-navigation-api = { path = "../navigation-api" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-storage = { path = "../../rsi-storage/core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

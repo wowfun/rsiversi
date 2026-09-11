@@ -19,6 +19,11 @@ name = "workbench-addon"
 path = "../../../fixtures/rsi/addon-workbench/main.rs"
 
 [dependencies]
+rsi-navigation = { path = "../navigation" }
+rsi-navigation-api = { path = "../navigation-api" }
+rsi-configuration-access = { path = "../configuration-access" }
+rsi-managed-providers = { path = "../managed-providers" }
+rsi-configuration-api = { path = "../configuration-api" }
 rsi-native-addons-api = { path = "../native-addons-api" }
 rsi-inspector = { path = "../inspector" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }

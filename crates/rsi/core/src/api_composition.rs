@@ -7,6 +7,10 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
         ApiDispatchContract, ApiRegistrarContract, ConnectionDescriptionContract,
         DeviceAdministrationContract, DeviceAuthenticationContract, EndpointIdentityContract,
     };
+    builder.register_local_contract::<rsi_configuration_access::ConfigurationAccessContract>()?;
+    builder.register_local_contract::<rsi_navigation::NavigationContract>()?;
+    builder.register_local_contract::<rsi_managed_providers::ManagedProvidersContract>()?;
+    builder.register_local_contract::<rsi_settings_api::SettingsMutationPolicyContract>()?;
     builder.register_local_contract::<ApiDispatchContract>()?;
     builder.register_local_contract::<ApiRegistrarContract>()?;
     builder.register_local_contract::<ConnectionDescriptionContract>()?;
@@ -40,7 +44,14 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
             UpdateMode::RestartRequired,
             factory,
         )?;
-        let config = if matches!(id, "rsi.service.identity" | "rsi.api.devices") {
+        let config = if matches!(
+            id,
+            "rsi.service.identity"
+                | "rsi.api.devices"
+                | "rsi.configuration.access"
+                | "rsi.managed-providers"
+                | "rsi.navigation"
+        ) {
             json!({"backend": "base"})
         } else {
             Value::Null
@@ -65,7 +76,7 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
     Ok(())
 }
 
-fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 16] {
+fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 19] {
     [
         ("rsi.api", std::sync::Arc::new(rsi_api::ApiFactory)),
         ("rsi.service.ui", std::sync::Arc::new(rsi_ui::UiFactory)),
@@ -103,8 +114,20 @@ fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 
             std::sync::Arc::new(rsi_ai_models_api::ModelsApiFactory),
         ),
         (
+            "rsi.configuration.access",
+            std::sync::Arc::new(rsi_configuration_access::ConfigurationAccessFactory),
+        ),
+        (
             "rsi.settings.api",
             std::sync::Arc::new(rsi_settings_api::SettingsApiFactory),
+        ),
+        (
+            "rsi.managed-providers",
+            std::sync::Arc::new(rsi_managed_providers::ManagedProvidersFactory),
+        ),
+        (
+            "rsi.navigation",
+            std::sync::Arc::new(rsi_navigation::NavigationFactory),
         ),
         (
             "rsi.media.api",

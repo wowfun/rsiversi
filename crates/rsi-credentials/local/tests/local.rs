@@ -11,6 +11,87 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
+#[tokio::test]
+async fn redacted_status_preserves_source_precedence_and_admin_editability() {
+    use rsi_credentials_protocol::{CredentialAvailability, CredentialsStatusContract};
+    let reference = CredentialRef::new("rsi.ai.deepseek", "key").unwrap();
+    for (stored, environment) in [(false, false), (false, true), (true, false), (true, true)] {
+        let store = Arc::new(MemorySecretStore::default());
+        if stored {
+            store
+                .set(
+                    "fixture",
+                    &reference.account(),
+                    &SecretValue::new("stored-secret-marker").unwrap(),
+                )
+                .unwrap();
+        }
+        let runtime = Runtime::default();
+        runtime.root().apply(ResolvedFactory::linked("credentials", "test", UpdateMode::Replayable,
+            Arc::new(CredentialsLocalFactory::with_store(store, if environment {
+                BTreeMap::from([("FIXTURE_KEY".into(), SecretValue::new("environment-secret-marker").unwrap())])
+            } else { BTreeMap::new() }))),
+            json!({"service":"fixture", "environment":[{"reference":reference,"variable":"FIXTURE_KEY"}]})).await.unwrap();
+        let status = runtime
+            .root()
+            .lookup_local::<CredentialsStatusContract>()
+            .unwrap()
+            .status(&reference)
+            .await
+            .unwrap();
+        let expected = if stored {
+            CredentialAvailability::Configured {
+                source: CredentialSource::Keyring,
+            }
+        } else if environment {
+            CredentialAvailability::Configured {
+                source: CredentialSource::Environment {
+                    variable: "FIXTURE_KEY".into(),
+                },
+            }
+        } else {
+            CredentialAvailability::Missing
+        };
+        assert_eq!(status.availability, expected);
+        assert_eq!(status.editable, !environment);
+        let wire = serde_json::to_string(&status).unwrap();
+        assert!(!wire.contains("secret-marker"));
+        assert_eq!(
+            serde_json::from_str::<rsi_credentials_protocol::CredentialStatus>(&wire).unwrap(),
+            status
+        );
+        assert!(runtime.shutdown().await.is_clean());
+    }
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "credentials",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(CredentialsLocalFactory::with_store(
+                    Arc::new(FailingStore),
+                    BTreeMap::new(),
+                )),
+            ),
+            json!({"service":"fixture"}),
+        )
+        .await
+        .unwrap();
+    let status = runtime
+        .root()
+        .lookup_local::<CredentialsStatusContract>()
+        .unwrap()
+        .status(&reference)
+        .await
+        .unwrap();
+    assert_eq!(status.availability, CredentialAvailability::Unavailable);
+    assert!(!status.editable);
+    assert!(!serde_json::to_string(&status).unwrap().contains("backend"));
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[derive(Debug)]
 struct FailingStore;
 

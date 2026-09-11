@@ -46,20 +46,13 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
         program,
     )
     .await?;
-    let result = match running.lookup_local::<rsi_application::ApplicationRunContract>() {
-        Some(application) => application
-            .run()
-            .await
-            .map_err(|error| RsiError::Run(error.to_string())),
-        None => Err(RsiError::Boot(
-            "Application Profile did not publish an entry point".into(),
-        )),
-    };
-    let cleanup = running.shutdown().await;
-    if !cleanup.is_clean() {
-        return Err(RsiError::Run("application Runtime cleanup failed".into()));
-    }
-    result
+    rsi_application::ApplicationLifetime::default()
+        .run(&running)
+        .await
+        .map_err(|error| match error {
+            rsi_application::ApplicationError::MissingEntry => RsiError::Boot(error.to_string()),
+            _ => RsiError::Run(error.to_string()),
+        })
 }
 
 pub(super) fn report_error(error: &RsiError) -> u8 {

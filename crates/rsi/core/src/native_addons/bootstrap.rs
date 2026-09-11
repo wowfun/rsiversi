@@ -28,6 +28,7 @@ pub(crate) async fn stage(
     composition: &StandardComposition,
     plan: &mut ActivationPlan,
     service: bool,
+    additional_reserved: std::collections::BTreeSet<String>,
 ) -> rsi_meta::Result<Arc<ScopedProfile>> {
     let factory = plan
         .context()
@@ -35,7 +36,7 @@ pub(crate) async fn stage(
         .execution()
         .prepare({
             let composition = composition.clone();
-            move || composition.native_bootstrap_factory(service)
+            move || composition.native_bootstrap_factory(service, additional_reserved)
         })
         .await
         .map_err(activation)?

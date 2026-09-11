@@ -7,6 +7,16 @@ its factory owns argument validation and its plugin generation owns runtime work
 The launcher selects and prepares a Profile, invokes that capability, then disposes
 the composition. Help and invalid arguments must finish before backend activation.
 
+ApplicationLifetime joins that entry and the prepared RunningHost's shutdown.
+Native launchers retain its run future until cleanup completes. A stop request is
+idempotent and may arrive before entry starts; it stops waiting for ApplicationRun
+and awaits the same composition shutdown. Dropping the entry waiter never grants
+permission to abandon plugin-owned work. Plugins retain and drain admitted tasks
+under Meta cleanup. The lifetime introduces no timeout or second Runtime.
+Its stopped notification means cleanup has completed, including failed cleanup;
+the run result remains the authority for success. A platform window can defer
+process exit until that notification while keeping its main-thread loop alive.
+
 RsiError owns the product entry failure classification (bootstrap exit 2,
 execution exit 1). Native launchers and application parsers share the small
 argument-reading helpers here; domain-specific grammars remain with their

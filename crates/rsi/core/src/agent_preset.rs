@@ -24,6 +24,8 @@ pub const DEFAULT_AGENT_PRESET_ID: &str = "standard";
 pub const USER_AGENT_PRESET_DIRECTORY: &str = "agent-presets";
 
 mod plugin;
+mod service_settings;
+pub(crate) use service_settings::ServicePresetSettingsFactory;
 const CATALOG_FACTORY: &str = "rsi.agent.preset-catalog";
 
 const SETTINGS_LOCAL_FACTORY: &str = "rsi.settings.local";
@@ -416,7 +418,7 @@ fn read_settings(scope: &dyn SettingsScope) -> rsi_settings_protocol::Result<Set
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SettingsDefaultStore {
     scope: Arc<dyn SettingsScope>,
     path: PathBuf,

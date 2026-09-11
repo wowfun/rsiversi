@@ -30,6 +30,8 @@ pub use addon::{
 };
 mod application_connection;
 pub use application_connection::{ApplicationDiagnostics, standard_application_host};
+mod application_composition;
+pub use application_composition::ApplicationComposition;
 mod application_bootstrap;
 pub use application_bootstrap::start_application;
 mod api_composition;
@@ -37,6 +39,7 @@ mod client_composition;
 #[cfg(target_os = "linux")]
 pub use client_composition::probe_service_host;
 mod composition;
+mod local_api_client;
 mod local_host;
 #[cfg(unix)]
 mod native_addons;
@@ -189,6 +192,53 @@ impl RunningRsi {
     }
 
     async fn from_started_host(host: ProfileOwner) -> Result<Self> {
+        let mut changes = host.subscribe_profile();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                {
+                    let status = changes.borrow_and_update();
+                    let managed = status
+                        .observed()
+                        .iter()
+                        .find(|instance| instance.id().as_str() == "rsi.managed-providers");
+                    match managed.map(rsi_host::ProfileInstanceStatus::state) {
+                        None if !status
+                            .target()
+                            .iter()
+                            .any(|target| target.id().as_str() == "rsi.managed-providers")
+                            && status.health() == rsi_host::ProfileHealth::Converged =>
+                        {
+                            break Ok(());
+                        }
+                        Some(rsi_host::ProfileInstanceState::Active) => break Ok(()),
+                        Some(
+                            rsi_host::ProfileInstanceState::Failed
+                            | rsi_host::ProfileInstanceState::Disposed
+                            | rsi_host::ProfileInstanceState::Unloading,
+                        ) => break Err("managed provider owner failed during startup"),
+                        None
+                        | Some(
+                            rsi_host::ProfileInstanceState::Pending(_)
+                            | rsi_host::ProfileInstanceState::Loading,
+                        ) => {}
+                    }
+                }
+                if changes.changed().await.is_err() {
+                    break Err("Service Profile stopped during startup");
+                }
+            }
+        })
+        .await;
+        if !matches!(ready, Ok(Ok(()))) {
+            let _ = host.shutdown().await;
+            return Err(RsiError::Boot(
+                match ready {
+                    Ok(Err(error)) => error,
+                    _ => "managed provider startup timed out",
+                }
+                .into(),
+            ));
+        }
         let Some(paths) = host.paths().cloned() else {
             let _outcome = host.shutdown().await;
             return Err(RsiError::Boot(

@@ -54,21 +54,7 @@ impl PluginFactory for CatalogFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let settings = plan.local::<SettingsContract>()?;
         let registration = settings
-            .register(SettingsSpec {
-                namespace: AGENT_PRESET_SETTINGS_NAMESPACE.into(),
-                defaults: json!({"default":DEFAULT_AGENT_PRESET_ID,"roots":[]}),
-                base: json!({}),
-                metadata: rsi_settings_protocol::SettingsMetadata {
-                    schema: json!({"type":"object","additionalProperties":false,"required":["default","roots"],"properties":{
-                        "default":{"type":"string","description":"Default selection for future drafts."},
-                        "roots":{"type":"array","description":"Absolute discovery roots; changing roots requires restarting the catalog.","items":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"trust":{"enum":["system","user"]}}}}
-                    }}),
-                    applies: rsi_settings_protocol::SettingsApply::Restart,
-                    description: "Root changes require restarting the catalog. The default preset is read for future selections without restarting; existing Sessions retain their pinned composition.".into(),
-                    sensitive_fields: vec![vec!["roots".into()]],
-                },
-                validator: Arc::new(ValidateWith(validate_settings)),
-            })
+            .register(settings_spec())
             .map_err(|error| self.diagnosed(settings_boot(error)))?;
         let scope = registration.scope.clone();
         plan.defer(
@@ -122,4 +108,22 @@ impl PluginFactory for CatalogFactory {
 }
 fn activation(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
+}
+
+pub(super) fn settings_spec() -> SettingsSpec {
+    SettingsSpec {
+                namespace: AGENT_PRESET_SETTINGS_NAMESPACE.into(),
+                defaults: json!({"default":DEFAULT_AGENT_PRESET_ID,"roots":[]}),
+                base: json!({}),
+                metadata: rsi_settings_protocol::SettingsMetadata {
+                    schema: json!({"type":"object","additionalProperties":false,"required":["default","roots"],"properties":{
+                        "default":{"type":"string","description":"Default selection for future drafts."},
+                        "roots":{"type":"array","description":"Absolute discovery roots; changing roots requires restarting the catalog.","items":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"trust":{"enum":["system","user"]}}}}
+                    }}),
+                    applies: rsi_settings_protocol::SettingsApply::Restart,
+                    description: "Root changes require restarting the catalog. The default preset is read for future selections without restarting; existing Sessions retain their pinned composition.".into(),
+                    sensitive_fields: vec![vec!["roots".into()]],
+                },
+                validator: Arc::new(ValidateWith(validate_settings)),
+            }
 }

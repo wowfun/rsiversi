@@ -85,6 +85,11 @@ terminal grammar over a negotiated local ApiClient. It requires no Session,
 Workspace or model capability. It uses the same exclusive terminal lease and
 owned ApplicationRun entry as the other terminal plugins. Registration is the
 only explicit output that includes a new credential; diagnostics and list do not.
+Its `configuration list`, `configuration grant DEVICE_ID REVISION` and
+`configuration revoke DEVICE_ID REVISION` commands use the same Local connection.
+The revision must come from the durable grant snapshot; changes execute once and
+unknown outcomes require an explicit fresh list. Registration itself grants no
+configuration authority.
 On Unix device result delivery uses the same cancellable nonblocking output owner
 as the line renderer, including descriptor restoration before terminal retirement.
 

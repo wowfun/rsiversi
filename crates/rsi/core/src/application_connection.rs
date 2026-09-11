@@ -105,6 +105,7 @@ impl PluginFactory for ConnectionFactory {
             .addons()
             .publish_domains(&mut plan, crate::addon::DomainLookup::Local(&connection));
         let session = connection.session_service();
+        let api = connection.api_client();
         let workspace = connection.workspace_registry();
         let models = connection.language_models();
         let output = connection.output_cache();
@@ -129,6 +130,7 @@ impl PluginFactory for ConnectionFactory {
         exports.map_err(|error| self.diagnosed(error))?;
         let context = plan.context();
         let supplies = vec![
+            context.provide_local::<rsi_api_protocol::ApiClientContract>(api)?,
             context.provide_local::<rsi_session_protocol::SessionContract>(session)?,
             context.provide_local::<rsi_session_files::SessionFilesContract>(files)?,
             context.provide_local::<rsi_settings_protocol::SettingsAccessContract>(settings)?,
@@ -188,10 +190,10 @@ impl ApplicationDiagnostics {
 
 /// Freezes the ordinary native application catalog without activating any backend.
 pub fn standard_application_host(
-    composition: StandardComposition,
+    composition: impl Into<crate::ApplicationComposition>,
     arguments: Vec<std::ffi::OsString>,
 ) -> crate::Result<(Host, ApplicationDiagnostics)> {
-    let (addons, diagnostics) = application_addons(composition, arguments)?;
+    let (addons, diagnostics) = application_addons(composition.into(), arguments)?;
     let mut host = HostBuilder::new(diagnostics.connection.composition.paths().clone());
     addons
         .register_into(&mut host, crate::AddonScope::Application)
@@ -200,9 +202,20 @@ pub fn standard_application_host(
 }
 
 pub(crate) fn application_addons(
-    composition: StandardComposition,
+    composition: crate::ApplicationComposition,
     arguments: Vec<std::ffi::OsString>,
 ) -> crate::Result<(crate::StandardAddonSet, ApplicationDiagnostics)> {
+    let crate::ApplicationComposition {
+        service: composition,
+        extras,
+    } = composition;
+    extras
+        .validate_platform(&format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+        .map_err(boot)?;
     let diagnostics = ApplicationDiagnostics {
         connection: Arc::new(ConnectionFactory {
             composition,
@@ -284,6 +297,8 @@ pub(crate) fn application_addons(
         .connection
         .composition
         .addons()
+        .merged_set(&extras)
+        .map_err(boot)?
         .merged(builder.build().map_err(boot)?)
         .map_err(boot)?;
     Ok((addons, diagnostics))

@@ -27,7 +27,9 @@ use rsi_apply_patch::ApplyPatchToolFactory;
 use rsi_approval_protocol::{ApprovalAnswerersContract, ApprovalContract};
 use rsi_commands_protocol::CommandRuntimeContract;
 use rsi_credentials_local::{CredentialsLocalFactory, KeyringSecretStore, SecretStore};
-use rsi_credentials_protocol::{CredentialsAdminContract, CredentialsResolveContract, SecretValue};
+use rsi_credentials_protocol::{
+    CredentialsAdminContract, CredentialsResolveContract, CredentialsStatusContract, SecretValue,
+};
 use rsi_host::{Host, HostBuilder, HostPaths, ProfileEntry, ProfileFragment};
 use rsi_jobs::{Jobs, JobsContract};
 use rsi_jobs_tools::JobsToolsFactory;
@@ -868,8 +870,11 @@ impl StandardComposition {
     pub(crate) fn native_bootstrap_factory(
         &self,
         require_service_owner: bool,
+        additional_reserved: std::collections::BTreeSet<String>,
     ) -> rsi_host::Result<crate::native_addons::NativeAddonFactory> {
         let base = self.agent_addons()?;
+        let mut reserved = self.native_linked_plugins()?;
+        reserved.extend(additional_reserved);
         Ok(crate::native_addons::NativeAddonFactory {
             paths: self.paths.clone(),
             linux_tools: self.coding_tools.is_some(),
@@ -879,7 +884,7 @@ impl StandardComposition {
             base,
             application_cache: !require_service_owner,
             require_service_owner,
-            reserved: Arc::new(std::sync::OnceLock::from(self.native_linked_plugins()?)),
+            reserved: Arc::new(std::sync::OnceLock::from(reserved)),
         })
     }
 
@@ -1303,7 +1308,12 @@ impl StandardComposition {
         let linux_tools_enabled = self.coding_tools.is_some();
         let paths = self.paths.clone();
         let agent_addons = self.agent_addons()?;
-        let presets = self.preset_catalog(materialize_assets, &agent_addons)?;
+        let (preset_settings, selection) = crate::agent_preset::ServicePresetSettingsFactory::new(
+            paths.config().join("settings.json"),
+        );
+        let presets = self
+            .preset_catalog(materialize_assets, &agent_addons)?
+            .with_selection_store(selection);
         let preset_identity = presets.launch_identity();
         let scopes = ScopeRoot::new(ScopeRoot::MAXIMUM_ANCESTRY_DEPTH)
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
@@ -1349,6 +1359,7 @@ impl StandardComposition {
                 Value::Null,
             )],
         ))?;
+        register_preset_settings(&mut builder, preset_settings)?;
         builder.register_fragment(base_fragment(&paths, linux_tools_enabled))?;
         let agent = SessionAgentConfig::new(paths.state().join("agent"))
             .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?
@@ -1404,7 +1415,7 @@ impl StandardComposition {
         factories: &[AddonFactoryDescription],
     ) -> rsi_host::Result<std::collections::BTreeSet<String>> {
         let (application, _) =
-            crate::application_connection::application_addons(self.clone(), Vec::new())
+            crate::application_connection::application_addons(self.clone().into(), Vec::new())
                 .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
         Ok(factories
             .iter()
@@ -1725,6 +1736,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_service_host::ApprovalBrokerContract>()?;
     builder.register_local_contract::<CredentialsResolveContract>()?;
     builder.register_local_contract::<CredentialsAdminContract>()?;
+    builder.register_local_contract::<CredentialsStatusContract>()?;
     builder.register_local_contract::<MediaBackendContract>()?;
     builder.register_local_contract::<MediaContract>()?;
     builder.register_local_contract::<MediaReadContract>()?;
@@ -1995,6 +2007,27 @@ impl PluginFactory for SessionJobsFinalizerFactory {
             }),
         )
     }
+}
+
+fn register_preset_settings(
+    builder: &mut StandardAddonBuilder,
+    preset_settings: crate::agent_preset::ServicePresetSettingsFactory,
+) -> rsi_host::Result<()> {
+    register(
+        builder,
+        "rsi.agent.preset-settings",
+        UpdateMode::RestartRequired,
+        preset_settings,
+    )?;
+    builder.register_fragment(ProfileFragment::new(
+        "rsi.standard.preset-settings",
+        [ProfileEntry::new(
+            "rsi-agent-preset-settings",
+            "rsi.agent.preset-settings",
+            Value::Null,
+        )],
+    ))?;
+    Ok(())
 }
 
 #[cfg(test)]

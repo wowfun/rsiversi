@@ -1,14 +1,15 @@
-use crate::{Result, RsiError, StandardComposition};
+use crate::{ApplicationComposition, Result, RsiError};
 use rsi_host::{ProfileProgram, RunningHost};
 use std::ffi::OsString;
 
 /// Starts the product's stable bootstrap and its ordinary Application child Profile.
 /// Native staging precedes child catalog construction and shares the same Runtime.
 pub async fn start_application(
-    composition: StandardComposition,
+    composition: impl Into<ApplicationComposition>,
     arguments: Vec<OsString>,
     program: ProfileProgram,
 ) -> Result<RunningHost> {
+    let composition = composition.into();
     #[cfg(unix)]
     {
         native::start(composition, arguments, program).await
@@ -26,7 +27,7 @@ pub async fn start_application(
 
 #[cfg(unix)]
 mod native {
-    use super::{OsString, ProfileProgram, Result, RsiError, RunningHost, StandardComposition};
+    use super::{ApplicationComposition, OsString, ProfileProgram, Result, RsiError, RunningHost};
     use crate::native_addons::{NativeStaging, NativeStagingContract};
     use async_trait::async_trait;
     use rsi_application::{ApplicationRunContract, ScopedProfile};
@@ -38,14 +39,14 @@ mod native {
 
     #[derive(Debug)]
     struct Bootstrap {
-        composition: StandardComposition,
+        composition: ApplicationComposition,
         arguments: Vec<OsString>,
         program: ProfileProgram,
         diagnostic: Arc<std::sync::Mutex<Option<RsiError>>>,
     }
 
     pub(super) async fn start(
-        composition: StandardComposition,
+        composition: ApplicationComposition,
         arguments: Vec<OsString>,
         program: ProfileProgram,
     ) -> Result<RunningHost> {
@@ -57,12 +58,12 @@ mod native {
             .profile_input(program.clone())
             .map_err(boot)?
             .preflight_linked(&crate::native_addons::bootstrap::deferred(
-                &composition,
+                &composition.service,
                 crate::AddonScope::Application,
             )?)
             .map_err(|error| diagnostics.take().unwrap_or_else(|| boot(error)))?;
         let diagnostic = Arc::new(std::sync::Mutex::new(None));
-        let mut builder = HostBuilder::new(composition.paths().clone());
+        let mut builder = HostBuilder::new(composition.service.paths().clone());
         builder
             .register_local_contract::<ApplicationRunContract>()
             .map_err(boot)?;
@@ -127,19 +128,24 @@ mod native {
     }
     impl Bootstrap {
         async fn activate_inner(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-            let native =
-                crate::native_addons::bootstrap::stage(&self.composition, &mut plan, false).await?;
+            let native = crate::native_addons::bootstrap::stage(
+                &self.composition.service,
+                &mut plan,
+                false,
+                self.composition.reserved_plugins(),
+            )
+            .await?;
             let staging = native
                 .lookup_local::<NativeStagingContract>()
                 .ok_or_else(|| activation("native staging did not publish its source"))?;
-            let (host, diagnostics) = crate::standard_application_host(
-                self.composition
-                    .clone()
-                    .with_published_native_staging(staging.as_ref().clone())
-                    .map_err(activation)?,
-                self.arguments.clone(),
-            )
-            .map_err(activation)?;
+            let mut composition = self.composition.clone();
+            composition.service = composition
+                .service
+                .with_published_native_staging(staging.as_ref().clone())
+                .map_err(activation)?;
+            let (host, diagnostics) =
+                crate::standard_application_host(composition, self.arguments.clone())
+                    .map_err(activation)?;
             let source = Arc::new(ApplicationCatalog {
                 composition: self.composition.clone(),
                 arguments: self.arguments.clone(),
@@ -189,15 +195,15 @@ mod native {
 
     #[derive(Debug)]
     struct ApplicationCatalog {
-        composition: StandardComposition,
+        composition: ApplicationComposition,
         arguments: Vec<OsString>,
         staging: NativeStaging,
     }
     impl rsi_application::ProfileCatalogSource for ApplicationCatalog {
         fn snapshot(&self) -> rsi_host::Result<Arc<rsi_host::Host>> {
-            let composition = self
-                .composition
-                .clone()
+            let mut composition = self.composition.clone();
+            composition.service = composition
+                .service
                 .with_native_staging(self.staging.clone())
                 .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
             let (host, _) = crate::standard_application_host(composition, self.arguments.clone())

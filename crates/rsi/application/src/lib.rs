@@ -7,8 +7,10 @@
 pub mod arguments;
 mod catalog;
 mod error;
+mod lifetime;
 mod profile;
 pub use catalog::{ProfileCatalogContract, ProfileCatalogSource};
+pub use lifetime::ApplicationLifetime;
 mod shell;
 pub use error::RsiError;
 pub use profile::ScopedProfile;
@@ -55,6 +57,12 @@ pub enum ApplicationError {
     /// The single entry point was already invoked for this generation.
     #[error("application entry was already started")]
     AlreadyStarted,
+    /// The selected Profile has no entry capability.
+    #[error("Application Profile did not publish an entry point")]
+    MissingEntry,
+    /// Runtime teardown completed with one or more failures.
+    #[error("application Runtime cleanup failed")]
+    CleanupFailed,
 }
 
 /// Application composition result.

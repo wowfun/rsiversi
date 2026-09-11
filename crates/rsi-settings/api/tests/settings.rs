@@ -144,6 +144,11 @@ async fn server(path: &std::path::Path) -> Runtime {
             Value::Null,
         ),
         ("api", Arc::new(rsi_api::ApiFactory), Value::Null),
+        (
+            "settings-policy",
+            Arc::new(rsi_settings_api::LocalSettingsPolicy),
+            Value::Null,
+        ),
         ("settings-api", Arc::new(SettingsApiFactory), Value::Null),
     ] {
         runtime

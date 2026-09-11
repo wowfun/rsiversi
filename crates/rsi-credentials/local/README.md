@@ -1,5 +1,11 @@
 # rsi-credentials-local
 
+The Status capability follows Resolve's keyring/environment precedence and
+returns only redacted availability, effective source and current editability.
+Store failures and resolution deadlines become unavailable, with no diagnostic
+or secret in that value. Captured environment bindings disable editing exactly
+as Admin does. Status shares the existing bounded resolution admission.
+
 This ordinary plugin resolves exact credential references from an injected OS
 keyring store first and an explicitly captured startup environment snapshot
 second. Profile configuration maps references to allowed variable names but

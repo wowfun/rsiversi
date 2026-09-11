@@ -1,0 +1,29 @@
+[package]
+name = "rsi-managed-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-configuration-access = { path = "../configuration-access" }
+rsi-configuration-api = { path = "../configuration-api" }
+rsi-application = { path = "../application" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-ai-openai = { path = "../../rsi-ai/openai" }
+rsi-ai-openai-compatible = { path = "../../rsi-ai/openai-compatible" }
+rsi-ai-deepseek = { path = "../../rsi-ai/deepseek" }
+rsi-ai-provider = { path = "../../rsi-ai/provider" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

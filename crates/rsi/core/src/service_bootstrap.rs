@@ -87,8 +87,13 @@ impl PluginFactory for Bootstrap {
         Ok(PreparedActivation::new(ConfigValue::Null))
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let native =
-            crate::native_addons::bootstrap::stage(&self.composition, &mut plan, true).await?;
+        let native = crate::native_addons::bootstrap::stage(
+            &self.composition,
+            &mut plan,
+            true,
+            std::collections::BTreeSet::default(),
+        )
+        .await?;
         let staging = native
             .lookup_local::<crate::native_addons::NativeStagingContract>()
             .ok_or_else(|| activation("native staging did not publish its source"))?;

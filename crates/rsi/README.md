@@ -202,6 +202,14 @@ Kernel still serializes turns within one Session; the four lanes permit bounded
 progress across independent Sessions. A copied Host Profile may replace the
 complete executor configuration to select another value from `1..=256`.
 
+Application-specific linked plugins are supplied through `ApplicationComposition`,
+which carries an unchanged `StandardComposition` and a validated Application-only
+addon set. They participate in Application preflight, native-name reservations
+and catalog refresh. They do not enter the Service catalog digest or Host launch
+identity. Service and Agent declarations and domain exports cannot be supplied
+as Application extras. `StandardComposition` converts to an Application
+composition with no extras.
+
 `rsi --profile NAME [application arguments]` selects one Application Profile.
 The built-in, non-shadowable `cli`, `headless`, `tui`, and `serve` profiles select the
 built-in `standard` Host Profile. The `devices` and `inspector` profiles connect only to the

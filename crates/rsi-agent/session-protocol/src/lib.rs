@@ -1182,18 +1182,37 @@ impl FrozenAgentSettings {
 
     /// Revalidates decoded Agent settings.
     pub fn validate(&self) -> Result<()> {
-        validate_identifier("Agent settings", &self.settings_id)?;
-        validate_safe_text(
-            "system prompt",
+        Self::validate_policy(
+            &self.settings_id,
             &self.system_prompt,
-            MAXIMUM_SYSTEM_PROMPT_BYTES,
-            true,
+            self.sandbox,
+            self.require_approval,
+            &self.turn_budget,
         )?;
         self.default_model
             .validate()
-            .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        self.turn_budget.validate()?;
-        if self.sandbox == SandboxMode::DangerFullAccess && !self.require_approval {
+            .map_err(|error| SessionError::Invalid(error.to_string()))
+    }
+
+    /// Validates the complete non-routing policy without inventing a model route.
+    /// Configuration owners may use this before selection; durable settings still
+    /// require an explicit model through the constructor or deserializer.
+    pub fn validate_policy(
+        settings_id: &str,
+        system_prompt: &str,
+        sandbox: SandboxMode,
+        require_approval: bool,
+        turn_budget: &TurnBudget,
+    ) -> Result<()> {
+        validate_identifier("Agent settings", settings_id)?;
+        validate_safe_text(
+            "system prompt",
+            system_prompt,
+            MAXIMUM_SYSTEM_PROMPT_BYTES,
+            true,
+        )?;
+        turn_budget.validate()?;
+        if sandbox == SandboxMode::DangerFullAccess && !require_approval {
             return Err(SessionError::Invalid(
                 "danger-full-access requires live approval".into(),
             ));

@@ -295,14 +295,18 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         domains,
         [
             "connection",
+            "configuration",
             "devices",
             "files",
             "inspector",
             "media",
             "models",
+            "navigation",
             #[cfg(unix)]
             "native-addons",
             "output",
+            "provider-credentials",
+            "providers",
             "session",
             "settings",
             "ui",

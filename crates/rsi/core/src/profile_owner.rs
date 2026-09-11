@@ -120,7 +120,6 @@ impl ProfileOwner {
             runtime,
         })
     }
-    #[cfg(target_os = "linux")]
     pub(crate) fn subscribe_profile(
         &self,
     ) -> tokio::sync::watch::Receiver<rsi_host::ProfileStatus> {

@@ -6,8 +6,9 @@
 
 use async_trait::async_trait;
 use rsi_credentials_protocol::{
-    CredentialRef, CredentialSource, CredentialsAdmin, CredentialsAdminContract, CredentialsError,
-    CredentialsResolve, CredentialsResolveContract, ResolvedCredential, Result, SecretValue,
+    CredentialAvailability, CredentialRef, CredentialSource, CredentialStatus, CredentialsAdmin,
+    CredentialsAdminContract, CredentialsError, CredentialsResolve, CredentialsResolveContract,
+    CredentialsStatus, CredentialsStatusContract, ResolvedCredential, Result, SecretValue,
     validate_environment_name, validate_segment,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -157,6 +158,29 @@ impl CredentialsResolve for Service {
         tokio::time::timeout(self.resolution_timeout, self.resolve_admitted(reference))
             .await
             .map_err(|_| CredentialsError::Timeout(reference.account()))?
+    }
+}
+
+#[async_trait]
+impl CredentialsStatus for Service {
+    async fn status(&self, reference: &CredentialRef) -> Result<CredentialStatus> {
+        reference.validate()?;
+        let availability = match self.resolve(reference).await {
+            Ok(resolved) => CredentialAvailability::Configured {
+                source: resolved.source,
+            },
+            Err(CredentialsError::NotConfigured(_)) => CredentialAvailability::Missing,
+            Err(CredentialsError::Store(_) | CredentialsError::Timeout(_)) => {
+                CredentialAvailability::Unavailable
+            }
+            Err(error) => return Err(error),
+        };
+        let editable = !self.environment.contains_key(reference)
+            && availability != CredentialAvailability::Unavailable;
+        Ok(CredentialStatus {
+            availability,
+            editable,
+        })
     }
 }
 
@@ -386,17 +410,22 @@ impl PluginFactory for CredentialsLocalFactory {
             resolution_timeout: Duration::from_millis(config.resolution_timeout_ms),
         });
         let resolve: Arc<dyn CredentialsResolve> = service.clone();
-        let admin: Arc<dyn CredentialsAdmin> = service;
+        let admin: Arc<dyn CredentialsAdmin> = service.clone();
+        let status: Arc<dyn CredentialsStatus> = service;
         let resolve_supply = plan
             .context()
             .provide_local::<CredentialsResolveContract>(resolve)?;
         let admin_supply = plan
             .context()
             .provide_local::<CredentialsAdminContract>(admin)?;
+        let status_supply = plan
+            .context()
+            .provide_local::<CredentialsStatusContract>(status)?;
         plan.defer(
             "withdraw local credential services",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(status_supply);
                     drop(admin_supply);
                     drop(resolve_supply);
                     Ok(())

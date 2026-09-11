@@ -306,6 +306,13 @@ impl AgentPresetCatalog {
         self
     }
 
+    /// Binds future default selection to a product-owned store without changing roots or compiler identity.
+    #[must_use]
+    pub fn with_selection_store(mut self, defaults: Arc<dyn AgentPresetDefaultStore>) -> Self {
+        self.defaults = defaults;
+        self
+    }
+
     /// Freezes root precedence without touching the filesystem.
     ///
     /// # Errors

@@ -21,5 +21,14 @@ lexical order, cursor progress, exact namespace binding, metadata and default
 value bounds before exposing descriptions. Discovery carries no authority to
 register namespaces or to bypass the existing write scope and revision checks.
 
+Replace and clear also require an explicitly composed SettingsMutationPolicy.
+The policy receives the trusted connection origin, exact namespace and proposed
+replacement (or clear), and returns a retained admission lease. The endpoint
+holds that lease through the complete domain mutation, including durable commit.
+This permits an application-owned grant to close admission and drain existing
+writes before acknowledging revocation. The policy cannot be selected or bypassed
+by a request field. LocalSettingsPolicy is the explicit Local-only policy for
+standalone composition. Product-specific namespace rules remain with the product.
+
 Tests exercise namespace isolation, validation, last-good state, exact CAS and
 re-registration through the public API with isolated Settings providers.

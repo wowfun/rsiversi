@@ -1,0 +1,35 @@
+[package]
+name = "rsi-configuration-access"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-configuration-api = { path = "../configuration-api" }
+async-trait.workspace = true
+futures-util.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-settings-api = { path = "../../rsi-settings/api" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
+rsi-storage-domain = { path = "../../rsi-storage/domain" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
+rsi-api-auth = { path = "../../rsi-api/auth" }
+rsi-storage = { path = "../../rsi-storage/core" }
+rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
+rsi-settings = { path = "../../rsi-settings/core" }
+rsi-settings-testkit = { path = "../../rsi-settings/testkit" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

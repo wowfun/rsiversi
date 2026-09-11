@@ -15,6 +15,7 @@ impl SettingsApi {
     pub fn register(
         registrar: &dyn ApiRegistrar,
         settings: Arc<dyn SettingsAccess>,
+        policy: Arc<dyn crate::SettingsMutationPolicy>,
     ) -> rsi_api_protocol::Result<Self> {
         let mut registrations = Vec::new();
         let service = settings.clone();
@@ -42,11 +43,16 @@ impl SettingsApi {
             }),
         )?);
         let service = settings.clone();
+        let replace_policy = policy.clone();
         registrations.push(registrar.register(
             Operation::Replace.spec(),
-            json_handler(move |_, input: Replace| {
+            json_handler(move |context, input: Replace| {
                 let service = service.clone();
+                let policy = replace_policy.clone();
                 async move {
+                    let _admission = policy
+                        .admit(&context.origin, &input.namespace, Some(&input.value))
+                        .await?;
                     result(
                         service
                             .replace(&input.namespace, &input.expected, input.value)
@@ -57,9 +63,15 @@ impl SettingsApi {
         )?);
         registrations.push(registrar.register(
             Operation::Clear.spec(),
-            json_handler(move |_, input: Clear| {
+            json_handler(move |context, input: Clear| {
                 let service = settings.clone();
-                async move { result(service.clear(&input.namespace, &input.expected).await) }
+                let policy = policy.clone();
+                async move {
+                    let _admission = policy
+                        .admit(&context.origin, &input.namespace, None)
+                        .await?;
+                    result(service.clear(&input.namespace, &input.expected).await)
+                }
             }),
         )?);
         Ok(Self { registrations })
@@ -78,14 +90,18 @@ pub struct SettingsApiFactory;
 impl PluginFactory for SettingsApiFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(crate::prepare(config)?
+            .requiring_local::<crate::SettingsMutationPolicyContract>()
             .requiring_local::<SettingsAccessContract>()
             .requiring_local::<ApiRegistrarContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let registrar = plan.local::<ApiRegistrarContract>()?;
-        let api =
-            SettingsApi::register(registrar.as_ref(), plan.local::<SettingsAccessContract>()?)
-                .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let api = SettingsApi::register(
+            registrar.as_ref(),
+            plan.local::<SettingsAccessContract>()?,
+            plan.local::<crate::SettingsMutationPolicyContract>()?,
+        )
+        .map_err(|error| MetaError::Activation(error.to_string()))?;
         plan.defer(
             "retire Settings API",
             Box::new(move || {

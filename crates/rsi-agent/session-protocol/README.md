@@ -1,5 +1,10 @@
 # rsi-agent-session-protocol
 
+`FrozenAgentSettings::validate_policy` validates the non-routing fields for
+configuration owners that have not selected a model yet. It does not construct
+durable settings. Constructors and deserialization still require a validated
+model reference and the complete policy before creating `FrozenAgentSettings`.
+
 ## Derived extension snapshots
 
 Session projection DTOs are disposable read values, outside the durable record

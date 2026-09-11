@@ -1,0 +1,18 @@
+[package]
+name = "rsi-navigation-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-session-protocol = { path = "../session-protocol" }
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

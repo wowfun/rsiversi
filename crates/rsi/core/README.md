@@ -1,5 +1,26 @@
 # rsi
 
+The running Service registers the existing Agent-preset Settings definition in
+its own Settings owner and binds its composition catalog's default selection to
+that exact scope. A remote default-selection receipt therefore affects subsequent
+Service drafts. The separate management catalog retains its own Settings lifetime;
+it is not the Service API's namespace registry. Both registrations use the same
+definition, validator and default-store implementation. Roots remain frozen for
+the catalog lifetime and remote mutations must preserve them.
+
+The standard Host composes the ordinary [managed provider owner](../managed-providers/README.md)
+with Storage backend `base`. Its child Profile contributes routes through the
+existing registrars; it never rewrites source-owned Host Profiles. Configuration
+mutations share the durable configuration grant authority used by Settings.
+Before exposing a ready connection catalog, standard bootstrap waits for an
+enabled managed-provider owner to finish its post-Profile publication, for at
+most 30 seconds. An enabled target without an observed instance is still pending;
+only a target that is absent from a completed Profile may skip the wait. A failed
+or timed-out owner activation closes that Host and reports a boot failure; failed
+provider convergence remains a repairable management diagnostic.
+The ordinary [navigation owner](../navigation/README.md) stores title/archive
+metadata in backend `base` and serves authenticated bounded Session queries.
+
 The native Application bootstrap publishes its immutable role catalog source to
 descendant presentation Profiles before starting the Application. Descendants use
 the ordinary Profile update owner; they do not mutate the catalog or start a
@@ -26,6 +47,11 @@ submission reconciliation and observation cursor/retry policy live in
 [rsi-client](../client/README.md).
 
 The standard catalog links providers but does not select or enable a deployment.
+A missing default model is a valid unconfigured Agent defaults document. The
+defaults plugin and its Settings namespace remain active; new Session creation
+returns an actionable setup-required error until a model is selected. Every
+provided field and all policy invariants are validated before persistence.
+Existing Sessions retain their frozen settings.
 A persistent Profile instantiates the intended provider, while Settings names
 the exact default deployment and model. Tests can inject a credential store at
 the public composition seam without consulting real user state.
@@ -449,3 +475,15 @@ bounded and cancellable under backpressure. Interrupted or lost delivery require
 inspecting source/runtime state before another explicit action; publication is
 not rolled back. A source watch cannot reopen a failed Loader or override its
 retained-failure admission fence.
+
+Remote Settings mutations use the ordinary [configuration grant owner](../configuration-access/README.md).
+Local operators explicitly authorize registered DeviceIds; existing Settings
+replace/clear share its revocation fence. Credentials status exposes only
+availability, effective source and editability under its owning contract.
+
+Native application connections also publish their exact ApiClient. A daemon
+connection reuses its negotiated UDS client; an embedded connection invokes the
+current dispatcher with Local origin and one shared 64 MiB input budget. It holds
+only a weak reference to the Service owner. This adds no listener or invented
+DeviceId. HTTP application connections expose their already authenticated client.
+All three retain their existing connection cleanup and domain capabilities.

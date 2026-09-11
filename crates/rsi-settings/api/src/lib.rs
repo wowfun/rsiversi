@@ -6,9 +6,14 @@
 
 mod client;
 mod endpoint;
+mod policy;
 mod wire;
 pub use client::{SettingsClient, SettingsClientFactory};
 pub use endpoint::{SettingsApi, SettingsApiFactory};
+pub use policy::{
+    LocalSettingsPolicy, SettingsMutationLease, SettingsMutationPolicy,
+    SettingsMutationPolicyContract,
+};
 
 fn prepare(config: &rsi_meta::ConfigValue) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
     if !config.is_null() && !config.as_object().is_some_and(serde_json::Map::is_empty) {

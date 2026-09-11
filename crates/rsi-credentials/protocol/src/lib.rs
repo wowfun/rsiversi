@@ -188,6 +188,47 @@ pub trait CredentialsAdmin: fmt::Debug + Send + Sync + 'static {
     async fn unset(&self, reference: &CredentialRef) -> Result<bool>;
 }
 
+/// Redacted effective credential availability, without store diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialAvailability {
+    /// A source currently resolves this exact address.
+    Configured {
+        /// Effective non-secret provenance.
+        source: CredentialSource,
+    },
+    /// All configured sources were read successfully and contain no value.
+    Missing,
+    /// The provider could not determine availability.
+    Unavailable,
+}
+
+/// A safe status projection; this type cannot contain secret material.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialStatus {
+    /// Effective availability at the time of the read.
+    pub availability: CredentialAvailability,
+    /// Whether the current provider permits administrative mutation.
+    pub editable: bool,
+}
+
+/// Read-only credential setup information, independent of secret resolution authority.
+#[async_trait]
+pub trait CredentialsStatus: fmt::Debug + Send + Sync + 'static {
+    /// Reads one bounded exact reference without returning any secret or store error text.
+    async fn status(&self, reference: &CredentialRef) -> Result<CredentialStatus>;
+}
+
+/// Nominal Local contract for redacted setup information.
+#[derive(Debug)]
+pub struct CredentialsStatusContract;
+
+impl LocalContract for CredentialsStatusContract {
+    const KEY: &'static str = "rsi.credentials.status";
+    type Service = dyn CredentialsStatus;
+}
+
 /// Nominal Local contract for provider consumers.
 #[derive(Debug)]
 pub struct CredentialsResolveContract;

@@ -27,6 +27,7 @@ pub enum ServiceHostConnectionMode {
 /// One selected Service Host connection plus any embedded resources it owns.
 pub struct ServiceHostConnection {
     mode: ServiceHostConnectionMode,
+    api: Arc<dyn rsi_api_protocol::ApiClient>,
     application: Arc<dyn SessionService>,
     output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
     model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
@@ -53,6 +54,10 @@ impl ServiceHostConnection {
         let result = (|| {
             Ok(Self {
                 mode: ServiceHostConnectionMode::Remote,
+                api: crate::required_local::<rsi_api_protocol::ApiClientContract>(
+                    &host,
+                    "remote API",
+                )?,
                 settings: crate::required_local::<rsi_settings_protocol::SettingsAccessContract>(
                     &host,
                     "remote Settings",
@@ -105,6 +110,11 @@ impl ServiceHostConnection {
     /// Returns the exact selected ownership mode.
     pub const fn mode(&self) -> ServiceHostConnectionMode {
         self.mode
+    }
+
+    /// Clones the selected Local or negotiated daemon API without owning Service lifetime.
+    pub fn api_client(&self) -> Arc<dyn rsi_api_protocol::ApiClient> {
+        self.api.clone()
     }
 
     /// Clones the connected Session domain service.
@@ -309,6 +319,7 @@ async fn boot_embedded(
     }
     Ok(ServiceHostConnection {
         mode: ServiceHostConnectionMode::Embedded,
+        api: booted.api.clone(),
         application: Arc::clone(&booted.application),
         output_cache: booted.output_cache.clone(),
         model_catalog: booted.model_catalog.clone(),
@@ -326,6 +337,7 @@ async fn boot_embedded(
 }
 
 struct BootedServiceHost {
+    api: Arc<dyn rsi_api_protocol::ApiClient>,
     settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
     description: Arc<rsi_api_protocol::ConnectionDescription>,
     running: Arc<RunningRsi>,
@@ -361,6 +373,7 @@ impl BootedServiceHost {
         let running = Arc::new(running);
         let result = (|| {
             Ok(Self {
+                api: crate::local_api_client::client(&running)?,
                 description: running.connection_description()?,
                 broker: running.approval_broker()?,
                 application: running.session_service()?,

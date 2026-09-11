@@ -1,0 +1,16 @@
+[package]
+name = "rsi-configuration-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

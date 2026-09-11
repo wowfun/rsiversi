@@ -31,6 +31,10 @@ mod files;
 
 #[path = "session_service/addon_acceptance.rs"]
 mod addon_acceptance;
+#[path = "session_service/managed_providers.rs"]
+mod managed_providers;
+#[path = "session_service/navigation.rs"]
+mod navigation;
 #[path = "session_service/plan_policy.rs"]
 mod plan_policy;
 #[path = "session_service/repeat_reminder.rs"]

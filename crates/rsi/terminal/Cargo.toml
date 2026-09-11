@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-configuration-api = { path = "../configuration-api" }
 rsi-terminal-ui = { path = "../terminal-ui" }
 rsi-native-addons-api = { path = "../native-addons-api" }
 rsi-inspector = { path = "../inspector" }
