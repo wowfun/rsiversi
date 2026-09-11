@@ -9,12 +9,17 @@ use rsi_credentials_protocol::{CredentialSource, ResolvedCredential, SecretValue
 
 #[tokio::test]
 #[ignore = "requires an explicit DEEPSEEK_API_KEY and spends live API quota"]
-async fn deepseek_v4_flash_streams_a_real_completion() {
+async fn deepseek_streams_a_real_completion() {
     let key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY must be set explicitly");
+    let model = match std::env::var("DEEPSEEK_MODEL") {
+        Ok(model) => model,
+        Err(std::env::VarError::NotPresent) => "deepseek-flash".into(),
+        Err(error) => panic!("DEEPSEEK_MODEL must be valid Unicode: {error}"),
+    };
     let adapter = DeepSeekAdapter::new(
         DeepSeekConfig::default()
             .with_model_profile(
-                "deepseek-v4-flash",
+                model.clone(),
                 LanguageModelLimits::new(
                     required_u32("DEEPSEEK_CONTEXT_WINDOW_TOKENS"),
                     required_u32("DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS"),
@@ -43,7 +48,7 @@ async fn deepseek_v4_flash_streams_a_real_completion() {
             language_context(
                 "deepseek-live",
                 "deepseek",
-                "deepseek-v4-flash",
+                &model,
                 Some(ResolvedCredential {
                     secret: SecretValue::new(key).expect("credential"),
                     source: CredentialSource::Environment {
@@ -53,7 +58,7 @@ async fn deepseek_v4_flash_streams_a_real_completion() {
                 Arc::new(MissingMediaResolver),
                 0,
             ),
-            "deepseek-v4-flash",
+            &model,
             request,
         ),
     )
@@ -68,6 +73,7 @@ async fn deepseek_v4_flash_streams_a_real_completion() {
             .as_ref()
             .is_some_and(|usage| usage.input_tokens > 0 && usage.output_tokens > 0)
     );
+    println!("live DeepSeek model={model:?} usage={:?}", output.usage);
 }
 
 fn required_u32(name: &str) -> u32 {

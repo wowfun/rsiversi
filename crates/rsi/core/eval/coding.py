@@ -465,6 +465,20 @@ def oracle(workspace, task, stage, timeout_seconds=30):
 
 
 def self_test():
+    import tomllib
+    with tempfile.TemporaryDirectory(prefix="rsi-model-name-") as temporary:
+        root = Path(temporary)
+        options = ["--live", "--key-file", "unused.env", "--output", "unused-report"]
+        default = parse_args(options, {})
+        assert default.model == "deepseek-flash"
+        configured = parse_args(options, {"DEEPSEEK_MODEL": "environment-model"})
+        assert configured.model == "environment-model"
+        selected = parse_args([*options, "--model", "fixture.model-1"], {"DEEPSEEK_MODEL": "environment-model"})
+        assert selected.model == "fixture.model-1"
+        settings = configure(root, selected.model, 1)
+        profile = tomllib.loads((root / "config/rsi/host-profiles/live/host.profile.toml").read_text())
+        assert list(profile["steps"][0]["config"]["language_models"]) == [selected.model]
+        assert settings["rsi.agent"]["default_model"]["model"] == selected.model
     checks = 0
     for task in TASKS:
         with tempfile.TemporaryDirectory(prefix="rsi-eval-fixture-") as temporary:
@@ -909,7 +923,7 @@ deployment = "live-deepseek"
 endpoint = "https://api.deepseek.com"
 protocol = "responses"
 credential = {{ owner = "rsi.ai.provider.deepseek", slot = "default" }}
-[steps.config.language_models.{model}]
+[steps.config.language_models.{json.dumps(model)}]
 context_window_tokens = 128000
 default_output_reserve_tokens = 8192
 max_output_reserve_tokens = 16384
@@ -1093,7 +1107,8 @@ def live(args):
     (output / "results.json").write_text(json.dumps(results, indent=2))
 
 
-def main():
+def parse_args(argv=None, environment=None):
+    environment = os.environ if environment is None else environment
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--self-test", action="store_true")
@@ -1101,16 +1116,22 @@ def main():
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--task", action="append", choices=[task["id"] for task in TASKS])
-    parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument("--model", default=environment.get("DEEPSEEK_MODEL", "deepseek-flash"),
+                        help="exact model name (default: DEEPSEEK_MODEL or deepseek-flash)")
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/rsi")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.live and not re.fullmatch(r"[A-Za-z0-9_.-]{1,256}", args.model):
+        parser.error("model must be one exact identifier")
+    if args.live and (args.key_file is None or args.output is None):
+        parser.error("--live requires --key-file and --output")
+    return args
+
+
+def main():
+    args = parse_args()
     if args.self_test:
         self_test()
     else:
-        if args.key_file is None or args.output is None:
-            parser.error("--live requires --key-file and --output")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", args.model):
-            parser.error("model must be one exact identifier")
         live(args)
 
 

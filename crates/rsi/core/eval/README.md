@@ -8,10 +8,15 @@ credential; these checks never contact a provider. Scripted provider tests
 remain separate evidence of the execution pipeline.
 
 `python3 crates/rsi/core/eval/coding.py --live --key-file .local/dev/.env
---output .local/notes/0905/live --model deepseek-v4-flash` uses the built
+--output .local/notes/0905/live` uses the built
 `target/debug/rsi` binary and a fresh isolated Host per task. The key reader
 accepts only the named literal `DEEPSEEK_API_KEY` assignment and never sources
-the file or writes the key into task inputs or reports. Real integrations are
+the file or writes the key into task inputs or reports. Model selection uses
+`--model`, then `DEEPSEEK_MODEL`, then `deepseek-flash`, in that order. The exact
+selected name configures both the provider profile and the Session default and
+is recorded in each report; a provider rejection never selects another model.
+Model names are quoted
+as one TOML table key, preserving dots and other literal model-name characters. Real integrations are
 explicitly opt-in; ordinary Cargo tests never execute this script's live mode.
 
 Evaluation version 10 covers a UTF-8 truncation repair, a two-module word-frequency

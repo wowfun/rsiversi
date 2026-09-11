@@ -17,3 +17,11 @@ Developer messages to wire `system` messages in their original positions,
 preserving their text and the original prepared request identity. This does
 not claim separate system/developer precedence on that provider. Agent history
 and provider-neutral messages retain their original roles.
+
+The ignored `deepseek_streams_a_real_completion` live test uses `DEEPSEEK_MODEL`
+when set, otherwise `deepseek-flash`. It configures and requests that exact model
+without fallback. Run it explicitly with `cargo test --locked -p rsi-ai-deepseek
+--test live -- --ignored --nocapture`. It requires `DEEPSEEK_API_KEY` and explicit
+`DEEPSEEK_CONTEXT_WINDOW_TOKENS`, `DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS`, and
+`DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS` for the selected model. The test reports the
+selected model and validated usage, never the credential.
