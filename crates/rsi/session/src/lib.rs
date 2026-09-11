@@ -358,14 +358,12 @@ impl LocalSessionHandle {
     }
 
     fn begin_activity(&self) -> Result<Option<drafts::Activity>> {
-        if self.published.load(std::sync::atomic::Ordering::Acquire) {
-            return Ok(None);
-        }
-        self.lease
-            .as_ref()
-            .ok_or_else(|| SessionError::NotFound("draft lease".into()))?
-            .begin()
-            .map(Some)
+        begin_draft_activity(&self.published, || {
+            self.lease
+                .as_ref()
+                .ok_or_else(|| SessionError::NotFound("draft lease".into()))?
+                .begin()
+        })
     }
 
     fn expire_draft(&self) {
@@ -879,6 +877,21 @@ fn map_media_error(error: &MediaError) -> SessionError {
     }
 }
 
+fn begin_draft_activity<T>(
+    published: &std::sync::atomic::AtomicBool,
+    begin: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    if published.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(None);
+    }
+    match begin() {
+        Err(SessionError::NotFound(_)) if published.load(std::sync::atomic::Ordering::Acquire) => {
+            Ok(None)
+        }
+        result => result.map(Some),
+    }
+}
+
 fn map_question_error(error: rsi_user_questions_protocol::QuestionError) -> SessionError {
     use rsi_user_questions_protocol::QuestionError;
     match error {
@@ -887,5 +900,39 @@ fn map_question_error(error: rsi_user_questions_protocol::QuestionError) -> Sess
         error @ (QuestionError::Invalid(_) | QuestionError::Conflict) => {
             SessionError::Invalid(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_admission_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[test]
+    fn publication_between_check_and_lease_admission_preserves_durable_activity() {
+        let published = AtomicBool::new(false);
+        // finish_fresh publishes before retiring its lease. Force that exact
+        // interleaving after the first read, without timing or a retry loop.
+        let result = begin_draft_activity::<()>(&published, || {
+            published.store(true, Ordering::Release);
+            Err(SessionError::NotFound("retired draft lease".into()))
+        });
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+    #[test]
+    fn expiry_and_shutdown_are_not_successful_publication() {
+        let published = AtomicBool::new(false);
+        assert!(matches!(
+            begin_draft_activity::<()>(&published, || Err(SessionError::NotFound(
+                "expired".into()
+            ))),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            begin_draft_activity::<()>(&published, || {
+                published.store(true, Ordering::Release);
+                Err(SessionError::ShuttingDown)
+            }),
+            Err(SessionError::ShuttingDown)
+        ));
     }
 }

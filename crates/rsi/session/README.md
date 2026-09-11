@@ -33,6 +33,10 @@ Header behind for binding or publication reconciliation.
 Already admitted publication
 waiters recheck the draft state after acquiring that transition lock; a draft
 expired by a conflicting publication returns NotFound.
+Activity admission rechecks successful publication when its former draft lease
+has retired between the initial publication check and lease acquisition. Only
+confirmed publication permits the durable path; actual expiry, capacity and
+shutdown remain errors.
 Fresh handle Header/history reads also reconcile against the Store. A matching
 publication releases the draft pin and exposes durable history; a different
 Header expires the old handle. A new attach then returns the durable Header.

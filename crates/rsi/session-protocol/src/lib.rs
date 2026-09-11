@@ -318,6 +318,8 @@ pub struct RecentSessionPage {
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     /// Reads the current Header and revision from one live draft snapshot.
+    /// Returns `NotFound` when this handle has no unpublished draft; other failures
+    /// do not establish that durable history is available.
     async fn draft_snapshot(&self) -> Result<SessionDraftView>;
     /// Selects a fully prepared preset only at the expected unpublished revision.
     async fn select_preset(&self, request: SelectDraftPreset) -> Result<SessionDraftView>;
