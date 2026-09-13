@@ -53,6 +53,9 @@ resulting submission; this gates the WebKit draft-save/click interleaving.
 `--tasks` additionally drives recorded inline patch evidence, Goal pause/resume/
 cancel and a real background Bash job through the native window. Explicit
 provider gates expose the claimed round and original Jobs scope for observation.
+Resume waits for both the disarmed driver and the settled Paused projection,
+whose creation control is visible only after settlement. Known Goal rejection
+ends the check immediately.
 An unreported completed job must fail finalization after its readonly panel was
 used. These deterministic screenshots and native clicks remain separate from
 the opt-in live smoke; `--tasks` cannot be combined with live mode.

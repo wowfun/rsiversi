@@ -115,9 +115,13 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     until(lambda: has('Durable phase: Paused') and has('Current driving: Disarmed'))
     screenshot('tasks-goal-paused.png')
     provider.release('Native Goal hold')
-    until(lambda: has('Driver: Disarmed') and text('.pane-status') == 'Completed')
+    until(lambda: has('Driver: Disarmed') and text('.pane-status') == 'Completed' and has('Create and start Goal'))
     button('Resume Goal')
-    until(lambda: has('Allocated rounds: 2 / 3') and has('Driver: Waiting'))
+    def resumed():
+        detail = text('#detail')
+        assert not re.search(r'Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved|UI action or surface has retired', detail), detail
+        return 'Allocated rounds: 2 / 3' in detail and 'Driver: Waiting' in detail
+    until(resumed)
     until(lambda: text('.transcript').count('Waiting for native fixture release.') == 2)
     screenshot('tasks-goal-resumed.png')
     button('Cancel automatic round')

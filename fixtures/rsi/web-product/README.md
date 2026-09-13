@@ -9,6 +9,10 @@ proves hidden, disabled, obscured and missing controls fail these assertions.
 CI retains reports under `RSI_WEB_REPORT` and fails artifact upload if none exist.
 Failure metadata is written even when a crashed renderer prevents HTML or
 screenshot capture; capture diagnostics supplement the original task error.
+Goal controls retain bounded Worker invocation/reply evidence and intermediate
+control errors. Resume after a completed paused round waits for both the live
+driver and the delivered durable settlement projection, rather than treating
+their independent streams as one notification.
 
 First install the shared document's pinned build dependencies with
 `npm ci --ignore-scripts --prefix ../../../plugins/rsi/web` from this directory.

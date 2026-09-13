@@ -229,7 +229,11 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 9] = [
+const EXPECTED_INDEXES: [(&str, &str); 10] = [
+    (
+        "active_activations_waiting",
+        "CREATE INDEX active_activations_waiting ON active_activations (session_id) WHERE phase = 'waiting'",
+    ),
     (
         "domain_requests_by_turn",
         "CREATE INDEX domain_requests_by_turn ON domain_requests (session_id, source_turn_id, control_seq)",

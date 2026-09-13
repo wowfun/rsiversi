@@ -817,11 +817,12 @@ pub(super) const fn message_delivery_name(
 }
 
 pub(super) const fn message_source_name(source: &AgentMessageSource) -> &'static str {
-    match source {
-        AgentMessageSource::Continuation { .. } => "continuation",
-        AgentMessageSource::Human => "human",
-        AgentMessageSource::Agent { .. } => "agent",
-        AgentMessageSource::Completion { .. } => "completion",
+    use rsi_agent_session_protocol::AgentMessageSourceKind;
+    match source.kind() {
+        AgentMessageSourceKind::Continuation => "continuation",
+        AgentMessageSourceKind::Human => "human",
+        AgentMessageSourceKind::Agent => "agent",
+        AgentMessageSourceKind::Completion => "completion",
     }
 }
 
@@ -917,8 +918,25 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
 }
 
 pub(super) fn decode_ready_message(
-    row: (String, String, i64, i64, String),
+    row: (String, String, i64, i64, String, Vec<u8>, bool),
 ) -> Result<StoreReadyMessage> {
+    use rsi_agent_session_protocol::AgentMessageSourceKind;
+    let source_kind = match row.5.as_slice() {
+        b"human" => AgentMessageSourceKind::Human,
+        b"agent" => AgentMessageSourceKind::Agent,
+        b"completion" => AgentMessageSourceKind::Completion,
+        b"continuation" => AgentMessageSourceKind::Continuation,
+        _ => {
+            return Err(StoreError::Corrupt(
+                "ready message source is missing or invalid".into(),
+            ));
+        }
+    };
+    if !row.6 {
+        return Err(StoreError::Corrupt(
+            "ready message differs from pending mailbox routing".into(),
+        ));
+    }
     let target = match row.4.as_str() {
         "next_turn" => MessageTarget::NextTurn,
         "next_step" => MessageTarget::NextStep,
@@ -929,6 +947,7 @@ pub(super) fn decode_ready_message(
         }
     };
     Ok(StoreReadyMessage {
+        source_kind,
         session_id: SessionId::new(row.0)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?,
         message_id: rsi_agent_session_protocol::MessageId::new(row.1)

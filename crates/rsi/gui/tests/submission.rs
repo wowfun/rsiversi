@@ -210,9 +210,12 @@ impl SessionHandle for Backend {
     }
     async fn command_status(
         &self,
-        _: &rsi_agent_session_protocol::DomainRequestId,
+        request: &rsi_agent_session_protocol::DomainRequestId,
     ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>
     {
+        if self.task_panels.enabled() && self.task_panels.record_query(request) {
+            return Ok(None);
+        }
         Ok(self.command_receipt.lock().unwrap().clone())
     }
 

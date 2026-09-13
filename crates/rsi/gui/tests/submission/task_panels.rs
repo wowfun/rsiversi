@@ -16,7 +16,13 @@ pub(super) struct Scenario {
     controls: Mutex<Vec<GoalControl>>,
     changed: tokio::sync::watch::Sender<u64>,
     live: Mutex<GoalLiveState>,
+    live_changed: tokio::sync::watch::Sender<()>,
+    block_projections: AtomicBool,
+    projection_entered: tokio::sync::Notify,
+    projection_release: tokio::sync::Notify,
     unknown: AtomicBool,
+    receipt_unavailable: AtomicBool,
+    receipt_queries: Mutex<Vec<DomainRequestId>>,
     jobs_active: AtomicBool,
     jobs_reads: Mutex<Vec<TurnJobsRequest>>,
     block_jobs: AtomicBool,
@@ -32,7 +38,13 @@ impl Default for Scenario {
             controls: Mutex::default(),
             changed: tokio::sync::watch::channel(0).0,
             live: Mutex::default(),
+            live_changed: tokio::sync::watch::channel(()).0,
+            block_projections: AtomicBool::new(false),
+            projection_entered: tokio::sync::Notify::new(),
+            projection_release: tokio::sync::Notify::new(),
             unknown: AtomicBool::new(false),
+            receipt_unavailable: AtomicBool::new(false),
+            receipt_queries: Mutex::default(),
             jobs_active: AtomicBool::new(false),
             jobs_reads: Mutex::default(),
             block_jobs: AtomicBool::new(false),
@@ -43,6 +55,10 @@ impl Default for Scenario {
     }
 }
 impl Scenario {
+    pub(super) fn record_query(&self, request: &DomainRequestId) -> bool {
+        self.receipt_queries.lock().unwrap().push(request.clone());
+        self.receipt_unavailable.load(Ordering::SeqCst)
+    }
     pub(super) fn enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
@@ -62,11 +78,13 @@ impl Scenario {
     ) -> rsi_session_protocol::Result<GoalControlReceipt> {
         let header = backend.header().await?;
         let revision = *self.changed.borrow();
-        assert_eq!(
-            request.expected_revision,
-            CommandRevision::Draft { revision }
-        );
         self.controls.lock().unwrap().push(request.clone());
+        if request.expected_revision != (CommandRevision::Draft { revision }) {
+            return Err(SessionError::CommandRevisionConflict {
+                expected: request.expected_revision,
+                actual: CommandRevision::Draft { revision },
+            });
+        }
         self.state
             .lock()
             .unwrap()
@@ -96,6 +114,7 @@ impl Scenario {
                 .unwrap();
         *backend.command_receipt.lock().unwrap() = Some(command.clone());
         self.changed.send_replace(revision + 1);
+        self.live_changed.send_replace(());
         if self.unknown.load(Ordering::SeqCst) {
             return Err(SessionError::CommandOutcomeUnknown {
                 request_id: request.request_id,
@@ -106,7 +125,7 @@ impl Scenario {
     pub(super) fn observe_goal(self: &Arc<Self>) -> rsi_session_protocol::Result<GoalStream> {
         let initial = self.live()?;
         let stream = futures_util::stream::unfold(
-            (self.clone(), self.changed.subscribe()),
+            (self.clone(), self.live_changed.subscribe()),
             |(owner, mut changed)| async move {
                 changed.changed().await.ok()?;
                 changed.borrow_and_update();
@@ -144,6 +163,10 @@ impl Scenario {
             |(owner, header, mut changed)| async move {
                 changed.changed().await.ok()?;
                 changed.borrow_and_update();
+                if owner.block_projections.swap(false, Ordering::SeqCst) {
+                    owner.projection_entered.notify_one();
+                    owner.projection_release.notified().await;
+                }
                 Some((owner.snapshot(&header), (owner, header, changed)))
             },
         );

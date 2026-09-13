@@ -38,6 +38,12 @@ test("task assertions reject missing, hidden, disabled and obscured controls and
     await page.setContent('<main><div style="height:1500px"></div><button>Complete result</button></main><div id="notice"></div><div class="pane-notice"></div>');
     assert.deepEqual(await assertControls(page, page.locator("main"), ["Complete result"]), [{ label: "Complete result", hit: true }]);
     await assertNoNotices(page);
+    await page.locator("body").evaluate(node => node.insertAdjacentHTML("beforeend", '<div id="detail"></div>'));
+    for (const feedback of ["Goal control rejected. Request old: command revision conflict", "Control outcome is unresolved. Request original."]) {
+      await page.locator("#detail").evaluate((node, text) => { node.textContent = text; }, feedback);
+      await assert.rejects(() => assertNoNotices(page), /Unexpected Goal feedback/);
+    }
+    await page.locator("#detail").evaluate(node => { node.textContent = ""; });
     for (const selector of ["#notice", ".pane-notice"]) {
       await page.locator(selector).evaluate(node => { node.textContent = "Failed to open result"; });
       await assert.rejects(() => assertNoNotices(page), /Unexpected product notice/);
