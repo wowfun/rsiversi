@@ -183,6 +183,7 @@ try {
       await left.locator(".pane-session").filter({ hasText: (await right.locator(".pane-session").innerText()).split(" · ").at(-1) }).waitFor();
       await page.locator("#sessions .nav-item").filter({ has: page.locator("small", { hasText: leftIdentity.split(" · ").at(-1) }) }).click();
       await left.locator(".pane-session").filter({ hasText: leftIdentity.split(" · ").at(-1) }).waitFor();
+      await left.getByRole("textbox", { name: "Main message" }).click({ trial: true });
       assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "Keep this draft while switching");
       await left.getByRole("textbox", { name: "Main message" }).fill("hold this turn until I cancel");
       await left.getByRole("button", { name: "Send ↗" }).click();

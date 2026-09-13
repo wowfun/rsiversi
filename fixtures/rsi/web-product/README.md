@@ -92,6 +92,9 @@ including revision conflicts, record reincarnation, origin quotas, opaque u64
 requests and receipts, transaction aborts and malformed durable metadata.
 Document composer tests gate saves before repeated Send/reconcile input and
 automatic recovery, checking single admission and the absence of false conflicts.
+They also hold draft loading after a Session header changes. Switching acceptance
+waits for the enabled composer before checking exact saved text, since the header
+can arrive while IndexedDB is still loading the draft.
 They also check cached UTF-8 accounting without re-encoding inactive editors.
 These use the shipped document methods with a controlled Worker reply, not a
 live Session or provider. `recovery.mjs` owns
