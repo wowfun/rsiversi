@@ -151,6 +151,7 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
             2,
             2,
             SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: turn.clone(),
                 effect_id: effect.clone(),
                 snapshot: snapshot(),

@@ -24,8 +24,8 @@ use rsi_ai_protocol::{
     AiCapability, AiError, ContentDelta, ContentStart, DispatchStatus, ErrorKind, ErrorPhase,
     FinishReason, ImageCall, ImageCallContract, ImageEvent, ImageRequest, ImageStream,
     ImageToolResultCapability, LanguageCall, LanguageCallContract, LanguageEvent, LanguageProfile,
-    LanguageRequest, LanguageStream, MessageContent, MessageRole, ModelRef, PreparedCallSnapshot,
-    PreparedImageCall, PreparedLanguageCall, RetryPolicy, ToolCallKind, ToolDialect,
+    LanguageRequest, LanguageStream, ModelRef, PreparedCallSnapshot, PreparedImageCall,
+    PreparedLanguageCall, RetryPolicy, ToolCallKind, ToolDialect,
 };
 use rsi_approval_protocol::{
     Approval, ApprovalContract, ApprovalDecision, ApprovalOutcome, ApprovalRequest,
@@ -377,12 +377,12 @@ struct PreparedScript {
     outcome: StartOutcome,
     store: Arc<MemoryStore>,
     starts: Arc<AtomicUsize>,
-    expected_turn_text: String,
 }
 
 #[derive(Debug)]
 enum StartOutcome {
     Stream(Vec<LanguageEvent>),
+    FinishedOnCancellation(Arc<Notify>),
     GatedStream {
         events: Vec<LanguageEvent>,
         waiting_after_first: Arc<Notify>,
@@ -409,13 +409,20 @@ impl PreparedLanguageCall for PreparedScript {
         self: Box<Self>,
         cancellation: CancellationToken,
     ) -> Result<LanguageStream, AiError> {
-        assert_turn_session_latest_is(&self.store, &self.expected_turn_text, |body| {
-            matches!(body, SessionFactBody::ModelStarted { .. })
-        })
-        .await;
+        assert_model_started(&self.store, &self.snapshot).await;
         self.starts.fetch_add(1, Ordering::AcqRel);
         match self.outcome {
             StartOutcome::Stream(script) => Ok(Box::pin(stream::iter(script.into_iter().map(Ok)))),
+            StartOutcome::FinishedOnCancellation(entered) => {
+                Ok(Box::pin(stream::once(async move {
+                    entered.notify_one();
+                    cancellation.cancelled().await;
+                    Ok(LanguageEvent::Finished {
+                        reason: FinishReason::Cancelled,
+                        replay: None,
+                    })
+                })))
+            }
             StartOutcome::GatedStream {
                 events,
                 waiting_after_first,
@@ -670,18 +677,6 @@ impl LanguageCall for LanguageFixture {
         model: ModelRef,
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
-        let expected_turn_text = request
-            .messages()
-            .iter()
-            .rev()
-            .find(|message| message.role() == MessageRole::User)
-            .and_then(|message| {
-                message.content().iter().find_map(|content| match content {
-                    MessageContent::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-            })
-            .expect("fixture request has a user text message");
         self.requests.lock().unwrap().push(request);
         let call = self.requests.lock().unwrap().len();
         Ok(Box::new(PreparedScript {
@@ -702,7 +697,6 @@ impl LanguageCall for LanguageFixture {
             outcome: self.outcomes.lock().unwrap().pop_front().expect("outcome"),
             store: self.store.clone(),
             starts: self.starts.clone(),
-            expected_turn_text,
         }))
     }
 }
@@ -932,26 +926,19 @@ async fn assert_latest_is(store: &MemoryStore, predicate: impl Fn(&SessionFactBo
     assert!(predicate(page.facts.last().unwrap().body()));
 }
 
-async fn assert_turn_session_latest_is(
-    store: &MemoryStore,
-    expected_turn_text: &str,
-    predicate: impl Fn(&SessionFactBody) -> bool,
-) {
-    let sessions = store.list_sessions(None, 64).await.unwrap().sessions;
-    for session in sessions {
-        let page = store.read_facts(&session, 0, 64).await.unwrap();
-        let matches_turn = page.facts.iter().any(|fact| {
-            matches!(
-                fact.body(),
-                SessionFactBody::TurnAccepted { text, .. } if text == expected_turn_text
-            )
-        });
-        if matches_turn {
-            assert!(page.facts.last().is_some_and(|fact| predicate(fact.body())));
-            return;
-        }
+async fn assert_model_started(store: &MemoryStore, expected: &PreparedCallSnapshot) {
+    for session in store.list_sessions(None, 64).await.unwrap().sessions {
+        let page = store.read_facts(&session, 0, 512).await.unwrap();
+        let Some(SessionFactBody::ModelStarted { effect_id, .. }) = page
+            .facts
+            .last()
+            .map(rsi_agent_session_protocol::SessionFact::body)
+        else {
+            continue;
+        };
+        if page.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::ModelIntent { effect_id: intent, snapshot, .. } if intent == effect_id && snapshot == expected)) { return; }
     }
-    panic!("no Session contains the expected accepted turn");
+    panic!("provider start lacks its exact durable prepared intent and start prefix");
 }
 
 fn tool_script() -> Vec<LanguageEvent> {
@@ -1084,6 +1071,7 @@ struct CompositionFixture {
     panic_on_commit: Mutex<Option<Arc<Notify>>>,
     context_builder: Mutex<Arc<dyn rsi_agent_context::ModelContextBuilder>>,
     contributions: Mutex<rsi_agent_composition_protocol::ContributionCatalog>,
+    domains: Mutex<rsi_agent_composition_protocol::DomainCatalog>,
 }
 
 #[async_trait]
@@ -1130,7 +1118,7 @@ impl AgentComposition for CompositionFixture {
             "b".repeat(64),
             tools,
             self.context_builder.lock().unwrap().clone(),
-            rsi_agent_composition_protocol::DomainCatalog::default(),
+            self.domains.lock().unwrap().clone(),
             self.contributions.lock().unwrap().clone(),
             Arc::new(GenerationOwner(Arc::clone(&self.owner_drops))),
         )?;
@@ -1167,6 +1155,7 @@ impl PluginFactory for CompositionFixtureFactory {
                 rsi_agent_context::DefaultContextBuilder::default(),
             )),
             contributions: Mutex::default(),
+            domains: Mutex::default(),
         });
         *self.installed.lock().unwrap() = Some(Arc::clone(&fixture));
         let service: Arc<dyn AgentComposition> = fixture;
@@ -1547,6 +1536,8 @@ impl TurnFinalizer for HangingFinalizer {
 
 #[path = "end_to_end/budgets_and_recovery.rs"]
 mod budgets_and_recovery;
+#[path = "end_to_end/compaction.rs"]
+mod compaction;
 #[path = "end_to_end/context_builder.rs"]
 mod context_builder;
 #[path = "end_to_end/contributions.rs"]

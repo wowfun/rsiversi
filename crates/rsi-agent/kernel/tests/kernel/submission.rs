@@ -85,6 +85,7 @@ async fn permanent_flush_failure_rejects_later_mailbox_submission() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id,
                 effect_id: EffectId::new("effect-mailbox-flush-latch").unwrap(),
                 snapshot: snapshot(),
@@ -857,6 +858,7 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect,
                 snapshot: snapshot(),
@@ -920,6 +922,7 @@ async fn effect_start_requires_its_intent_to_be_durable() {
             &claim,
             vec![
                 SessionFactBody::ModelIntent {
+                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                     turn_id: submitted.turn_id.clone(),
                     effect_id: effect.clone(),
                     snapshot: snapshot(),
@@ -938,6 +941,7 @@ async fn effect_start_requires_its_intent_to_be_durable() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect.clone(),
                 snapshot: snapshot(),
@@ -1058,6 +1062,7 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: first.turn_id.clone(),
                 effect_id: effect_id.clone(),
                 snapshot: snapshot(),
@@ -1324,6 +1329,7 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect.clone(),
                 snapshot: snapshot(),
@@ -1355,6 +1361,7 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
 
     let mut first_batch = Vec::with_capacity(MAXIMUM_FACTS_PER_READ);
     first_batch.push(SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: submitted.turn_id.clone(),
         effect_id: effect.clone(),
         event: LanguageEvent::ContentStarted {
@@ -1364,6 +1371,7 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
     });
     first_batch.extend(
         (1..MAXIMUM_FACTS_PER_READ).map(|_| SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: submitted.turn_id.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentDelta {
@@ -1381,6 +1389,7 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: submitted.turn_id,
                 effect_id: effect,
                 event: LanguageEvent::ContentDelta {
@@ -1449,6 +1458,7 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: EffectId::new("captured-live-horizon").unwrap(),
                 snapshot: snapshot(),

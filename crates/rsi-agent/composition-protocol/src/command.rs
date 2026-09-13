@@ -16,12 +16,16 @@ pub use draft::{
 /// Immutable input captured before a command callback; no mutation authority.
 #[derive(Clone, Debug)]
 pub struct SessionCommandContext {
+    /// Exact immutable invocation identity, including internal reserve receipts.
+    pub request_id: rsi_agent_session_protocol::DomainRequestId,
     /// Authoritative candidate or durable Session Header.
     pub header: Arc<SessionHeader>,
     /// Exact captured draft or durable control predecessor.
     pub revision: CommandRevision,
     /// Complete bounded domain set from that same predecessor.
     pub domains: Arc<[DomainStateView]>,
+    /// Authenticated reserve input; absent on ordinary, draft and settle commands.
+    pub continuation_input: Option<rsi_agent_session_protocol::ContinuationInput>,
 }
 
 /// A command proposes typed replacements only; the Session owner performs the commit.
@@ -37,10 +41,20 @@ pub trait SessionCommand: fmt::Debug + Send + Sync + 'static {
 }
 
 /// Bounded metadata paired with its exact linked callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContinuationCommand {
+    /// Requires an armed lease and exactly one complete reserved input.
+    Reserve,
+    /// May reconcile with a retained revoked lease; cannot authorize input.
+    Settle,
+}
+
+/// Bounded metadata paired with its exact linked callback.
 #[derive(Clone, Debug)]
 pub struct SessionCommandRegistration {
     descriptor: SessionCommandDescriptor,
     callback: Arc<dyn SessionCommand>,
+    continuation: Option<ContinuationCommand>,
 }
 
 impl SessionCommandRegistration {
@@ -49,7 +63,23 @@ impl SessionCommandRegistration {
         Self {
             descriptor,
             callback,
+            continuation: None,
         }
+    }
+    /// Restricts dispatch to the Kernel's authenticated continuation service.
+    /// This process-local flag is frozen with the callback, never supplied on the wire.
+    #[must_use]
+    pub fn continuation_only(mut self, kind: ContinuationCommand) -> Self {
+        self.continuation = Some(kind);
+        self
+    }
+    /// Whether ordinary command discovery and dispatch must exclude this callback.
+    pub const fn is_continuation_only(&self) -> bool {
+        self.continuation.is_some()
+    }
+    /// Returns the internal reserve or settlement contract selected by registration.
+    pub const fn continuation_kind(&self) -> Option<ContinuationCommand> {
+        self.continuation
     }
     /// Returns immutable discovery metadata.
     pub const fn descriptor(&self) -> &SessionCommandDescriptor {

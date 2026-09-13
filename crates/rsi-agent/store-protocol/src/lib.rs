@@ -26,7 +26,7 @@ pub use domain::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 16;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 18;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -70,6 +70,10 @@ pub fn validate_message_claim_fact(
     fact: Option<&SessionFact>,
 ) -> Result<()> {
     let expected_source = match &message.source {
+        AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
+            message_id: message.message_id.clone(),
+            source: source.clone(),
+        },
         AgentMessageSource::Human => InputMessageSource::Human {
             message_id: message.message_id.clone(),
         },
@@ -1080,6 +1084,8 @@ pub struct StoreAgentSessionStatus {
     pub session_id: SessionId,
     /// Durable control tail.
     pub durable_control_seq: u64,
+    /// Last `ActivationSettled` sequence in this snapshot, or zero; never beyond its tail.
+    pub last_settled_control_seq: u64,
     /// An accepted Turn has no terminal Fact.
     pub has_open_turn: bool,
     /// An activation remains active, including parked or waiting phases.
@@ -1122,6 +1128,15 @@ impl StoreAgentSubtreeSnapshot {
         }
         let mut previous = None;
         let mut parents = BTreeMap::new();
+        for status in
+            std::iter::once(&self.session).chain(self.descendants.iter().map(|child| &child.status))
+        {
+            if status.last_settled_control_seq > status.durable_control_seq {
+                return Err(StoreError::Corrupt(
+                    "settlement sequence exceeds the captured control tail".into(),
+                ));
+            }
+        }
         for descendant in &self.descendants {
             rsi_agent_session_protocol::validate_identifier(
                 "subagent task name",

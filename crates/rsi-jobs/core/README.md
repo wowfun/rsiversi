@@ -1,5 +1,9 @@
 # rsi-jobs
 
+`JobSummary::validate` checks the bounded identifiers, terminal/status agreement
+and reporting invariants before a summary crosses an external read boundary.
+Status-only `list` and `get` never report a terminal job or release its output.
+
 Output reads may carry an optional producer-issued `full_output` reference for
 a complete best-effort log. Jobs passes the bounded opaque reference through;
 the producer's output reader owns its interpretation and expiry. The reference

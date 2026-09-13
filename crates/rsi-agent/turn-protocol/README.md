@@ -1,5 +1,34 @@
 # rsi-agent-turn-protocol
 
+Current-Turn Jobs observation is process-local. The Executor publishes a weak
+read-only source under its authenticated claim, retaining the strong source only
+for that claim. The source contains the exact originally acquired Jobs authority;
+it exposes status listing only. Kernel reads bind Session/Header/Turn, check the
+live claim both before and after sampling, and never acquire a Jobs scope.
+Finalization's authority revocation, claim release and executor withdrawal make
+the source unavailable. No durable replay or historical Jobs lookup is provided.
+Pages follow the shared [current-Turn Jobs contract](../../rsi/session-protocol/README.md).
+Cancellation is checked before and after sampling.
+
+`SessionContinuations` is a separate Local service for trusted Host controllers.
+Local lookup is not a sandbox against linked plugin code; the application-owned
+contribution allowlist and its trusted implementations determine dependencies.
+A bounded live
+lease binds one Session Header, exact composition generation, domain and owner
+identity. Dropping the final lease or revoking it disarms further allocation and
+message admission. Internal settlement may finish with the retained revoked
+lease; it cannot reserve or admit input. Each submitted input binds a canonical
+internal reservation receipt or the exact frozen first-publication baseline,
+plus the current domain revision. Ordinary command and message routes cannot
+claim this provenance. The ready scheduler and claim admission both check the
+live lease and current revision; a cold pending continuation is discarded.
+Pending-only discard never falls through to cancellation of a claimed Turn.
+An explicit pause/cancel after restart may retain an already revoked settlement
+lease. It never grants scheduling authority. Draft arm freezes the first input
+provided by the validated domain owner with the exact baseline snapshot; Kernel
+does not interpret that domain's opaque JSON. Durable reserve binds the complete
+input in canonical continuation command provenance.
+
 `SessionCommands` is an independent Local service published by the same Kernel.
 Listing and execution consume Kernel-issued resume authority, retaining the
 resident or validated cold generation. Query reads the canonical request receipt

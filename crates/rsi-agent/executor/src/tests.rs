@@ -888,6 +888,7 @@ fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
             2,
             2,
             SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: claim.turn_id().clone(),
                 effect_id: effect_id.clone(),
                 snapshot: PreparedCallSnapshot {
@@ -920,6 +921,7 @@ fn completed_model_without_a_successor_is_not_classified_as_fresh_work() {
             4,
             4,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: claim.turn_id().clone(),
                 effect_id,
                 event: LanguageEvent::Finished {

@@ -234,6 +234,8 @@ struct KernelInner {
     state: Mutex<KernelState>,
     submission_admission: SubmissionAdmission,
     commands: commands::CommandRequests,
+    continuation_issuer: rsi_agent_turn_protocol::ContinuationIssuer,
+    continuations: Mutex<BTreeMap<SessionId, rsi_agent_turn_protocol::WeakContinuationLease>>,
     projection_admission: Arc<Semaphore>,
     ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
@@ -246,7 +248,7 @@ struct KernelInner {
     limits: KernelLimits,
     process_pending_bytes: AtomicUsize,
     process_pending_changed: Notify,
-    active_observers: AtomicUsize,
+    observers: observer_resources::ObserverResources,
     observation_retention: ObservationRetention,
     store_read_admission: Arc<Semaphore>,
 }
@@ -612,6 +614,7 @@ struct BudgetUsage {
 
 #[derive(Clone)]
 struct ClaimOwner {
+    jobs: Option<Weak<dyn rsi_agent_turn_protocol::TurnJobStatusSource>>,
     executor: String,
     registration: u64,
     claim: u64,
@@ -628,6 +631,7 @@ struct TreeClaimLane {
 #[derive(Clone)]
 enum ActiveEffect {
     Model {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
         effect_id: EffectId,
         started: bool,
     },
@@ -785,6 +789,7 @@ fn apply_committed_flush(
 
 mod admission;
 mod commands;
+mod continuation;
 mod contributions;
 mod domains;
 mod elapsed;
@@ -792,6 +797,7 @@ mod ending;
 mod execution;
 mod finalization;
 mod human_wait;
+mod jobs;
 mod lifecycle;
 mod notifications;
 mod projection;
@@ -855,41 +861,9 @@ struct DurableObservationState {
     _observer_lease: ObserverLease,
 }
 
-struct ObserverLease {
-    inner: Weak<KernelInner>,
-}
-
-impl ObserverLease {
-    fn acquire(inner: &Arc<KernelInner>) -> TurnResult<Self> {
-        let mut current = inner.active_observers.load(Ordering::Acquire);
-        loop {
-            if current >= inner.limits.maximum_active_observers {
-                return Err(TurnError::ObserverCapacity);
-            }
-            match inner.active_observers.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Ok(Self {
-                        inner: Arc::downgrade(inner),
-                    });
-                }
-                Err(observed) => current = observed,
-            }
-        }
-    }
-}
-
-impl Drop for ObserverLease {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.upgrade() {
-            inner.active_observers.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-}
+mod observer_resources;
+use observer_resources::{ObserverKind, ObserverLease};
+pub use observer_resources::{ObserverSnapshot, ObserverUsage};
 
 enum ObservationSignal {
     Update(std::result::Result<(), watch::error::RecvError>),
@@ -951,6 +925,7 @@ impl PluginFactory for KernelFactory {
         .requiring_local::<AgentCompositionContract>())
     }
 
+    #[allow(clippy::too_many_lines)] // The generation publishes its related services with one fail-closed worker shutdown path.
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let limits = plan.take_state::<ValidatedKernelLimits>()?;
         let kernel = AgentKernel::recover_with_validated_limits(
@@ -1025,10 +1000,44 @@ impl PluginFactory for KernelFactory {
                 return Err(error);
             }
         };
+        let continuations_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionContinuationsContract>(
+            Arc::new(kernel.clone()),
+        ) {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(projections_supply);
+                drop(commands_supply);
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
+        let jobs_supply = match plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::TurnJobsContract>(Arc::new(kernel.clone()))
+        {
+            Ok(supply) => supply,
+            Err(error) => {
+                drop(continuations_supply);
+                drop(projections_supply);
+                drop(commands_supply);
+                drop(finalization_supply);
+                drop(execution_supply);
+                drop(turns_supply);
+                let _ignored = kernel.shutdown(worker).await;
+                return Err(error);
+            }
+        };
         plan.defer(
             "shutdown Agent Kernel",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(jobs_supply);
+                    drop(continuations_supply);
                     drop(projections_supply);
                     drop(commands_supply);
                     drop(finalization_supply);

@@ -22,7 +22,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "1.0.0",
+                "2.4.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),
@@ -35,10 +35,11 @@ impl ModelContextBuilder for DefaultContextBuilder {
         &self.identity
     }
     fn open(&self, init: ContextInit<'_>) -> Result<Box<dyn ModelContextCursor>> {
-        let fold = match init.checkpoint {
+        let mut fold = match init.checkpoint {
             Some(bytes) => ContextFold::from_checkpoint(init.header, init.limits, bytes)?,
             None => ContextFold::with_limits(init.header, init.limits)?,
         };
+        fold.enable_semantic(init.identity)?;
         Ok(Box::new(DefaultCursor {
             fold,
             limits: init.limits,
@@ -64,6 +65,18 @@ impl ModelContextCursor for DefaultCursor {
     }
     fn build(&self, tools: Vec<ToolDefinition>) -> Result<LanguageRequest> {
         self.fold.request(self.limits, tools)
+    }
+    fn plan_compaction(
+        &self,
+        model: &rsi_ai_protocol::ModelRef,
+        profile: &rsi_ai_protocol::LanguageProfile,
+        force: Option<rsi_agent_session_protocol::CompactionTrigger>,
+        shrink: bool,
+    ) -> Result<Option<crate::PlannedCompaction>> {
+        self.fold.plan_compaction(model, profile, force, shrink)
+    }
+    fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
+        self.fold.summary_installed(effect)
     }
     fn checkpoint(&self) -> Result<Arc<[u8]>> {
         self.fold.checkpoint_bytes()

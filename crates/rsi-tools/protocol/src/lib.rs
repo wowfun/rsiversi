@@ -331,6 +331,24 @@ pub struct ToolStart {
     pub extensions: ToolExecutionExtensions,
 }
 
+/// Host-owned encoded-byte allowance for optional Tool result evidence.
+#[derive(Clone, Copy, Debug)]
+pub struct ToolEvidenceBudget {
+    maximum_bytes: usize,
+}
+
+impl ToolEvidenceBudget {
+    /// Creates a host-owned allowance for encoded optional evidence per call.
+    pub const fn new(maximum_bytes: usize) -> Self {
+        Self { maximum_bytes }
+    }
+
+    /// Returns the encoded-byte allowance; zero permits only omission metadata.
+    pub const fn maximum_bytes(self) -> usize {
+        self.maximum_bytes
+    }
+}
+
 /// Opaque, typed process-local capabilities injected at Tool start.
 #[derive(Clone, Default)]
 pub struct ToolExecutionExtensions {

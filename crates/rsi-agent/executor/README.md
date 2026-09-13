@@ -1,5 +1,17 @@
 # rsi-agent-executor
 
+A post-Tool domain revision conflict discards that entire stale contribution
+batch; the already retained Tool result remains evidence and execution continues.
+Callbacks are not replayed. Other mutation failures, including unknown outcomes,
+retain their failure semantics. Context-stage conflicts remain failures.
+
+Each claimed Turn retains a read-only Jobs status source containing a clone of
+its original `JobScopeAuthority`. Publishing that source through the claim does
+not reacquire authority or report any job. The source is weakly held by Kernel
+and disappears when the claim driver exits; finalization revokes the underlying
+authority before terminal publication. Status sampling calls only `Jobs::list`.
+The returned view follows the [shared Jobs contract](../../rsi/session-protocol/README.md).
+
 Execution contributions use the claim's frozen composition. Before a new
 provider retry series, one stage captures durable Fact/control watermarks and
 domain states, invokes callbacks in catalog order, validates the complete
@@ -92,8 +104,29 @@ If an executor reclaims history containing a completed Model event but no turn
 terminal, it records interruption rather than repeating the completed external
 effect.
 
+An unconstructible forced compaction plan reports `context.limit`; malformed
+planning state remains `context.compaction_failed`. An optional planner that
+returns no plan leaves the ordinary provider attempt eligible.
+Semantic compaction uses the same serial ModelIntent/Started/Event barriers as
+ordinary calls. Before a new Conversation attempt, the selected pure cursor
+receives the current described profile and may freeze a compaction plan. Summary
+calls use the current model with no Tools and a capped output reserve. A valid
+Finished is flushed before another external call; resumption also requires
+successful installation under the [Context contract](../context/README.md).
+A naturally finished, bounded summary can still fail to shrink the view; this
+fails the Turn without replacing the prior view. There are at most two summary
+attempts per pressure event, with a smaller complete source batch only after
+explicit ContextLimit rejection. One ordinary ContextLimit permits one summary
+recovery and one ordinary resubmission. Unknown dispatch and transport errors
+gain no new retry. An interrupted original Turn remains interrupted even when
+its valid durable summary can be used by a later explicit resume.
+
 The immutable session settings supply the mandatory elapsed, provider, Tool,
-generated-Fact, and generated-byte budget. The elapsed deadline bounds the
+generated-Fact, and generated-byte budget. Tool start also receives a typed
+optional-evidence allowance: generated-byte maximum divided by eight and then
+by the Tool-call maximum. Across all admitted calls optional evidence therefore
+uses at most one eighth of that frozen Turn allowance; mandatory result ledgers
+and framing still count against normal publication admission. The elapsed deadline bounds the
 complete driver future, including provider preparation and Media import; it
 drops a non-cooperative caller future at expiry while effect owners retain any
 separately documented blocking-task cleanup. An already-terminal drive result

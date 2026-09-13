@@ -14,6 +14,8 @@ use serde_json::json;
 
 #[path = "projection/builders.rs"]
 mod builders;
+#[path = "projection/compaction.rs"]
+mod compaction;
 #[path = "projection/contributions.rs"]
 mod contributions;
 
@@ -125,6 +127,7 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
             require_approval: false,
         },
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             snapshot: snapshot(),
@@ -134,6 +137,7 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
             effect_id: effect.clone(),
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentStarted {
@@ -146,6 +150,7 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
             },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentDelta {
@@ -154,11 +159,13 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
             },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentFinished { index: 0 },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect,
             event: LanguageEvent::Finished {
@@ -216,6 +223,7 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
             require_approval: false,
         },
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: previous.clone(),
             effect_id: effect.clone(),
             snapshot: snapshot(),
@@ -225,6 +233,7 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
             effect_id: effect.clone(),
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: previous.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentStarted {
@@ -233,6 +242,7 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
             },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: previous.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentDelta {
@@ -241,11 +251,13 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
             },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: previous.clone(),
             effect_id: effect.clone(),
             event: LanguageEvent::ContentFinished { index: 0 },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: previous.clone(),
             effect_id: effect,
             event: LanguageEvent::Finished {
@@ -298,6 +310,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
             require_approval: false,
         },
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: parent_turn.clone(),
             effect_id: parent_effect.clone(),
             snapshot: snapshot(),
@@ -307,6 +320,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
             effect_id: parent_effect.clone(),
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: parent_turn.clone(),
             effect_id: parent_effect.clone(),
             event: LanguageEvent::ContentStarted {
@@ -315,6 +329,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
             },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: parent_turn.clone(),
             effect_id: parent_effect.clone(),
             event: LanguageEvent::ContentDelta {
@@ -323,11 +338,13 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
             },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: parent_turn.clone(),
             effect_id: parent_effect.clone(),
             event: LanguageEvent::ContentFinished { index: 0 },
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: parent_turn.clone(),
             effect_id: parent_effect,
             event: LanguageEvent::Finished {
@@ -617,6 +634,7 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
                 require_approval: false,
             },
             SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: active_turn,
                 effect_id: EffectId::new("effect-active").unwrap(),
                 snapshot: snapshot(),

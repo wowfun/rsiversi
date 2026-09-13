@@ -27,7 +27,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Header format
-11 and SQLite schema 16 make this command invocation cutover explicit; earlier
+12 and SQLite schema 18 include model-effect purpose and continuation provenance; earlier
 authoritative formats are rejected without rewriting their files.
 
 Client command receipts are compact validated projections of canonical command
@@ -38,6 +38,12 @@ the original invocation digest. They do not copy complete domain states into
 transport receipts or create another durable receipt store.
 
 ## Execution records
+
+Each ModelIntent freezes its full purpose. Each ModelEvent repeats only the
+small Conversation/ContextCompaction kind, which Kernel checks against the
+intent. Partial history pages therefore identify internal summary output even
+when they omit the earlier intent. Only the intent's validated plan plus its
+Finished output can install a summary; the event tag grants no new authority.
 
 `PluginContext` attributes actual model-visible text to one validated
 ContributionId. It is text-only, uses the entered-message byte/block bounds,
@@ -60,7 +66,7 @@ baseline contains at most 64 domains and 1 MiB of complete-state bytes. These
 mechanical bounds do not replace the owning domain's typed semantic validator.
 
 This package owns the exact pre-release durable Session format: immutable
-headers (format version 9), bounded identities, append-only Facts, and one terminal outcome per
+headers (format version 12), bounded identities, append-only Facts, and one terminal outcome per
 turn. It is a data contract, not a Runtime service or transport.
 
 Canonical workspace paths in Headers and Facts describe their originating host.

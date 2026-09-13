@@ -28,6 +28,7 @@ fn contribution_history() -> Vec<SessionFact> {
             }],
         },
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: model.clone(),
             snapshot: snapshot(),
@@ -58,6 +59,7 @@ fn contribution_history() -> Vec<SessionFact> {
             },
         ]
         .map(|event| SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: model.clone(),
             event,

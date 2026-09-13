@@ -202,6 +202,14 @@ impl TurnService for AgentKernel {
     }
 
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
+        if matches!(
+            request.message.source,
+            AgentMessageSource::Continuation { .. }
+        ) {
+            return Err(TurnError::Invalid(
+                "continuation input requires its live admission service".into(),
+            ));
+        }
         self.submit_message_authorized(request, None).await
     }
 
@@ -228,7 +236,7 @@ impl TurnService for AgentKernel {
         &self,
         root: &SessionId,
     ) -> TurnResult<rsi_agent_turn_protocol::TreeMembershipChanges> {
-        let observer = ObserverLease::acquire(&self.inner)?;
+        let observer = ObserverLease::acquire(&self.inner, ObserverKind::Tree)?;
         let watch = self.inner.session_changes.tree(root);
         let inner = Arc::downgrade(&self.inner);
         Ok(stream::unfold(
@@ -249,7 +257,7 @@ impl TurnService for AgentKernel {
         session_id: &SessionId,
         cursor: ObservationCursor,
     ) -> TurnResult<SessionObservationStream> {
-        let observer_lease = ObserverLease::acquire(&self.inner)?;
+        let observer_lease = ObserverLease::acquire(&self.inner, ObserverKind::Session)?;
         let mut watch = self.inner.session_changes.session(session_id);
         watch.mark_seen();
         let mut state = DurableObservationState {
@@ -494,7 +502,7 @@ impl TurnService for AgentKernel {
     }
 
     async fn observe(&self, session_id: &SessionId, after_seq: u64) -> TurnResult<TurnObservation> {
-        let observer_lease = ObserverLease::acquire(&self.inner)?;
+        let observer_lease = ObserverLease::acquire(&self.inner, ObserverKind::Turn)?;
         let live_snapshot = {
             let state = lock_state(&self.inner);
             state.sessions.get(session_id).map(|session| {
@@ -731,7 +739,7 @@ impl AgentKernel {
     }
 
     #[allow(clippy::too_many_lines)] // Admission commits the validated Header, mailbox payload, and ready index as one operation.
-    async fn submit_message_admitted(
+    pub(super) async fn submit_message_admitted(
         &self,
         request: SubmitMessage,
         source: Option<(&AgentCallerAuthority, &CancellationToken)>,
@@ -812,12 +820,6 @@ impl AgentKernel {
             .completion_reservation_count(&session_id)
             .await
             .map_err(turn_store_error)?;
-        if scan.pending_count.saturating_add(completion_reservations)
-            >= MAXIMUM_PENDING_AGENT_MESSAGES
-        {
-            return Err(TurnError::Capacity);
-        }
-
         let expected_fact_seq = scan.durable_fact_seq;
         let bound_turn_id = if request.delivery == MessageDelivery::Steer {
             if !matches!(request.message.source, AgentMessageSource::Human)
@@ -845,6 +847,43 @@ impl AgentKernel {
             MessageDelivery::Steer if bound_turn_id.is_some() => MessageTarget::NextStep,
             MessageDelivery::NextTurn | MessageDelivery::Steer => MessageTarget::NextTurn,
         };
+        let automatic = matches!(
+            request.message.source,
+            AgentMessageSource::Continuation { .. }
+        );
+        if automatic
+            && scan.pending.iter().any(|entry| {
+                entry.target == MessageTarget::NextTurn
+                    && !matches!(
+                        entry.message.source,
+                        AgentMessageSource::Continuation { .. }
+                    )
+            })
+        {
+            return Err(TurnError::ContinuationDisarmed);
+        }
+        let superseded = if !automatic && target == MessageTarget::NextTurn {
+            scan.pending
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.message.source,
+                        AgentMessageSource::Continuation { .. }
+                    )
+                })
+                .map(|entry| entry.message.message_id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if scan
+            .pending_count
+            .saturating_sub(superseded.len())
+            .saturating_add(completion_reservations)
+            >= MAXIMUM_PENDING_AGENT_MESSAGES
+        {
+            return Err(TurnError::Capacity);
+        }
         let baseline = match &request.session {
             SubmitSession::Fresh(prepared) => {
                 lifecycle::initial_domain_control(prepared.header(), prepared.baseline())?
@@ -853,8 +892,29 @@ impl AgentKernel {
         };
         let control_seq = scan
             .durable_control_seq
-            .checked_add(1 + u64::from(baseline.is_some()))
+            .checked_add(
+                1 + u64::from(baseline.is_some())
+                    + u64::try_from(superseded.len()).map_err(|_| TurnError::Capacity)?,
+            )
             .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
+        let mut controls = baseline.into_iter().collect::<Vec<_>>();
+        for message_id in superseded {
+            let seq = scan
+                .durable_control_seq
+                .checked_add(u64::try_from(controls.len()).map_err(|_| TurnError::Capacity)? + 1)
+                .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
+            controls.push(
+                AgentControlRecord::new(
+                    seq,
+                    self.inner.clock.now_ms().max(1),
+                    AgentControlRecordBody::MessageDiscarded {
+                        message_id,
+                        reason: MessageDiscardReason::Superseded,
+                    },
+                )
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+            );
+        }
         let control = AgentControlRecord::new(
             control_seq,
             self.inner.clock.now_ms().max(1),
@@ -868,6 +928,7 @@ impl AgentKernel {
             },
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        controls.push(control);
         let header = match request.session {
             SubmitSession::Fresh(prepared) => {
                 let (header, _composition, _baseline) = prepared.into_parts();
@@ -893,10 +954,7 @@ impl AgentKernel {
                         expected_control_seq: scan.durable_control_seq,
                         header,
                         facts: Vec::new(),
-                        controls: baseline
-                            .into_iter()
-                            .chain(std::iter::once(control))
-                            .collect(),
+                        controls,
                     }],
                     required_active_activations: Vec::new(),
                     quiescent_descendants_of: None,
@@ -974,7 +1032,7 @@ impl AgentKernel {
 
         let scan =
             scan_durable_messages(&self.inner, &session_id, Some(&request.message_id)).await?;
-        let entry = scan.selected.ok_or_else(|| {
+        let entry = scan.selected.clone().ok_or_else(|| {
             TurnError::Invalid(format!(
                 "message `{}` does not exist in session `{}`",
                 request.message_id.as_str(),
@@ -1019,6 +1077,33 @@ impl AgentKernel {
             return Err(TurnError::Invalid(
                 "next-Step message requires its owning active Turn".into(),
             ));
+        }
+        if let AgentMessageSource::Continuation { source } = &entry.message.source {
+            let ordinary_pending = scan.pending.iter().any(|pending| {
+                pending.target == MessageTarget::NextTurn
+                    && !matches!(
+                        pending.message.source,
+                        AgentMessageSource::Continuation { .. }
+                    )
+            });
+            if ordinary_pending
+                || !self
+                    .continuation_claim_allowed(&session_id, source, Some(&request.session))
+                    .await?
+            {
+                self.discard_continuation_admitted(
+                    &session_id,
+                    &scan,
+                    &entry,
+                    if ordinary_pending {
+                        MessageDiscardReason::Superseded
+                    } else {
+                        MessageDiscardReason::ContinuationDisarmed
+                    },
+                )
+                .await?;
+                return Err(TurnError::ContinuationDisarmed);
+            }
         }
 
         let expected_fact_seq = lock_state(&self.inner)

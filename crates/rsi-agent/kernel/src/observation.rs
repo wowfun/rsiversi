@@ -190,40 +190,8 @@ pub(super) async fn observe_agent_wait_change(
             )));
         }
         if current.status.durable_control_seq > previous.status.durable_control_seq {
-            let mut cursor = previous.status.durable_control_seq;
-            let mut settled = false;
-            while cursor < current.status.durable_control_seq {
-                let controls = read_controls_bounded(
-                    &kernel.inner,
-                    &current.status.session_id,
-                    cursor,
-                    MAXIMUM_FACTS_PER_READ,
-                )
-                .await
-                .map_err(turn_store_error)?;
-                let mut through = cursor;
-                for record in controls
-                    .records
-                    .iter()
-                    .take_while(|record| record.seq() <= current.status.durable_control_seq)
-                {
-                    through = record.seq();
-                    settled |= matches!(
-                        record.body(),
-                        AgentControlRecordBody::ActivationSettled { .. }
-                    );
-                }
-                if settled {
-                    break;
-                }
-                if through == cursor {
-                    return Err(TurnError::Invariant(format!(
-                        "descendant control scan made no progress for `{}`",
-                        current.status.session_id
-                    )));
-                }
-                cursor = through;
-            }
+            let settled =
+                current.status.last_settled_control_seq > previous.status.durable_control_seq;
             kernel.validate_agent_caller(caller)?;
             return Ok(Some(if settled {
                 WaitResumeCause::Completion
@@ -352,6 +320,10 @@ pub(super) fn message_receipt(
 
 pub(super) fn entered_message_source(message: &AgentMessage) -> InputMessageSource {
     match &message.source {
+        AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
+            message_id: message.message_id.clone(),
+            source: source.clone(),
+        },
         AgentMessageSource::Human => InputMessageSource::Human {
             message_id: message.message_id.clone(),
         },

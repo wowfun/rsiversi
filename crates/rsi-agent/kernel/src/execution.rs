@@ -2,6 +2,27 @@ use super::*;
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
+    fn publish_job_status(
+        &self,
+        claim: &TurnClaim,
+        source: Weak<dyn rsi_agent_turn_protocol::TurnJobStatusSource>,
+    ) -> TurnResult<()> {
+        let mut state = lock_state(&self.inner);
+        self.validate_claim(&state, claim)?;
+        let owner = state
+            .sessions
+            .get_mut(claim.session_id())
+            .and_then(|session| session.turns.get_mut(claim.turn_id()))
+            .and_then(|turn| turn.claim.as_mut())
+            .ok_or(TurnError::StaleClaim)?;
+        if owner.jobs.is_some() {
+            return Err(TurnError::Invalid(
+                "Jobs status source already published for claim".into(),
+            ));
+        }
+        owner.jobs = Some(source);
+        Ok(())
+    }
     async fn contribution_context(
         &self,
         claim: &TurnClaim,
@@ -127,6 +148,7 @@ impl TurnExecution for AgentKernel {
                     let accepted_at_ms = turn.accepted_at_ms;
                     let accepted_seq = turn.accepted_seq;
                     turn.claim = Some(ClaimOwner {
+                        jobs: None,
                         mutations: Arc::new(mutation::ClaimMutationGate::default()),
                         executor: executor_id.into(),
                         registration: registration_id,

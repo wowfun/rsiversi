@@ -66,8 +66,9 @@ reopening it permits business operations with unproven revisions and budgets.
 
 ## Consequences
 
-Schema 14 and Header format 9 replace the previously published 13 and 8 by
-explicit rejection, preserving old databases. Existing generated-fact limit
+The [session protocol](../../../../crates/rsi-agent/session-protocol/README.md)
+and [SQLite Store](../../../../crates/rsi-agent/store-sqlite/README.md) own current
+format versions; unsupported databases are rejected without mutation. Generated-fact limit
 names are replaced throughout their consumers without compatibility aliases.
 
 Shared Memory/SQLite contracts cover complete-state CAS, exact mixed Fact

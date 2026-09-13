@@ -327,6 +327,37 @@ pub struct JobSummary {
     pub output_retained: bool,
 }
 
+impl JobSummary {
+    /// Validates one bounded status snapshot without reporting the job.
+    pub fn validate(&self) -> Result<()> {
+        for (kind, value) in [
+            ("job id", &self.id),
+            ("job name", &self.name),
+            ("job producer", &self.producer),
+        ] {
+            validate_job_identifier(kind, value)?;
+        }
+        if let Some(terminal) = &self.terminal {
+            terminal.validate()?;
+            if terminal.status != self.status {
+                return Err(JobsError::InvalidInput(
+                    "job terminal status differs".into(),
+                ));
+            }
+        } else if self.status.is_terminal() {
+            return Err(JobsError::InvalidInput(
+                "terminal job lacks terminal facts".into(),
+            ));
+        }
+        if self.reported && (!self.status.is_terminal() || self.output_retained) {
+            return Err(JobsError::InvalidInput(
+                "reported job retains live control".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Result of one output operation, including an atomic status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobRead {

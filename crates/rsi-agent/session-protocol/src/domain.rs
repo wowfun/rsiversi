@@ -193,6 +193,10 @@ impl DomainSnapshot {
     pub fn encoded_len(&self) -> Result<usize> {
         compact_json_len(self)
     }
+    /// Canonical complete snapshot identity, including the codec name and version.
+    pub fn sha256(&self) -> Result<String> {
+        payload_digest(b"rsi-domain-snapshot-v1\0", self)
+    }
 }
 
 /// Durable provenance assigned by Kernel admission, never by a typed proposal.
@@ -206,6 +210,17 @@ pub enum DomainMutationSource {
         /// Exact logical request selected by Kernel dispatch, including CAS and arguments.
         invocation: crate::SessionCommandInvocation,
     },
+    /// Host continuation command authenticated against one live or settling lease.
+    Continuation {
+        /// Exact internal callback invocation and CAS predecessor.
+        invocation: crate::SessionCommandInvocation,
+        /// Exact owning domain selected by the live lease.
+        domain: DomainIdentity,
+        /// Logical owner selected by the domain controller.
+        owner: crate::DomainRequestId,
+        /// Complete charged input for reserve; absent for settlement.
+        reservation: Option<crate::ContinuationInput>,
+    },
     /// Execution contribution charged to its actual admitted Turn.
     Turn {
         /// Kernel-bound originating Turn, including Hook and Tool contributions.
@@ -217,7 +232,20 @@ impl DomainMutationSource {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Baseline | Self::Turn { .. } => Ok(()),
-            Self::Command { invocation } => {
+            Self::Command { invocation } | Self::Continuation { invocation, .. } => {
+                if let Self::Continuation {
+                    owner,
+                    reservation: Some(input),
+                    ..
+                } = self
+                {
+                    input.validate()?;
+                    if &input.owner != owner {
+                        return Err(SessionError::Invalid(
+                            "continuation reservation changed its owner".into(),
+                        ));
+                    }
+                }
                 if matches!(
                     invocation.expected_revision,
                     crate::CommandRevision::Draft { .. }
@@ -424,7 +452,8 @@ impl DomainStateCommit {
                 "only a domain baseline omits a request identity".into(),
             ));
         }
-        if let DomainMutationSource::Command { invocation } = &source
+        if let DomainMutationSource::Command { invocation }
+        | DomainMutationSource::Continuation { invocation, .. } = &source
             && Some(&invocation.request_id) != request_id.as_ref()
         {
             return Err(SessionError::Invalid(
@@ -434,6 +463,13 @@ impl DomainStateCommit {
         if updates.is_empty() || updates.len() > MAXIMUM_SESSION_DOMAINS {
             return Err(SessionError::Invalid(
                 "domain commit must contain 1..=64 complete replacements".into(),
+            ));
+        }
+        if let DomainMutationSource::Continuation { domain, .. } = &source
+            && (updates.len() != 1 || updates[0].snapshot().identity() != domain)
+        {
+            return Err(SessionError::Invalid(
+                "continuation commit must replace exactly its owning domain".into(),
             ));
         }
         if updates

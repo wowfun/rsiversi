@@ -244,7 +244,9 @@ pub(super) fn read_turn_usage(
 fn source_turn(commit: &DomainStateCommit) -> Option<&str> {
     match commit.source() {
         DomainMutationSource::Turn { turn_id } => Some(turn_id.as_str()),
-        DomainMutationSource::Baseline | DomainMutationSource::Command { .. } => None,
+        DomainMutationSource::Baseline
+        | DomainMutationSource::Command { .. }
+        | DomainMutationSource::Continuation { .. } => None,
     }
 }
 

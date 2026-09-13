@@ -1,5 +1,27 @@
 # rsi-agent-kernel
 
+The current-Turn Jobs read port relays an Executor-published weak status source.
+It authenticates publication against the exact claim and validates the active
+Session/Header/Turn before and after sampling outside Kernel locks. The Kernel
+does not construct a Jobs authority, read output, report, wait or kill a job.
+Claim replacement or retirement invalidates the source; restart has no sources.
+The returned view follows the [shared Jobs contract](../../rsi/session-protocol/README.md).
+
+Continuation admission owns a separate sealed live authority bound to Session
+and composition. Internal command receipts freeze exact reservation data and
+domain revision before accepting the matching NextTurn message. Reservation
+and acceptance are separate durable operations; mailbox claim keeps its existing
+atomic activation/Turn/Step/input commit. Ordinary submission rejects fabricated
+Continuation sources. Ordinary waking acceptance atomically discards pending
+automatic input, and claim rechecks live authority, domain revision and priority.
+No-live-lease automatic input is ineligible during startup scanning. Pending-only
+discard never cancels a message that already belongs to a Turn.
+Lease registration is fenced with shutdown admission after asynchronous binding
+reads. Revocation prevents subsequent admission; an already admitted Store
+transaction may settle during the overlapping control operation. Pause waits
+for pending-only discard under the same Session submission admission, so a
+concurrently committed claim is observed as claimed before Pause returns.
+
 Durable turn scheduler and write-behind ordinary plugin. The Kernel is the sole
 owner of live session state, Fact sequencing, cancellation classification,
 executor claims, 200 ms batching, flush retry, and startup interruption repair.
@@ -20,8 +42,11 @@ use the current healthy source generation. The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
-The independent Session projection read service retains an existing resident pin
-without acquiring a claim. A cold view may resolve the current generation without
+The independent Session projection read service reports `ProjectionCapacity`
+when concurrent capture admission is exhausted.
+Its change subscriptions use the shared observer pool and report `ObserverCapacity`.
+The read service retains an existing resident pin without acquiring a claim.
+A cold view may resolve the current generation without
 hydrating the Session or validating unrelated codecs; each projection unit owns
 its semantic decode. Capture uses the Store's simultaneous durable Fact/control
 watermarks and verifies the requested selected horizon before presenting state.
@@ -276,3 +301,12 @@ Startup recovery revalidates accumulated usage and any exhaustion marker
 against the immutable session budget before choosing a repair outcome. Repair
 uses only durable Header/Facts and does not build an Agent composition; the
 current generation is acquired later by cold resume before resident admission.
+
+`AgentKernel::observer_snapshot` exposes current, peak, and rejected admissions
+for turn, durable Session, tree, and projection observers, plus their shared
+total and retained observation payload bytes. Categories are diagnostics, not
+separate quotas. Admission still uses the one configured total limit. Concurrent
+fields are sampled independently; this snapshot is not an atomic ownership graph
+and cannot authorize new work. Completed teardown, including retained idle
+consumer handles, must return the current observer counts to the prior baseline.
+Observation payload bytes remain charged until their last delivered clone drops.

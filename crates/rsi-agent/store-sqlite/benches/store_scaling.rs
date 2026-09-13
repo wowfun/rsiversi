@@ -203,6 +203,7 @@ async fn append_session(
                 }
             } else {
                 SessionFactBody::ModelEvent {
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: turn.clone(),
                     effect_id: effect.clone(),
                     event: LanguageEvent::ContentDelta {

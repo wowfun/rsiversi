@@ -15,9 +15,9 @@ use thiserror::Error;
 mod command;
 mod contribution;
 pub use command::{
-    DraftCommandError, DraftCommandMutation, DraftCommandPreparation, DraftCommandResult,
-    MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedDraftCommand, SessionCommand, SessionCommandContext,
-    SessionCommandRegistration,
+    ContinuationCommand, DraftCommandError, DraftCommandMutation, DraftCommandPreparation,
+    DraftCommandResult, MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedDraftCommand, SessionCommand,
+    SessionCommandContext, SessionCommandRegistration,
 };
 mod domain;
 mod projection;
@@ -50,7 +50,7 @@ pub struct AgentCompositionPin {
     context_builder: Arc<dyn ModelContextBuilder>,
     domains: DomainCatalog,
     contributions: ContributionCatalog,
-    _owner: Arc<dyn AgentGenerationOwner>,
+    owner: Arc<dyn AgentGenerationOwner>,
 }
 
 impl AgentCompositionPin {
@@ -86,7 +86,7 @@ impl AgentCompositionPin {
             context_builder,
             domains,
             contributions,
-            _owner: owner,
+            owner,
         })
     }
 
@@ -101,6 +101,10 @@ impl AgentCompositionPin {
     /// catalog. This process-local identity is not a persisted artifact locator.
     pub fn source_digest(&self) -> &str {
         &self.source_digest
+    }
+    /// Compares exact linked-generation ownership, not merely identical source bytes.
+    pub fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
     }
 
     /// Returns the immutable Tool Runtime pinned by this generation.

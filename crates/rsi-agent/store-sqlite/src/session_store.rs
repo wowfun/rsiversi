@@ -1956,6 +1956,7 @@ impl StoreInner {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One SQL snapshot binds ancestry and all derived watermarks.
 pub(super) fn read_agent_subtree(
     connection: &Connection,
     root: &SessionId,
@@ -1978,7 +1979,8 @@ pub(super) fn read_agent_subtree(
            EXISTS(SELECT 1 FROM ready_messages WHERE session_id = subtree.session_id),
            CASE WHEN subtree.session_id = ?1 THEN
              EXISTS(SELECT 1 FROM subtree ancestry WHERE ancestry.session_id = node.parent_session_id)
-             ELSE 0 END
+             ELSE 0 END,
+           (SELECT last_settled_control_seq FROM sessions WHERE session_id = subtree.session_id)
          FROM subtree LEFT JOIN agent_nodes node ON node.session_id = subtree.session_id
          ORDER BY subtree.session_id",
         )
@@ -2003,6 +2005,10 @@ pub(super) fn read_agent_subtree(
             ));
         }
         let status = StoreAgentSessionStatus {
+            last_settled_control_seq: decode_u64(
+                "last settlement sequence",
+                row.get(9).map_err(sql_error)?,
+            )?,
             session_id: SessionId::new(
                 row.get::<_, Option<String>>(0)
                     .map_err(sql_error)?

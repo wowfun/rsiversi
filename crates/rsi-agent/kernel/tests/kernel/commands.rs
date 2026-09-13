@@ -127,6 +127,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    #[allow(clippy::too_many_lines)] // One fixture exposes ordinary, reserve, settle and projection registrations from the same generation.
     async fn start(store: Arc<dyn SessionStore>, blocked: bool) -> Self {
         let runtime = Runtime::default();
         let (_owner, context) = rsi_agent_testkit::activate_contribution_owner(&runtime.root())
@@ -158,7 +159,7 @@ impl Fixture {
         let projection = Arc::new(projection::ToggleView::new(
             domains.bind(&definition).unwrap(),
         ));
-        let commands = ContributionCatalog::freeze(vec![
+        let mut registrations = vec![
             (
                 ContributionRegistration::new(
                     id,
@@ -176,10 +177,36 @@ impl Fixture {
                     0,
                     ContributionKind::Projection(projection.clone()),
                 ),
-                position,
+                position.clone(),
             ),
-        ])
-        .unwrap();
+        ];
+        for (name, kind) in [
+            (
+                "reserve",
+                rsi_agent_composition_protocol::ContinuationCommand::Reserve,
+            ),
+            (
+                "settle",
+                rsi_agent_composition_protocol::ContinuationCommand::Settle,
+            ),
+        ] {
+            let id = ContributionId::new(format!("fixture.{name}")).unwrap();
+            let descriptor =
+                SessionCommandDescriptor::new(id.clone(), name, "Internal fixture command", false)
+                    .unwrap();
+            registrations.push((
+                ContributionRegistration::new(
+                    id,
+                    0,
+                    ContributionKind::Command(
+                        SessionCommandRegistration::new(descriptor, callback.clone())
+                            .continuation_only(kind),
+                    ),
+                ),
+                position.clone(),
+            ));
+        }
+        let commands = ContributionCatalog::freeze(registrations).unwrap();
         let pin = AgentCompositionPin::new(
             AgentPresetId::new("test-agent").unwrap(),
             "c".repeat(64),
@@ -672,3 +699,6 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
     assert_eq!(draft.command_receipt(receipt.request_id()), Some(receipt));
     fixture.stop().await;
 }
+
+#[path = "commands/continuation.rs"]
+mod continuation;

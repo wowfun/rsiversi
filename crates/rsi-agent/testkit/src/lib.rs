@@ -65,6 +65,7 @@ struct MemorySession {
     fact_prefix_digest: [u8; 32],
     checkpoint: Option<StoredContextCheckpoint>,
     controls: Vec<AgentControlRecord>,
+    last_settled_control_seq: u64,
     control_prefix_digest: [u8; 32],
     domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
     domain_requests: BTreeMap<rsi_agent_session_protocol::DomainRequestId, u64>,

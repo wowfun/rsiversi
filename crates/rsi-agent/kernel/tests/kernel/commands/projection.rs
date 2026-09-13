@@ -376,7 +376,7 @@ async fn pending_capture_capacity_and_drop_shutdown_release_callback_ownership()
             .kernel
             .projection_snapshot(&fixture.session_id)
             .await,
-        Err(TurnError::ObserverCapacity)
+        Err(TurnError::ProjectionCapacity)
     ));
     let cancelled = tasks.pop().unwrap();
     cancelled.abort();

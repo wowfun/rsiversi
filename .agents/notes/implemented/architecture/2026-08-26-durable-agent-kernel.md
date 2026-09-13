@@ -191,6 +191,14 @@ full scan of every referenced immutable object. Durable session meaning
 survives executor, AI, and Tool generation replacement because only the
 mechanical Store and Kernel own it.
 
+The Store maintains the last settlement sequence with the control tail in each
+atomic commit and captures both in the subtree snapshot. Kernel wake classification
+compares this scalar with its previous horizon. Replaying an interval merely to
+answer whether it contains a settlement adds work proportional to irrelevant
+history; an in-memory-only cache cannot classify a cold subtree consistently.
+The extra durable scalar therefore receives the same cold and offline validation
+as other indexes, including rollback and captured-horizon checks.
+
 Retained observation and validation ownership
 --------------------------------------------
 
@@ -209,8 +217,10 @@ SQLite cold validation uses a dedicated read-only connection and one admission
 lane, separate from the foreground reader and writer. The additional connection
 is the cost of allowing unrelated warm operations during an integrity scan.
 An admitted worker owns its Store lease and publishes its proof even if its
-waiter cancels; queued cancellation launches no work. The bounded LRU still
-revalidates working sets larger than its capacity. This isolates cold work but
+waiter cancels; queued cancellation launches no work. A bounded recent FIFO and reused LRU retain successful proofs; bounded ghost
+identities influence admission only after another successful validation. This
+keeps repeated archive scans from continually displacing a hot working set,
+while working sets larger than the proof capacity still require validation. This isolates cold work but
 does not reduce its history-dependent cost. Subtree operations retry within a
 new consistent snapshot on that lane, while writer commits validate missing
 proofs outside their transaction and recheck the complete final subtree.

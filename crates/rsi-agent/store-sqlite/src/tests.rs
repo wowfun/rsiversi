@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "tests/settlement.rs"]
+mod settlement;
+
 #[tokio::test]
 #[ignore = "report-only actual SQLite validation VM and full-scan work"]
 async fn online_validation_sql_work() {
@@ -21,57 +24,65 @@ async fn online_validation_sql_work() {
             );
         }
     }
-    for size in [257, 512] {
-        let root = tempfile::tempdir().unwrap();
-        let store = SqliteStore::open(root.path()).unwrap();
-        let mut sessions = Vec::new();
-        for index in 0..size {
-            sessions.push(seed_session(&store, &format!("scan-{index}")).await);
-        }
-        drop(store);
-        let store = SqliteStore::open(root.path()).unwrap();
-        for connection in [
-            &store.inner.connections.validation_reader,
-            &store.inner.connections.reader,
-        ] {
-            connection
-                .lock()
-                .unwrap()
-                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
-        }
-        for cycle in 0..3 {
+    for (facts, controls) in [(1, 0), (1000, 0), (1000, 1000)] {
+        for size in [256, 257, 512] {
+            let root = tempfile::tempdir().unwrap();
+            let store = SqliteStore::open(root.path()).unwrap();
+            let mut sessions = Vec::new();
+            for index in 0..size {
+                sessions
+                    .push(seed_history(&store, &format!("scan-{index}"), facts, controls).await);
+            }
+            drop(store);
+            let store = SqliteStore::open(root.path()).unwrap();
+            for connection in [
+                &store.inner.connections.validation_reader,
+                &store.inner.connections.reader,
+            ] {
+                connection
+                    .lock()
+                    .unwrap()
+                    .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+            }
+            for cycle in 0..3 {
+                VM.store(0, Ordering::Relaxed);
+                SCANS.store(0, Ordering::Relaxed);
+                store.inner.validation_queue_ns.store(0, Ordering::Relaxed);
+                store.inner.validation_work_ns.store(0, Ordering::Relaxed);
+                let previous_runs = store.inner.validation_runs.load(Ordering::Relaxed);
+                let start = std::time::Instant::now();
+                for id in &sessions {
+                    assert_eq!(store.read_facts(id, 0, 1).await.unwrap().facts.len(), 1);
+                }
+                eprintln!(
+                    "sqlite sessions={size} facts={facts} controls={controls} cycle={cycle} fact_page_calls={size} validation_runs={} vm_steps={} full_scan_steps={} validation_queue_ns={} validation_work_ns={} elapsed={:?}",
+                    store.inner.validation_runs.load(Ordering::Relaxed) - previous_runs,
+                    VM.load(Ordering::Relaxed),
+                    SCANS.load(Ordering::Relaxed),
+                    store.inner.validation_queue_ns.load(Ordering::Relaxed),
+                    store.inner.validation_work_ns.load(Ordering::Relaxed),
+                    start.elapsed()
+                );
+            }
             VM.store(0, Ordering::Relaxed);
             SCANS.store(0, Ordering::Relaxed);
-            let start = std::time::Instant::now();
-            for id in &sessions {
-                assert_eq!(store.read_facts(id, 0, 1).await.unwrap().facts.len(), 1);
+            let validated = store.inner.validation_runs.load(Ordering::Relaxed);
+            for _ in 0..100 {
+                store
+                    .read_facts(sessions.last().unwrap(), 0, 1)
+                    .await
+                    .unwrap();
             }
-            eprintln!(
-                "sqlite sessions={size} cycle={cycle} fact_page_calls={size} validation_runs={} vm_steps={} full_scan_steps={} elapsed={:?}",
+            assert_eq!(
                 store.inner.validation_runs.load(Ordering::Relaxed),
+                validated
+            );
+            eprintln!(
+                "sqlite sessions={size} warm_same_session_calls=100 vm_steps={} full_scan_steps={}",
                 VM.load(Ordering::Relaxed),
-                SCANS.load(Ordering::Relaxed),
-                start.elapsed()
+                SCANS.load(Ordering::Relaxed)
             );
         }
-        VM.store(0, Ordering::Relaxed);
-        SCANS.store(0, Ordering::Relaxed);
-        let validated = store.inner.validation_runs.load(Ordering::Relaxed);
-        for _ in 0..100 {
-            store
-                .read_facts(sessions.last().unwrap(), 0, 1)
-                .await
-                .unwrap();
-        }
-        assert_eq!(
-            store.inner.validation_runs.load(Ordering::Relaxed),
-            validated
-        );
-        eprintln!(
-            "sqlite sessions={size} warm_same_session_calls=100 vm_steps={} full_scan_steps={}",
-            VM.load(Ordering::Relaxed),
-            SCANS.load(Ordering::Relaxed)
-        );
     }
 }
 
@@ -279,7 +290,7 @@ fn prepared_store_charge_includes_inline_and_dynamic_config_state() {
 }
 
 #[test]
-fn validated_session_cache_has_exact_recency_eviction() {
+fn validation_cache_ghosts_are_admission_hints_not_proofs() {
     let first = SessionId::new("session-000").unwrap();
     let mut cache = ValidatedSessionCache::default();
     cache.insert(first.clone());
@@ -287,9 +298,27 @@ fn validated_session_cache_has_exact_recency_eviction() {
         cache.insert(SessionId::new(format!("session-{index:03}")).unwrap());
     }
 
+    let ghosts = cache.ghost.clone();
     assert!(!cache.touch(&first));
+    assert!(!cache.touch(&first));
+    assert_eq!(
+        cache.ghost, ghosts,
+        "miss checks cannot publish or promote proofs"
+    );
     assert!(cache.touch(&SessionId::new("session-001").unwrap()));
-    assert_eq!(cache.recency.len(), VALIDATED_SESSION_CACHE_CAPACITY);
+    assert_eq!(cache.len(), VALIDATED_SESSION_CACHE_CAPACITY);
+    cache.insert(first.clone());
+    assert_eq!(cache.reused.back(), Some(&first));
+    assert!(!cache.ghost.contains(&first));
+    for index in 0..1_024 {
+        cache.insert(SessionId::new(format!("archive-{index}")).unwrap());
+        assert!(
+            cache.touch(&first),
+            "archive scans must preserve the active reused proof"
+        );
+        assert_eq!(cache.len(), VALIDATED_SESSION_CACHE_CAPACITY);
+        assert!(cache.ghost.len() <= VALIDATED_SESSION_CACHE_CAPACITY);
+    }
 }
 
 #[test]
@@ -908,6 +937,7 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
             seq,
             seq,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: turn.clone(),
                 effect_id: EffectId::new("large-delta").unwrap(),
                 event: LanguageEvent::ContentDelta {
@@ -1050,15 +1080,7 @@ async fn metadata_catalog_larger_than_validation_cache_never_validates_history()
         }
     }
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 0);
-    assert!(
-        store
-            .inner
-            .validated_sessions
-            .lock()
-            .unwrap()
-            .recency
-            .is_empty()
-    );
+    assert_eq!(store.inner.validated_sessions.lock().unwrap().len(), 0);
 }
 
 fn pause_next_validation(
@@ -1176,8 +1198,12 @@ async fn cancelled_queued_validation_never_dispatches_a_worker() {
 }
 
 #[tokio::test]
-async fn operational_reads_over_257_and_512_sessions_revalidate_evicted_proofs() {
-    for count in [257, 512] {
+async fn operational_reads_reuse_proofs_under_bounded_scan_pressure() {
+    for (count, expected) in [
+        (256, [256, 0, 0, 0, 0]),
+        (257, [257, 193, 4, 4, 4]),
+        (512, [512, 448, 321, 448, 259]),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(root.path()).unwrap();
         let mut sessions = Vec::new();
@@ -1186,19 +1212,17 @@ async fn operational_reads_over_257_and_512_sessions_revalidate_evicted_proofs()
         }
         drop(store);
         let store = SqliteStore::open(root.path()).unwrap();
-        for cycle in 1..=2 {
+        for misses in expected {
+            let previous = store.inner.validation_runs.load(Ordering::Relaxed);
             for id in &sessions {
                 let page = store.read_facts(id, 0, 1).await.unwrap();
                 assert_eq!(page.facts.len(), 1);
             }
             assert_eq!(
                 store.inner.validation_runs.load(Ordering::Relaxed),
-                count * cycle
+                previous + misses
             );
-            assert_eq!(
-                store.inner.validated_sessions.lock().unwrap().recency.len(),
-                256
-            );
+            assert_eq!(store.inner.validated_sessions.lock().unwrap().len(), 256);
         }
     }
 }
@@ -1506,4 +1530,105 @@ async fn quiescence_checks_children_created_by_the_same_commit_without_caching_r
             .durable_seq,
         1
     );
+}
+
+async fn seed_history(
+    store: &SqliteStore,
+    name: &str,
+    fact_count: u64,
+    controls: u64,
+) -> SessionId {
+    let id = seed_session(store, name).await;
+    let mut fact_seq = 1;
+    while fact_seq < fact_count {
+        let end = (fact_seq + 500).min(fact_count);
+        let facts = (fact_seq + 1..=end)
+            .map(|seq| {
+                SessionFact::new(
+                    seq,
+                    seq,
+                    SessionFactBody::ModelEvent {
+                        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
+                        turn_id: TurnId::new("turn-1").unwrap(),
+                        effect_id: rsi_agent_session_protocol::EffectId::new("model").unwrap(),
+                        event: rsi_ai_protocol::LanguageEvent::ContentDelta {
+                            index: 0,
+                            delta: rsi_ai_protocol::ContentDelta::Text("delta".into()),
+                        },
+                    },
+                )
+                .unwrap()
+                .into()
+            })
+            .collect();
+        store
+            .append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: fact_seq,
+                header: None,
+                facts,
+            })
+            .await
+            .unwrap();
+        fact_seq = end;
+    }
+    for previous in (0..controls).step_by(500) {
+        let mut append = settlement::append(&id, previous);
+        append.expected_fact_seq = fact_count;
+        append.controls = (previous..previous + 500)
+            .step_by(2)
+            .flat_map(|seq| settlement::append(&id, seq).controls)
+            .collect();
+        store
+            .commit_agent(settlement::commit(vec![append]))
+            .await
+            .unwrap();
+    }
+    id
+}
+
+#[tokio::test]
+async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut hot = Vec::new();
+    let mut archive = Vec::new();
+    for index in 0..32 {
+        hot.push(seed_session(&store, &format!("hot-{index}")).await);
+    }
+    for index in 0..512 {
+        archive.push(seed_session(&store, &format!("archive-{index}")).await);
+    }
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    for id in &hot {
+        store.read_facts(id, 0, 1).await.unwrap();
+    }
+    let mut fact_seq = 1;
+    for cycle in 0..3 {
+        let mut hot_misses = 0;
+        for chunk in archive.chunks(16) {
+            for id in chunk {
+                store.read_facts(id, 0, 1).await.unwrap();
+            }
+            let before = store.inner.validation_runs.load(Ordering::Relaxed);
+            for id in &hot {
+                store.read_facts(id, 0, 1).await.unwrap();
+            }
+            hot_misses += store.inner.validation_runs.load(Ordering::Relaxed) - before;
+            store
+                .append(AppendBatch {
+                    session_id: hot[0].clone(),
+                    expected_seq: fact_seq,
+                    header: None,
+                    facts: vec![test_fact(fact_seq + 1).into()],
+                })
+                .await
+                .unwrap();
+            fact_seq += 1;
+        }
+        // Each hot identity validates once more when probation eviction promotes its ghost.
+        assert_eq!(hot_misses, if cycle == 0 { 32 } else { 0 }, "cycle {cycle}");
+        assert!(store.inner.validated_sessions.lock().unwrap().len() <= 256);
+    }
 }

@@ -109,9 +109,13 @@ by the Store while it reads or indexes the payload; mailbox validation and
 Kernel next-Step batching reuse that value instead of serializing the same
 validated message again. A descendant
 status snapshot reads one subtree's immutable membership, parent/path/task,
-control watermarks, and open-Turn, active-activation and waking-message flags
+control watermarks, the last settlement control sequence, and open-Turn,
+active-activation and waking-message flags
 in one Store snapshot; Agent waits use it as their race-free
-observation baseline. Activation guards check exact ownership before applying
+observation baseline. The settlement sequence is zero when absent and cannot
+exceed the captured control tail. Backends maintain it atomically with appends;
+the Kernel interprets an advancement inside its captured interval as completion.
+Activation guards check exact ownership before applying
 appends; quiescence guards check the resulting indexed state before committing.
 The Kernel chooses policy and the Store proves these atomic conditions. Guard failures have
 dedicated errors and are not encoded as synthetic Fact-sequence conflicts. This
@@ -121,9 +125,11 @@ the same write transaction, after all appends, the Store checks every strict
 descendant against all three busy indexes. This includes children introduced by
 that transaction. The root may itself be newly created and is excluded.
 Traversal rejects cycles and trees exceeding 256 nodes.
-An atomic append without a Header requires an existing Session. Its absence is
+An append without a Header requires an existing Session. Its absence is
 reported as `NotFound` before Fact or control cursor conflicts, identically in
 the production backend and the shared in-memory contract fixture.
+An active-activation lookup likewise returns `NotFound` for an absent Session;
+`None` denotes an existing Session with no active activation.
 
 The lineage index is derived from immutable Headers rather than trusting
 duplicated root labels in writes. A child root must equal its parent's derived

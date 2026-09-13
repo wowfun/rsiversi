@@ -129,7 +129,9 @@ impl AgentSessionDraft {
             .entries()
             .iter()
             .filter_map(|entry| match entry.kind() {
-                ContributionKind::Command(command) => Some(command.descriptor().clone()),
+                ContributionKind::Command(command) if !command.is_continuation_only() => {
+                    Some(command.descriptor().clone())
+                }
                 _ => None,
             })
             .collect()
@@ -161,7 +163,9 @@ impl AgentSessionDraft {
             .entries()
             .iter()
             .find_map(|entry| match entry.kind() {
-                ContributionKind::Command(command) if entry.id() == &invocation.command => {
+                ContributionKind::Command(command)
+                    if entry.id() == &invocation.command && !command.is_continuation_only() =>
+                {
                     Some(command.clone())
                 }
                 _ => None,
@@ -188,6 +192,8 @@ impl AgentSessionDraft {
                 identity: self.identity.clone(),
                 composition: self.composition.clone(),
                 context: SessionCommandContext {
+                    request_id: invocation.request_id.clone(),
+                    continuation_input: None,
                     header: Arc::new(self.header.clone()),
                     revision: self.revision(),
                     domains,

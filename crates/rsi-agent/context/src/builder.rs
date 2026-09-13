@@ -105,6 +105,8 @@ impl ContextPosition {
 /// Immutable opening inputs. Checkpoint bytes are borrowed only during `open`.
 #[derive(Debug)]
 pub struct ContextInit<'a> {
+    /// Full selected builder identity, including an outer composing implementation.
+    pub identity: &'a ContextBuilderIdentity,
     /// Validated immutable Session Header.
     pub header: SessionHeader,
     /// Exact retention and model-request limits.
@@ -145,6 +147,20 @@ pub trait ModelContextCursor: fmt::Debug + Send + 'static {
     fn ingest(&mut self, page: ContextPage<'_>) -> Result<()>;
     /// Builds a request using Tool definitions from the cursor's Agent pin.
     fn build(&self, tools: Vec<ToolDefinition>) -> Result<LanguageRequest>;
+    /// Plans internal compaction from exact cursor inputs; unsupported builders decline.
+    fn plan_compaction(
+        &self,
+        _model: &rsi_ai_protocol::ModelRef,
+        _profile: &rsi_ai_protocol::LanguageProfile,
+        _force: Option<rsi_agent_session_protocol::CompactionTrigger>,
+        _shrink: bool,
+    ) -> Result<Option<crate::PlannedCompaction>> {
+        Ok(None)
+    }
+    /// Reports whether the exact summary effect installed through its Finished event.
+    fn summary_installed(&self, _effect: &rsi_agent_session_protocol::EffectId) -> bool {
+        false
+    }
     /// Encodes a bounded payload only for an exact checkpointable Fact prefix.
     fn checkpoint(&self) -> Result<Arc<[u8]>>;
     /// Returns the current child Fact position.
@@ -195,6 +211,7 @@ impl ModelContextState {
             .fingerprint()
             .map_err(|error| invalid(&error.to_string()))?;
         let cursor = builder.open(ContextInit {
+            identity: &identity,
             header: header.clone(),
             limits,
             checkpoint: None,
@@ -216,6 +233,20 @@ impl ModelContextState {
     /// Builds the next bounded request using the same pin's Tools.
     pub fn build(&self, tools: Vec<ToolDefinition>) -> Result<LanguageRequest> {
         self.cursor.build(tools)
+    }
+    /// Plans a bounded no-Tool summary using the selected pure cursor.
+    pub fn plan_compaction(
+        &self,
+        model: &rsi_ai_protocol::ModelRef,
+        profile: &rsi_ai_protocol::LanguageProfile,
+        force: Option<rsi_agent_session_protocol::CompactionTrigger>,
+        shrink: bool,
+    ) -> Result<Option<crate::PlannedCompaction>> {
+        self.cursor.plan_compaction(model, profile, force, shrink)
+    }
+    /// Reports the sole installing Finished event's effect identity.
+    pub fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
+        self.cursor.summary_installed(effect)
     }
     /// Returns the selected cursor's exact child position.
     pub fn position(&self) -> ContextPosition {
@@ -316,6 +347,7 @@ impl ModelContextState {
             ));
         }
         let cursor = self.builder.open(ContextInit {
+            identity: &self.identity,
             header: self.header.clone(),
             limits: self.limits,
             checkpoint: Some(payload),

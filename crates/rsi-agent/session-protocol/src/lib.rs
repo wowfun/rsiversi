@@ -16,7 +16,14 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+mod compaction;
+mod continuation;
+pub use continuation::{ContinuationInput, ContinuationProvenance, ContinuationSource};
 mod contribution;
+pub use compaction::{
+    CompactionBuilder, CompactionPrior, CompactionSelection, CompactionSource, CompactionTrigger,
+    ContextCompactionPlan, MAXIMUM_COMPACTION_PLAN_BYTES, ModelEventPurpose, ModelPurpose,
+};
 pub use contribution::ToolRejection;
 mod command;
 pub use command::{
@@ -37,7 +44,7 @@ pub use projection::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 11;
+pub const SESSION_FORMAT_VERSION: u32 = 12;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -361,6 +368,8 @@ pub enum AgentMessageContent {
 pub enum AgentMessageSource {
     /// Direct application/user input.
     Human,
+    /// Kernel-authenticated automatic input; serialized provenance is not a live lease.
+    Continuation { source: ContinuationSource },
     /// Another Agent activation.
     Agent { source_session_id: SessionId },
     /// Child-settlement notification.
@@ -409,6 +418,13 @@ impl MessageDelivery {
         target: MessageTarget,
         bound_turn_id: Option<&TurnId>,
     ) -> Result<()> {
+        if matches!(message.source, AgentMessageSource::Continuation { .. })
+            && self != Self::NextTurn
+        {
+            return Err(SessionError::Invalid(
+                "continuation requires waking next-Turn delivery".into(),
+            ));
+        }
         match self {
             Self::NextTurn if target == MessageTarget::NextTurn && bound_turn_id.is_none() => {}
             Self::NextStep if target == MessageTarget::NextStep && bound_turn_id.is_none() => {}
@@ -458,6 +474,20 @@ pub struct AgentMessage {
 impl AgentMessage {
     /// Revalidates content, route, and byte bounds at admission.
     pub fn validate(&self) -> Result<()> {
+        if let AgentMessageSource::Continuation { source } = &self.source {
+            source.validate()?;
+            let [AgentMessageContent::Text { text }] = self.content.as_slice() else {
+                return Err(SessionError::Invalid(
+                    "continuation must contain one frozen text block".into(),
+                ));
+            };
+            source.validate_text(text)?;
+            if self.options != MessageOptions::default() {
+                return Err(SessionError::Invalid(
+                    "continuation input changed its frozen payload or options".into(),
+                ));
+            }
+        }
         let text_limit = if matches!(self.source, AgentMessageSource::Human) {
             MAXIMUM_TURN_TEXT_BYTES
         } else {
@@ -509,6 +539,10 @@ fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) 
 pub enum MessageDiscardReason {
     /// Caller cancelled the message before claim.
     Cancelled,
+    /// Ordinary waking input took priority over pending automatic input.
+    Superseded,
+    /// No matching live authorization or current domain revision remained.
+    ContinuationDisarmed,
 }
 
 /// Model-visible durable source of one entered input message.
@@ -518,6 +552,11 @@ pub enum MessageDiscardReason {
 pub enum InputMessageSource {
     /// Direct user/application input.
     Human { message_id: MessageId },
+    /// Automatic input admitted through a live continuation lease.
+    Continuation {
+        message_id: MessageId,
+        source: ContinuationSource,
+    },
     /// Input sent by another Agent session.
     Agent {
         message_id: MessageId,
@@ -550,6 +589,7 @@ pub enum InputMessageSource {
 impl InputMessageSource {
     fn validate(&self) -> Result<()> {
         match self {
+            Self::Continuation { source, .. } => source.validate(),
             Self::AgentInstructions { source, sha256, .. } => {
                 validate_safe_text("input source", source, MAXIMUM_WORKSPACE_PATH_BYTES, false)?;
                 validate_sha256("instruction digest", sha256)
@@ -1690,6 +1730,8 @@ pub enum SessionFactBody {
         effect_id: EffectId,
         /// Redacted provider preparation snapshot.
         snapshot: PreparedCallSnapshot,
+        /// Frozen interpretation and installation authority for this model effect.
+        purpose: ModelPurpose,
     },
     /// The prepared Language call was authorized to start after intent durability.
     ModelStarted {
@@ -1733,6 +1775,8 @@ pub enum SessionFactBody {
         effect_id: EffectId,
         /// Validated provider-neutral event.
         event: LanguageEvent,
+        /// Purpose kind authenticated against the exact model intent.
+        purpose: ModelEventPurpose,
     },
     /// One Tool call was pinned before execution.
     ToolIntent {
@@ -1849,11 +1893,9 @@ impl SessionFactBody {
                 limit,
                 ..
             } => validate_budget_exhaustion(*dimension, *consumed, *limit),
-            Self::ModelIntent { snapshot, .. } => validate_snapshot_capability(
-                snapshot,
-                AiCapability::Language,
-                "Agent model intent must target the Language capability",
-            ),
+            Self::ModelIntent {
+                snapshot, purpose, ..
+            } => purpose.validate_snapshot(snapshot),
             Self::ImageIntent { snapshot, .. } => validate_snapshot_capability(
                 snapshot,
                 AiCapability::Image,
@@ -2015,6 +2057,14 @@ fn validate_entered_message(
     content: &[AgentMessageContent],
 ) -> Result<()> {
     source.validate()?;
+    if let InputMessageSource::Continuation { source, .. } = source {
+        let [AgentMessageContent::Text { text }] = content else {
+            return Err(SessionError::Invalid(
+                "continuation input must remain one text block".into(),
+            ));
+        };
+        source.validate_text(text)?;
+    }
     if matches!(source, InputMessageSource::PluginContext { .. })
         && content
             .iter()

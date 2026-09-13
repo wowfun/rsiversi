@@ -21,6 +21,16 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 mod command;
+mod jobs;
+pub use jobs::{
+    MAXIMUM_TURN_JOBS_BYTES, MAXIMUM_TURN_JOBS_ITEMS, TurnJobStatusSource, TurnJobs,
+    TurnJobsContract, TurnJobsPage, TurnJobsRequest,
+};
+mod continuation;
+pub use continuation::{
+    ContinuationBinding, ContinuationIssuer, ContinuationLease, SessionContinuations,
+    SessionContinuationsContract, WeakContinuationLease,
+};
 mod projection;
 pub use projection::{SessionProjectionChanges, SessionProjections, SessionProjectionsContract};
 mod domain;
@@ -951,6 +961,16 @@ pub trait HumanWait: fmt::Debug + Send + 'static {
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Publishes an optional read-only Jobs source for this exact claim.
+    /// The Executor retains the strong owner; an unsupported provider exposes no view.
+    fn publish_job_status(
+        &self,
+        claim: &TurnClaim,
+        source: std::sync::Weak<dyn TurnJobStatusSource>,
+    ) -> Result<()> {
+        let _ = (claim, source);
+        Ok(())
+    }
     /// Returns the Kernel-owned read-only elapsed-budget watch for this exact claim.
     fn elapsed_budget(&self, claim: &TurnClaim) -> Result<Arc<dyn ElapsedBudget>>;
     /// Parks both execution permits and pauses elapsed time around a human interaction.
@@ -1280,6 +1300,9 @@ impl Drop for ExecutorLease {
 /// Closed Turn runtime failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TurnError {
+    /// The exact live continuation owner or guarded state is no longer available.
+    #[error("automatic continuation is disarmed")]
+    ContinuationDisarmed,
     /// An exact mailbox identity does not exist in its Session.
     #[error("Agent message `{message}` does not exist in Session `{session}`")]
     MessageNotFound {
@@ -1348,12 +1371,15 @@ pub enum TurnError {
         /// Exact request to query.
         request_id: String,
     },
-    /// The session already has its bounded number of live turns.
-    #[error("Agent session live-turn capacity is exhausted")]
+    /// A bounded Agent resource, including retained bytes or tree size, is exhausted.
+    #[error("Agent resource capacity is exhausted")]
     Capacity,
     /// Process-wide live-observer admission is exhausted.
     #[error("Agent active-observer capacity is exhausted")]
     ObserverCapacity,
+    /// Concurrent projection capture admission is exhausted.
+    #[error("Agent projection capture capacity is exhausted")]
+    ProjectionCapacity,
     /// The session's durable Agent preset cannot produce a healthy generation.
     #[error("Agent composition is unavailable: {0}")]
     Composition(String),

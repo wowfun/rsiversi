@@ -29,6 +29,10 @@ Reacquisition observes the Tool execution's cooperative cancellation: a
 cancelled wait may return `Cancelled` without admission, while no successful or
 model-visible error result may cross the parking boundary until admission is
 held again. Model arguments cannot forge or discover that authority.
+The same typed extension seam carries `ToolEvidenceBudget`, an optional-data
+allowance supplied by the orchestrator. It bounds encoded evidence rather than
+the mandatory result ledger; zero permits only the tool's omission marker.
+It is not a model argument or a Portable capability.
 
 The caller supplies one bounded invocation identity when preparing a call.
 Durable orchestrators use their own effect identity; the Tool layer does not

@@ -81,6 +81,9 @@ enum WaitResumeFault {
 struct FactReadRaceStore {
     inner: Arc<MemoryStore>,
     stale_domain_read: AtomicBool,
+    pause_domain_read: AtomicBool,
+    domain_read_entered: Notify,
+    release_domain_read: Notify,
     preparation_gate: Mutex<Option<Arc<mutations::GatedPreparation>>>,
     block_header_reads: AtomicBool,
     blocked_header_session: Mutex<Option<SessionId>>,
@@ -88,6 +91,8 @@ struct FactReadRaceStore {
     release_header_reads: Notify,
     pause_read: AtomicBool,
     read_attempts: AtomicUsize,
+    control_read_attempts: AtomicUsize,
+    count_control_reads_for: Mutex<Option<SessionId>>,
     read_captured: Notify,
     release_read: Notify,
     read_error: Mutex<Option<String>>,
@@ -147,6 +152,9 @@ impl FactReadRaceStore {
         Self {
             inner,
             stale_domain_read: AtomicBool::new(false),
+            pause_domain_read: AtomicBool::new(false),
+            domain_read_entered: Notify::new(),
+            release_domain_read: Notify::new(),
             preparation_gate: Mutex::new(None),
             block_header_reads: AtomicBool::new(false),
             blocked_header_session: Mutex::new(None),
@@ -154,6 +162,8 @@ impl FactReadRaceStore {
             release_header_reads: Notify::new(),
             pause_read: AtomicBool::new(false),
             read_attempts: AtomicUsize::new(0),
+            control_read_attempts: AtomicUsize::new(0),
+            count_control_reads_for: Mutex::new(None),
             read_captured: Notify::new(),
             release_read: Notify::new(),
             read_error: Mutex::new(None),
@@ -405,6 +415,10 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         horizon: Option<u64>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        if self.pause_domain_read.swap(false, Ordering::AcqRel) {
+            self.domain_read_entered.notify_one();
+            self.release_domain_read.notified().await;
+        }
         if self.stale_domain_read.load(Ordering::Acquire) {
             return self.inner.read_domain_states(session_id, Some(1)).await;
         }
@@ -646,6 +660,9 @@ impl SessionStore for FactReadRaceStore {
         after_seq: u64,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreControlPage> {
+        if self.count_control_reads_for.lock().unwrap().as_ref() == Some(session_id) {
+            self.control_read_attempts.fetch_add(1, Ordering::AcqRel);
+        }
         if let Some(page) = self.control_page_override.lock().unwrap().take() {
             return Ok(page);
         }
@@ -1272,6 +1289,7 @@ fn model_intent_fact(seq: u64, turn_id: &TurnId, effect_id: &EffectId) -> Sessio
         seq,
         seq,
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn_id.clone(),
             effect_id: effect_id.clone(),
             snapshot: snapshot(),
@@ -1297,6 +1315,7 @@ fn model_finished_fact(seq: u64, turn_id: &TurnId, effect_id: &EffectId) -> Sess
         seq,
         seq,
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn_id.clone(),
             effect_id: effect_id.clone(),
             event: LanguageEvent::Finished {
@@ -1424,6 +1443,8 @@ mod contributions;
 mod domains;
 #[path = "kernel/fork_and_scheduler.rs"]
 mod fork_and_scheduler;
+#[path = "kernel/jobs.rs"]
+mod jobs;
 #[path = "kernel/recovery_and_finalization.rs"]
 mod recovery_and_finalization;
 #[path = "kernel/settlement.rs"]

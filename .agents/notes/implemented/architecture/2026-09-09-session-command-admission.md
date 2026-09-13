@@ -65,8 +65,9 @@ invariant prevents rejoining a draft after a successful preset switch.
 
 ## Consequences
 
-Schema 16 and Header format 11 explicitly replace the previous formats. The
-canonical command envelope changes; old databases are preserved and rejected.
+The [session protocol](../../../../crates/rsi-agent/session-protocol/README.md)
+and [SQLite Store](../../../../crates/rsi-agent/store-sqlite/README.md) own the
+current format versions. Unsupported databases are preserved and rejected.
 Draft receipts remain process-local and end with publication or lease expiry;
 they do not become a second durable command log. Independent replay of an old
 Draft invocation against a durable Session fails its typed predecessor check.

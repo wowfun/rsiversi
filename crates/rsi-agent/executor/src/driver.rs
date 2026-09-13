@@ -2,20 +2,11 @@ use super::*;
 
 impl Driver {
     pub(super) async fn run_claim(&self, claim: TurnClaim, stop: &CancellationToken) {
-        let job_scope = match self.acquire_job_scope(&claim) {
-            Ok(scope) => Some(scope),
-            Err(message) => {
-                let _ignored = self
-                    .finish(
-                        &claim,
-                        None,
-                        failure_outcome("jobs.scope", bounded(&message)),
-                    )
-                    .await;
-                let _ignored = self.turns.release(&claim);
-                return;
-            }
+        let Some((job_scope, _job_status)) = self.prepare_jobs(&claim).await else {
+            let _ignored = self.turns.release(&claim);
+            return;
         };
+        let job_scope = Some(job_scope);
         let composition = match self.turns.composition(&claim) {
             Ok(composition) => composition,
             Err(error) => {
@@ -327,6 +318,12 @@ impl Driver {
                 )
                 .await?
             {
+                ModelAttempt::ContextLimit => {
+                    return Err(failed(
+                        "context.limit",
+                        "ordinary request exceeded context after recovery",
+                    ));
+                }
                 ModelAttempt::Retry => {
                     retry_attempt = retry_attempt.saturating_add(1);
                     continue;
@@ -663,25 +660,27 @@ impl Driver {
     }
 
     #[allow(clippy::too_many_arguments)] // One attempt binds the resident generation to its durable fold, model, retry ordinal, and cancellation fences.
-    pub(super) async fn run_model_attempt(
+    pub(super) async fn run_model_effect(
         &self,
         claim: &TurnClaim,
-        composition: &AgentCompositionPin,
+        request: rsi_ai_protocol::LanguageRequest,
+        purpose: rsi_agent_session_protocol::ModelPurpose,
         fold: &mut ModelContextState,
         model: &ModelRef,
         retry_attempt: u8,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
-        self.sync_fold(claim, fold).await?;
-        let request = fold
-            .build(composition.tools().definitions())
-            .map_err(|error| failed("context.projection", error.to_string()))?;
-        let prepared = self
-            .language
-            .prepare(model.clone(), request)
-            .await
-            .map_err(|error| ai_failure(&error))?;
+        let prepared = match self.language.prepare(model.clone(), request).await {
+            Ok(prepared) => prepared,
+            Err(error)
+                if error.kind() == ErrorKind::ContextLimit
+                    && error.dispatch_status() != DispatchStatus::Unknown =>
+            {
+                return Ok(ModelAttempt::ContextLimit);
+            }
+            Err(error) => return Err(ai_failure(&error)),
+        };
         let snapshot = prepared.snapshot().clone();
         let effect_id = next_effect_id().map_err(fatal)?;
         let intent = self
@@ -689,6 +688,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ModelIntent {
+                    purpose: purpose.clone(),
                     turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     snapshot: snapshot.clone(),
@@ -716,27 +716,54 @@ impl Driver {
                 if stop.is_cancelled() {
                     return Err(DriveFailure::Stopped);
                 }
-                self.record_model_failure(claim, fold, &effect_id, error.clone())
-                    .await?;
+                self.record_model_failure(
+                    claim,
+                    fold,
+                    &effect_id,
+                    purpose.event_purpose(),
+                    error.clone(),
+                )
+                .await?;
                 return self
                     .retry_or_fail(&snapshot, &error, retry_attempt, cancellation, stop)
                     .await;
             }
         };
-        self.consume_model_stream(
-            fold,
-            ModelStreamContext {
-                claim,
-                effect_id: &effect_id,
-                snapshot: &snapshot,
-                retry_attempt,
-                cancellation,
-                stop,
-                combined,
-            },
-            stream,
-        )
-        .await
+        let result = self
+            .consume_model_stream(
+                fold,
+                ModelStreamContext {
+                    purpose: purpose.event_purpose(),
+                    claim,
+                    effect_id: &effect_id,
+                    snapshot: &snapshot,
+                    retry_attempt,
+                    cancellation,
+                    stop,
+                    combined,
+                },
+                stream,
+            )
+            .await?;
+        if let rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) = purpose
+            && let ModelAttempt::Output(output) = &result
+        {
+            if stop.is_cancelled() {
+                return Err(DriveFailure::Stopped);
+            }
+            if cancellation.is_cancelled() || output.finish_reason == FinishReason::Cancelled {
+                return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
+            }
+            rsi_agent_context::validate_summary_output(&plan, output)
+                .map_err(|error| failed("context.compaction_failed", error.to_string()))?;
+            if !fold.summary_installed(&effect_id) {
+                return Err(failed(
+                    "context.compaction_failed",
+                    "summary did not install against its exact source view",
+                ));
+            }
+        }
+        Ok(result)
     }
 
     pub(super) async fn consume_model_stream(
@@ -746,6 +773,7 @@ impl Driver {
         mut stream: rsi_ai_protocol::LanguageStream,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
         let ModelStreamContext {
+            purpose,
             claim,
             effect_id,
             snapshot,
@@ -764,7 +792,7 @@ impl Driver {
                     if stop.is_cancelled() {
                         return Err(DriveFailure::Stopped);
                     }
-                    self.record_model_failure(claim, fold, effect_id, error.clone())
+                    self.record_model_failure(claim, fold, effect_id, purpose, error.clone())
                         .await?;
                     return self
                         .retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
@@ -790,6 +818,7 @@ impl Driver {
                     claim,
                     fold,
                     vec![SessionFactBody::ModelEvent {
+                        purpose,
                         turn_id: claim.turn_id().clone(),
                         effect_id: effect_id.clone(),
                         event,
@@ -824,6 +853,11 @@ impl Driver {
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
+        if error.kind() == ErrorKind::ContextLimit
+            && error.dispatch_status() != DispatchStatus::Unknown
+        {
+            return Ok(ModelAttempt::ContextLimit);
+        }
         if !should_retry(snapshot, error, retry_attempt) {
             return Err(ai_failure(error));
         }
@@ -1336,7 +1370,14 @@ impl Driver {
     ) -> std::result::Result<ToolResult, DriveFailure> {
         let combined = combine_cancellation(cancellation, stop);
         let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
-        let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default();
+        let budget = claim.header().settings().turn_budget();
+        let evidence_bytes =
+            budget.maximum_generated_record_bytes() / 8 / budget.maximum_tool_calls();
+        let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
+            .with(Arc::new(rsi_tools_protocol::ToolEvidenceBudget::new(
+                usize::try_from(evidence_bytes).unwrap_or(usize::MAX),
+            )))
+            .map_err(|error| fatal(error.to_string()))?;
         if let Ok(caller) = self.turns.agent_caller(claim) {
             extensions = extensions
                 .with(Arc::new(caller))
@@ -1515,6 +1556,7 @@ impl Driver {
         claim: &TurnClaim,
         fold: &mut ModelContextState,
         effect_id: &EffectId,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
         error: rsi_ai_protocol::AiError,
     ) -> std::result::Result<(), DriveFailure> {
         let facts = self
@@ -1522,6 +1564,7 @@ impl Driver {
                 claim,
                 fold,
                 vec![SessionFactBody::ModelEvent {
+                    purpose,
                     turn_id: claim.turn_id().clone(),
                     effect_id: effect_id.clone(),
                     event: LanguageEvent::Failed {

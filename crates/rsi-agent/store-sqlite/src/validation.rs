@@ -1239,6 +1239,7 @@ pub(super) fn validate_agent_indexes(
     let mut decoded = 0_u64;
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
+    let mut last_settled_control_seq = 0;
     let mut statement = connection
         .prepare(
             "SELECT length(CAST(control_json AS BLOB)),
@@ -1275,17 +1276,29 @@ pub(super) fn validate_agent_indexes(
             terminals += 1;
         }
         mailbox.apply(connection, header, &record)?;
+        if matches!(
+            record.body(),
+            AgentControlRecordBody::ActivationSettled { .. }
+        ) {
+            last_settled_control_seq = record.seq();
+        }
         ready.apply(selected.as_str(), &record)?;
         activation.apply(header, &record)?;
         domains.apply(connection, selected, &record)?;
     }
-    let indexed_terminals = connection
+    let (indexed_terminals, indexed_settlement) = connection
         .query_row(
-            "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL",
+            "SELECT (SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL),
+                last_settled_control_seq FROM sessions WHERE session_id = ?1",
             [selected.as_str()],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .map_err(sql_error)?;
+    if last_settled_control_seq != decode_u64("last settlement sequence", indexed_settlement)? {
+        return Err(StoreError::Corrupt(
+            "last settlement sequence differs from canonical controls".into(),
+        ));
+    }
     if terminals != decode_u64("terminal index count", indexed_terminals)? {
         return Err(StoreError::Corrupt(
             "terminal index has no unique canonical control marker".into(),

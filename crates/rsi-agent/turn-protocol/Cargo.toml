@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 async-trait.workspace = true
 futures-util.workspace = true
@@ -20,9 +21,6 @@ rsi-meta = { path = "../../rsi-meta/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 thiserror.workspace = true
 tokio-util.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

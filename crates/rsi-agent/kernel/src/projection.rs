@@ -41,7 +41,7 @@ impl SessionProjections for AgentKernel {
         &self,
         session_id: &SessionId,
     ) -> TurnResult<rsi_agent_turn_protocol::SessionProjectionChanges> {
-        let observer = ObserverLease::acquire(&self.inner)?;
+        let observer = ObserverLease::acquire(&self.inner, ObserverKind::Projection)?;
         let watch = self.inner.session_changes.session(session_id);
         let inner = Arc::downgrade(&self.inner);
         Ok(stream::unfold(
@@ -68,7 +68,7 @@ impl SessionProjections for AgentKernel {
             .projection_admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| TurnError::ObserverCapacity)?;
+            .map_err(|_| TurnError::ProjectionCapacity)?;
         let cancellation = self.inner.submission_admission.closed.child_token();
         let _guard = cancellation.clone().drop_guard();
         tokio::select! {

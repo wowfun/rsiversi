@@ -117,6 +117,7 @@ async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() 
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: first.turn_id.clone(),
                 effect_id: effect.clone(),
                 snapshot: snapshot(),
@@ -146,6 +147,7 @@ async fn failed_cancellation_admission_can_be_retried_after_capacity_recovers() 
             .publish(
                 &claim,
                 vec![SessionFactBody::ModelEvent {
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: first.turn_id.clone(),
                     effect_id: effect.clone(),
                     event: LanguageEvent::ContentDelta {
@@ -204,6 +206,7 @@ async fn shutdown_timeout_retains_the_store_until_background_drain_finishes() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id,
                 effect_id: EffectId::new("shutdown-pending").unwrap(),
                 snapshot: snapshot(),
@@ -302,6 +305,7 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect_id.clone(),
                 snapshot: snapshot(),
@@ -547,6 +551,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
     )
     .unwrap();
     let intent = SessionFactBody::ModelIntent {
+        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: turn_id.clone(),
         effect_id: effect_id.clone(),
         snapshot: snapshot(),
@@ -556,6 +561,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
         effect_id: effect_id.clone(),
     };
     let body = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: turn_id.clone(),
         effect_id: effect_id.clone(),
         event: LanguageEvent::ContentDelta {
@@ -564,6 +570,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
         },
     };
     let second_body = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: turn_id.clone(),
         effect_id,
         event: LanguageEvent::ContentDelta {
@@ -674,6 +681,7 @@ async fn process_capacity_flush_required_preserves_bodies_and_turn_control_state
 async fn publication_larger_than_an_empty_process_budget_is_invalid() {
     let turn_id = TurnId::new("turn-oversized-publication").unwrap();
     let intent = SessionFactBody::ModelIntent {
+        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: turn_id.clone(),
         effect_id: EffectId::new("effect-oversized-publication").unwrap(),
         snapshot: snapshot(),
@@ -753,6 +761,7 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id.clone(),
                 effect_id: effect_id.clone(),
                 snapshot: snapshot(),
@@ -769,6 +778,7 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
         effect_id: effect_id.clone(),
     };
     let first_delta = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: submitted.turn_id.clone(),
         effect_id: effect_id.clone(),
         event: LanguageEvent::ContentDelta {
@@ -777,6 +787,7 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
         },
     };
     let second_delta_base = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: submitted.turn_id.clone(),
         effect_id: effect_id.clone(),
         event: LanguageEvent::ContentDelta {
@@ -800,6 +811,7 @@ async fn cancel_reports_pending_capacity_separately_from_durable_flush_failure()
         .expect("maximum deltas leave room for the second event");
     assert!(second_text_bytes <= MAX_LANGUAGE_OUTPUT_BYTES);
     let second_delta = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: submitted.turn_id.clone(),
         effect_id,
         event: LanguageEvent::ContentDelta {
@@ -838,11 +850,13 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
     let first_turn = TurnId::new("turn-process-pressure-a").unwrap();
     let second_turn = TurnId::new("turn-process-pressure-b").unwrap();
     let first_body = SessionFactBody::ModelIntent {
+        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: first_turn.clone(),
         effect_id: EffectId::new("effect-process-pressure-a").unwrap(),
         snapshot: snapshot(),
     };
     let second_body = SessionFactBody::ModelIntent {
+        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: second_turn.clone(),
         effect_id: EffectId::new("effect-process-pressure-b").unwrap(),
         snapshot: snapshot(),
@@ -976,6 +990,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
     let target_effect = EffectId::new("effect-process-failure-a").unwrap();
     let blocker_effect = EffectId::new("effect-process-failure-b").unwrap();
     let target_first = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: target_turn.clone(),
         effect_id: target_effect.clone(),
         event: LanguageEvent::ContentDelta {
@@ -984,6 +999,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
         },
     };
     let target_second = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: target_turn.clone(),
         effect_id: target_effect.clone(),
         event: LanguageEvent::ContentDelta {
@@ -992,6 +1008,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
         },
     };
     let blocker_first = SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: blocker_turn.clone(),
         effect_id: blocker_effect.clone(),
         event: LanguageEvent::ContentDelta {
@@ -1060,6 +1077,7 @@ async fn cross_session_process_pressure_observes_own_permanent_flush_failure() {
             .publish(
                 claim,
                 vec![SessionFactBody::ModelIntent {
+                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                     turn_id: turn_id.clone(),
                     effect_id: effect_id.clone(),
                     snapshot: snapshot(),
@@ -1187,6 +1205,7 @@ async fn observation_reports_durability_that_advanced_while_unpolled() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: submitted.turn_id,
                 effect_id: EffectId::new("effect-observed").unwrap(),
                 snapshot: snapshot(),
@@ -1862,6 +1881,7 @@ async fn retained_history(store: &MemoryStore, name: &str) -> usize {
             require_approval: false,
         },
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: EffectId::new("retained-effect").unwrap(),
             event: rsi_ai_protocol::LanguageEvent::ContentDelta {
@@ -2179,6 +2199,7 @@ async fn largest_legal_fact_progresses_with_minimum_observation_and_read_budgets
             2,
             2,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: turn.clone(),
                 effect_id: EffectId::new("maximum-effect").unwrap(),
                 event: rsi_ai_protocol::LanguageEvent::ContentDelta {
@@ -2442,6 +2463,17 @@ async fn tree_watches_share_observer_capacity_and_release_it_on_drop() {
             .await,
         Err(TurnError::ObserverCapacity)
     ));
+    let snapshot = kernel.observer_snapshot();
+    assert_eq!(snapshot.total.current, 1);
+    assert_eq!(snapshot.tree.current, 1);
+    assert_eq!(snapshot.tree.peak, 1);
+    assert_eq!(snapshot.total.rejected, 2);
+    assert_eq!(snapshot.tree.rejected, 1);
+    assert_eq!(snapshot.session.rejected, 1);
     drop(watch);
     assert!(kernel.watch_tree_membership(&id).is_ok());
+    let snapshot = kernel.observer_snapshot();
+    assert_eq!(snapshot.total.current, 0);
+    assert_eq!(snapshot.tree.current, 0);
+    assert_eq!(snapshot.total.peak, 1);
 }

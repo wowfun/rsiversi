@@ -99,6 +99,8 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
             durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
             fact_prefix_sha256 TEXT NOT NULL,
             control_seq INTEGER NOT NULL CHECK (control_seq >= 0),
+            last_settled_control_seq INTEGER NOT NULL DEFAULT 0
+                CHECK (last_settled_control_seq >= 0 AND last_settled_control_seq <= control_seq),
             control_prefix_sha256 TEXT NOT NULL
          ) STRICT",
     ),
@@ -181,7 +183,7 @@ const EXPECTED_TABLES: [(&str, &str); 13] = [
             bound_turn_id TEXT,
             accepted_timestamp_ms INTEGER NOT NULL CHECK (accepted_timestamp_ms > 0),
             root_session_id TEXT NOT NULL,
-            message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion')),
+            message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation')),
             message_json TEXT NOT NULL,
             target TEXT NOT NULL CHECK (target IN ('next_turn', 'next_step')),
             wake_required INTEGER NOT NULL CHECK (wake_required IN (0, 1)),
@@ -309,6 +311,10 @@ struct StoreInner {
     #[cfg(test)]
     validation_runs: Arc<AtomicU64>,
     #[cfg(test)]
+    validation_queue_ns: AtomicU64,
+    #[cfg(test)]
+    validation_work_ns: AtomicU64,
+    #[cfg(test)]
     fact_materializations: Arc<AtomicU64>,
     #[cfg(test)]
     control_decodes: AtomicU64,
@@ -335,34 +341,60 @@ struct DatabaseConnections {
 
 #[derive(Debug, Default)]
 struct ValidatedSessionCache {
-    recency: VecDeque<SessionId>,
+    recent: VecDeque<SessionId>,
+    reused: VecDeque<SessionId>,
+    ghost: VecDeque<SessionId>,
 }
 
 impl ValidatedSessionCache {
+    fn len(&self) -> usize {
+        self.recent.len() + self.reused.len()
+    }
+
     fn touch(&mut self, session_id: &SessionId) -> bool {
-        let Some(index) = self
-            .recency
+        if let Some(index) = self
+            .reused
             .iter()
             .position(|candidate| candidate == session_id)
-        else {
-            return false;
-        };
-        let session_id = self
-            .recency
-            .remove(index)
-            .expect("located validated session is present");
-        self.recency.push_back(session_id);
-        true
+        {
+            let id = self.reused.remove(index).expect("located reused proof");
+            self.reused.push_back(id);
+            true
+        } else {
+            self.recent.contains(session_id)
+        }
     }
 
     fn insert(&mut self, session_id: SessionId) {
         if self.touch(&session_id) {
             return;
         }
-        if self.recency.len() == VALIDATED_SESSION_CACHE_CAPACITY {
-            self.recency.pop_front();
+        let returning = self
+            .ghost
+            .iter()
+            .position(|candidate| candidate == &session_id);
+        if let Some(index) = returning {
+            self.ghost.remove(index);
         }
-        self.recency.push_back(session_id);
+        if self.len() == VALIDATED_SESSION_CACHE_CAPACITY {
+            if self.recent.len() > VALIDATED_SESSION_CACHE_CAPACITY / 4 || self.reused.is_empty() {
+                let evicted = self
+                    .recent
+                    .pop_front()
+                    .expect("full cache has recent proofs");
+                if self.ghost.len() == VALIDATED_SESSION_CACHE_CAPACITY {
+                    self.ghost.pop_front();
+                }
+                self.ghost.push_back(evicted);
+            } else {
+                self.reused.pop_front();
+            }
+        }
+        if returning.is_some() {
+            self.reused.push_back(session_id);
+        } else {
+            self.recent.push_back(session_id);
+        }
     }
 }
 
@@ -452,6 +484,10 @@ impl SqliteStore {
                 validation_admission: Arc::new(Semaphore::new(1)),
                 #[cfg(test)]
                 validation_runs: Arc::new(AtomicU64::new(0)),
+                #[cfg(test)]
+                validation_queue_ns: AtomicU64::new(0),
+                #[cfg(test)]
+                validation_work_ns: AtomicU64::new(0),
                 #[cfg(test)]
                 fact_materializations: Arc::new(AtomicU64::new(0)),
                 #[cfg(test)]
@@ -595,6 +631,8 @@ impl SqliteStore {
         if self.touch_validated_session(session_id) {
             return Ok(());
         }
+        #[cfg(test)]
+        let queued = std::time::Instant::now();
         let permit = Arc::clone(&self.inner.validation_admission)
             .acquire_owned()
             .await
@@ -606,13 +644,26 @@ impl SqliteStore {
         let owner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            #[cfg(test)]
+            owner.validation_queue_ns.fetch_add(
+                u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
             let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
                 StoreError::Io("SQLite validation connection mutex was poisoned".into())
             })?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            owner.validate_selected(&transaction, &candidate)?;
+            #[cfg(test)]
+            let started = std::time::Instant::now();
+            let validated = owner.validate_selected(&transaction, &candidate);
+            #[cfg(test)]
+            owner.validation_work_ns.fetch_add(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            validated?;
             transaction.commit().map_err(sql_error)?;
             if let Ok(mut cache) = owner.validated_sessions.lock() {
                 cache.insert(candidate);

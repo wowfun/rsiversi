@@ -122,7 +122,8 @@ impl Driver {
         if !proposals.is_empty() {
             let request_id =
                 DomainRequestId::new(next_effect_id().map_err(fatal)?.as_str()).map_err(fatal)?;
-            self.turns
+            let result = self
+                .turns
                 .commit_domains(
                     claim,
                     rsi_agent_turn_protocol::DomainMutation {
@@ -131,8 +132,14 @@ impl Driver {
                         facts,
                     },
                 )
-                .await
-                .map_err(turn_failure)?;
+                .await;
+            match result {
+                Err(TurnError::DomainRevisionConflict { .. })
+                    if stage == ContributionStage::AfterTools => {}
+                result => {
+                    result.map_err(turn_failure)?;
+                }
+            }
         } else if !facts.is_empty() {
             let entered = self.publish_apply(claim, fold, facts).await?;
             self.flush_last(claim, &entered).await?;

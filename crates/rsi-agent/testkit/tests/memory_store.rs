@@ -47,6 +47,7 @@ fn model_delta(seq: u64, turn_id: &TurnId, text: String) -> SessionFact {
         seq,
         seq,
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: turn_id.clone(),
             effect_id: EffectId::new("effect").unwrap(),
             event: LanguageEvent::ContentDelta {

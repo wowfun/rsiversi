@@ -199,7 +199,8 @@ pub(super) fn apply_atomic_sqlite_append(
         .execute(
             "UPDATE sessions
              SET durable_seq = ?1, fact_prefix_sha256 = ?2,
-                 control_seq = ?3, control_prefix_sha256 = ?4
+                 control_seq = ?3, control_prefix_sha256 = ?4,
+                 last_settled_control_seq = COALESCE(?8, last_settled_control_seq)
              WHERE session_id = ?5 AND durable_seq = ?6 AND control_seq = ?7",
             params![
                 sqlite_u64("durable sequence", durable_fact_seq)?,
@@ -209,6 +210,16 @@ pub(super) fn apply_atomic_sqlite_append(
                 append.session_id.as_str(),
                 sqlite_u64("expected sequence", append.expected_fact_seq)?,
                 sqlite_u64("expected control sequence", append.expected_control_seq)?,
+                append
+                    .controls
+                    .iter()
+                    .rev()
+                    .find(|record| matches!(
+                        record.body(),
+                        AgentControlRecordBody::ActivationSettled { .. }
+                    ))
+                    .map(|record| sqlite_u64("settlement control sequence", record.seq()))
+                    .transpose()?,
             ],
         )
         .map_err(sql_error)?;
@@ -807,6 +818,7 @@ pub(super) const fn message_delivery_name(
 
 pub(super) const fn message_source_name(source: &AgentMessageSource) -> &'static str {
     match source {
+        AgentMessageSource::Continuation { .. } => "continuation",
         AgentMessageSource::Human => "human",
         AgentMessageSource::Agent { .. } => "agent",
         AgentMessageSource::Completion { .. } => "completion",

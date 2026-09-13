@@ -32,6 +32,21 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(terminal.body().turn_id(), &turn_id);
     assert_missing_session_atomic_append_is_not_found(store).await;
     assert!(matches!(
+        store.active_activation(&session_id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        store
+            .append(AppendBatch {
+                session_id: session_id.clone(),
+                expected_seq: 1,
+                header: None,
+                facts: vec![Arc::new(event.clone())],
+            })
+            .await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(matches!(
         store.validate_session(&session_id).await,
         Err(StoreError::NotFound(_))
     ));
@@ -59,6 +74,15 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(inspected.header, header);
     assert_eq!(inspected.durable_fact_seq, 1);
     assert_eq!(inspected.durable_control_seq, 0);
+    assert_eq!(
+        store
+            .read_agent_subtree_snapshot(&session_id)
+            .await
+            .unwrap()
+            .session
+            .last_settled_control_seq,
+        0
+    );
     assert_eq!(inspected.active_turn_id.as_ref(), Some(&turn_id));
     assert!(inspected.pending.is_empty());
     assert!(matches!(
@@ -580,6 +604,15 @@ pub async fn assert_mechanical_store_contract(
         })
         .await
         .expect("claim the ready Agent message");
+    assert_eq!(
+        store
+            .read_agent_subtree_snapshot(&session_id)
+            .await
+            .unwrap()
+            .session
+            .last_settled_control_seq,
+        0
+    );
     assert!(matches!(
         store
             .commit_agent(AtomicAgentCommit {
@@ -640,6 +673,12 @@ pub async fn assert_mechanical_store_contract(
         })
         .await
         .expect("resume the parked wait before settling its Activation");
+    let settled = store
+        .read_agent_subtree_snapshot(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(settled.session.durable_control_seq, 10);
+    assert_eq!(settled.session.last_settled_control_seq, 10);
     assert!(
         store
             .list_ready_messages(&session_id, None, 8)
@@ -813,6 +852,7 @@ pub async fn assert_mechanical_store_contract(
         .await
         .unwrap();
     assert!(before_new_child.descendants.is_empty());
+    assert_eq!(before_new_child.session.last_settled_control_seq, 0);
     let grandchild_id = SessionId::new("shared-contract-grandchild").unwrap();
     let grandchild_header = first_child_header
         .forked_child(
@@ -1249,6 +1289,15 @@ pub async fn assert_mechanical_store_contract(
         })
         .await
         .expect("fill every parent mailbox slot not reserved for child completion");
+    let later = store
+        .read_agent_subtree_snapshot(&session_id)
+        .await
+        .unwrap();
+    assert!(later.session.durable_control_seq > 10);
+    assert_eq!(
+        later.session.last_settled_control_seq, 10,
+        "a later non-settlement commit must preserve the settlement watermark"
+    );
     let reserved_full_control_seq =
         10 + u64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1).unwrap();
     assert!(matches!(

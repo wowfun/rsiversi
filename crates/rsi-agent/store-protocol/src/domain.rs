@@ -93,7 +93,8 @@ pub fn domain_heads_after(
 ) -> Result<Vec<StoreDomainHead>> {
     validate_domain_heads(heads)?;
     let baseline = matches!(commit.source(), DomainMutationSource::Baseline);
-    if let DomainMutationSource::Command { invocation } = commit.source()
+    if let DomainMutationSource::Command { invocation }
+    | DomainMutationSource::Continuation { invocation, .. } = commit.source()
         && invocation.expected_revision
             != (rsi_agent_session_protocol::CommandRevision::Durable {
                 control_seq: control_seq.saturating_sub(1),

@@ -188,11 +188,14 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult
 
 pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     match body {
-        SessionFactBody::ModelIntent { effect_id, .. } => {
+        SessionFactBody::ModelIntent {
+            effect_id, purpose, ..
+        } => {
             ensure_no_active_effect(turn)?;
             turn.effects.insert(
                 effect_id.clone(),
                 ActiveEffect::Model {
+                    purpose: purpose.event_purpose(),
                     effect_id: effect_id.clone(),
                     started: false,
                 },
@@ -202,17 +205,22 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
             Some(ActiveEffect::Model {
                 effect_id: current,
                 started,
+                ..
             }) if current == effect_id && !*started => *started = true,
             _ => return Err(TurnError::Invalid("model start has no exact intent".into())),
         },
         SessionFactBody::ModelEvent {
-            effect_id, event, ..
+            effect_id,
+            event,
+            purpose,
+            ..
         } => {
             match turn.effects.get(effect_id) {
                 Some(ActiveEffect::Model {
                     effect_id: current,
                     started: true,
-                }) if current == effect_id => {}
+                    purpose: expected,
+                }) if current == effect_id && expected == purpose => {}
                 _ => return Err(TurnError::Invalid("model event has no exact start".into())),
             }
             if matches!(

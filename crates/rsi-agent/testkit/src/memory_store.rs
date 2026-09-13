@@ -54,6 +54,9 @@ impl SessionStore for MemoryStore {
                     .seq(),
             })
         } else {
+            if batch.header.is_none() {
+                return Err(StoreError::NotFound(batch.session_id.to_string()));
+            }
             if batch.expected_seq != 0 {
                 return Err(StoreError::Conflict {
                     expected: batch.expected_seq,
@@ -93,6 +96,7 @@ impl SessionStore for MemoryStore {
                     fact_prefix_digest,
                     checkpoint: None,
                     controls: Vec::new(),
+                    last_settled_control_seq: 0,
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
                     domain_versions: BTreeMap::new(),
                     domain_requests: BTreeMap::new(),
@@ -1056,13 +1060,14 @@ impl SessionStore for MemoryStore {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<StoreActiveActivation>> {
-        Ok(self
+        let state = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active_activations
-            .get(session_id)
-            .cloned())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.sessions.contains_key(session_id) {
+            return Err(StoreError::NotFound(session_id.to_string()));
+        }
+        Ok(state.active_activations.get(session_id).cloned())
     }
 
     async fn completion_reservation_count(&self, parent_session_id: &SessionId) -> Result<usize> {
@@ -1364,6 +1369,7 @@ fn apply_atomic_memory_append(
                 fact_prefix_digest: fact_digest,
                 checkpoint: None,
                 controls: append.controls.clone(),
+                last_settled_control_seq: 0,
                 control_prefix_digest: control_digest,
                 domain_versions: BTreeMap::new(),
                 domain_requests: BTreeMap::new(),
@@ -1384,6 +1390,14 @@ fn apply_atomic_memory_append(
         .get_mut(&session_id)
         .expect("atomic append installed or updated its session");
     apply_domain_updates(session, minimum_entered_fact_seq, &append.controls)?;
+    if let Some(record) = append.controls.iter().rev().find(|record| {
+        matches!(
+            record.body(),
+            AgentControlRecordBody::ActivationSettled { .. }
+        )
+    }) {
+        session.last_settled_control_seq = record.seq();
+    }
     if let Some(record) = append.controls.last()
         && let AgentControlRecordBody::TurnBoundaryRecorded {
             turn_id,
@@ -2042,6 +2056,7 @@ fn memory_agent_subtree(
             .get(id)
             .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         Ok(StoreAgentSessionStatus {
+            last_settled_control_seq: session.last_settled_control_seq,
             session_id: id.clone(),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             has_open_turn: session

@@ -5,6 +5,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod builder;
+mod compaction;
+pub use compaction::{PlannedCompaction, validate_summary_output};
 mod default_provider;
 
 pub use builder::{
@@ -41,9 +43,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 5;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v5\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v5\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 7;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v7\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v7\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -98,6 +100,7 @@ pub struct ModelContext {
 #[derive(Debug)]
 pub struct ContextFold {
     header: SessionHeader,
+    semantic: Option<compaction::SemanticState>,
     system_message: Option<Message>,
     system_message_bytes: usize,
     through_seq: u64,
@@ -124,13 +127,16 @@ struct ProjectedTurn {
 
 #[derive(Debug)]
 struct ActiveAssembler {
+    purpose: rsi_agent_session_protocol::ModelPurpose,
+    eligible_summary: bool,
+    model: rsi_ai_protocol::ModelRef,
     turn_id: TurnId,
     assembler: LanguageAssembler,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContextCheckpointPayloadV4 {
+struct ContextCheckpointPayload {
     version: u32,
     header_fingerprint: String,
     through_seq: u64,
@@ -138,6 +144,7 @@ struct ContextCheckpointPayloadV4 {
     omitted_turns: usize,
     retention_limits: ContextLimits,
     turns: Vec<CheckpointTurn>,
+    semantic: Option<compaction::SemanticState>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,7 +157,7 @@ struct CheckpointTurn {
 
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ContextCheckpointPayloadRefV4<'a> {
+struct ContextCheckpointPayloadRef<'a> {
     version: u32,
     header_fingerprint: &'a str,
     through_seq: u64,
@@ -158,6 +165,7 @@ struct ContextCheckpointPayloadRefV4<'a> {
     omitted_turns: usize,
     retention_limits: ContextLimits,
     turns: Vec<CheckpointTurnRef<'a>>,
+    semantic: Option<&'a compaction::SemanticState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +200,7 @@ impl ContextFold {
             .map_or(0, |origin| origin.resolved_after_seq);
         Ok(Self {
             header,
+            semantic: None,
             system_message,
             system_message_bytes,
             through_seq: 0,
@@ -240,7 +249,10 @@ impl ContextFold {
         if self.through_seq == 0
             || !self.checkpointable_prefix
             || !self.assemblers.is_empty()
-            || self.turns.iter().any(|turn| turn.messages.is_empty())
+            || self
+                .turns
+                .iter()
+                .any(|turn| turn.messages.is_empty() && !turn.terminal)
         {
             return Err(ContextError::Invalid(
                 "checkpoint requires a nonempty exact prefix without an active assembler or empty turn"
@@ -252,8 +264,9 @@ impl ContextFold {
             .fingerprint()
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
         let fact_prefix_sha256 = self.fact_prefix_sha256();
-        let payload = ContextCheckpointPayloadRefV4 {
+        let payload = ContextCheckpointPayloadRef {
             version: CONTEXT_CHECKPOINT_VERSION,
+            semantic: self.semantic.as_ref(),
             header_fingerprint: &header_fingerprint,
             through_seq: self.through_seq,
             fact_prefix_sha256: &fact_prefix_sha256,
@@ -321,7 +334,7 @@ impl ContextFold {
                 "checkpoint binding does not match its retained projection".into(),
             ));
         }
-        let checkpoint: ContextCheckpointPayloadV4 = serde_json::from_slice(payload_bytes)
+        let checkpoint: ContextCheckpointPayload = serde_json::from_slice(payload_bytes)
             .map_err(|error| ContextError::Invalid(format!("invalid checkpoint: {error}")))?;
         let fact_prefix_digest = decode_sha256(
             "checkpoint Fact-prefix digest",
@@ -340,6 +353,7 @@ impl ContextFold {
             ));
         }
         let mut fold = Self::with_limits(header, limits)?;
+        fold.semantic = checkpoint.semantic;
         fold.through_seq = checkpoint.through_seq;
         fold.fact_prefix_digest = fact_prefix_digest;
         fold.checkpointable_prefix = true;
@@ -359,7 +373,9 @@ impl ContextFold {
 
     fn restore_checkpoint_turns(&mut self, turns: Vec<CheckpointTurn>) -> Result<()> {
         for turn in turns {
-            if self.turn_index.contains_key(&turn.id) || turn.messages.is_empty() {
+            if self.turn_index.contains_key(&turn.id)
+                || (turn.messages.is_empty() && !turn.terminal)
+            {
                 return Err(ContextError::Invalid(
                     "checkpoint contains duplicate, empty, or misaligned turns".into(),
                 ));
@@ -419,7 +435,8 @@ impl ContextFold {
             fact.validate()
                 .map_err(|error| ContextError::Invalid(error.to_string()))?;
             let next_digest = advance_fact_prefix(self.fact_prefix_digest, fact)?;
-            self.apply_body(fact.body())?;
+            self.apply_body(fact.body(), fact.seq())?;
+            self.record_semantic_fact(&self.header.session_id().clone(), fact)?;
             self.through_seq = fact.seq();
             self.fact_prefix_digest = next_digest;
             self.compact_retained()?;
@@ -444,11 +461,12 @@ impl ContextFold {
                 "fork seed cannot follow child session Facts".into(),
             ));
         }
-        let terminal_seq = self
+        let origin = self
             .header
             .fork_origin()
-            .ok_or_else(|| ContextError::Invalid("fork seed requires fork lineage".into()))?
-            .resolved_terminal_seq;
+            .ok_or_else(|| ContextError::Invalid("fork seed requires fork lineage".into()))?;
+        let terminal_seq = origin.resolved_terminal_seq;
+        let parent_session = origin.parent_session_id.clone();
         let mut expected = self
             .seed_through_seq
             .checked_add(1)
@@ -463,7 +481,8 @@ impl ContextFold {
             }
             fact.validate()
                 .map_err(|error| ContextError::Invalid(error.to_string()))?;
-            self.apply_body(fact.body())?;
+            self.apply_body(fact.body(), fact.seq())?;
+            self.record_semantic_fact(&parent_session, fact)?;
             self.seed_through_seq = fact.seq();
             self.compact_retained()?;
             expected = expected
@@ -534,7 +553,9 @@ impl ContextFold {
                 self.checkpointable_prefix = false;
             }
             let next_digest = advance_fact_prefix(self.fact_prefix_digest, fact)?;
-            self.apply_body(fact.body())?;
+            self.apply_body(fact.body(), fact.seq())?;
+            self.record_semantic_fact(&self.header.session_id().clone(), fact)?;
+            self.through_seq = fact.seq();
             self.fact_prefix_digest = next_digest;
             previous = fact.seq();
             self.compact_retained()?;
@@ -549,6 +570,9 @@ impl ContextFold {
     /// Projects bounded messages, dropping only complete oldest turns.
     pub fn project(&self, limits: ContextLimits) -> Result<ModelContext> {
         ContextLimits::new(limits.max_messages, limits.max_bytes)?;
+        if self.semantic.is_some() {
+            return self.semantic_project(limits);
+        }
         let mut retained_messages = usize::from(self.system_message.is_some())
             .checked_add(self.retained_messages)
             .ok_or_else(|| ContextError::Invalid("context message count overflowed".into()))?;
@@ -623,6 +647,16 @@ impl ContextFold {
     }
 
     fn compact_retained(&mut self) -> Result<()> {
+        if self.semantic.is_some() {
+            // Never evict source messages before semantic planning. The absolute
+            // materialization ceiling still bounds a cold or adversarial history.
+            if self.retained_messages > MAXIMUM_CONTEXT_MESSAGES
+                || self.retained_message_bytes > MAXIMUM_CONTEXT_BYTES
+            {
+                return Err(ContextError::TooLarge);
+            }
+            return Ok(());
+        }
         let Some(limits) = self.retention_limits else {
             return Ok(());
         };
@@ -697,7 +731,7 @@ impl ContextFold {
         )
     }
 
-    fn apply_body(&mut self, body: &SessionFactBody) -> Result<()> {
+    fn apply_body(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
         match body {
             SessionFactBody::TurnAccepted { turn_id, text, .. } => {
                 let message = Message::user_text(text)
@@ -724,30 +758,19 @@ impl ContextFold {
                 self.insert_turn(turn_id, message)?;
             }
             SessionFactBody::ModelIntent {
-                turn_id, effect_id, ..
+                turn_id,
+                effect_id,
+                purpose,
+                snapshot,
             } => {
-                self.require_live_turn(turn_id)?;
-                if self
-                    .assemblers
-                    .insert(
-                        effect_id.clone(),
-                        ActiveAssembler {
-                            turn_id: turn_id.clone(),
-                            assembler: LanguageAssembler::new(),
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(ContextError::Invalid(
-                        "model effect intent was duplicated".into(),
-                    ));
-                }
+                self.start_model(turn_id, effect_id, purpose, snapshot)?;
             }
             SessionFactBody::ModelEvent {
                 turn_id,
                 effect_id,
                 event,
-            } => self.apply_model_event(turn_id, effect_id, event)?,
+                purpose,
+            } => self.apply_model_event(turn_id, effect_id, event, *purpose, seq)?,
             SessionFactBody::ToolRejected {
                 turn_id,
                 identity,
@@ -780,6 +803,11 @@ impl ContextFold {
                     ));
                 }
                 turn.terminal = true;
+                // A terminal Turn cannot emit more events. Unfinished effects
+                // remain visible as raw Facts but cannot poison the next cursor
+                // boundary or install an uncompleted internal summary.
+                self.assemblers
+                    .retain(|_, active| &active.turn_id != turn_id);
             }
             SessionFactBody::CancelRequested { .. }
             | SessionFactBody::StepStarted { .. }
@@ -795,11 +823,51 @@ impl ContextFold {
         Ok(())
     }
 
+    fn start_model(
+        &mut self,
+        turn_id: &TurnId,
+        effect_id: &EffectId,
+        purpose: &rsi_agent_session_protocol::ModelPurpose,
+        snapshot: &rsi_ai_protocol::PreparedCallSnapshot,
+    ) -> Result<()> {
+        self.require_live_turn(turn_id)?;
+        let eligible_summary = match purpose {
+            rsi_agent_session_protocol::ModelPurpose::Conversation => false,
+            rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) => {
+                self.summary_eligible(plan)
+            }
+        };
+        let model =
+            rsi_ai_protocol::ModelRef::new(snapshot.deployment_id.clone(), snapshot.model.clone())
+                .map_err(|error| ContextError::Invalid(error.to_string()))?;
+        if self
+            .assemblers
+            .insert(
+                effect_id.clone(),
+                ActiveAssembler {
+                    purpose: purpose.clone(),
+                    eligible_summary,
+                    model,
+                    turn_id: turn_id.clone(),
+                    assembler: LanguageAssembler::new(),
+                },
+            )
+            .is_some()
+        {
+            return Err(ContextError::Invalid(
+                "model effect intent was duplicated".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn apply_model_event(
         &mut self,
         turn_id: &TurnId,
         effect_id: &EffectId,
         event: &rsi_ai_protocol::LanguageEvent,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        seq: u64,
     ) -> Result<()> {
         let terminal = matches!(
             event,
@@ -810,7 +878,7 @@ impl ContextFold {
             .assemblers
             .get_mut(effect_id)
             .ok_or_else(|| ContextError::Invalid("model event has no matching intent".into()))?;
-        if &active.turn_id != turn_id {
+        if &active.turn_id != turn_id || active.purpose.event_purpose() != purpose {
             return Err(ContextError::Invalid(
                 "model event changed its owning turn".into(),
             ));
@@ -829,6 +897,21 @@ impl ContextFold {
             .expect("assembler was observed above");
         match active.assembler.finish() {
             Ok(output) => {
+                let internal = matches!(
+                    active.purpose,
+                    rsi_agent_session_protocol::ModelPurpose::ContextCompaction(_)
+                );
+                self.finish_semantic(
+                    effect_id,
+                    &active.purpose,
+                    active.eligible_summary,
+                    active.model,
+                    seq,
+                    &output,
+                )?;
+                if internal {
+                    return Ok(());
+                }
                 let message = assistant_message(output.content, output.replay.as_ref())?;
                 self.push_turn_message(turn_id, message)?;
                 Ok(())
@@ -1110,6 +1193,7 @@ fn input_message(source: &InputMessageSource, content: &[AgentMessageContent]) -
             Message::developer_text(text).map_err(|error| ContextError::Invalid(error.to_string()))
         }
         InputMessageSource::Human { .. }
+        | InputMessageSource::Continuation { .. }
         | InputMessageSource::Agent { .. }
         | InputMessageSource::Completion { .. }
         | InputMessageSource::UserSkillInvocation { .. } => {

@@ -772,6 +772,7 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
         .publish(
             &claim,
             vec![SessionFactBody::ModelIntent {
+                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
                 turn_id: claim.turn_id().clone(),
                 effect_id: EffectId::new("effect-message-flush-race").unwrap(),
                 snapshot: snapshot(),

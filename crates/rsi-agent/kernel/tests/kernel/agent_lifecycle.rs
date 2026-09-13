@@ -683,8 +683,8 @@ async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // The 513-record interval is the public regression for paginated completion classification.
-async fn wait_completion_cause_scans_beyond_one_control_page() {
+#[allow(clippy::too_many_lines)] // The 513-record interval proves scalar completion classification without control replay.
+async fn wait_completion_cause_uses_snapshot_without_control_replay() {
     let memory = Arc::new(MemoryStore::new());
     let observed = Arc::new(FactReadRaceStore::new(memory.clone()));
     let service: Arc<dyn SessionStore> = observed.clone();
@@ -814,9 +814,15 @@ async fn wait_completion_cause_scans_beyond_one_control_page() {
         .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
         .unwrap();
+    *observed.count_control_reads_for.lock().unwrap() = Some(child_id.clone());
     observed.release_descendant_snapshot();
 
     assert_eq!(wait.await.unwrap().unwrap(), AgentWaitResult::Changed);
+    assert_eq!(
+        observed.control_read_attempts.load(Ordering::Acquire),
+        0,
+        "classification must not read descendant control pages"
+    );
     let controls = memory.read_controls(&root_id, 0, 16).await.unwrap();
     assert!(controls.records.iter().any(|record| {
         matches!(

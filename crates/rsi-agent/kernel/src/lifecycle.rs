@@ -133,6 +133,8 @@ impl AgentKernel {
                 }),
                 submission_admission: SubmissionAdmission::new(),
                 commands: commands::CommandRequests::default(),
+                continuation_issuer: rsi_agent_turn_protocol::ContinuationIssuer::default(),
+                continuations: Mutex::new(BTreeMap::new()),
                 projection_admission: Arc::new(Semaphore::new(projection::MAXIMUM_CAPTURES)),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
@@ -145,7 +147,7 @@ impl AgentKernel {
                 limits,
                 process_pending_bytes: AtomicUsize::new(0),
                 process_pending_changed: Notify::new(),
-                active_observers: AtomicUsize::new(0),
+                observers: observer_resources::ObserverResources::default(),
                 observation_retention: ObservationRetention::new(
                     limits.maximum_retained_observation_bytes,
                 )
@@ -173,6 +175,16 @@ impl AgentKernel {
     pub async fn shutdown(&self, workers: KernelWorkers) -> Result<()> {
         {
             lock_state(&self.inner).accepting = false;
+        }
+        for lease in self
+            .inner
+            .continuations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter_map(rsi_agent_turn_protocol::WeakContinuationLease::upgrade)
+        {
+            lease.revoke();
         }
         self.inner.submission_admission.close();
         self.inner.stop_settlement.cancel();
@@ -642,6 +654,12 @@ impl AgentKernel {
                 .map_err(turn_store_error)?;
             ready.validate().map_err(turn_store_error)?;
             for message in &ready.messages {
+                if self
+                    .discard_stale_continuation(&message.session_id, &message.message_id)
+                    .await?
+                {
+                    continue;
+                }
                 if message.target != MessageTarget::NextTurn {
                     return Err(TurnError::Invariant(
                         "ready index contains a waking next-Step message".into(),
@@ -670,26 +688,32 @@ impl AgentKernel {
                     () = cancellation.cancelled() => return Ok(false),
                     result = self.prepare_resume(&message.session_id) => result?,
                 };
-                self.claim_message_with_lane(
-                    ClaimMessage {
-                        session: prepared,
-                        message_id: message.message_id.clone(),
-                        activation_id: rsi_agent_session_protocol::ActivationId::new(format!(
-                            "activation-{suffix}"
-                        ))
-                        .map_err(|error| TurnError::Invalid(error.to_string()))?,
-                        path,
-                        turn_id: TurnId::new(format!("turn-message-{suffix}"))
+                let claimed = self
+                    .claim_message_with_lane(
+                        ClaimMessage {
+                            session: prepared,
+                            message_id: message.message_id.clone(),
+                            activation_id: rsi_agent_session_protocol::ActivationId::new(format!(
+                                "activation-{suffix}"
+                            ))
                             .map_err(|error| TurnError::Invalid(error.to_string()))?,
-                        step_id: rsi_agent_session_protocol::StepId::new(format!(
-                            "step-message-{suffix}"
-                        ))
-                        .map_err(|error| TurnError::Invalid(error.to_string()))?,
-                    },
-                    Some(lane),
-                    Some(cancellation),
-                )
-                .await?;
+                            path,
+                            turn_id: TurnId::new(format!("turn-message-{suffix}"))
+                                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                            step_id: rsi_agent_session_protocol::StepId::new(format!(
+                                "step-message-{suffix}"
+                            ))
+                            .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                        },
+                        Some(lane),
+                        Some(cancellation),
+                    )
+                    .await;
+                if let Err(error) = claimed
+                    && !matches!(error, TurnError::ContinuationDisarmed)
+                {
+                    return Err(error);
+                }
                 return Ok(true);
             }
             if !ready.has_more {

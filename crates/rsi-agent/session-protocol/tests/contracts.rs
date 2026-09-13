@@ -6,6 +6,146 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn compaction_plan_guards_are_enforced_when_decoding_durable_model_intents() {
+    let plan = json!({
+        "version":1,"session":"session","builder":{"id":"builder","semantic_version":"2.3.0","config_sha256":"a".repeat(64)},
+        "header_fingerprint":"b".repeat(64),"sources":[{"session":"session","turn":"old","after_seq":0,"through_seq":5,"facts_sha256":"c".repeat(64)}],
+        "selections":[{"turn":"old","first":0,"count":1}],"prior":null,"trigger":{"kind":"canonical_limit"},
+        "through_seq":5,"view_sha256":"d".repeat(64),"original_bytes":1000,"maximum_text_bytes":32768,"maximum_output_tokens":8192
+    });
+    let intent = SessionFact::new(
+        6,
+        1,
+        SessionFactBody::ModelIntent {
+            turn_id: TurnId::new("current").unwrap(),
+            effect_id: EffectId::new("summary").unwrap(),
+            snapshot: snapshot(AiCapability::Language),
+            purpose: ModelPurpose::ContextCompaction(Box::new(
+                serde_json::from_value(plan.clone()).unwrap(),
+            )),
+        },
+    )
+    .unwrap();
+    let valid = serde_json::to_value(intent).unwrap();
+    assert!(serde_json::from_value::<SessionFact>(valid.clone()).is_ok());
+    for (path, value) in [
+        ("/version", json!(0)),
+        ("/through_seq", json!(0)),
+        ("/original_bytes", json!(0)),
+        ("/maximum_text_bytes", json!(32769)),
+        ("/maximum_output_tokens", json!(8193)),
+        ("/sources", json!([])),
+        ("/selections", json!([])),
+        ("/builder/id", json!("unsafe\n")),
+        ("/builder/semantic_version", json!("x".repeat(65))),
+        ("/builder/config_sha256", json!("invalid")),
+        ("/view_sha256", json!("invalid")),
+        ("/sources/0/through_seq", json!(0)),
+        ("/sources/0/facts_sha256", json!("invalid")),
+        ("/selections/0/count", json!(0)),
+        ("/selections/0/first", json!(u32::MAX)),
+        (
+            "/prior",
+            json!({"session":"session","effect":"prior","finished_seq":6,"text_sha256":"e".repeat(64)}),
+        ),
+        (
+            "/trigger",
+            json!({"kind":"usage","session":"session","finished_seq":6,"input_tokens":100}),
+        ),
+        (
+            "/selections",
+            json!(vec![
+                json!({"turn":"t".repeat(256),"first":0,"count":1});
+                4096
+            ]),
+        ),
+    ] {
+        let mut changed = valid.clone();
+        *changed["purpose"]["plan"].pointer_mut(path).unwrap() = value;
+        assert!(
+            serde_json::from_value::<SessionFact>(changed).is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn continuation_input_and_mailbox_decode_reject_invalid_bounds_and_changed_text() {
+    let input = ContinuationInput {
+        owner: DomainRequestId::new("goal").unwrap(),
+        round: 1,
+        message_id: MessageId::new("automatic").unwrap(),
+        text: "fixed input".into(),
+    };
+    input.validate().unwrap();
+    for text in [String::new(), "bad\0input".into(), "x".repeat(16385)] {
+        assert!(
+            ContinuationInput {
+                text,
+                ..input.clone()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    assert!(
+        ContinuationInput {
+            round: 0,
+            ..input.clone()
+        }
+        .validate()
+        .is_err()
+    );
+    let source = ContinuationSource {
+        domain: DomainIdentity::new("goal", 1).unwrap(),
+        owner: input.owner.clone(),
+        round: 1,
+        reserved_revision: DomainRevision::new(1),
+        provenance: ContinuationProvenance::Baseline {
+            snapshot_sha256: "a".repeat(64),
+        },
+        text_sha256: input.text_sha256(),
+    };
+    let record = AgentControlRecord::new(
+        2,
+        1,
+        AgentControlRecordBody::MessageAccepted {
+            message: AgentMessage {
+                message_id: input.message_id,
+                source: AgentMessageSource::Continuation { source },
+                content: vec![AgentMessageContent::Text { text: input.text }],
+                options: MessageOptions::default(),
+            },
+            root_session_id: SessionId::new("session").unwrap(),
+            delivery: MessageDelivery::NextTurn,
+            bound_turn_id: None,
+            target: MessageTarget::NextTurn,
+            wake_required: true,
+        },
+    )
+    .unwrap();
+    let valid = serde_json::to_value(record).unwrap();
+    assert!(serde_json::from_value::<AgentControlRecord>(valid.clone()).is_ok());
+    for (path, value) in [
+        ("/message/source/source/round", json!(0)),
+        ("/message/source/source/reserved_revision", json!(0)),
+        (
+            "/message/source/source/provenance/snapshot_sha256",
+            json!("invalid"),
+        ),
+        ("/message/source/source/text_sha256", json!("invalid")),
+        ("/message/content/0/text", json!("changed text")),
+    ] {
+        let mut changed = valid.clone();
+        *changed.pointer_mut(path).unwrap() = value;
+        assert!(
+            serde_json::from_value::<AgentControlRecord>(changed).is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn parked_wait_deadline_matches_its_kind_on_construction_and_decode() {
     for (kind, deadline_ms, valid) in [
         (WaitKind::Agent, Some(1), true),
@@ -336,6 +476,7 @@ fn unconfined_settings_require_live_approval() {
 fn decoded_identifiers_and_nested_model_snapshot_cannot_bypass_validation() {
     assert!(serde_json::from_str::<SessionId>(r#""bad id""#).is_err());
     let body = SessionFactBody::ModelIntent {
+        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
         turn_id: TurnId::new("turn-1").unwrap(),
         effect_id: EffectId::new("effect-1").unwrap(),
         snapshot: snapshot(AiCapability::Image),

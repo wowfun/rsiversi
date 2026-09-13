@@ -1,5 +1,6 @@
 //! Generation-pinned effect-free commands with canonical receipt reconciliation.
 
+use super::continuation::CommandAuthorization;
 use super::*;
 use rsi_agent_composition_protocol::{
     ContributionKind, SessionCommandContext, SessionCommandRegistration, ValidatedDomainProposal,
@@ -61,7 +62,9 @@ impl SessionCommands for AgentKernel {
                 .entries()
                 .iter()
                 .filter_map(|entry| match entry.kind() {
-                    ContributionKind::Command(command) => Some(command.descriptor().clone()),
+                    ContributionKind::Command(command) if !command.is_continuation_only() => {
+                        Some(command.descriptor().clone())
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -74,11 +77,56 @@ impl SessionCommands for AgentKernel {
         session: PreparedResumeSession,
         invocation: SessionCommandInvocation,
     ) -> CommandResult {
+        self.execute_command_authorized(session, invocation, CommandAuthorization::Ordinary)
+            .await
+    }
+
+    async fn query(
+        &self,
+        session_id: &SessionId,
+        request_id: &DomainRequestId,
+    ) -> TurnResult<Option<DomainMutationReceipt>> {
+        let result = self.domain_request(session_id, request_id).await?;
+        if result.as_ref().is_some_and(|receipt| {
+            !matches!(
+                receipt.commit().source(),
+                DomainMutationSource::Command { .. }
+            )
+        }) {
+            return Err(TurnError::DomainRequestConflict {
+                request_id: request_id.to_string(),
+            });
+        }
+        Ok(result)
+    }
+}
+
+struct CommandCandidate {
+    session: PreparedResumeSession,
+    invocation: SessionCommandInvocation,
+    proposals: Vec<ValidatedDomainProposal>,
+    authorization: CommandAuthorization,
+}
+
+struct PreparedCommandCommit {
+    candidate: CommandCandidate,
+    _admission: SubmissionAdmissionLease,
+    append: AtomicSessionAppend,
+    receipt: DomainMutationReceipt,
+}
+
+impl AgentKernel {
+    pub(super) async fn execute_command_authorized(
+        &self,
+        session: PreparedResumeSession,
+        invocation: SessionCommandInvocation,
+        authorization: CommandAuthorization,
+    ) -> CommandResult {
         let (header, _) = self.inner.resume_issuer.inspect(&session)?;
+        authorization.validate(self, &session, &invocation)?;
         let key = (header.session_id().clone(), invocation.request_id.clone());
-        let digest = invocation
-            .digest()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let source = authorization.source(invocation.clone());
+        let digest = source_digest(&source)?;
         let mut receiver = {
             // This is admission only; no user callback or Store I/O runs under either lock.
             let state = lock_state(&self.inner);
@@ -115,9 +163,11 @@ impl SessionCommands for AgentKernel {
                 };
                 let kernel = self.clone();
                 self.inner.tasks.spawn(async move {
-                    let result = std::panic::AssertUnwindSafe(
-                        kernel.execute_session_command(session, invocation),
-                    )
+                    let result = std::panic::AssertUnwindSafe(kernel.execute_session_command(
+                        session,
+                        invocation,
+                        authorization,
+                    ))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| {
@@ -139,38 +189,6 @@ impl SessionCommands for AgentKernel {
                 .map_err(|_| TurnError::Invariant("command result owner disappeared".into()))?;
         }
     }
-
-    async fn query(
-        &self,
-        session_id: &SessionId,
-        request_id: &DomainRequestId,
-    ) -> TurnResult<Option<DomainMutationReceipt>> {
-        let result = self.domain_request(session_id, request_id).await?;
-        if result.as_ref().is_some_and(|receipt| {
-            !matches!(
-                receipt.commit().source(),
-                DomainMutationSource::Command { .. }
-            )
-        }) {
-            return Err(TurnError::DomainRequestConflict {
-                request_id: request_id.to_string(),
-            });
-        }
-        Ok(result)
-    }
-}
-
-struct CommandCandidate {
-    session: PreparedResumeSession,
-    invocation: SessionCommandInvocation,
-    proposals: Vec<ValidatedDomainProposal>,
-}
-
-struct PreparedCommandCommit {
-    candidate: CommandCandidate,
-    _admission: SubmissionAdmissionLease,
-    append: AtomicSessionAppend,
-    receipt: DomainMutationReceipt,
 }
 
 impl AgentKernel {
@@ -178,6 +196,7 @@ impl AgentKernel {
         &self,
         session: PreparedResumeSession,
         invocation: SessionCommandInvocation,
+        authorization: CommandAuthorization,
     ) -> CommandResult {
         let cancellation = self.inner.submission_admission.closed.child_token();
         let _cancel = cancellation.clone().drop_guard();
@@ -185,7 +204,7 @@ impl AgentKernel {
         let candidate = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(TurnError::ShuttingDown),
-            result = tokio::time::timeout_at(deadline, self.prepare_session_command(session, invocation, cancellation.clone())) => {
+            result = tokio::time::timeout_at(deadline, self.prepare_session_command(session, invocation, authorization, cancellation.clone())) => {
                 result.map_err(|_| TurnError::Invalid("command preparation exceeded its deadline".into()))??
             }
         };
@@ -199,6 +218,7 @@ impl AgentKernel {
         &self,
         session: PreparedResumeSession,
         invocation: SessionCommandInvocation,
+        authorization: CommandAuthorization,
         cancellation: CancellationToken,
     ) -> TurnResult<std::result::Result<DomainMutationReceipt, PreparedCommandCommit>> {
         let (header, composition) = self.inner.resume_issuer.inspect(&session)?;
@@ -206,7 +226,7 @@ impl AgentKernel {
             .domain_request(header.session_id(), &invocation.request_id)
             .await?
         {
-            return matching_receipt(receipt, &invocation).map(Ok);
+            return matching_receipt(receipt, &authorization.source(invocation.clone())).map(Ok);
         }
         let callback: SessionCommandRegistration = composition
             .contributions()
@@ -239,6 +259,11 @@ impl AgentKernel {
             )
             .map_err(|error| turn_composition_error(error.into()))?;
         let context = SessionCommandContext {
+            request_id: invocation.request_id.clone(),
+            continuation_input: match &authorization {
+                CommandAuthorization::Continuation { reservation, .. } => reservation.clone(),
+                CommandAuthorization::Ordinary => None,
+            },
             header: Arc::new(header.clone()),
             revision: invocation.expected_revision,
             domains: page
@@ -265,6 +290,7 @@ impl AgentKernel {
             session,
             invocation,
             proposals,
+            authorization,
         })
         .await
     }
@@ -280,15 +306,25 @@ impl AgentKernel {
                 "command requires 1..=64 typed domain replacements".into(),
             ));
         }
+        candidate
+            .authorization
+            .validate(self, &candidate.session, &candidate.invocation)?;
         let (header, composition) = self.inner.resume_issuer.inspect(&candidate.session)?;
         let session_id = header.session_id().clone();
         let admission = self.inner.submission_admission.acquire(&session_id).await?;
+        candidate
+            .authorization
+            .validate(self, &candidate.session, &candidate.invocation)?;
         self.fence_pending_terminal(&session_id).await?;
         if let Some(receipt) = self
             .domain_request(&session_id, &candidate.invocation.request_id)
             .await?
         {
-            return matching_receipt(receipt, &candidate.invocation).map(Ok);
+            return matching_receipt(
+                receipt,
+                &candidate.authorization.source(candidate.invocation.clone()),
+            )
+            .map(Ok);
         }
         let page = observation::read_domain_states_bounded(&self.inner, &session_id, None)
             .await
@@ -312,11 +348,10 @@ impl AgentKernel {
                     .map_err(|error| TurnError::Invalid(error.to_string()))
             })
             .collect::<TurnResult<Vec<_>>>()?;
+        candidate.authorization.validate_updates(&updates)?;
         let commit = DomainStateCommit::new(
             Some(candidate.invocation.request_id.clone()),
-            DomainMutationSource::Command {
-                invocation: candidate.invocation.clone(),
-            },
+            candidate.authorization.source(candidate.invocation.clone()),
             updates,
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
@@ -364,6 +399,9 @@ impl AgentKernel {
             receipt,
         } = prepared;
         let session_id = append.session_id.clone();
+        candidate
+            .authorization
+            .validate(self, &candidate.session, &candidate.invocation)?;
         let result = self
             .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                 sessions: vec![append],
@@ -402,20 +440,25 @@ fn request_conflict(invocation: &SessionCommandInvocation) -> TurnError {
     }
 }
 
+fn source_digest(source: &DomainMutationSource) -> TurnResult<String> {
+    use sha2::Digest;
+    let bytes =
+        serde_json::to_vec(source).map_err(|error| TurnError::Invalid(error.to_string()))?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
 fn matching_receipt(
     receipt: DomainMutationReceipt,
-    invocation: &SessionCommandInvocation,
+    source: &DomainMutationSource,
 ) -> CommandResult {
-    let DomainMutationSource::Command { invocation: stored } = receipt.commit().source() else {
-        return Err(request_conflict(invocation));
-    };
-    let digest = |input: &SessionCommandInvocation| {
-        input
-            .digest()
-            .map_err(|error| TurnError::Invalid(error.to_string()))
-    };
-    if digest(stored)? != digest(invocation)? {
-        return Err(request_conflict(invocation));
+    if source_digest(receipt.commit().source())? != source_digest(source)? {
+        let request_id = receipt
+            .commit()
+            .request_id()
+            .ok_or_else(|| TurnError::Invariant("command receipt lacks identity".into()))?;
+        return Err(TurnError::DomainRequestConflict {
+            request_id: request_id.to_string(),
+        });
     }
     Ok(receipt)
 }

@@ -12,8 +12,15 @@ writer recovery. Open validates root ownership and the exact schema without
 scanning dormant session history. Header and recent-session reads validate only bounded immutable metadata.
 Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
 validate the selected session's mechanical durable invariants in one snapshot.
-A bounded 256-session recency cache and one serialized validation lane avoid
-repeating that work; metadata reads neither fill nor touch the cache. The
+A bounded cache retains 256 Session proofs across a recent FIFO and a reused
+LRU. Successful first validations enter recent; successful revalidation of a
+recently evicted identity enters reused. At capacity, recent entries above a
+64-entry target are evicted first; otherwise reused entries are evicted (or
+recent when reused is empty). Recent hits preserve FIFO order; reused hits
+refresh LRU order. At most 256 evicted recent identities are remembered only as
+admission hints, never as validation proofs. Failed validations publish no hint
+or proof. The serialized validation lane checks the cache again after admission;
+miss checks alone never change queue membership. Metadata reads neither fill nor touch the cache. The
 cache is an optional hint: a poisoned cache disables proof reuse and marking,
 so it cannot turn a successful durable commit into an error. Cold validation
 still runs before any indexed execution/history read.
@@ -126,12 +133,15 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 16 admits only the current mandatory Agent-preset
+The exact schema version 18 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one
 schema-owned index, and mailbox rows project the validated message-source class
 needed by metadata-only completion-summary reads. Index maintenance is atomic with append;
+the Session row also retains the last `ActivationSettled` control sequence.
+Subtree snapshots capture it with the control tail, and cold control validation
+recomputes it in the existing single decode pass. Zero means no settlement.
 SQLite also stores one bounded opaque Context checkpoint and its Fact-prefix
 digest per session behind an exact durable-tail transaction, rejecting metadata
 that differs from the Store-owned header and prefix. It does not interpret

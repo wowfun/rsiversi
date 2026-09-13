@@ -224,6 +224,7 @@ async fn publication_staging_releases_global_state_but_keeps_session_admission()
     let effect = EffectId::new("publication-effect").unwrap();
     for body in [
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: first.turn_id().clone(),
             effect_id: effect.clone(),
             snapshot: snapshot(),
@@ -244,6 +245,7 @@ async fn publication_staging_releases_global_state_but_keeps_session_admission()
             .unwrap();
     }
     let event = || SessionFactBody::ModelEvent {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
         turn_id: first.turn_id().clone(),
         effect_id: effect.clone(),
         event: LanguageEvent::ContentDelta {

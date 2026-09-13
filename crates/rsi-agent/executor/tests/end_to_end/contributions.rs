@@ -5,6 +5,7 @@ use rsi_agent_composition_protocol::{
     ContributionResult, PostToolContributor, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
 };
 use rsi_agent_session_protocol::{ContributionId, InputMessageSource};
+use std::time::Duration;
 
 #[derive(Debug)]
 struct CallbacksFactory(Vec<ContributionRegistration>, Arc<CompositionFixture>);
@@ -286,6 +287,204 @@ async fn policy_constraints_accumulate_and_denial_never_starts_the_tool() {
 
 #[derive(Debug, Default)]
 struct Settled(AtomicUsize);
+
+#[derive(Debug)]
+struct RacingReport {
+    state: rsi_agent_composition_protocol::DomainHandle<bool>,
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl PostToolContributor for RacingReport {
+    async fn contribute(
+        &self,
+        context: &ContributionContext,
+        _: &[Arc<SessionFact>],
+        _: CancellationToken,
+    ) -> ContributionResult<ContributionOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let proposal = self
+            .state
+            .propose(context.domains[0].revision, &false)
+            .unwrap();
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        Ok(ContributionOutput {
+            inputs: vec![ContributionInput::context(
+                "stale report must not enter context",
+            )],
+            domains: vec![proposal],
+        })
+    }
+}
+#[async_trait]
+impl rsi_agent_composition_protocol::SessionCommand for RacingReport {
+    async fn execute(
+        &self,
+        context: &rsi_agent_composition_protocol::SessionCommandContext,
+        _: &rsi_agent_session_protocol::CommandArguments,
+        _: CancellationToken,
+    ) -> ContributionResult<Vec<rsi_agent_composition_protocol::ValidatedDomainProposal>> {
+        Ok(vec![
+            self.state
+                .propose(context.domains[0].revision, &true)
+                .unwrap(),
+        ])
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the gated public command, captured report and terminal assertions in one race scenario.
+async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_replaying_the_turn() {
+    use rsi_agent_composition_protocol::{
+        DomainCatalog, DomainDefinition, SessionCommandRegistration,
+    };
+    use rsi_agent_session_protocol::{
+        CommandArguments, DomainIdentity, DomainRequestId, SessionCommandDescriptor,
+        SessionCommandInvocation,
+    };
+    use rsi_agent_turn_protocol::SessionCommandsContract;
+    let stack = BaseStack::activate().await;
+    let definition = DomainDefinition::new(
+        DomainIdentity::new("fixture.report", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+    )
+    .unwrap();
+    let domains = DomainCatalog::new([definition.registration()]).unwrap();
+    let report = Arc::new(RacingReport {
+        state: domains.bind(&definition).unwrap(),
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    *stack.composition.domains.lock().unwrap() = domains;
+    let command_id = ContributionId::new("fixture.pause").unwrap();
+    let callbacks = install(
+        &stack,
+        vec![
+            ContributionRegistration::new(
+                ContributionId::new("fixture.report").unwrap(),
+                0,
+                ContributionKind::PostTool(report.clone()),
+            ),
+            ContributionRegistration::new(
+                command_id.clone(),
+                0,
+                ContributionKind::Command(SessionCommandRegistration::new(
+                    SessionCommandDescriptor::new(
+                        command_id.clone(),
+                        "pause",
+                        "Pause report",
+                        true,
+                    )
+                    .unwrap(),
+                    report.clone(),
+                )),
+            ),
+        ],
+    )
+    .await;
+    let tool = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        })
+        .unwrap();
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_calls_script(&[("call-a", "echo", "{\"value\":42}")])),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language_fiber = stack
+        .activate_language("test.language", language.clone())
+        .await;
+    let executor = stack.activate_executor("executor-racing-report").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let commands = stack
+        .runtime
+        .root()
+        .lookup_local::<SessionCommandsContract>()
+        .unwrap();
+    let submitted = stack.submit_fresh(&turns, "racing-report", "work").await;
+    report.entered.acquire().await.unwrap().forget();
+    let prepared = turns.prepare_resume(&submitted.session_id).await.unwrap();
+    let revision = commands.list(prepared).await.unwrap().revision();
+    commands
+        .execute(
+            turns.prepare_resume(&submitted.session_id).await.unwrap(),
+            SessionCommandInvocation {
+                command: command_id,
+                request_id: DomainRequestId::new("pause-report").unwrap(),
+                expected_revision: revision,
+                arguments: CommandArguments::new(json!(true)).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    report.release.add_permits(1);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(outcome) = turns
+                .outcome(&submitted.session_id, &submitted.turn_id)
+                .await
+                .unwrap()
+            {
+                break outcome;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(report.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        !serde_json::to_string(&*language.requests.lock().unwrap())
+            .unwrap()
+            .contains("stale report must not enter context")
+    );
+    let current = stack
+        .store
+        .read_domain_states(&submitted.session_id, None)
+        .await
+        .unwrap();
+    assert!(
+        report.state.decode(&current.states[0].snapshot).unwrap(),
+        "user command must remain authoritative"
+    );
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 128)
+        .await
+        .unwrap();
+    assert_eq!(
+        facts
+            .facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+            .count(),
+        1
+    );
+    drop((turns, commands, tool));
+    assert!(callbacks.dispose().await.is_clean());
+    stack.dispose(language_fiber, executor).await;
+}
 #[async_trait]
 impl PostToolContributor for Settled {
     async fn contribute(

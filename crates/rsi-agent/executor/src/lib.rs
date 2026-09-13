@@ -5,6 +5,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod checkpoint;
+mod compaction;
+mod jobs;
 
 use checkpoint::{CheckpointRequest, CheckpointScheduler, run_checkpoint_writer};
 
@@ -298,9 +300,11 @@ use execution_support::{
 enum ModelAttempt {
     Output(Box<rsi_ai_protocol::LanguageOutput>),
     Retry,
+    ContextLimit,
 }
 
 struct ModelStreamContext<'a> {
+    purpose: rsi_agent_session_protocol::ModelEventPurpose,
     claim: &'a TurnClaim,
     effect_id: &'a EffectId,
     snapshot: &'a PreparedCallSnapshot,
@@ -430,6 +434,7 @@ fn scan_turn(
                 turn_id,
                 effect_id,
                 event,
+                ..
             } if turn_id == claim.turn_id()
                 && matches!(
                     event,
