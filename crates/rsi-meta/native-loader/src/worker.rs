@@ -32,6 +32,7 @@ struct ExecutorStats {
     active_callbacks: AtomicUsize,
     peak_callbacks: AtomicUsize,
     rejected_callbacks: AtomicU64,
+    callback_thread_starts: AtomicU64,
     active_instances: AtomicUsize,
     peak_instances: AtomicUsize,
     rejected_instances: AtomicU64,
@@ -47,6 +48,7 @@ pub(super) struct ExecutorSnapshot {
     pub(super) active_callbacks: usize,
     pub(super) peak_callbacks: usize,
     pub(super) rejected_callbacks: u64,
+    pub(super) callback_thread_starts: u64,
     pub(super) active_instances: usize,
     pub(super) peak_instances: usize,
     pub(super) rejected_instances: u64,
@@ -112,18 +114,10 @@ impl NativeExecutor {
         T: Send + 'static,
     {
         let permit = self.callback_permit(name)?;
-        let activity = Activity::begin_callback(Arc::clone(&self.stats));
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        std::thread::Builder::new()
-            .name(callback_thread_name(name))
-            .spawn(move || {
-                // Reverse local drop order decrements activity before making
-                // admission reusable, after send and rejected-result drop.
-                let _permit = permit;
-                let _activity = activity;
-                let result = callback();
-                let _ = sender.send(result);
-            })?;
+        self.launch_callback(name, permit, move || {
+            let _ = sender.send(callback());
+        })?;
         Ok(receiver)
     }
 
@@ -136,19 +130,32 @@ impl NativeExecutor {
         T: Send + 'static,
     {
         let permit = self.callback_permit(name)?;
-        let activity = Activity::begin_callback(Arc::clone(&self.stats));
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        self.launch_callback(name, permit, move || {
+            let _ = sender.send(callback());
+        })?;
+        Ok(receiver)
+    }
+
+    fn launch_callback(
+        &self,
+        name: &'static str,
+        permit: OwnedSemaphorePermit,
+        deliver: impl FnOnce() + Send + 'static,
+    ) -> Result<(), LoaderError> {
+        let activity = Activity::begin_callback(Arc::clone(&self.stats));
+        let stats = Arc::clone(&self.stats);
         std::thread::Builder::new()
             .name(callback_thread_name(name))
             .spawn(move || {
-                // Reverse local drop order decrements activity before making
-                // admission reusable, after send and rejected-result drop.
+                // Reverse drop order releases activity before admission, only after
+                // result handoff and any rejected result's destruction finish.
                 let _permit = permit;
                 let _activity = activity;
-                let result = callback();
-                let _ = sender.send(result);
+                stats.callback_thread_starts.fetch_add(1, Ordering::Relaxed);
+                deliver();
             })?;
-        Ok(receiver)
+        Ok(())
     }
 
     fn callback_permit(
@@ -247,6 +254,7 @@ impl NativeExecutor {
             active_callbacks: self.stats.active_callbacks.load(Ordering::Relaxed),
             peak_callbacks: self.stats.peak_callbacks.load(Ordering::Relaxed),
             rejected_callbacks: self.stats.rejected_callbacks.load(Ordering::Relaxed),
+            callback_thread_starts: self.stats.callback_thread_starts.load(Ordering::Relaxed),
             active_instances: self.stats.active_instances.load(Ordering::Relaxed),
             peak_instances: self.stats.peak_instances.load(Ordering::Relaxed),
             rejected_instances: self.stats.rejected_instances.load(Ordering::Relaxed),

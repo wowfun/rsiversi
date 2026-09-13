@@ -95,62 +95,93 @@ async fn explicit_artifact_path_dynamically_provides_echo_without_a_loader_servi
 #[tokio::test]
 #[ignore = "report-only real native echo latency measurement"]
 async fn real_native_echo_callback_cost() {
-    let (_cache, catalog) = catalog();
-    let runtime = Runtime::default();
-    let upstream = runtime
-        .root()
-        .apply(upstream_factory(), Value::Null)
-        .await
-        .unwrap();
-    wait_active(&upstream).await;
-    let native = runtime
-        .root()
-        .apply(
-            catalog.load(native_fixture()).unwrap(),
-            json!({"prefix":"native:"}),
-        )
-        .await
-        .unwrap();
-    wait_active(&native).await;
-    let slot = Arc::new(Mutex::new(None));
-    let consumer = runtime
-        .root()
-        .apply(
-            crate::resolved(Arc::new(CaptureFactory::new(
-                "probe",
-                Requirement::new("echo", "fixture.echo", V1),
-                slot.clone(),
-            ))),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    wait_active(&consumer).await;
-    let echo = slot.lock().unwrap().take().unwrap();
-    let mut samples = Vec::new();
-    let start = std::time::Instant::now();
-    for _ in 0..1000 {
-        let started = std::time::Instant::now();
-        let response = echo
-            .invoke(Message::new(b"hello".as_slice()))
-            .await
-            .unwrap();
-        samples.push(started.elapsed());
-        assert_eq!(response.as_bytes(), b"native:upstream:hello");
+    for instances in [1, 8] {
+        let (_cache, catalog) = catalog();
+        let mut runtimes = Vec::new();
+        let mut echoes = Vec::new();
+        for _ in 0..instances {
+            let runtime = Runtime::default();
+            let upstream = runtime
+                .root()
+                .apply(upstream_factory(), Value::Null)
+                .await
+                .unwrap();
+            wait_active(&upstream).await;
+            let native = runtime
+                .root()
+                .apply(
+                    catalog.load(native_fixture()).unwrap(),
+                    json!({"prefix":"native:"}),
+                )
+                .await
+                .unwrap();
+            wait_active(&native).await;
+            let slot = Arc::new(Mutex::new(None));
+            let consumer = runtime
+                .root()
+                .apply(
+                    crate::resolved(Arc::new(CaptureFactory::new(
+                        "probe",
+                        Requirement::new("echo", "fixture.echo", V1),
+                        slot.clone(),
+                    ))),
+                    Value::Null,
+                )
+                .await
+                .unwrap();
+            wait_active(&consumer).await;
+            echoes.push(slot.lock().unwrap().take().unwrap());
+            runtimes.push(runtime);
+        }
+        wait_for_callback_quiescence(&catalog);
+        let before = catalog.snapshot().callback_thread_starts;
+        let start = std::time::Instant::now();
+        let mut jobs = tokio::task::JoinSet::new();
+        for echo in &echoes {
+            let echo = echo.clone();
+            jobs.spawn(async move {
+                let mut samples = Vec::new();
+                for _ in 0..1000 {
+                    let started = std::time::Instant::now();
+                    let response = echo
+                        .invoke(Message::new(b"hello".as_slice()))
+                        .await
+                        .unwrap();
+                    samples.push(started.elapsed());
+                    assert_eq!(response.as_bytes(), b"native:upstream:hello");
+                }
+                samples
+            });
+        }
+        let mut samples = Vec::new();
+        while let Some(result) = jobs.join_next().await {
+            samples.extend(result.unwrap());
+        }
+        let elapsed = start.elapsed();
+        samples.sort_unstable();
+        wait_for_callback_quiescence(&catalog);
+        let snapshot = catalog.snapshot();
+        assert_eq!(
+            snapshot.callback_thread_starts - before,
+            samples.len() as u64
+        );
+        eprintln!(
+            "native_echo instances={instances} calls={} optimized={} p50={:?} p95={:?} p99={:?} total={elapsed:?} thread_starts={} peak_admission={}",
+            samples.len(),
+            !cfg!(debug_assertions),
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100],
+            samples[samples.len() * 99 / 100],
+            snapshot.callback_thread_starts - before,
+            snapshot.peak_callbacks
+        );
+        drop(echoes);
+        for runtime in runtimes {
+            assert!(runtime.shutdown().await.is_clean());
+        }
+        wait_for_callback_quiescence(&catalog);
+        assert_eq!(catalog.snapshot().active_callbacks, 0);
     }
-    samples.sort_unstable();
-    eprintln!(
-        "native_echo calls=1000 optimized={} p50={:?} p95={:?} p99={:?} total={:?}",
-        !cfg!(debug_assertions),
-        samples[500],
-        samples[950],
-        samples[990],
-        start.elapsed()
-    );
-    drop(echo);
-    assert!(runtime.shutdown().await.is_clean());
-    wait_for_callback_quiescence(&catalog);
-    assert_eq!(catalog.snapshot().active_callbacks, 0);
 }
 
 #[tokio::test]

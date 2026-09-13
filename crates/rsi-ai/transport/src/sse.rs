@@ -121,6 +121,7 @@ pub fn decode_sse(
                         return;
                     }
                     frame.extend_from_slice(&chunk[offset..]);
+                    previous_was_cr = false;
                     break;
                 };
                 let terminator = offset + relative;
@@ -252,13 +253,12 @@ fn next_frame_capacity(
     if projected_len <= current_capacity {
         return current_capacity;
     }
-    let rounded_projected = projected_len.div_ceil(ADMISSION_UNIT_BYTES) * ADMISSION_UNIT_BYTES;
-    let rounded_maximum = maximum_frame_bytes.div_ceil(ADMISSION_UNIT_BYTES) * ADMISSION_UNIT_BYTES;
     current_capacity
         .checked_mul(2)
-        .unwrap_or(rounded_maximum)
-        .max(rounded_projected)
-        .min(rounded_maximum)
+        .unwrap_or(maximum_frame_bytes)
+        .max(1_024)
+        .max(projected_len.next_power_of_two())
+        .min(maximum_frame_bytes)
 }
 
 async fn ensure_admitted(
@@ -570,19 +570,133 @@ fn count_admission_work(index: usize, amount: usize) {
 }
 
 fn select_waiter(state: &AdmissionState, total_units: usize) -> Option<u64> {
-    [WaitKind::Growth, WaitKind::Begin]
-        .into_iter()
-        .find_map(|kind| {
-            state.waiters.iter().find_map(|(ticket, waiter)| {
-                #[cfg(test)]
-                count_admission_work(0, 1);
-                (waiter.kind == kind && safe_after_grant(state, waiter, total_units))
-                    .then_some(*ticket)
-            })
-        })
+    let simulation = std::cell::OnceCell::new();
+    let mut rejected = std::collections::BTreeSet::new();
+    for kind in [WaitKind::Growth, WaitKind::Begin] {
+        for (ticket, waiter) in &state.waiters {
+            #[cfg(test)]
+            count_admission_work(0, 1);
+            if waiter.kind != kind {
+                continue;
+            }
+            let Some(claim) = state.claims.get(&waiter.claim) else {
+                continue;
+            };
+            let shape = (
+                claim.maximum_units,
+                claim.allocated_units,
+                waiter.target_units,
+            );
+            if rejected.contains(&shape) {
+                continue;
+            }
+            if safe_with_simulation(state, waiter, total_units, &simulation) {
+                return Some(*ticket);
+            }
+            rejected.insert(shape);
+        }
+    }
+    None
 }
 
+struct SafetySimulation {
+    used: usize,
+    // Sorted by remaining demand; identities only remove the replaced claim.
+    claims: Vec<(usize, usize, u64)>,
+}
+impl SafetySimulation {
+    fn capture(state: &AdmissionState) -> Option<Self> {
+        let mut used = state.fixed_units;
+        let mut claims = Vec::with_capacity(state.claims.len());
+        for (id, claim) in &state.claims {
+            #[cfg(test)]
+            count_admission_work(2, 1);
+            if claim.allocated_units > claim.maximum_units {
+                return None;
+            }
+            used = used.checked_add(claim.allocated_units)?;
+            if claim.allocated_units != 0 {
+                claims.push((
+                    claim.maximum_units - claim.allocated_units,
+                    claim.allocated_units,
+                    *id,
+                ));
+            }
+        }
+        #[cfg(test)]
+        count_admission_work(3, claims.len());
+        claims.sort_unstable();
+        Some(Self { used, claims })
+    }
+    fn permits(&self, waiter: &Waiter, current: &Claim, total_units: usize) -> bool {
+        let Some(mut work) = self
+            .used
+            .checked_add(waiter.target_units - current.allocated_units)
+            .and_then(|used| total_units.checked_sub(used))
+        else {
+            return false;
+        };
+        let remaining = current.maximum_units - waiter.target_units;
+        let mut existing = self
+            .claims
+            .iter()
+            .filter(|(_, _, id)| *id != waiter.claim)
+            .peekable();
+        let mut inserted = false;
+        loop {
+            let (remaining, allocated) =
+                if !inserted && existing.peek().is_none_or(|claim| remaining <= claim.0) {
+                    inserted = true;
+                    (remaining, waiter.target_units)
+                } else if let Some(&(remaining, allocated, _)) = existing.next() {
+                    (remaining, allocated)
+                } else {
+                    return true;
+                };
+            #[cfg(test)]
+            count_admission_work(2, 1);
+            if remaining > work {
+                return false;
+            }
+            work = work.checked_add(allocated).expect("bounded SSE simulation");
+        }
+    }
+}
+
+fn safe_with_simulation(
+    state: &AdmissionState,
+    waiter: &Waiter,
+    total_units: usize,
+    simulation: &std::cell::OnceCell<Option<SafetySimulation>>,
+) -> bool {
+    #[cfg(test)]
+    count_admission_work(1, 1);
+    let Some(current) = state.claims.get(&waiter.claim) else {
+        return false;
+    };
+    if waiter.target_units <= current.allocated_units || waiter.target_units > current.maximum_units
+    {
+        return false;
+    }
+    if state
+        .fixed_units
+        .checked_add(state.declared_maximum_units)
+        .is_some_and(|declared| declared <= total_units)
+    {
+        return true;
+    }
+    simulation
+        .get_or_init(|| SafetySimulation::capture(state))
+        .as_ref()
+        .is_some_and(|simulation| simulation.permits(waiter, current, total_units))
+}
+#[cfg(test)]
 fn safe_after_grant(state: &AdmissionState, waiter: &Waiter, total_units: usize) -> bool {
+    safe_with_simulation(state, waiter, total_units, &std::cell::OnceCell::new())
+}
+
+#[cfg(test)]
+fn slow_safe_after_grant(state: &AdmissionState, waiter: &Waiter, total_units: usize) -> bool {
     #[cfg(test)]
     count_admission_work(1, 1);
     let Some(current) = state.claims.get(&waiter.claim) else {
@@ -741,8 +855,74 @@ impl Drop for FrameLease {
 mod tests {
     use super::*;
 
+    #[test]
+    fn optimized_selection_matches_completion_safety_oracle() {
+        let shapes: Vec<_> = (1..=4)
+            .flat_map(|maximum| (0..=maximum).map(move |allocated| (maximum, allocated)))
+            .collect();
+        for count in 0..=3 {
+            for code in 0..shapes.len().pow(count) {
+                let mut code = code;
+                let mut state = AdmissionState::default();
+                for id in 0..u64::from(count) {
+                    let (maximum_units, allocated_units) = shapes[code % shapes.len()];
+                    code /= shapes.len();
+                    state.declared_maximum_units += maximum_units;
+                    state.claims.insert(
+                        id,
+                        Claim {
+                            maximum_units,
+                            allocated_units,
+                        },
+                    );
+                    for target_units in 1..=maximum_units + 1 {
+                        state.waiters.insert(
+                            state.waiters.len() as u64,
+                            Waiter {
+                                claim: id,
+                                target_units,
+                                kind: if allocated_units == 0 {
+                                    WaitKind::Begin
+                                } else {
+                                    WaitKind::Growth
+                                },
+                                changed: Arc::new(Notify::new()),
+                            },
+                        );
+                    }
+                }
+                for total in 1..=4 {
+                    for fixed in 0..=total {
+                        state.fixed_units = fixed;
+                        for waiter in state.waiters.values() {
+                            assert_eq!(
+                                safe_after_grant(&state, waiter, total),
+                                slow_safe_after_grant(&state, waiter, total),
+                                "state={state:?} waiter={waiter:?} total={total}"
+                            );
+                        }
+                        let expected =
+                            [WaitKind::Growth, WaitKind::Begin]
+                                .into_iter()
+                                .find_map(|kind| {
+                                    state.waiters.iter().find_map(|(ticket, waiter)| {
+                                        (waiter.kind == kind
+                                            && slow_safe_after_grant(&state, waiter, total))
+                                        .then_some(*ticket)
+                                    })
+                                });
+                        assert_eq!(
+                            select_waiter(&state, total),
+                            expected,
+                            "state={state:?} total={total}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
-    #[ignore = "report-only production SSE admission work counters"]
     async fn contended_admission_cost() {
         use futures_util::FutureExt as _;
         for count in [32, 128, 256] {
@@ -776,6 +956,12 @@ mod tests {
                 started.elapsed(),
                 ADMISSION_WORK.with(std::cell::Cell::get)
             );
+            let work = ADMISSION_WORK.with(std::cell::Cell::get);
+            assert!(work[1] <= 2 * count as u64, "begin evaluations: {work:?}");
+            assert!(
+                work[2] <= 2 * (count * count) as u64,
+                "begin claim visits: {work:?}"
+            );
             ADMISSION_WORK.with(|work| work.set([0; 4]));
             let started = std::time::Instant::now();
             drop(begins);
@@ -783,6 +969,12 @@ mod tests {
                 "sse phase=cancel waiting={count} elapsed={:?} work={:?}",
                 started.elapsed(),
                 ADMISSION_WORK.with(std::cell::Cell::get)
+            );
+            let work = ADMISSION_WORK.with(std::cell::Cell::get);
+            assert!(work[1] <= 4 * count as u64, "cancel evaluations: {work:?}");
+            assert!(
+                work[2] <= 4 * (count * count) as u64,
+                "cancel claim visits: {work:?}"
             );
             drop(growth);
             drop(growing);
@@ -959,7 +1151,9 @@ mod tests {
     #[test]
     fn frame_capacity_grows_geometrically_within_the_admitted_maximum() {
         let maximum = 8 * ADMISSION_UNIT_BYTES;
-        assert_eq!(next_frame_capacity(0, 1, maximum), ADMISSION_UNIT_BYTES);
+        assert_eq!(next_frame_capacity(0, 1, maximum), 1_024);
+        assert_eq!(next_frame_capacity(0, 1, 17), 17);
+        assert_eq!(next_frame_capacity(1_024, 1_025, 1_537), 1_537);
         assert_eq!(
             next_frame_capacity(
                 2 * ADMISSION_UNIT_BYTES,
@@ -976,6 +1170,33 @@ mod tests {
             ),
             8 * ADMISSION_UNIT_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn physical_capacity_is_covered_until_the_completed_value_drops() {
+        let pool = Arc::new(AdmissionPool::new(ADMISSION_UNIT_BYTES, 4));
+        let mut admission = Some(
+            FrameAdmission::begin(pool.clone(), 2 * ADMISSION_UNIT_BYTES)
+                .await
+                .unwrap(),
+        );
+        let mut frame = Vec::new();
+        for length in [1, 1_025, ADMISSION_UNIT_BYTES + 1] {
+            prepare_frame_capacity(&mut frame, &mut admission, length, 2 * ADMISSION_UNIT_BYTES)
+                .await
+                .unwrap();
+            assert!(frame.capacity() >= length);
+            assert!(
+                frame.capacity()
+                    <= admission.as_ref().unwrap().allocated_units * ADMISSION_UNIT_BYTES
+            );
+        }
+        let lease = admission.take().unwrap().seal(frame.capacity());
+        assert!(pool.lock().claims.is_empty());
+        assert_eq!(pool.lock().fixed_units, lease.units);
+        drop(frame);
+        drop(lease);
+        assert_eq!(pool.lock().fixed_units, 0);
     }
 
     #[tokio::test]

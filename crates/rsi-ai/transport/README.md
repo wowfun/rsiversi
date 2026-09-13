@@ -28,11 +28,15 @@ process-wide claim set remains safe: all unfinished frames can reach their
 declared ceilings and finish in some release order. Registered claims with no
 allocated units are waiting for admission and do not participate in that
 completion simulation, except for the candidate being granted. Empty transport items do
-not alter cross-item CR/LF framing state. A delivered `data` value owns
+not alter cross-item CR/LF framing state. Decoding is invariant under byte-chunk
+partitioning, including split UTF-8 and mixed CR, LF and CRLF endings; the CR
+flag describes only the last consumed byte. A delivered `data` value owns
 its actual units until the consumer drops it. Cancellation removes a queued
 growth claim, and no admission lock is held while waiting for bytes or capacity.
-Frame storage grows geometrically within already acquired admission rather than
-copying the accumulated frame at every admission-unit boundary.
+Frame storage starts at at most 1 KiB and grows geometrically up to the exact
+provider ceiling within already acquired admission. Physical allocation is
+independent of the 256 KiB accounting unit. Completion charges actual retained
+capacity even if the allocator cannot shrink it.
 At most 1,024 unfinished claims exist. Admission state changes run one bounded
 scheduler that wakes only the waiters it actually grants; waiter tasks do not
 repeat global safe-state simulations after a broadcast wake-up.
@@ -71,3 +75,10 @@ zeroizing storage and marked sensitive before entering the request header map.
 The request map and HTTP client necessarily own ordinary header bytes while the
 attempt is live; they do not provide a zeroization guarantee and must not be
 used as a credential cache.
+
+One immutable admission selection builds at most one sorted active-claim
+simulation. Candidates with an identical rejected allocation shape reuse that
+result only within the same selection. A grant or release starts a new selection;
+there is no persistent safety index. Growth priority, ticket order, sealed-byte
+accounting, and the completion-safe grant rule remain the admission contract.
+Small-state equivalence and contended operation counts guard this optimization.

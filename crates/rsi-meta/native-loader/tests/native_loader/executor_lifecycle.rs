@@ -1,10 +1,21 @@
 use super::*;
 
 fn release_gate_watchdog(
+    entered: PathBuf,
     release: PathBuf,
 ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let (cancel, cancelled) = std::sync::mpsc::channel();
     let watchdog = std::thread::spawn(move || {
+        while !entered.exists() {
+            match cancelled.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = std::fs::write(release, b"owner-dropped");
+                    return;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
         if cancelled.recv_timeout(Duration::from_secs(5)).is_err() {
             let _ = std::fs::write(release, b"watchdog-release");
         }
@@ -287,7 +298,8 @@ async fn native_watchdog_terminalizes_even_after_core_drops_the_adapter_future()
     let markers = tempfile::tempdir().unwrap();
     let call_entered = markers.path().join("call-entered");
     let call_release = markers.path().join("call-release");
-    let (cancel_watchdog, watchdog) = release_gate_watchdog(call_release.clone());
+    let (cancel_watchdog, watchdog) =
+        release_gate_watchdog(call_entered.clone(), call_release.clone());
     let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(1));
     let runtime = Runtime::new(RuntimeLimits {
         deadlines: DeadlineLimits {
@@ -458,7 +470,8 @@ async fn publication_failure_never_runs_native_destruction_on_the_executor() {
     let destroy_entered = markers.path().join("destroy-entered");
     let destroy_release = markers.path().join("destroy-release");
     let destroy_thread = markers.path().join("destroy-thread");
-    let (cancel_watchdog, watchdog) = release_gate_watchdog(destroy_release.clone());
+    let (cancel_watchdog, watchdog) =
+        release_gate_watchdog(destroy_entered.clone(), destroy_release.clone());
     let (_cache, catalog) = catalog();
     let runtime = Runtime::default();
     let upstream = runtime
@@ -509,7 +522,8 @@ async fn native_instance_cleanup_joins_destruction_beyond_the_callback_deadline(
     let destroy_entered = markers.path().join("destroy-entered");
     let destroy_release = markers.path().join("destroy-release");
     let destroy_thread = markers.path().join("destroy-thread");
-    let (cancel_watchdog, watchdog) = release_gate_watchdog(destroy_release.clone());
+    let (cancel_watchdog, watchdog) =
+        release_gate_watchdog(destroy_entered.clone(), destroy_release.clone());
     let (_cache, catalog) = catalog_with_timeout(Duration::from_secs(1));
     let runtime = Runtime::default();
     let (native, _service) = apply_delayed_native(

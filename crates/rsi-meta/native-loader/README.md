@@ -147,8 +147,17 @@ recovery.
 
 ## Workers, timeout, and destruction
 
-Foreign callbacks run on dedicated OS threads, not Tokio's blocking pool. The
-catalog acquires callback admission before thread creation. Each factory or
+Foreign callbacks run on dedicated OS threads, not Tokio's blocking pool.
+Async and blocking result channels share one private thread launch path; the
+admission and activity guards cover callback execution, result handoff, and
+destruction of a rejected result. The catalog snapshot counts successful
+callback thread starts separately from current and peak admission. It measures
+thread churn; it does not imply a reusable worker pool. The
+callback executor acquires admission before allocating its result channel or creating
+a thread, so saturated executor calls return `Busy` without executor reply-channel
+allocations. Catalog-serving operations can allocate their outer response channel
+before reaching that executor boundary.
+Each factory or
 instance gate linearizes idle, busy, and poisoned in one admission state;
 callers cannot observe an old poison fact and later claim a reopened gate.
 These gates are fail-fast and do not retain hidden waiter queues.

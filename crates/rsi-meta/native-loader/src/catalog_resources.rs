@@ -78,6 +78,8 @@ pub struct NativeCatalogSnapshot {
     pub peak_callbacks: usize,
     /// Callbacks rejected before thread creation.
     pub rejected_callbacks: u64,
+    /// Successful foreign callback thread starts, including setup callbacks.
+    pub callback_thread_starts: u64,
     /// Admitted native creates or instances retaining create-owned handles.
     pub active_instances: usize,
     /// Largest observed live-instance total.

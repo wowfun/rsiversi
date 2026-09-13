@@ -301,6 +301,7 @@ impl NativeCatalog {
             active_callbacks: executor.active_callbacks,
             peak_callbacks: executor.peak_callbacks,
             rejected_callbacks: executor.rejected_callbacks,
+            callback_thread_starts: executor.callback_thread_starts,
             active_instances: executor.active_instances,
             peak_instances: executor.peak_instances,
             rejected_instances: executor.rejected_instances,

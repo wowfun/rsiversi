@@ -17,6 +17,9 @@ mod native;
 mod panic_containment;
 mod worker;
 
+#[cfg(test)]
+mod callback_allocations;
+
 pub use catalog::{CatalogOptions, NativeCatalog};
 pub use catalog_resources::{NativeCatalogLimits, NativeCatalogSnapshot};
 use native::{NativeFactory, NativeModule};

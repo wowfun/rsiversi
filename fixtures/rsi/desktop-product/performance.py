@@ -47,6 +47,7 @@ def family_pss(root):
     if not any('WebKitNetwork' in item['name'] for item in result): raise RuntimeError('WebKit network process absent from PSS family')
     return result
 reports = []
+scenes = [(16,0)] if args.smoke else [(16,0),(64,0),(128,0),(128,8000)]
 for variant in ('baseline', 'current'):
     output = args.report / variant; output.mkdir()
     env = {key: value for key, value in os.environ.items() if key in ('PATH','DISPLAY','DBUS_SESSION_BUS_ADDRESS','LANG','XAUTHORITY')}
@@ -77,11 +78,12 @@ for variant in ('baseline', 'current'):
         def script(source,arguments=None): return call('POST',root+'/execute/sync',{'script':source,'args':arguments or []})
         until(lambda:script('return !!window.rsiPerformance'),45)
         measurements=[]
-        for count in ([16] if args.smoke else [16,64,128]):
+        for count, text_bytes in scenes:
             for run in range(1 if args.smoke else 10):
-                script('window.perfReady=null;window.rsiPerformance.setup(...arguments).then(value=>window.perfReady=value).catch(e=>window.perfReady={error:String(e)});return true',[count,run])
+                script('window.perfReady=null;window.rsiPerformance.setup(...arguments).then(value=>window.perfReady=value).catch(e=>window.perfReady={error:String(e)});return true',[count,run,text_bytes])
                 setup=until(lambda:script('return window.perfReady'))
                 assert setup.get('blocks') == count and setup.get('input',0) >= 180 and 'Result 0:' in setup.get('body',''), setup
+                if text_bytes: assert setup['text_bytes'] == count * text_bytes
                 element=script('return document.querySelector("textarea[aria-label$=message]" )')
                 identity=next(iter(element.values()))
                 for _ in range(5):
@@ -95,9 +97,9 @@ for variant in ('baseline', 'current'):
                 for _ in range(3):
                     time.sleep(.2); family=family_pss(driver.pid)
                     pss.append({'processes':family,'total_kib':sum(item['pss_kib'] for item in family)})
-                measurements.append({'blocks':count,'run':run,'pss':pss})
+                measurements.append({'blocks':count,'text_bytes':setup['text_bytes'],'run':run,'pss':pss})
                 (output/'progress.json').write_text(json.dumps({'measurements':measurements,'samples':script('return window.rsiPerformance.samples')},indent=2))
-            (output/f'{count}-blocks.png').write_bytes(base64.b64decode(call('GET',root+'/screenshot')))
+            (output/f'{count}-{text_bytes}-blocks.png').write_bytes(base64.b64decode(call('GET',root+'/screenshot')))
         trajectory = None
         if not args.smoke:
             script('window.perfTrajectory=null;void window.rsiPerformance.trajectory().then(value=>window.perfTrajectory=value);return true')
@@ -125,11 +127,11 @@ for variant in ('baseline', 'current'):
         except subprocess.TimeoutExpired: driver.kill(); driver.wait()
         log.close()
 summary=[]
-for count in ([16] if args.smoke else [16,64,128]):
-    row={'blocks':count}
+for count, text_bytes in scenes:
+    row={'blocks':count,'near_limit':bool(text_bytes)}
     for report in reports:
-        values=sorted(item['input_to_paint_ms'] for item in report['samples'] if item['blocks']==count)
-        pss=[statistics.median(x['total_kib'] for x in item['pss']) for item in report['measurements'] if item['blocks']==count]
+        values=sorted(item['input_to_paint_ms'] for item in report['samples'] if item['blocks']==count and (item['text_bytes']==count*text_bytes if text_bytes else item['text_bytes']<1_000_000))
+        pss=[statistics.median(x['total_kib'] for x in item['pss']) for item in report['measurements'] if item['blocks']==count and (item['text_bytes']==count*text_bytes if text_bytes else item['text_bytes']<1_000_000)]
         row[report['variant']]={'input_to_paint_p95_ms':values[math.ceil(len(values)*.95)-1],'steady_pss_kib':statistics.median(pss),'samples':len(values)}
     row['pss_ratio']=row['current']['steady_pss_kib']/row['baseline']['steady_pss_kib']; summary.append(row)
 (args.report/'summary.json').write_text(json.dumps({'smoke':args.smoke,'platform':{key:getattr(os.uname(),key) for key in ('sysname','nodename','release','version','machine')},'scenes':summary},indent=2))

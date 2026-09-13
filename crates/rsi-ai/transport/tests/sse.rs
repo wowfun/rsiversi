@@ -34,6 +34,77 @@ fn bounded_owned_chunks(part: &str) -> ByteStream {
     Box::pin(stream::iter(chunks))
 }
 
+async fn decoded(parts: Vec<Bytes>, termination: SseTermination) -> Vec<Result<String, String>> {
+    decode_sse(
+        Box::pin(stream::iter(parts.into_iter().map(Ok))),
+        termination,
+        DEFAULT_SSE_FRAME_BYTES,
+    )
+    .map(|value| {
+        value
+            .map(|value| value.as_str().to_owned())
+            .map_err(|error| error.code().to_owned())
+    })
+    .collect()
+    .await
+}
+
+#[tokio::test]
+async fn framing_is_invariant_under_byte_partitions() {
+    let small = b":\rdata:x\n\n";
+    for cuts in 0..1_usize << (small.len() - 1) {
+        let mut parts = Vec::new();
+        let mut start = 0;
+        for end in 1..small.len() {
+            if cuts & (1 << (end - 1)) != 0 {
+                parts.push(Bytes::copy_from_slice(&small[start..end]));
+                start = end;
+            }
+        }
+        parts.push(Bytes::copy_from_slice(&small[start..]));
+        assert_eq!(
+            decoded(parts, SseTermination::Eof).await,
+            [Ok("x".into())],
+            "partition {cuts}"
+        );
+    }
+    for (input, termination) in [
+        ("data: first\rdata: second\n\n", SseTermination::Eof),
+        (
+            ": 注释\r\ndata: 你好\rdata: second\n\ndata: next\r\n\r\ndata: [DONE]\n\n",
+            SseTermination::DoneSentinel,
+        ),
+        ("data: incomplete", SseTermination::Eof),
+        ("data: x\n\n", SseTermination::DoneSentinel),
+    ] {
+        let expected = decoded(vec![Bytes::copy_from_slice(input.as_bytes())], termination).await;
+        for width in 1..=input.len() {
+            let parts = input
+                .as_bytes()
+                .chunks(width)
+                .flat_map(|chunk| [Bytes::copy_from_slice(chunk), Bytes::new()])
+                .collect();
+            assert_eq!(
+                decoded(parts, termination).await,
+                expected,
+                "width {width}, {input:?}"
+            );
+        }
+        for cut in 0..=input.len() {
+            let parts = vec![
+                Bytes::copy_from_slice(&input.as_bytes()[..cut]),
+                Bytes::new(),
+                Bytes::copy_from_slice(&input.as_bytes()[cut..]),
+            ];
+            assert_eq!(
+                decoded(parts, termination).await,
+                expected,
+                "cut {cut}, {input:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn sse_handles_fragmented_utf8_crlf_comments_and_multiline_data() {
     let mut values = decode_sse(
