@@ -27,6 +27,17 @@ const HELPER_STDERR_CAPTURE_BYTES: usize = 64_000;
 #[cfg(target_os = "linux")]
 const HELPER_TERMINATION_GRACE_MS: u64 = 3_000;
 
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelperHeader {
+    version: u32,
+    evidence_bytes: usize,
+}
+
+#[cfg(target_os = "linux")]
+const MAXIMUM_HELPER_HEADER_BYTES: usize = 128;
+
 /// Runs the hidden apply-patch helper only for its exact sole argv marker.
 ///
 /// The caller must pass arguments after `argv[0]`. Non-matching invocations do
@@ -83,21 +94,20 @@ fn run_apply_patch_helper_io(
     let mut bytes = Vec::new();
     let response = match input
         .by_ref()
-        .take((MAXIMUM_APPLY_PATCH_BYTES + 1) as u64)
+        .take((MAXIMUM_APPLY_PATCH_BYTES + MAXIMUM_HELPER_HEADER_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
     {
         Err(error) => patch_engine::rejection(
             "stdin_read_failed",
             format!("failed to read helper stdin: {error}"),
         ),
-        Ok(_) if bytes.len() > MAXIMUM_APPLY_PATCH_BYTES => patch_engine::rejection(
-            "patch_too_large",
-            format!("patch exceeds {MAXIMUM_APPLY_PATCH_BYTES} UTF-8 bytes"),
-        ),
-        Ok(_) => match std::str::from_utf8(&bytes) {
-            Ok(patch) => patch_engine::apply_patch(root, patch),
-            Err(_) => patch_engine::rejection("invalid_utf8", "patch stdin must be UTF-8"),
-        },
+        Ok(_) if bytes.len() > MAXIMUM_APPLY_PATCH_BYTES + MAXIMUM_HELPER_HEADER_BYTES => {
+            patch_engine::rejection(
+                "patch_too_large",
+                format!("patch exceeds {MAXIMUM_APPLY_PATCH_BYTES} UTF-8 bytes"),
+            )
+        }
+        Ok(_) => execute_helper_input(root, &bytes),
     };
     u8::from(
         serde_json::to_writer(&mut output, &response)
@@ -105,6 +115,39 @@ fn run_apply_patch_helper_io(
             .and_then(|()| output.flush().map_err(serde_json::Error::io))
             .is_err(),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn execute_helper_input(root: &Path, bytes: &[u8]) -> patch_engine::PatchHelperResponse {
+    let Some(end) = bytes
+        .iter()
+        .take(MAXIMUM_HELPER_HEADER_BYTES)
+        .position(|byte| *byte == b'\n')
+    else {
+        return patch_engine::rejection(
+            "invalid_header",
+            "helper input requires its bounded version-2 header",
+        );
+    };
+    let Ok(header) = serde_json::from_slice::<HelperHeader>(&bytes[..end]) else {
+        return patch_engine::rejection(
+            "invalid_header",
+            "helper header does not match its closed schema",
+        );
+    };
+    if header.version != 2 || header.evidence_bytes > patch_engine::evidence::MAXIMUM_EVIDENCE_BYTES
+    {
+        return patch_engine::rejection(
+            "invalid_header",
+            "unsupported helper version or evidence allowance",
+        );
+    }
+    match std::str::from_utf8(&bytes[end + 1..]) {
+        Ok(patch) => {
+            patch_engine::apply_patch_with_budget(root, patch, header.evidence_bytes, &mut |_| {})
+        }
+        Err(_) => patch_engine::rejection("invalid_utf8", "patch stdin must be UTF-8"),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -288,9 +331,14 @@ mod linux {
             arguments: Value,
             execution: ToolExecution,
         ) -> rsi_tools_protocol::Result<ToolResult> {
-            let arguments: ApplyPatchArguments = match parse_arguments(arguments) {
+            let arguments: ApplyPatchArguments = match serde_json::from_value(arguments) {
                 Ok(arguments) => arguments,
-                Err(result) => return Ok(*result),
+                Err(_) => {
+                    return error_result(
+                        "invalid_arguments",
+                        "arguments must be an object containing only the required string field `patch`",
+                    );
+                }
             };
             if let Err(failure) = patch_engine::validate_patch_document(&arguments.patch) {
                 return error_result(&failure.code, failure.message);
@@ -298,9 +346,16 @@ mod linux {
             let confined = execution
                 .confine(self.helper.clone(), vec![APPLY_PATCH_HELPER_MARKER.into()])
                 .await?;
+            let evidence_bytes = execution
+                .extension::<rsi_tools_protocol::ToolEvidenceBudget>()
+                .map_or(patch_engine::evidence::MAXIMUM_EVIDENCE_BYTES, |budget| {
+                    budget.maximum_bytes()
+                })
+                .min(patch_engine::evidence::MAXIMUM_EVIDENCE_BYTES);
+            let stdin = helper_input(&arguments.patch, evidence_bytes)?;
             let managed = match self.process.spawn(ProcessSpec {
                 process: confined,
-                stdin: arguments.patch.into_bytes(),
+                stdin,
                 environment: Vec::new(),
                 stdout_max_bytes: rsi_process::MAXIMUM_PROCESS_STREAM_BYTES,
                 stderr_max_bytes: HELPER_STDERR_CAPTURE_BYTES,
@@ -320,57 +375,73 @@ mod linux {
                         "apply-patch was interrupted after its helper started; filesystem effects are unknown and this invocation must not be replayed",
                     );
                 }
-            }
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            };
+            let Ok(outcome) = outcome else {
+                return unknown_effects_result(
+                    "helper wait failed after start; filesystem effects are unknown",
+                );
+            };
             if outcome.exit_code != Some(0) || outcome.signal.is_some() {
-                return Err(ToolError::Execution(format!(
-                    "apply-patch helper exited unexpectedly (code {:?}, signal {:?}); invocation was not replayed",
-                    outcome.exit_code, outcome.signal
-                )));
+                return unknown_effects_result(
+                    "helper exited unexpectedly after start; filesystem effects are unknown",
+                );
             }
-            let stdout = managed
-                .stdout()
-                .read_from(0)
-                .map_err(|error| ToolError::Execution(error.to_string()))?;
-            let stderr = managed
-                .stderr()
-                .read_from(0)
-                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let (Ok(stdout), Ok(stderr)) =
+                (managed.stdout().read_from(0), managed.stderr().read_from(0))
+            else {
+                return unknown_effects_result(
+                    "helper output read failed after start; filesystem effects are unknown",
+                );
+            };
             if stdout.lossy || stderr.lossy {
-                return Err(ToolError::Execution(
-                    "apply-patch helper output was truncated; invocation was not replayed".into(),
-                ));
+                return unknown_effects_result(
+                    "helper output was truncated; filesystem effects are unknown",
+                );
             }
             if !stderr.bytes.is_empty() {
-                return Err(ToolError::Execution(
-                    "apply-patch helper wrote unexpected stderr; invocation was not replayed"
-                        .into(),
-                ));
+                return unknown_effects_result(
+                    "helper wrote unexpected stderr; filesystem effects are unknown",
+                );
             }
-            let response = parse_helper_response(&stdout.bytes)?;
+            let response = match parse_helper_response(&stdout.bytes) {
+                Ok(response)
+                    if response
+                        .evidence
+                        .validate(&response.effects, evidence_bytes)
+                        .is_ok() =>
+                {
+                    response
+                }
+                _ => {
+                    return unknown_effects_result(
+                        "helper response was invalid or exceeded its allowance; filesystem effects are unknown",
+                    );
+                }
+            };
             let is_error = response.status != patch_engine::PatchStatus::Applied;
-            let text = String::from_utf8(stdout.bytes[..stdout.bytes.len() - 1].to_vec()).map_err(
-                |_| ToolError::Execution("apply-patch helper stdout was not UTF-8".into()),
-            )?;
+            let text = serde_json::to_string(&json!({
+                "status": response.status,
+                "delta_exact": response.delta_exact,
+                "effects": response.effects,
+                "fuzzy_matches": response.fuzzy_matches,
+                "failure": response.failure,
+            }))
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
             let value = serde_json::to_value(response)
                 .map_err(|error| ToolError::Execution(error.to_string()))?;
             result_with_text(value, text, is_error)
         }
     }
 
-    fn parse_arguments<T>(arguments: Value) -> std::result::Result<T, Box<ToolResult>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        serde_json::from_value(arguments).map_err(|error| {
-            Box::new(
-                error_result(
-                    "invalid_arguments",
-                    format!("arguments do not match the tool schema: {error}"),
-                )
-                .expect("bounded static error result is valid"),
-            )
+    fn helper_input(patch: &str, evidence_bytes: usize) -> rsi_tools_protocol::Result<Vec<u8>> {
+        let mut bytes = serde_json::to_vec(&super::HelperHeader {
+            version: 2,
+            evidence_bytes,
         })
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+        bytes.push(b'\n');
+        bytes.extend_from_slice(patch.as_bytes());
+        Ok(bytes)
     }
 
     fn parse_helper_response(
@@ -498,6 +569,12 @@ mod tests {
     use super::*;
     use std::fmt::Write as _;
 
+    fn framed(patch: &[u8]) -> Vec<u8> {
+        let mut bytes = b"{\"version\":2,\"evidence_bytes\":32768}\n".to_vec();
+        bytes.extend_from_slice(patch);
+        bytes
+    }
+
     #[test]
     fn helper_dispatch_requires_the_exact_sole_marker() {
         assert!(is_apply_patch_helper_invocation(&[OsString::from(
@@ -517,7 +594,8 @@ mod tests {
         assert_eq!(
             run_apply_patch_helper_io(
                 root.path(),
-                b"*** Begin Patch\n*** Add File: added.txt\n+value\n*** End Patch\n".as_slice(),
+                framed(b"*** Begin Patch\n*** Add File: added.txt\n+value\n*** End Patch\n")
+                    .as_slice(),
                 &mut applied_output,
             ),
             0
@@ -529,7 +607,11 @@ mod tests {
 
         let mut rejected_output = Vec::new();
         assert_eq!(
-            run_apply_patch_helper_io(root.path(), b"not a patch".as_slice(), &mut rejected_output,),
+            run_apply_patch_helper_io(
+                root.path(),
+                framed(b"not a patch").as_slice(),
+                &mut rejected_output,
+            ),
             0
         );
         let rejected: patch_engine::PatchHelperResponse =
@@ -547,7 +629,7 @@ mod tests {
         ] {
             let mut output = Vec::new();
             assert_eq!(
-                run_apply_patch_helper_io(root.path(), input.as_slice(), &mut output),
+                run_apply_patch_helper_io(root.path(), framed(&input).as_slice(), &mut output),
                 0
             );
             let response: patch_engine::PatchHelperResponse =
@@ -570,7 +652,11 @@ mod tests {
 
         let mut output = Vec::new();
         assert_eq!(
-            run_apply_patch_helper_io(root.path(), patch.as_bytes(), &mut output),
+            run_apply_patch_helper_io(
+                root.path(),
+                framed(patch.as_bytes()).as_slice(),
+                &mut output
+            ),
             0
         );
         let response: patch_engine::PatchHelperResponse =

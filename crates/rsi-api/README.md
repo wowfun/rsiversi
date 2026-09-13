@@ -24,7 +24,7 @@ even if its response future is never polled. A request still being received has
 not started mutation work and must be cancelled when its registration retires.
 
 Global admission has independent limits of 16 controls, 16 data calls and 64
-subscriptions. An authenticated device can occupy at most 4, 4 and 8 respectively;
+subscriptions. An authenticated device can occupy at most 4, 4 and 16 respectively;
 trusted local calls still obey global limits. Device counters exist only while
 calls are admitted. The registry holds at most 2,048 operation registrations,
 including retired registrations that still own work. There is no waiting queue.
@@ -35,7 +35,10 @@ reads reserve their measured encoding or copy size before allocating response
 storage, under both the operation maximum and shared delivery pool. Read execution
 scratch remains the domain adapter's responsibility; a small retained reply does
 not require another full operation maximum to be available. Subscription
-handlers reserve before materializing each item. Wire-buffer owners may outlive
+handlers reserve delivery bytes before allocating each encoded item. Domain
+materialization and retained typed values have independent admission owned by
+the domain; an already admitted immutable value may be measured before exact
+wire allocation without reserving another operation maximum. Wire-buffer owners may outlive
 call-slot release. Adapters retain a separate admission lease until response
 delivery ends, including queued transport writes. This lease retains class and
 device quota without retaining the domain handler or delaying its retirement.

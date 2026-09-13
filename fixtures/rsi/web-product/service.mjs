@@ -38,6 +38,7 @@ function sse(delta, finish = "stop") {
 async function startProvider(onRequest) {
   const requests = [];
   const sockets = new Set();
+  const held = new Map();
   const server = http.createServer(async (request, response) => {
     try {
       if (request.method !== "POST" || request.url !== "/v1/chat/completions") { response.writeHead(404).end(); return; }
@@ -58,6 +59,15 @@ async function startProvider(onRequest) {
       requests.push({ prompt, completedTool, model: body.model, images });
       onRequest?.(body);
       response.writeHead(200, { "content-type": "text/event-stream" });
+      if (prompt.includes("UI Goal hold") || (prompt.includes("observe background job") && completedTool)) {
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "Waiting for fixture release." }, finish_reason: null }] })}\n\n`);
+        const id = requests.length;
+        const finish = () => response.end(sse({ content: "Fixture released the model stream." }));
+        held.set(id, { prompt, finish });
+        const timer = setTimeout(finish, 60_000);
+        response.on("close", () => { clearTimeout(timer); held.delete(id); });
+        return;
+      }
       if (prompt.includes("hold this turn") && !completedTool) {
         response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "Waiting for cancellation." }, finish_reason: null }] })}\n\n`);
         const timer = setTimeout(() => response.end(sse({ content: "Wait deadline reached." })), 60_000);
@@ -71,7 +81,11 @@ async function startProvider(onRequest) {
         response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n![Remote alt text](https://example.com/never-fetch.png)\n\n[Unsafe link](javascript:alert%281%29)" })); return;
       }
       let name; let argumentsValue;
-      if (!completedTool && prompt.includes("inspect a child task")) {
+      if (!completedTool && prompt.includes("record an inline patch")) {
+        name = "apply_patch"; argumentsValue = { patch: "*** Begin Patch\n*** Update File: card.txt\n@@\n-before\n+after · 界\n*** End Patch\n" };
+      } else if (!completedTool && prompt.includes("observe background job")) {
+        name = "bash"; argumentsValue = { command: "printf 'job-ready\\n'; while [ ! -f job-release ]; do sleep 0.05; done; printf 'job-done\\n'", run_in_background: true };
+      } else if (!completedTool && prompt.includes("inspect a child task")) {
         name = "spawn_agent"; argumentsValue = { task_name: "inspect-child", message: "Child inspector evidence", fork_turns: "none" };
       } else if (!completedTool && prompt.includes("ask a question")) {
         name = "ask_user"; argumentsValue = { questions: [{ id: "color", prompt: "Which accent should the workspace use?", options: ["Teal", "Blue"] }, { id: "reason", prompt: "What matters for this change?", options: [] }] };
@@ -90,6 +104,11 @@ async function startProvider(onRequest) {
   server.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   return { origin: `http://127.0.0.1:${server.address().port}`, requests,
+    release(marker) {
+      const matches = [...held.values()].filter(value => value.prompt.includes(marker));
+      assert(matches.length > 0, `no held provider response for ${marker}`);
+      for (const value of matches) value.finish();
+    },
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 

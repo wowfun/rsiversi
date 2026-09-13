@@ -6,6 +6,8 @@ mod identity;
 mod index;
 mod media;
 mod source;
+mod source_path;
+pub use source_path::{SourcePathError, ToolValuePath, select_tool_value_path};
 mod tool;
 mod window;
 pub use bytes::hex_window;

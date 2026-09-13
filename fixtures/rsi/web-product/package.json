@@ -2,7 +2,7 @@
   "name": "rsi-web-product",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node verify.mjs" },
+  "scripts": { "test": "node --test task-checks.test.mjs && node verify.mjs" },
   "engines": { "node": ">=22" },
   "devDependencies": { "playwright": "1.63.0" }
 }

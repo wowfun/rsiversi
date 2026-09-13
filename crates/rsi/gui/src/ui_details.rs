@@ -123,13 +123,20 @@ impl GuiApplication {
     }
     async fn present_ui(self: &Arc<Self>, revision: u64, reference: &UiReference) -> Result<()> {
         let lease = Arc::new(self.ui.present(reference).map_err(error)?);
+        self.present_lease(revision, lease).await
+    }
+    async fn present_lease(
+        self: &Arc<Self>,
+        revision: u64,
+        lease: Arc<rsi_ui::PresentationLease>,
+    ) -> Result<()> {
         let stop = {
             let mut details = self.details.lock().expect("Web details poisoned");
             if details.revision != revision {
                 return Err("UI selection was replaced".into());
             }
             let detail = details.ui.as_mut().expect("selected UI detail");
-            detail.binding = Some(reference.clone());
+            detail.binding = Some(lease.identity().reference.clone());
             detail.lease = Some(lease.clone());
             details.stop.clone()
         };
@@ -212,8 +219,8 @@ impl GuiApplication {
         drop(details);
         self.changed();
     }
-    pub(crate) fn ui_block(
-        &self,
+    pub(crate) async fn ui_block(
+        self: &Arc<Self>,
         index: crate::SurfaceId,
         generation: &str,
         key: &str,
@@ -234,6 +241,24 @@ impl GuiApplication {
                 .find(|block| block.key == key)
                 .cloned()
         };
+        if let Some(block) = &block {
+            let sources = block.sources();
+            if let Some(lease) = self
+                .ui
+                .present_inline(
+                    &attached.ui_target,
+                    &rsi_ui::BlockInput {
+                        key: &block.key,
+                        text: &block.text,
+                        tool: block.tool.as_ref(),
+                        sources: &sources,
+                    },
+                )
+                .map_err(error)?
+            {
+                return self.present_lease(revision, Arc::new(lease)).await;
+            }
+        }
         // Plugin code runs after releasing both application and renderer locks.
         let result = block
             .ok_or_else(|| "This block is no longer retained".to_owned())
@@ -261,6 +286,9 @@ impl GuiApplication {
         name: String,
         input: ActionInput,
     ) -> Result<()> {
+        if ticket.starts_with("inline:") {
+            return self.inline_invoke(ticket, name, input).await;
+        }
         if self
             .details
             .lock()
@@ -384,6 +412,9 @@ impl GuiApplication {
         offset: u64,
         maximum: usize,
     ) -> futures_util::future::BoxFuture<'static, Result<rsi_api_protocol::RetainedBytes>> {
+        if ticket.starts_with("inline:") {
+            return self.inline_source(ticket, name, offset, maximum);
+        }
         if self
             .details
             .lock()

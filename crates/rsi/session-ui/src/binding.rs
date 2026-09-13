@@ -72,6 +72,7 @@ impl PluginFactory for Target {
             .register_target(&plan, TargetKind::Surface)
             .map_err(super::meta)?;
         let lease = Arc::new(lease);
+        let watching = super::watch_target(&plan, &lease)?;
         *self
             .invalidation
             .0
@@ -87,6 +88,7 @@ impl PluginFactory for Target {
                 Box::pin(async move {
                     drop(business);
                     drop(supplies);
+                    watching.await?;
                     let report = lease.dispose().await;
                     if report.is_clean() {
                         Ok(())

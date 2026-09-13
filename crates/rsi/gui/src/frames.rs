@@ -1,9 +1,18 @@
 //! One bounded presentation baseline, independent of durable replay cursors.
 use crate::GuiApplication;
 use rsi_api_protocol::{ApiError, ByteBudget, Result, RetainedBytes};
-use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, io::Write, sync::Arc};
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    sync::Arc,
+};
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+#[path = "frame_view.rs"]
+mod frame_view;
+pub(crate) use frame_view::CachedPane;
+#[cfg(test)]
+use serde_json::json;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PaneStamp {
@@ -27,8 +36,7 @@ impl PartialEq for PaneStamp {
 #[derive(Debug)]
 struct PaneView {
     stamp: PaneStamp,
-    value: Value,
-    bytes: usize,
+    value: CachedPane,
 }
 #[derive(Debug, Default)]
 pub(crate) struct FrameState {
@@ -37,6 +45,8 @@ pub(crate) struct FrameState {
     sections: Value,
     #[cfg(test)]
     projections: BTreeMap<crate::SurfaceId, usize>,
+    #[cfg(test)]
+    block_projections: usize,
 }
 impl FrameState {
     pub fn encode(
@@ -51,14 +61,15 @@ impl FrameState {
             .iter()
             .map(|(key, pane)| (*key, pane.stamp(ui)))
             .collect();
-        self.capture(
+        self.capture_views(
             budget,
             base,
             &stamps,
             || app.sections(),
-            |key| surfaces[&key].view(&app.ui),
+            |key, previous| surfaces[&key].frame_view(&app.ui, previous),
         )
     }
+    #[cfg(test)]
     fn capture(
         &mut self,
         budget: &ByteBudget,
@@ -66,6 +77,18 @@ impl FrameState {
         stamps: &BTreeMap<crate::SurfaceId, PaneStamp>,
         sections: impl FnOnce() -> Value,
         mut project: impl FnMut(crate::SurfaceId) -> Value,
+    ) -> Result<RetainedBytes> {
+        self.capture_views(budget, base, stamps, sections, |key, _| {
+            CachedPane::from_value(project(key))
+        })
+    }
+    fn capture_views(
+        &mut self,
+        budget: &ByteBudget,
+        base: Option<&str>,
+        stamps: &BTreeMap<crate::SurfaceId, PaneStamp>,
+        sections: impl FnOnce() -> Value,
+        mut project: impl FnMut(crate::SurfaceId, Option<&CachedPane>) -> Result<CachedPane>,
     ) -> Result<RetainedBytes> {
         let base = base.map(frame_id).transpose()?;
         let mut snapshot =
@@ -79,29 +102,32 @@ impl FrameState {
         let mut size = 32;
         for (key, stamp) in stamps {
             if self.panes.get(key).is_none_or(|old| old.stamp != *stamp) {
-                snapshot |= self
-                    .panes
-                    .get(key)
-                    .is_some_and(|old| old.stamp.generation != stamp.generation);
-                let value = project(*key);
-                let bytes = encoded_size(&value)?;
+                let previous = self.panes.get(key);
+                let same_generation =
+                    previous.is_some_and(|old| old.stamp.generation == stamp.generation);
+                snapshot |= previous.is_some() && !same_generation;
+                let value = project(
+                    *key,
+                    previous.filter(|_| same_generation).map(|old| &old.value),
+                )?;
+                #[cfg(test)]
+                {
+                    *self.projections.entry(*key).or_default() += 1;
+                    self.block_projections += value.projected_blocks;
+                }
                 replacements.insert(
                     *key,
                     PaneView {
                         stamp: stamp.clone(),
                         value,
-                        bytes,
                     },
                 );
-                #[cfg(test)]
-                {
-                    *self.projections.entry(*key).or_default() += 1;
-                }
             }
             size += replacements
                 .get(key)
                 .or(self.panes.get(key))
                 .expect("projected surface")
+                .value
                 .bytes;
         }
         let sections = sections();
@@ -109,39 +135,44 @@ impl FrameState {
         if size > MAX_BYTES {
             return Err(ApiError::Capacity);
         }
-        let wire = if snapshot {
-            let mut view = sections.clone();
-            view.as_object_mut().expect("closed sections").insert(
-                "surfaces".into(),
-                Value::Object(
-                    stamps
-                        .keys()
-                        .map(|key| {
-                            (
-                                key.to_string(),
-                                replacements
-                                    .get(key)
-                                    .or(self.panes.get(key))
-                                    .expect("projected surface")
-                                    .value
-                                    .clone(),
-                            )
-                        })
-                        .collect(),
-                ),
-            );
-            json!({"kind":"snapshot","frame_id":id.to_string(),"view":view})
+        let frame = if snapshot {
+            let surfaces = stamps
+                .keys()
+                .map(|key| {
+                    (
+                        *key,
+                        &replacements
+                            .get(key)
+                            .or(self.panes.get(key))
+                            .expect("projected surface")
+                            .value,
+                    )
+                })
+                .collect();
+            reservation.encode(&Snapshot {
+                kind: "snapshot",
+                frame_id: id.to_string(),
+                view: View {
+                    sections: &sections,
+                    surfaces,
+                },
+            })?
         } else {
-            let surfaces: Vec<_> = replacements
+            let surfaces = replacements
                 .iter()
                 .filter_map(|(key, replacement)| {
                     let old = &self.panes[key].value;
                     (old != &replacement.value).then(|| pane_patch(*key, old, &replacement.value))
                 })
                 .collect();
-            json!({"kind":"patch","frame_id":id.to_string(),"base_frame_id":self.id.to_string(),"sections":fields(&self.sections,&sections,&[]),"surfaces":surfaces})
+            reservation.encode(&Patch {
+                kind: "patch",
+                frame_id: id.to_string(),
+                base_frame_id: self.id.to_string(),
+                sections: fields(&self.sections, &sections, &[]),
+                surfaces,
+            })?
         };
-        let frame = reservation.encode(&wire)?;
         self.panes.retain(|key, _| stamps.contains_key(key));
         self.panes.extend(replacements);
         self.id = id;
@@ -149,20 +180,55 @@ impl FrameState {
         Ok(frame)
     }
 }
-
-fn frame_id(text: &str) -> Result<u64> {
-    if text.len() > 20 {
-        return Err(ApiError::Invalid("Invalid Web frame ID".into()));
-    }
-    let id: u64 = text
-        .parse()
-        .map_err(|_| ApiError::Invalid("Invalid Web frame ID".into()))?;
-    if text.len() > 20 || id == 0 || id.to_string() != text {
-        return Err(ApiError::Invalid("Invalid Web frame ID".into()));
-    }
-    Ok(id)
+#[derive(serde::Serialize)]
+struct Snapshot<'a> {
+    kind: &'static str,
+    frame_id: String,
+    view: View<'a>,
 }
-fn fields(before: &Value, after: &Value, excluded: &[&str]) -> Map<String, Value> {
+struct View<'a> {
+    sections: &'a Value,
+    surfaces: BTreeMap<crate::SurfaceId, &'a CachedPane>,
+}
+impl serde::Serialize for View<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let sections = self.sections.as_object().expect("closed view sections");
+        let mut view = serializer.serialize_map(Some(sections.len() + 1))?;
+        for (key, value) in sections {
+            view.serialize_entry(key, value)?;
+        }
+        view.serialize_entry("surfaces", &self.surfaces)?;
+        view.end()
+    }
+}
+#[derive(serde::Serialize)]
+struct Patch<'a> {
+    kind: &'static str,
+    frame_id: String,
+    base_frame_id: String,
+    sections: BTreeMap<&'a str, &'a Value>,
+    surfaces: Vec<PanePatch<'a>>,
+}
+#[derive(serde::Serialize)]
+struct PanePatch<'a> {
+    surface: crate::SurfaceId,
+    fields: BTreeMap<&'a str, &'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript: Option<TranscriptPatch<'a>>,
+}
+#[derive(serde::Serialize)]
+struct TranscriptPatch<'a> {
+    fields: BTreeMap<&'a str, &'a Value>,
+    upsert: Vec<&'a Value>,
+    remove: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    order: Option<Vec<&'a str>>,
+}
+fn fields<'a>(before: &Value, after: &'a Value, excluded: &[&str]) -> BTreeMap<&'a str, &'a Value> {
     after
         .as_object()
         .expect("closed view object")
@@ -170,52 +236,71 @@ fn fields(before: &Value, after: &Value, excluded: &[&str]) -> Map<String, Value
         .filter(|(key, value)| {
             !excluded.contains(&key.as_str()) && before.get(*key) != Some(*value)
         })
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .map(|(key, value)| (key.as_str(), value))
         .collect()
 }
-fn pane_patch(index: crate::SurfaceId, before: &Value, after: &Value) -> Value {
-    let mut patch = json!({"surface":index,"fields":fields(before,after,&["transcript"])});
-    let (old, new) = (&before["transcript"], &after["transcript"]);
-    if old != new {
-        let old_blocks: BTreeMap<_, _> = old["blocks"]
-            .as_array()
-            .expect("baseline blocks")
-            .iter()
-            .map(|block| (block["key"].as_str().expect("block key"), block))
-            .collect();
-        let new_blocks = new["blocks"].as_array().expect("current blocks");
-        let new_keys: Vec<_> = new_blocks
-            .iter()
-            .map(|block| block["key"].as_str().expect("block key"))
-            .collect();
-        let old_keys: Vec<_> = old["blocks"]
-            .as_array()
-            .expect("baseline blocks")
-            .iter()
-            .map(|block| block["key"].as_str().expect("block key"))
-            .collect();
-        let upsert: Vec<_> = new_blocks
-            .iter()
-            .filter(|block| {
-                old_blocks
-                    .get(block["key"].as_str().expect("block key"))
-                    .copied()
-                    != Some(*block)
+fn pane_patch<'a>(
+    surface: crate::SurfaceId,
+    before: &'a CachedPane,
+    after: &'a CachedPane,
+) -> PanePatch<'a> {
+    let transcript = match (&before.transcript, &after.transcript) {
+        (Some(old), Some(new)) if old != new => {
+            let old_blocks: BTreeMap<_, _> = old
+                .blocks
+                .iter()
+                .map(|block| (block.key(), block))
+                .collect();
+            let new_keys: Vec<_> = new
+                .blocks
+                .iter()
+                .map(frame_view::CachedBlock::key)
+                .collect();
+            let old_keys: Vec<_> = old
+                .blocks
+                .iter()
+                .map(frame_view::CachedBlock::key)
+                .collect();
+            let membership: BTreeSet<_> = new_keys.iter().copied().collect();
+            let upsert = new
+                .blocks
+                .iter()
+                .filter(|block| old_blocks.get(block.key()).copied() != Some(*block))
+                .map(|block| block.value.as_ref())
+                .collect();
+            let remove = old_keys
+                .iter()
+                .copied()
+                .filter(|key| !membership.contains(key))
+                .collect();
+            Some(TranscriptPatch {
+                fields: fields(&old.metadata, &new.metadata, &["blocks"]),
+                upsert,
+                remove,
+                order: (old_keys != new_keys).then_some(new_keys),
             })
-            .collect();
-        let remove: Vec<_> = old_keys
-            .iter()
-            .filter(|key| !new_keys.contains(key))
-            .collect();
-        patch["transcript"] =
-            json!({"fields":fields(old,new,&["blocks"]),"upsert":upsert,"remove":remove});
-        if old_keys != new_keys {
-            patch["transcript"]["order"] = json!(new_keys);
         }
+        _ => None,
+    };
+    PanePatch {
+        surface,
+        fields: fields(&before.metadata, &after.metadata, &["transcript"]),
+        transcript,
     }
-    patch
 }
-fn encoded_size(value: &Value) -> Result<usize> {
+fn frame_id(text: &str) -> Result<u64> {
+    if text.len() > 20 {
+        return Err(ApiError::Invalid("Invalid Web frame ID".into()));
+    }
+    let id: u64 = text
+        .parse()
+        .map_err(|_| ApiError::Invalid("Invalid Web frame ID".into()))?;
+    if id == 0 || id.to_string() != text {
+        return Err(ApiError::Invalid("Invalid Web frame ID".into()));
+    }
+    Ok(id)
+}
+fn encoded_size(value: &impl serde::Serialize) -> Result<usize> {
     struct Counter(usize);
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -433,3 +518,11 @@ mod tests {
         assert_eq!(recovered["surfaces"], json!([]));
     }
 }
+
+#[cfg(test)]
+#[path = "frame_cache_tests.rs"]
+mod cache_tests;
+
+#[cfg(test)]
+#[path = "frame_allocations.rs"]
+mod allocations;

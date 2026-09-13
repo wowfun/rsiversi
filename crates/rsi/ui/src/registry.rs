@@ -529,6 +529,42 @@ impl Ui {
         }
         Ok(None)
     }
+
+    /// Starts the first matching inline source under its exact registered owners.
+    ///
+    /// # Panics
+    /// Panics if a prior panic poisoned the registry lock.
+    pub fn present_inline(
+        self: &Arc<Self>,
+        handle: &UiTarget,
+        block: &BlockInput<'_>,
+    ) -> Result<Option<PresentationLease>> {
+        if block.text.len() > MAXIMUM_VIEW_BYTES || block.key.len() > 4096 {
+            return Err(UiError::Invalid(
+                "block input window exceeds UI limit".into(),
+            ));
+        }
+        let entries = {
+            let state = self.state.lock().expect("UI state poisoned");
+            self.target(&state, handle)?;
+            Self::ordered(&state)?
+        };
+        for (id, entry) in entries {
+            for renderer in &entry.value.renderers {
+                if renderer.target != handle.kind {
+                    continue;
+                }
+                let reference = self.reference(&handle.id, &id, &renderer.name);
+                let Ok(capture) = self.capture(&reference) else {
+                    continue;
+                };
+                if let Some(source) = renderer.renderer.inline(&capture.target.context, block)? {
+                    return self.present_captured(&reference, capture, source).map(Some);
+                }
+            }
+        }
+        Ok(None)
+    }
     /// Admits once before returning; dropping the waiter never cancels admitted work.
     pub fn invoke(
         self: &Arc<Self>,

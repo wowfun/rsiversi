@@ -696,6 +696,7 @@ mod tests {
             seq,
             seq,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: TurnId::new("turn").unwrap(),
                 effect_id: EffectId::new("effect").unwrap(),
                 event: LanguageEvent::ContentDelta {

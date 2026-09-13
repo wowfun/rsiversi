@@ -177,6 +177,15 @@ pub struct BlockInput<'a> {
 pub trait BlockRenderer: std::fmt::Debug + Send + Sync + 'static {
     /// Returns None when this renderer does not recognize the block.
     fn render(&self, target: &Context, block: &BlockInput<'_>) -> Result<Option<UiView>>;
+    /// Optionally binds a visible block to the existing asynchronous presentation owner.
+    /// Capture only bounded metadata and exact sources, never a Fact or observation lease.
+    fn inline(
+        &self,
+        _target: &Context,
+        _block: &BlockInput<'_>,
+    ) -> Result<Option<Arc<dyn SurfaceRenderer>>> {
+        Ok(None)
+    }
 }
 /// Named, target-scoped logical panel and menu entry.
 #[derive(Debug)]

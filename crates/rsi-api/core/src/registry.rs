@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 const GLOBAL_CALLS: [usize; 3] = [16, 16, 64];
-const DEVICE_CALLS: [usize; 3] = [4, 4, 8];
+const DEVICE_CALLS: [usize; 3] = [4, 4, 16];
 
 /// One registry generation with explicit task execution and bounded resource lanes.
 #[derive(Clone, Debug)]

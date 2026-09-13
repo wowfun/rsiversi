@@ -101,6 +101,7 @@ fn add_child(
         .insert(id.clone(), backend.clone());
     root.tree.lock().unwrap().push(StoreAgentDescendantStatus {
         status: StoreAgentSessionStatus {
+            last_settled_control_seq: 0,
             session_id: id,
             durable_control_seq: 1,
             has_open_turn: false,

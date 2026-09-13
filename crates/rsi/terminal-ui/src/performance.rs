@@ -24,6 +24,7 @@ fn delta(state: &mut TestState, seq: u64, block: usize, text: &str) {
             seq,
             seq,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: TurnId::new("performance").unwrap(),
                 effect_id: EffectId::new(format!("block-{block}")).unwrap(),
                 event: LanguageEvent::ContentDelta {

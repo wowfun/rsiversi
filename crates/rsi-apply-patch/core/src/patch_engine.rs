@@ -6,6 +6,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) mod evidence;
 mod file_update;
 mod parser;
 mod preflight;
@@ -102,10 +103,13 @@ pub(crate) struct PatchHelperResponse {
     pub effects: Vec<PatchEffect>,
     pub fuzzy_matches: Vec<PatchFuzzyMatch>,
     pub failure: Option<PatchFailure>,
+    pub evidence: evidence::PatchEvidence,
 }
 
 impl PatchHelperResponse {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        self.evidence
+            .validate(&self.effects, evidence::MAXIMUM_EVIDENCE_BYTES)?;
         match self.status {
             PatchStatus::Applied if self.failure.is_none() && !self.effects.is_empty() => {}
             PatchStatus::Rejected if self.failure.is_some() && self.effects.is_empty() => {}
@@ -148,6 +152,7 @@ impl PatchHelperResponse {
             effects: Vec::new(),
             fuzzy_matches,
             failure: Some(failure),
+            evidence: evidence::PatchEvidence::default(),
         };
         if !response.fits_capture() {
             response.fuzzy_matches.clear();
@@ -344,14 +349,30 @@ enum ParentCreation<'a> {
     Planned(&'a [String]),
 }
 
+#[cfg(test)]
 pub(crate) fn apply_patch(root_path: &Path, patch: &str) -> PatchHelperResponse {
     apply_patch_before_commit(root_path, patch, |_| {})
 }
 
+#[cfg(test)]
 fn apply_patch_before_commit(
     root_path: &Path,
     patch: &str,
     mut before_operation: impl FnMut(usize),
+) -> PatchHelperResponse {
+    apply_patch_with_budget(
+        root_path,
+        patch,
+        evidence::MAXIMUM_EVIDENCE_BYTES,
+        &mut before_operation,
+    )
+}
+
+pub(crate) fn apply_patch_with_budget(
+    root_path: &Path,
+    patch: &str,
+    evidence_bytes: usize,
+    before_operation: &mut impl FnMut(usize),
 ) -> PatchHelperResponse {
     if let Err(failure) = validate_patch_text(patch) {
         return PatchHelperResponse::rejected(failure.response(), Vec::new());
@@ -381,7 +402,11 @@ fn apply_patch_before_commit(
             return PatchHelperResponse::rejected(failure.response(), fuzzy_matches);
         }
     };
-    commit(&root, prepared, fuzzy_matches, &mut before_operation)
+    let mut response = commit(&root, &prepared, fuzzy_matches, before_operation);
+    response.evidence =
+        evidence::PatchEvidence::build(&prepared, &response.effects, evidence_bytes);
+    debug_assert!(response.fits_capture());
+    response
 }
 
 fn effective_new_file_mode() -> Result<Mode, EngineFailure> {
@@ -432,7 +457,7 @@ fn validate_patch_text(patch: &str) -> Result<(), EngineFailure> {
 #[allow(clippy::too_many_lines)] // Exact partial-effect accounting remains adjacent to each fallible filesystem operation.
 fn commit(
     root: &Root,
-    prepared: Vec<PreparedOperation>,
+    prepared: &[PreparedOperation],
     fuzzy_matches: Vec<PatchFuzzyMatch>,
     before_operation: &mut impl FnMut(usize),
 ) -> PatchHelperResponse {
@@ -566,7 +591,9 @@ fn commit(
         };
         if let Err(mut failure) = result {
             failure.operation = Some(operation.index);
-            failure.path.get_or_insert(operation.path.text);
+            failure
+                .path
+                .get_or_insert_with(|| operation.path.text.clone());
             return PatchHelperResponse {
                 status: if effects.is_empty() {
                     PatchStatus::Rejected
@@ -577,6 +604,10 @@ fn commit(
                 effects,
                 fuzzy_matches,
                 failure: Some(failure.response()),
+                evidence: evidence::PatchEvidence {
+                    omitted: true,
+                    ..Default::default()
+                },
             };
         }
     }
@@ -586,6 +617,10 @@ fn commit(
         effects,
         fuzzy_matches,
         failure: None,
+        evidence: evidence::PatchEvidence {
+            omitted: true,
+            ..Default::default()
+        },
     }
 }
 

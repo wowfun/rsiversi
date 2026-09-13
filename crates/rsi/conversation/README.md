@@ -1,5 +1,12 @@
 # rsi-conversation
 
+`ToolValuePath` selects an exact subfield of a `ToolValue` source without changing
+the source's Fact identity. It has 1–8 components, at most 64 UTF-8 bytes each and
+256 bytes total. Object keys are literal; array positions use canonical unsigned
+decimal indices. Missing or mismatched fields are unavailable. Selected strings
+yield raw UTF-8 windows; other values yield bounded canonical JSON windows. This
+does not reread a file or infer historical output from current Workspace state.
+
 This pure native/wasm library owns conversation source semantics. It consumes
 validated Agent Facts without retaining them, observation leases, a Runtime,
 domain capabilities or renderer state. Terminal sanitization and source-to-cell

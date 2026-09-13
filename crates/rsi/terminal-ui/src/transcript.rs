@@ -314,6 +314,14 @@ impl Transcript {
                         "You",
                         Role::User,
                     ),
+                    InputMessageSource::Continuation { message_id, .. } => (
+                        BlockIdentity::Message {
+                            message: message_id,
+                        }
+                        .key(),
+                        "Goal continuation",
+                        Role::Status,
+                    ),
                     InputMessageSource::Agent { message_id, .. }
                     | InputMessageSource::Completion { message_id, .. } => (
                         BlockIdentity::Message {
@@ -384,7 +392,7 @@ impl Transcript {
                 turn_id,
                 effect_id,
                 event: LanguageEvent::ContentDelta { index, delta },
-                ..
+                purpose,
             } => {
                 let (role, title, text, field) = match delta {
                     ContentDelta::Text(text) => {
@@ -397,6 +405,13 @@ impl Transcript {
                         FactField::ModelReasoning,
                     ),
                     ContentDelta::ToolArguments(_) => return,
+                };
+                let (role, title) = if *purpose
+                    == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
+                {
+                    (Role::Status, "Context compaction")
+                } else {
+                    (role, title)
                 };
                 add(
                     BlockIdentity::Model {

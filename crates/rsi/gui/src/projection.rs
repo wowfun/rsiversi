@@ -19,12 +19,14 @@ const MAX_METADATA: usize = 512 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Block {
+    pub(crate) revision: std::sync::Arc<()>,
     pub key: String,
     pub role: &'static str,
     pub title: String,
     pub text: String,
     pub clipped: bool,
     pub tool: Option<ToolState>,
+    tool_start_seq: Option<u64>,
     tool_argument_bytes: usize,
     sources: SourceIndex,
     source_bytes: VecDeque<usize>,
@@ -111,16 +113,36 @@ impl Block {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Transcript {
     pub blocks: VecDeque<Block>,
     pub omitted: bool,
     pub active: Option<TurnId>,
     pub status: String,
-    #[serde(skip)]
     pub seq: u64,
 }
+
+#[derive(Serialize)]
+pub(crate) struct TranscriptView<'a, B> {
+    blocks: B,
+    omitted: bool,
+    active: &'a Option<TurnId>,
+    status: &'a str,
+}
+impl Serialize for Transcript {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.view(&self.blocks).serialize(serializer)
+    }
+}
 impl Transcript {
+    pub(crate) fn view<B>(&self, blocks: B) -> TranscriptView<'_, B> {
+        TranscriptView {
+            blocks,
+            omitted: self.omitted,
+            active: &self.active,
+            status: &self.status,
+        }
+    }
     pub fn history_before(&self) -> Option<u64> {
         self.blocks
             .iter()
@@ -131,14 +153,17 @@ impl Transcript {
     }
     fn add(&mut self, key: String, role: &'static str, title: &str, text: &str, append: bool) {
         let index = self.blocks.iter().position(|block| block.key == key);
+        let existed = index.is_some();
         let index = index.unwrap_or_else(|| {
             self.blocks.push_back(Block {
+                revision: std::sync::Arc::new(()),
                 key,
                 role,
                 title: short(title, 512).into(),
                 text: String::new(),
                 clipped: false,
                 tool: None,
+                tool_start_seq: None,
                 tool_argument_bytes: 0,
                 sources: SourceIndex::default(),
                 source_bytes: VecDeque::new(),
@@ -153,16 +178,34 @@ impl Transcript {
         if !block.sources.is_empty() {
             return;
         }
+        let title = short(title, 512);
+        let available = if append {
+            MAX_BLOCK_BYTES.saturating_sub(block.text.len())
+        } else {
+            MAX_BLOCK_BYTES
+        };
+        let copied = short(text, available);
+        let clipped = (append && block.clipped) || text.len() > available;
+        if existed
+            && block.title == title
+            && block.clipped == clipped
+            && if append {
+                copied.is_empty()
+            } else {
+                block.text == copied
+            }
+        {
+            return;
+        }
         block.markdown.take();
-        block.title = short(title, 512).into();
+        block.revision = std::sync::Arc::new(());
+        block.title = title.into();
         if !append {
             block.text.clear();
-            block.clipped = false;
             block.first_seq = self.seq;
         }
-        let available = MAX_BLOCK_BYTES.saturating_sub(block.text.len());
-        block.text.push_str(short(text, available));
-        block.clipped |= text.len() > available;
+        block.text.push_str(copied);
+        block.clipped = clipped;
         self.trim();
     }
     fn trim(&mut self) {
@@ -262,6 +305,15 @@ impl Transcript {
         let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) else {
             return;
         };
+        if block.sources.iter().any(|source| source.seq == fact.seq())
+            || block.tool_start_seq == Some(fact.seq())
+        {
+            return;
+        }
+        block.revision = std::sync::Arc::new(());
+        if matches!(fact.body(), SessionFactBody::ToolStarted { .. }) {
+            block.tool_start_seq = Some(fact.seq());
+        }
         let old_arguments = block.tool.as_ref().and_then(|tool| tool.arguments);
         let old_result = block.tool.as_ref().and_then(|tool| tool.result);
         let tool = if let Some(tool) = &mut block.tool {
@@ -370,6 +422,9 @@ impl Transcript {
             } => {
                 let (id, role, title) = match source {
                     InputMessageSource::Human { message_id } => (message_id, "user", "You"),
+                    InputMessageSource::Continuation { message_id, .. } => {
+                        (message_id, "status", "Goal continuation")
+                    }
                     InputMessageSource::Agent { message_id, .. }
                     | InputMessageSource::Completion { message_id, .. } => {
                         (message_id, "status", "Agent message")
@@ -410,7 +465,7 @@ impl Transcript {
                 turn_id,
                 effect_id,
                 event: LanguageEvent::ContentDelta { index, delta },
-                ..
+                purpose,
             } => {
                 let (role, title, text, field) = match delta {
                     ContentDelta::Text(text) => {
@@ -420,6 +475,13 @@ impl Transcript {
                         ("reasoning", "Reasoning", text, FactField::ModelReasoning)
                     }
                     ContentDelta::ToolArguments(_) => return,
+                };
+                let (role, title) = if *purpose
+                    == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
+                {
+                    ("status", "Context compaction")
+                } else {
+                    (role, title)
                 };
                 self.put_source(
                     BlockIdentity::Model {
@@ -486,6 +548,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Three Tool outcomes share lifecycle, revision, and backfill assertions.
     fn completed_tool_keeps_name_arguments_and_both_sources() {
         use rsi_agent_session_protocol::EffectId;
         use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
@@ -514,6 +577,16 @@ mod tests {
                 },
             )
             .unwrap();
+            let started = SessionFact::new(
+                11,
+                1,
+                SessionFactBody::ToolStarted {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    identity: identity.clone(),
+                },
+            )
+            .unwrap();
             let result = SessionFact::new(
                 12,
                 1,
@@ -534,8 +607,28 @@ mod tests {
             .unwrap();
             let mut transcript = Transcript::default();
             transcript.fact(&intent);
+            let prepared_revision = transcript.blocks[0].revision.clone();
+            let prepared_text = transcript.blocks[0].text.clone();
+            transcript.fact(&started);
+            assert!(!std::sync::Arc::ptr_eq(
+                &prepared_revision,
+                &transcript.blocks[0].revision
+            ));
+            assert_eq!(transcript.blocks[0].title, "bash · running");
+            assert_eq!(transcript.blocks[0].text, prepared_text);
+            let running_revision = transcript.blocks[0].revision.clone();
+            transcript.fact(&started);
+            assert!(std::sync::Arc::ptr_eq(
+                &running_revision,
+                &transcript.blocks[0].revision
+            ));
             transcript.fact(&result);
+            let completed_revision = transcript.blocks[0].revision.clone();
             transcript.fact(&result);
+            assert!(std::sync::Arc::ptr_eq(
+                &completed_revision,
+                &transcript.blocks[0].revision
+            ));
             let block = &transcript.blocks[0];
             assert_eq!(transcript.blocks.len(), 1);
             assert_eq!(block.title, format!("bash · {expected_status}"));

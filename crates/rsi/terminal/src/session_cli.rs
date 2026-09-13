@@ -810,6 +810,7 @@ mod tests {
             activation_phase: None,
             tree: rsi_agent_store_protocol::StoreAgentSubtreeSnapshot {
                 session: rsi_agent_store_protocol::StoreAgentSessionStatus {
+                    last_settled_control_seq: 0,
                     session_id: header.session_id().clone(),
                     durable_control_seq: 3,
                     has_waking_message: false,

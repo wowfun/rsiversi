@@ -7,6 +7,26 @@ preflights the bounded patch before confinement, invokes the helper through
 Process with the exact sole marker `--rsi-run-as-apply-patch`, joins it even
 after cooperative cancellation, and accepts exactly one bounded JSON line with
 internally consistent status/effect metadata.
+Helper input uses a bounded version-2 JSON header followed by the raw patch;
+the header carries a host-supplied optional-evidence allowance. Model arguments
+cannot set it. Results retain version-1 `evidence` alongside the complete effect
+ledger. Only committed file effects receive diffs, computed from the actual
+preflight bytes; move destination writes and source deletes remain separate.
+Diffs use a complete replacement hunk with three unchanged context lines at
+each edge. Invalid UTF-8, display-unsafe controls or oversized hunks omit the
+body explicitly; no file is reread to reconstruct historical changes.
+
+Optional evidence occupies at most 32 KiB of canonical JSON per call and 8 KiB
+per operation, including metadata and escaping. A trusted `ToolEvidenceBudget`
+extension may lower the call allowance to zero. Allocation follows effect
+order; an oversized body is skipped and later effects remain eligible. The
+complete ledger and a global omission flag survive even when the allowance
+cannot hold the evidence envelope. Preflight reserves the maximum optional
+evidence overhead in its worst-case partial-response check before mutation.
+Every result has nonempty model-facing text: the ledger excludes diff bodies,
+so Context's empty-content fallback cannot send evidence back to the model.
+After helper start, unsuccessful exit, lost or malformed output, and wait/read
+failures have unknown effects just like cancellation; none permits replay.
 Once the helper has started, cancellation may race a committed filesystem
 prefix before the helper can emit its sole effect ledger. After terminating and
 reaping that helper, the Tool therefore returns an explicit `effects_unknown`,

@@ -1,5 +1,9 @@
 # rsi-terminal-ui
 
+Partial transcript pages use each model event's authenticated purpose kind.
+Context-compaction output is an internal status block, distinct from assistant
+answers even when the preceding model intent is outside the loaded page.
+
 Pure terminal presentation: grapheme editing, bounded transcript projection,
 Markdown styling, layout and source positions. The resident terminal application
 supplies borrowed display data and owns every controller, cancellation token,

@@ -14,6 +14,16 @@ renderers. Each surface and renderer chooses application or surface targets.
 Callbacks run outside registry locks. Renderers borrow bounded presentation
 input; neither the registry nor its views retain Facts or observation leases.
 
+A block renderer may opt into an inline presentation by returning a bounded
+`SurfaceRenderer` bound to that borrowed block's exact source identities.
+`present_inline` gives it the same presentation epoch, snapshot/action/source
+admission, cancellation, refresh fencing and cleanup as a named surface. Each
+block has its own epoch even when it uses the same renderer registration. The
+application owns visible-block selection and closes leases on eviction, Session
+switch or contribution withdrawal; the registry owns no transcript. Inline
+sources retain bounded metadata only, and share the existing 16-presentation,
+32-snapshot and 4 MiB limits with details and ordinary surfaces.
+
 Action references bind the fresh application nonce, contribution registration,
 target generation and exact action name. They are opaque strings on the document
 wire. Rust verifies all four and bounds payloads before invoking plugin code;

@@ -531,3 +531,80 @@ fn operation_path_and_file_budgets_reject_before_mutation() {
     assert_eq!(large.failure.unwrap().code, "file_too_large");
     assert!(large.effects.is_empty());
 }
+
+#[test]
+fn evidence_uses_actual_fuzzy_bytes_and_survives_later_file_changes() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("target.txt"), "  old  \r\nkeep\r\n").unwrap();
+    let result = patch(root.path(), "*** Update File: target.txt\n@@\n-old\n+new");
+    assert_eq!(result.status, PatchStatus::Applied);
+    assert!(!result.fuzzy_matches.is_empty());
+    let diff = &result.evidence.diffs[0].unified_diff;
+    assert!(diff.contains("-  old  \r\n"), "{diff:?}");
+    assert!(diff.contains("+new\r\n"), "{diff:?}");
+    fs::write(root.path().join("target.txt"), "later").unwrap();
+    let encoded = serde_json::to_vec(&result).unwrap();
+    let reopened: PatchHelperResponse = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(reopened.evidence, result.evidence);
+    reopened.validate().unwrap();
+}
+
+#[test]
+fn evidence_bounds_skip_whole_hunks_and_preserve_later_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let document = format!(
+        "*** Begin Patch\n*** Add File: huge.txt\n+{}\n*** Add File: small.txt\n+small\n*** End Patch\n",
+        "x".repeat(9000)
+    );
+    let result = apply_patch(root.path(), &document);
+    assert_eq!(result.effects.len(), 2);
+    assert!(result.evidence.omitted);
+    assert_eq!(result.evidence.diffs.len(), 1);
+    assert_eq!(result.evidence.diffs[0].effect, 1);
+    result.validate().unwrap();
+    for allowance in [0, 1, 63, 256, 1024, 32768] {
+        let root = tempfile::tempdir().unwrap();
+        let document = format!(
+            "*** Begin Patch\n*** Add File: escaped.txt\n+{}\n*** End Patch\n",
+            "\"\\\t".repeat(100)
+        );
+        let result = apply_patch_with_budget(root.path(), &document, allowance, &mut |_| {});
+        result
+            .evidence
+            .validate(&result.effects, allowance)
+            .unwrap();
+        assert_eq!(result.status, PatchStatus::Applied);
+        assert_eq!(result.effects.len(), 1);
+        if result.evidence.diffs.is_empty() {
+            assert!(result.evidence.omitted);
+        } else {
+            assert!(serde_json::to_vec(&result.evidence).unwrap().len() <= allowance);
+        }
+    }
+}
+
+#[test]
+fn move_evidence_separates_committed_destination_from_failed_source_delete() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("source.txt"), "old\n").unwrap();
+    // Replacing the source after preflight permits the destination write but
+    // fails the separately validated source deletion.
+    let result = apply_patch_before_commit(
+        root.path(),
+        "*** Begin Patch\n*** Update File: source.txt\n*** Move to: dest.txt\n@@\n-old\n+new\n*** End Patch\n",
+        |_| {
+            fs::write(root.path().join("source.txt"), "raced\n").unwrap();
+        },
+    );
+    assert_eq!(result.status, PatchStatus::Partial);
+    assert_eq!(result.effects.len(), 1);
+    assert_eq!(result.effects[0].kind, PatchEffectKind::MoveWrite);
+    assert_eq!(result.evidence.diffs.len(), 1);
+    assert!(
+        result.evidence.diffs[0]
+            .unified_diff
+            .contains("--- /dev/null\n+++ dest.txt\n")
+    );
+    assert!(!result.evidence.diffs[0].unified_diff.contains("-old"));
+    result.validate().unwrap();
+}

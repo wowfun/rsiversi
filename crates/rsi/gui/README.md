@@ -1,5 +1,9 @@
 # rsi-gui
 
+Model events carry their intent-checked purpose even in partial history pages.
+Internal summary text uses a Context compaction status block, never an Assistant
+answer block; raw source paging preserves its exact Fact provenance.
+
 When composed, ordinary [workbench feature plugins](../workbench-ui/README.md)
 supply navigation and redacted model-setup projections. Closed commands forward
 to those owners; the GUI does not duplicate configuration policy or Store cursors.
@@ -27,6 +31,15 @@ source text changes. Eviction drops the cache with the block; unavailable or
 over-budget Markdown retains an explicit cached plain-text result. Retained
 Markdown capacity is limited to eight times each block's source bytes plus 512
 bytes, within the existing 128-block / 1 MiB source budget.
+
+The incremental frame baseline caches each block's immutable JSON and encoded
+length by its own revision identity. Every visible block mutation replaces that
+identity; duplicate retained Facts do not. Repeated controls preserve the history
+anchor of unchanged previews and status blocks. Pane and UI revisions refresh metadata
+without invalidating unchanged blocks. Frame construction borrows cached values,
+and commits replacements only after successful output encoding. Generation
+replacement and pane removal discard the corresponding baseline. Asset-only
+changes still deliver a frame and participate in renderer mounting and ACK.
 
 Assistant text may carry a restricted Markdown event stream alongside its exact
 retained source. The application uses at most 64 KiB input, 4,096 events and 32 nested
@@ -260,6 +273,20 @@ detail ticket and model-local source, with windows of at most 64 KiB. Actions na
 only displayed membership; the application derives target identity and revision from
 its retained snapshot. Standard block cards retain their independently bound
 block action contract and are converted to the neutral standard model.
+
+Each pane admits at most four visible inline block presentations (eight across
+the two-pane application), leaving shared UI capacity for details and panels.
+The document sends a monotonically numbered visible-key replacement; the GUI
+validates retained block membership and captures its exact revision. Eviction,
+history replacement, Session switch and plugin retirement cancel and drain the
+same PresentationLease. Frames contain only captured models, never business
+reads. Inline and detail cards use the same assets, action membership, source
+paging and snapshot tickets. Tickets bind the presentation epoch and displayed
+revision; a delayed response cannot populate a replacement block. Visibility is
+a bounded read-admission hint, not authority to select a Session or source.
+The sequence commits after new presentations are admitted. Failed admission can
+retry the same sequence and reuse already opened cards. Retired-card cleanup
+failures remain visible as notices while replacement cards continue opening.
 
 The opt-in `projection_performance` test measures ten alternating-order runs of
 16/64/128-block projection with Linux thread CPU accounting. It compares current

@@ -286,7 +286,7 @@ impl Connection {
             calls: [
                 Arc::new(Semaphore::new(4)),
                 Arc::new(Semaphore::new(4)),
-                Arc::new(Semaphore::new(8)),
+                Arc::new(Semaphore::new(16)),
             ],
             input: budgets(),
             output: budgets(),

@@ -148,6 +148,7 @@ async fn block_source_lists_are_bounded_stable_and_invalidated_with_their_pane()
                 seq,
                 1,
                 SessionFactBody::ModelEvent {
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: TurnId::new("turn").unwrap(),
                     effect_id: EffectId::new("effect").unwrap(),
                     event: rsi_ai_protocol::LanguageEvent::ContentDelta {

@@ -1,5 +1,16 @@
 # rsi-client
 
+The controller shares its existing retained projection snapshot with contribution
+models through a coalesced watch; this adds no Session projection observer and
+holds only a clone of the same byte lease. One optional live Goal observer belongs
+to the controller generation. Its small state remains separate from durable
+projections. Retirement clears both watches. Goal controls retain an uncertain
+invocation until explicit receipt reconciliation; reads never arm execution.
+Goal-driven publication starts the existing Fact/interaction observers just as
+ordinary submission does. Current-Turn Jobs reads share the four-operation
+admission and controller cancellation; they expose neither scope acquisition nor
+output/reporting operations.
+
 Shared Rust application control logic consumes domain contracts and an explicit
 Execution. It does not own a Runtime, network transport, terminal, DOM or backend.
 Application/controller plugins own the futures they drive and their cancellation.
@@ -72,6 +83,12 @@ checked before I/O. The controller owns an admitted read even after its waiter
 is dropped; detail cancellation and controller retirement drop its I/O future
 and release its work slot. The returned window retains no Fact or observation
 lease. Applications additionally fence delivery with their detail generation.
+
+Tool-value subfield windows use this same admission, exact Fact read and
+cancellation path with a validated `ToolValuePath`. The controller selects the
+borrowed subvalue before bounded serialization, so a small evidence field does
+not require copying or serializing the complete Tool value. The enclosing Fact
+read keeps its existing Store/API bound and is released before delivery.
 
 `drive_message` follows one submitted message through its durable claim and the
 claimed Turn's terminal Fact. It emits typed receipt, claim, Fact and outcome

@@ -431,7 +431,7 @@ if (!process.env.RSI_RENDERER_ASSETS) {
 }
 for (const name of ["chromium", "firefox"]) {
   if (process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER !== name) continue;
-  for (const probe of ["renderers", "rust-renderer", "recovery"]) {
+  for (const probe of ["renderers", "rust-renderer", "recovery", "tasks"]) {
     boundedRun("node", [join(root, `fixtures/rsi/web-product/${probe}.mjs`)], {
       cwd: root, stdio: "inherit", timeout: 180_000,
       env: { ...process.env, RSI_WEB_ASSETS: assets, RSI_WEB_BINARY: sourceBinary, RSI_WEB_BROWSER: name, RSI_RENDERER_ASSETS: rendererAssets, RSI_NATIVE_UI_ARTIFACT: nativeUiArtifact, RSI_WEB_REPORT: join(report, `${name}-${probe}`) },

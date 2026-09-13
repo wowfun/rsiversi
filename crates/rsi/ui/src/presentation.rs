@@ -218,6 +218,7 @@ impl Drop for ActionCompletion {
 #[derive(Debug)]
 struct Presentation {
     identity: PresentationIdentity,
+    renderer: Weak<dyn crate::SurfaceRenderer>,
     current: Mutex<Publication>,
     wake: watch::Sender<()>,
     changed: watch::Sender<PresentationStatus>,
@@ -489,7 +490,7 @@ impl PresentationLease {
                 return Err(UiError::Retired);
             }
             let capture = ui.capture(&self.state.identity.reference)?;
-            let renderer = surface(&capture, &self.state.identity.reference)?;
+            let renderer = self.state.renderer.upgrade().ok_or(UiError::Retired)?;
             let token = self.state.actions.admit()?;
             let permit = ui
                 .slots
@@ -547,6 +548,15 @@ impl Ui {
     pub fn present(self: &Arc<Self>, reference: &UiReference) -> Result<PresentationLease> {
         let capture = self.capture(reference)?;
         let renderer = surface(&capture, reference)?;
+        self.present_captured(reference, capture, renderer)
+    }
+
+    pub(super) fn present_captured(
+        self: &Arc<Self>,
+        reference: &UiReference,
+        capture: Capture,
+        renderer: Arc<dyn crate::SurfaceRenderer>,
+    ) -> Result<PresentationLease> {
         let permit = self
             .presentations
             .clone()
@@ -555,6 +565,7 @@ impl Ui {
         let initial = self.snapshots.reserve()?;
         let (status_sender, _) = watch::channel(PresentationStatus::default());
         let state = Arc::new(Presentation {
+            renderer: Arc::downgrade(&renderer),
             identity: PresentationIdentity {
                 reference: reference.clone(),
                 epoch: crate::fresh_identity("presentation").map_err(UiError::Action)?,

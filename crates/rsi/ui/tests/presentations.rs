@@ -13,6 +13,8 @@ use tokio::sync::Semaphore;
 
 #[path = "presentations/binding.rs"]
 mod binding;
+#[path = "presentations/inline.rs"]
+mod inline;
 #[path = "presentations/invalidation.rs"]
 mod invalidation;
 #[path = "presentations/ordering.rs"]
@@ -128,7 +130,11 @@ impl PluginFactory for Fixture {
                             handler: Arc::new(Action(self.0.clone())),
                         })
                         .collect(),
-                    renderers: vec![],
+                    renderers: vec![BlockRendererContribution {
+                        name: "inline".into(),
+                        target: TargetKind::Application,
+                        renderer: Arc::new(inline::Inline(self.0.clone())),
+                    }],
                 },
             )
             .unwrap();

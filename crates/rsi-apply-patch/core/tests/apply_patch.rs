@@ -225,7 +225,7 @@ struct Fixture {
     tools: Arc<dyn ToolRuntime>,
     sandbox: Arc<dyn Sandbox>,
     workspace: TempDir,
-    _helper_root: TempDir,
+    helper_root: TempDir,
 }
 
 impl Fixture {
@@ -240,8 +240,10 @@ impl Fixture {
             &helper,
             br#"#!/bin/sh
 [ "$#" -eq 1 ] && [ "$1" = "--rsi-run-as-apply-patch" ] || exit 2
+IFS= read -r header
+[ "$header" = '{"version":2,"evidence_bytes":32768}' ] || exit 3
 /bin/cat >/dev/null
-printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,"kind":"add","path":"added.txt","bytes_before":null,"bytes_after":6}],"fuzzy_matches":[],"failure":null}'
+printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,"kind":"add","path":"added.txt","bytes_before":null,"bytes_after":6}],"fuzzy_matches":[],"failure":null,"evidence":{"version":1,"omitted":false,"diffs":[{"effect":0,"unified_diff":"--- /dev/null\n+++ added.txt\n@@ -0,0 +1,1 @@\n+value\n"}]}}'
 "#,
         )
         .unwrap();
@@ -319,7 +321,7 @@ printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,
             tools,
             sandbox,
             workspace,
-            _helper_root: helper_root,
+            helper_root,
         }
     }
 
@@ -334,6 +336,13 @@ printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,
     }
 
     fn prepare_call(&self, patch: &str) -> (Box<dyn PreparedToolCall>, ToolResultIdentity) {
+        self.prepare_arguments(json!({"patch":patch}))
+    }
+
+    fn prepare_arguments(
+        &self,
+        arguments: Value,
+    ) -> (Box<dyn PreparedToolCall>, ToolResultIdentity) {
         let number = NEXT_CALL.fetch_add(1, Ordering::AcqRel) + 1;
         let prepared = self
             .tools
@@ -342,7 +351,7 @@ printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,
                 ToolCall {
                     id: format!("call-{number}"),
                     name: "apply_patch".into(),
-                    arguments: json!({"patch":patch}),
+                    arguments,
                 },
             )
             .unwrap();
@@ -371,6 +380,31 @@ printf '%s\n' '{"status":"applied","delta_exact":true,"effects":[{"operation":0,
         }
         assert!(self.runtime.shutdown().await.is_complete());
     }
+}
+
+#[tokio::test]
+async fn malformed_model_arguments_return_recoverable_tool_errors() {
+    let fixture = Fixture::activate().await;
+    for key in [
+        "wrong".to_owned(),
+        "\u{0001}".to_owned(),
+        "\"\\\t雪".repeat(4096),
+    ] {
+        let (prepared, _) = fixture.prepare_arguments(json!({key: 1}));
+        let result = prepared
+            .start(fixture.tool_start(CancellationToken::new()))
+            .await
+            .expect("malformed model input must not fail the Tool Runtime");
+        result.validate().unwrap();
+        assert_eq!(result.value["code"], "invalid_arguments");
+        assert!(result.is_error);
+        assert!(
+            result.enforcement.is_empty(),
+            "invalid input must not start the helper"
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() < 4096);
+    }
+    fixture.shutdown().await;
 }
 
 fn linked(name: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
@@ -443,6 +477,16 @@ async fn factory_publishes_only_apply_patch_and_joins_the_exact_helper_protocol(
     assert!(!applied.is_error);
     assert_eq!(applied.value["status"], "applied");
     assert_eq!(applied.value["effects"][0]["path"], "added.txt");
+    assert!(
+        applied.value["evidence"]["diffs"][0]["unified_diff"]
+            .as_str()
+            .unwrap()
+            .contains("+value")
+    );
+    assert!(!applied.content.is_empty());
+    let model_content = serde_json::to_string(&applied.content).unwrap();
+    assert!(!model_content.contains("unified_diff"));
+    assert!(!model_content.contains("+value"));
     assert_eq!(applied.enforcement.len(), 1);
 
     let invalid = fixture.call("not\0a patch").await.unwrap();
@@ -542,4 +586,53 @@ async fn tool_timeout_reports_unknown_effects_after_reaping_the_helper() {
     assert!(spawned_once);
     assert!(terminated);
     assert!(reaped, "Tool settlement raced ahead of helper reaping");
+}
+
+#[tokio::test]
+async fn malformed_or_over_budget_helper_results_are_retained_as_unknown_effects() {
+    let fixture = Fixture::activate().await;
+    let (prepared, identity) =
+        fixture.prepare_call("*** Begin Patch\n*** Add File: added.txt\n+value\n*** End Patch\n");
+    let mut start = fixture.tool_start(CancellationToken::new());
+    start.extensions = start
+        .extensions
+        .with(Arc::new(rsi_tools_protocol::ToolEvidenceBudget::new(0)))
+        .unwrap();
+    let result = prepared.start(start).await.unwrap();
+    assert_eq!(result.value["code"], "effects_unknown");
+    assert_eq!(result.value["replay_safe"], false);
+    assert!(matches!(
+        fixture.tools.query(&identity).unwrap(),
+        RetainedToolResult::Returned(_)
+    ));
+    fixture.tools.commit(&identity).unwrap();
+
+    for tail in [
+        "exit 9",
+        "printf 'bad JSON\\n'",
+        "printf '{}\\nextra\\n'",
+        "printf '{}\\n'; printf 'unexpected' >&2",
+    ] {
+        let script = format!("#!/bin/sh\n/bin/cat >/dev/null\n{tail}\n");
+        std::fs::write(
+            fixture.helper_root.path().join("apply-patch-helper"),
+            script,
+        )
+        .unwrap();
+        let (prepared, identity) = fixture
+            .prepare_call("*** Begin Patch\n*** Add File: added.txt\n+value\n*** End Patch\n");
+        let result = prepared
+            .start(fixture.tool_start(CancellationToken::new()))
+            .await
+            .unwrap();
+        assert_eq!(result.value["code"], "effects_unknown", "{tail}");
+        assert_eq!(result.value["effects_known"], false);
+        assert!(!result.content.is_empty());
+        assert!(matches!(
+            fixture.tools.query(&identity).unwrap(),
+            RetainedToolResult::Returned(_)
+        ));
+        fixture.tools.commit(&identity).unwrap();
+    }
+    fixture.shutdown().await;
 }

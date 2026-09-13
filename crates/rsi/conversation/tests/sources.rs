@@ -7,6 +7,120 @@ use serde::ser::SerializeSeq;
 use serde_json::json;
 
 #[test]
+fn dense_patch_evidence_fits_the_pretty_source_window() {
+    use rsi_conversation::{ToolValuePath, select_tool_value_path};
+    let mut evidence = json!({"version":1,"omitted":false,"diffs":[]});
+    for effect in 0..2000 {
+        evidence["diffs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"effect":effect,"unified_diff":"x"}));
+        if serde_json::to_vec(&evidence).unwrap().len() > 32 * 1024 {
+            evidence["diffs"].as_array_mut().unwrap().pop();
+            break;
+        }
+    }
+    assert!(serde_json::to_vec(&evidence).unwrap().len() > 32 * 1024 - 64);
+    let fact = SessionFact::new(
+        7,
+        1,
+        SessionFactBody::ToolResult {
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("patch").unwrap(),
+            identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64)).unwrap(),
+            result: ToolResult::new(
+                json!({"unrelated":"x".repeat(2 * 1024 * 1024), "evidence":evidence}),
+                vec![],
+                false,
+            )
+            .unwrap(),
+        },
+    )
+    .unwrap();
+    let source = SourceRef {
+        seq: 7,
+        field: FactField::ToolValue,
+    };
+    let path = ToolValuePath::new(vec!["evidence".into()]).unwrap();
+    let window = select_tool_value_path(&fact, source, &path)
+        .unwrap()
+        .window(0, 96 * 1024)
+        .unwrap();
+    assert!(!window.more);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&window.text).unwrap(),
+        evidence
+    );
+}
+
+#[test]
+fn tool_subfields_select_exact_values_without_unrelated_payloads() {
+    use rsi_conversation::{ToolValuePath, select_tool_value_path};
+    let fact = SessionFact::new(
+        7,
+        1,
+        SessionFactBody::ToolResult {
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("effect").unwrap(),
+            identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64)).unwrap(),
+            result: ToolResult::new(
+                json!({"large": "x".repeat(2 * 1024 * 1024),
+            "evidence": {"diffs": [{"unified_diff": "-旧\n+新\n"}]}, "a/b": true}),
+                vec![],
+                false,
+            )
+            .unwrap(),
+        },
+    )
+    .unwrap();
+    let source = SourceRef {
+        seq: 7,
+        field: FactField::ToolValue,
+    };
+    let path = ToolValuePath::new(
+        ["evidence", "diffs", "0", "unified_diff"]
+            .map(str::to_owned)
+            .into(),
+    )
+    .unwrap();
+    let selected = select_tool_value_path(&fact, source, &path).unwrap();
+    assert_eq!(selected.window(0, 64).unwrap().text, "-旧\n+新\n");
+    for key in ["01", "+0", "-1", "18446744073709551616"] {
+        let path = ToolValuePath::new(vec!["evidence".into(), "diffs".into(), key.into()]).unwrap();
+        assert!(select_tool_value_path(&fact, source, &path).is_none());
+    }
+    assert!(select_tool_value_path(&fact, SourceRef { seq: 8, ..source }, &path).is_none());
+    assert!(
+        select_tool_value_path(
+            &fact,
+            SourceRef {
+                field: FactField::ToolArguments,
+                ..source
+            },
+            &path
+        )
+        .is_none()
+    );
+    let literal = ToolValuePath::new(vec!["a/b".into()]).unwrap();
+    assert_eq!(
+        select_tool_value_path(&fact, source, &literal)
+            .unwrap()
+            .window(0, 64)
+            .unwrap()
+            .text,
+        "true"
+    );
+    for value in [
+        json!([]),
+        json!(vec!["x"; 9]),
+        json!(["x".repeat(65)]),
+        json!(vec!["x".repeat(64); 5]),
+    ] {
+        assert!(serde_json::from_value::<ToolValuePath>(value).is_err());
+    }
+}
+
+#[test]
 fn source_identity_is_lossless_and_its_wire_grammar_is_closed() {
     let source = SourceRef {
         seq: u64::MAX,
@@ -300,6 +414,7 @@ fn model_sources_preserve_delta_failure_and_generated_image_kinds() {
             9,
             1,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: TurnId::new("turn").unwrap(),
                 effect_id: EffectId::new("model").unwrap(),
                 event: LanguageEvent::ContentDelta { index: 0, delta },
@@ -326,6 +441,7 @@ fn model_sources_preserve_delta_failure_and_generated_image_kinds() {
     }
     check_fields(
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             turn_id: TurnId::new("turn").unwrap(),
             effect_id: EffectId::new("model").unwrap(),
             event: LanguageEvent::Failed {
@@ -418,6 +534,7 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
     };
     check_fields(
         SessionFactBody::ModelIntent {
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
             turn_id: turn.clone(),
             effect_id: effect.clone(),
             snapshot: snapshot.clone(),

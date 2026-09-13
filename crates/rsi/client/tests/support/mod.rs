@@ -211,7 +211,7 @@ impl SessionHandle for Handle {
     async fn observe(
         &self,
         cursor: ObservationCursor,
-    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::SessionObservationStream> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionObservationStream> {
         self.cursors.lock().unwrap().push(cursor);
         let active = Active::new(&self.active_streams);
         if let Some(case) = &self.message {

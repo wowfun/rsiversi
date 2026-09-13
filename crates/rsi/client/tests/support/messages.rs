@@ -2,7 +2,7 @@ use super::*;
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentControlRecordBody, MessageDiscardReason, StepId,
 };
-use rsi_agent_turn_protocol::{CancelTarget, ObservationRetention, TurnError};
+use rsi_agent_turn_protocol::{CancelTarget, ObservationRetention};
 use rsi_client::{MessageEvent, MessageRunError, MessageSink, drive_message};
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +29,7 @@ impl Scenario {
     pub fn observations(
         &self,
         cursor: ObservationCursor,
-    ) -> Vec<Result<SessionObservation, TurnError>> {
+    ) -> Vec<rsi_session_protocol::Result<SessionObservation>> {
         let retention = ObservationRetention::default();
         if cursor.fact_seq == 0 {
             let body = if self.discard {

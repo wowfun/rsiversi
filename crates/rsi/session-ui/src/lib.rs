@@ -5,6 +5,8 @@
 
 mod binding;
 mod output;
+mod patch;
+mod tasks;
 pub use binding::SessionUiBinderFactory;
 
 use async_trait::async_trait;
@@ -59,11 +61,14 @@ impl PluginFactory for SessionUiTargetFactory {
             .register_target(&plan, TargetKind::Surface)
             .map_err(meta)?;
         let supply = plan.context().provide_local::<UiTargetContract>(target)?;
+        let lease = Arc::new(lease);
+        let watching = watch_target(&plan, &lease)?;
         plan.defer(
             "withdraw Session UI target",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    watching.await?;
                     let report = lease.dispose().await;
                     if report.is_clean() {
                         Ok(())
@@ -74,6 +79,36 @@ impl PluginFactory for SessionUiTargetFactory {
             }),
         )
     }
+}
+fn watch_target(
+    plan: &ActivationPlan,
+    lease: &Arc<rsi_ui::ContributionLease>,
+) -> rsi_meta::Result<BoxFuture<'static, std::result::Result<(), String>>> {
+    let weak = Arc::downgrade(lease);
+    let controller = plan.local::<SessionControllerContract>()?;
+    let mut projections = controller.projection_changes();
+    let mut goal = controller.goal_changes();
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let task = plan.context().runtime().execution().spawn(async move {
+        loop {
+            tokio::select! { biased;
+                () = stopping.cancelled() => break,
+                result = projections.changed() => { if result.is_err() { break; } },
+                result = goal.changed() => { if result.is_err() { break; } },
+            }
+            let Some(lease) = weak.upgrade() else {
+                break;
+            };
+            if lease.invalidate().is_err() {
+                break;
+            }
+        }
+    });
+    Ok(Box::pin(async move {
+        stop.cancel();
+        task.await.map_err(|error| error.to_string())
+    }))
 }
 /// First-party Session surface and Tool block/source contributions.
 #[derive(Debug, Clone, Default)]
@@ -90,13 +125,37 @@ impl PluginFactory for SessionUiFactory {
                 &plan,
                 Contributions {
                     name: "rsi.session.inspection".into(),
-                    surfaces: vec![SurfaceContribution {
-                        name: "session".into(),
-                        title: "Session details".into(),
-                        target: TargetKind::Surface,
-                        renderer: Arc::new(SessionCard),
-                    }],
+                    surfaces: vec![
+                        SurfaceContribution {
+                            name: "session".into(),
+                            title: "Session details".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(SessionCard),
+                        },
+                        SurfaceContribution {
+                            name: "goal".into(),
+                            title: "Goal".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(tasks::GoalCard),
+                        },
+                        SurfaceContribution {
+                            name: "jobs".into(),
+                            title: "Current-Turn Jobs".into(),
+                            target: TargetKind::Surface,
+                            renderer: Arc::new(tasks::JobsCard),
+                        },
+                    ],
                     actions: vec![
+                        ActionContribution {
+                            name: "goal".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(tasks::GoalAction),
+                        },
+                        ActionContribution {
+                            name: "jobs".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(tasks::JobsAction),
+                        },
                         ActionContribution {
                             name: "source".into(),
                             target: TargetKind::Surface,
@@ -154,6 +213,21 @@ impl SurfaceRenderer for SessionCard {
 #[derive(Debug)]
 struct ToolCard;
 impl BlockRenderer for ToolCard {
+    fn inline(
+        &self,
+        _: &Context,
+        block: &BlockInput<'_>,
+    ) -> Result<Option<Arc<dyn SurfaceRenderer>>> {
+        let Some(tool) = block
+            .tool
+            .filter(|tool| tool.name.as_deref() == Some("apply_patch"))
+        else {
+            return Ok(None);
+        };
+        Ok(tool
+            .result
+            .map(|source| Arc::new(patch::PatchCard(source)) as Arc<dyn SurfaceRenderer>))
+    }
     fn render(&self, target: &Context, block: &BlockInput<'_>) -> Result<Option<UiView>> {
         let controller = controller(target)?;
         let Some(tool) = block.tool else {

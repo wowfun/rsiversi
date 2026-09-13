@@ -1,5 +1,7 @@
 #[path = "images.rs"]
 pub(crate) mod images;
+#[path = "inline.rs"]
+mod inline;
 #[path = "remote_ui.rs"]
 mod remote_ui;
 #[path = "source_details.rs"]
@@ -59,6 +61,8 @@ impl SubmissionState {
 
 #[derive(Debug)]
 struct Attachment {
+    inline: Mutex<BTreeMap<String, Arc<inline::InlineCard>>>,
+    inline_work: tokio::sync::Mutex<u64>,
     commands: Mutex<Option<rsi_agent_session_protocol::SessionCommandsView>>,
     generation: u64,
     id: SessionId,
@@ -78,6 +82,13 @@ struct Attachment {
 }
 impl Attachment {
     async fn close(&self) -> Result<()> {
+        let cards = std::mem::take(&mut *self.inline.lock().expect("inline cards poisoned"));
+        for card in cards.values() {
+            card.stop.cancel();
+        }
+        for card in cards.values() {
+            card.lease.close().await.map_err(error)?;
+        }
         let surface = self.surface.lock().expect("Web surface poisoned").take();
         if let Some(surface) = surface {
             let report = surface.close().await.map_err(error)?;
@@ -141,9 +152,30 @@ impl Pane {
         }
     }
     pub fn view(&self, ui: &rsi_ui::Ui) -> serde_json::Value {
+        self.project(ui, |mut value, transcript| {
+            if let Some(transcript) = transcript {
+                value["transcript"] = serde_json::to_value(transcript).expect("bounded transcript");
+            }
+            value
+        })
+    }
+    pub(crate) fn frame_view(
+        &self,
+        ui: &rsi_ui::Ui,
+        previous: Option<&crate::frames::CachedPane>,
+    ) -> rsi_api_protocol::Result<crate::frames::CachedPane> {
+        self.project(ui, |metadata, transcript| {
+            crate::frames::CachedPane::capture(metadata, transcript, previous)
+        })
+    }
+    fn project<T>(
+        &self,
+        ui: &rsi_ui::Ui,
+        project: impl FnOnce(serde_json::Value, Option<&Transcript>) -> T,
+    ) -> T {
         let current = self.current.lock().expect("Web pane poisoned").clone();
         let Some(current) = current else {
-            return serde_json::json!(null);
+            return project(serde_json::Value::Null, None);
         };
         let pending = current.renderer.pending();
         let state = current
@@ -151,18 +183,24 @@ impl Pane {
             .state
             .lock()
             .expect("Web renderer poisoned");
-        serde_json::json!({
+        let metadata = serde_json::json!({
+            "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
             "ui_cards": ui.has_block_renderers(&current.ui_target),
+            "ui_revision": ui.membership_changes().borrow().to_string(),
             "commands":*current.commands.lock().expect("Web commands poisoned"),
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
             "header":current.header, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
             "model":*current.model.lock().expect("Web model poisoned"),
-            "transcript":state.history.as_ref().unwrap_or(&state.transcript), "historical":state.history.is_some(),
+            "transcript":null, "historical":state.history.is_some(),
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
-        })
+        });
+        project(
+            metadata,
+            Some(state.history.as_ref().unwrap_or(&state.transcript)),
+        )
     }
 }
 
@@ -486,6 +524,8 @@ impl GuiApplication {
             .ok_or("Surface UI target is unavailable")?;
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            inline: Mutex::new(BTreeMap::new()),
+            inline_work: tokio::sync::Mutex::new(0),
             ui_target,
             commands: Mutex::new(None),
             generation,

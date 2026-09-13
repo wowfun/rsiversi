@@ -74,6 +74,13 @@ Session state while executable renderer assets change. Keyed surfaces keep bound
 persistent editors; the schema upgrade preserves uncertain submissions from both
 old numeric panes transactionally without increasing the origin allowance.
 
+Immutable block revisions let a presentation baseline retain closed JSON values
+and encoded lengths for unchanged blocks. Changed-pane metadata remains cheap
+and independently projected; snapshot and patch serialization borrow the block
+cache. This avoids interpreting a small wire patch as proof of small producer
+work. The cache belongs to one bounded baseline and carries no durable replay
+or business authority; generation changes discard its reuse proof.
+
 ## Alternatives considered
 
 Keeping only the vanilla document would retain its small build surface but would

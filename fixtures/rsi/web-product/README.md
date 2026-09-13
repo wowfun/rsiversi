@@ -1,5 +1,15 @@
 # Web product verification
 
+Task captures require named controls to be present, enabled and reachable after
+scrolling, and reject product notices as well as JavaScript errors. The task
+probe accepts only Chromium or Firefox and cannot pass with no selected engine.
+It injects one rejected visible-card hint and requires an exact same-sequence
+retry through the document/Worker boundary. `task-checks.test.mjs` separately
+proves hidden, disabled, obscured and missing controls fail these assertions.
+CI retains reports under `RSI_WEB_REPORT` and fails artifact upload if none exist.
+Failure metadata is written even when a crashed renderer prevents HTML or
+screenshot capture; capture diagnostics supplement the original task error.
+
 First install the shared document's pinned build dependencies with
 `npm ci --ignore-scripts --prefix ../../../plugins/rsi/web` from this directory.
 Then `npm ci && npm test` builds the actual Rust Web bundle and native RSI executable,
@@ -17,6 +27,18 @@ Browser commands pass through the product Worker, API and Agent Kernel. The
 provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in
 and recorded separately.
+
+The default runner includes `tasks.mjs`, which uses the same real Worker,
+Service and provider with explicit
+response gates. With `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new `RSI_WEB_REPORT`,
+it checks recorded inline patch evidence after a later filesystem edit, Goal
+create/pause/resume/cancel with distinct durable and live state, and an actual
+background Bash job observed without reporting its output. Both browsers retain
+desktop/narrow screenshots, containment and Send hit-test measurements. Gates
+hold the model stream while the fixture observes actual process state; they
+measure lifecycle mechanisms, not model ability. The unreported completed job
+must still fail its Turn at finalization, proving that panel reads did not report
+the job or consume its retained output.
 
 Files scenarios browse an actual unpublished Session through authenticated HTTP,
 including directory snapshots, byte pagination, text/hex display, Linux non-UTF8
@@ -131,9 +153,25 @@ Registration itself remains unprivileged. Grant bypass and revocation tests use 
 configuration owner's separate authenticated API fixtures.
 
 The opt-in `prepare-performance.mjs` creates instrumented copies of an explicitly
-supplied pre-migration asset directory and the current document source. It injects
-bounded synthetic 16/64/128-block projections and observes actual input through
+supplied baseline document source directory and the current document source.
+Both use the current pinned build dependencies and generated assets; source and
+scene hashes are recorded. Preparation copies the generated assets once, uses
+that frozen copy for both variants, and records every source, generated asset
+and final output hash together with the build dependency lockfile. Vite preserves
+the generated assets while replacing the compiled document outputs. From the
+repository root, run `RSI_WEB_ASSETS=/absolute/bundle/assets node
+fixtures/rsi/web-product/prepare-performance.mjs /absolute/baseline/document-source
+/absolute/new-documents`. The baseline must contain the document's source and
+Vite configuration. It injects
+bounded synthetic 16/64/128-block projections, including 128 blocks near the
+1 MiB text limit, and observes actual input through
 two animation frames. Production files are never rewritten. The comparison keeps
 the same native Host/Tauri harness and includes its WebKit web/network process
 PSS; it isolates document rendering and persistence, not provider or transport
 latency. Each engine has separate samples, artifacts and screenshots.
+
+Performance results distinguish block count from source text bytes. Chromium
+also reports post-scene JS heap and DOM counters; Firefox has no equivalent CDP
+sample. Time, heap and native process-family PSS are report-only. The assertions
+cover actual typed input, concurrent single-block updates, usable input geometry,
+and an error-free document. Document scenes do not measure Rust frame caching.

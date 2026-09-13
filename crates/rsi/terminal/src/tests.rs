@@ -351,7 +351,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn observe(
         &self,
         cursor: ObservationCursor,
-    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::SessionObservationStream> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionObservationStream> {
         use rsi_agent_session_protocol::{ActivationId, AgentControlRecord, StepId};
         self.observations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

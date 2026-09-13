@@ -46,6 +46,8 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-goal = { path = "../goal" }
+rsi-agent-goal = { path = "../../rsi-agent/goal" }
 image.workspace = true
 sha2.workspace = true
 rsi-process = { path = "../../rsi-process/core" }

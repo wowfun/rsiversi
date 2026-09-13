@@ -1,5 +1,9 @@
 # rsi-terminal
 
+The machine-readable JSONL envelope is version 5. It retains internal model
+events with their authenticated purpose tags. Plain answer output excludes
+context-compaction text; the TUI renders it as an internal status block.
+
 The resident application owns raw terminal modes, input decoding, the sole output
 writer, signal and unwind restoration, Session controllers and editable drafts.
 The [terminal presentation library](../terminal-ui/README.md) owns grapheme

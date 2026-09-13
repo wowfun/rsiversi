@@ -25,6 +25,7 @@ impl Transcript {
             return;
         }
         block.markdown.take();
+        block.revision = std::sync::Arc::new(());
         if block.sources.is_empty() {
             // Entered Message data replaces its transient accepted-control preview.
             block.text.clear();
@@ -92,6 +93,7 @@ mod tests {
             seq,
             1,
             SessionFactBody::ModelEvent {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                 turn_id: TurnId::new("turn").unwrap(),
                 effect_id: EffectId::new("model").unwrap(),
                 event: LanguageEvent::ContentDelta {

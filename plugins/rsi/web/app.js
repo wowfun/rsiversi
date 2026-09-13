@@ -300,6 +300,7 @@ class Pane {
   constructor(index) {
     this.index = index;
     this.blocks = new Map();
+    this.visibleSequence = 0n;
     this.generation = undefined;
     this.editors = new Map();
     this.enterSubmit = false;
@@ -327,6 +328,9 @@ class Pane {
     this.transcript = element("div", "transcript");
     this.transcript.setAttribute("aria-label", "Conversation transcript");
     this.transcript.tabIndex = 0;
+    this.transcript.addEventListener("scroll", () => this.scheduleVisible(), { passive: true });
+    this.resizeObserver = new ResizeObserver(() => this.scheduleVisible());
+    this.resizeObserver.observe(this.transcript);
     this.waiting = element("div", "pending");
     this.notice = element("div", "pane-notice");
     this.composer = element("form", "composer");
@@ -372,6 +376,54 @@ class Pane {
   action(action, fields = {}) {
     if (!this.generation) throw new Error("Open a conversation first");
     return command({ action, pane: this.index, generation: this.generation, ...fields });
+  }
+  scheduleVisible() {
+    if (this.visibleFrame) return;
+    this.visibleFrame = requestAnimationFrame(() => { this.visibleFrame = undefined; this.syncVisible(); });
+  }
+  syncVisible() {
+    if (!this.generation || !this.node.isConnected || closing) return;
+    const bounds = this.transcript.getBoundingClientRect();
+    const entries = [...this.blocks].filter(([, entry]) => {
+      const rect = entry.node.getBoundingClientRect();
+      return this.uiCards && bounds.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    }).slice(-4);
+    const key = JSON.stringify([this.generation, this.historical, this.uiRevision, entries.map(([key, entry]) => [key, entry.sourceKey])]);
+    if (key === this.visibleKey) return;
+    this.visibleKey = key;
+    this.visiblePending = { generation: this.generation, sequence: (++this.visibleSequence).toString(), keys: entries.map(([key]) => key) };
+    if (!this.visibleRunning) void this.sendVisible();
+  }
+  async sendVisible() {
+    this.visibleRunning = true;
+    try {
+      while (this.visiblePending && !closing) {
+        const request = this.visiblePending; this.visiblePending = undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try { await command({ action: "ui_visible", pane: this.index, ...request }); break; }
+          catch (error) {
+            if (this.generation !== request.generation || closing) break;
+            if (attempt === 1) notify(error.message);
+            else await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        }
+      }
+    } finally { this.visibleRunning = false; }
+  }
+  renderInline(cards) {
+    for (const [key, entry] of this.blocks) {
+      const card = cards?.[key];
+      entry.inline.hidden = !card;
+      if (!card?.model || !card.ticket) {
+        if (card) entry.inline.textContent = card.error ?? "Loading card…";
+        continue;
+      }
+      rendererSlots.push({ key: `inline-${this.index}-${card.binding.epoch}`, surface: "pane", root: entry.inline,
+        binding: JSON.stringify(card.binding), snapshot: { model: card.model, busy: card.busy, error: card.error },
+        host: { invoke(action, input) { return command({ action: "ui_invoke", ticket: card.ticket, name: action, input }); },
+          source(name, offset, maximum) { return call("ui_source", JSON.stringify({ ticket: card.ticket, name, offset, maximum })); } }
+      });
+    }
   }
   edit(text, images = this.editor?.images ?? []) {
     if (!this.editor) throw new Error("The saved draft is still loading");
@@ -619,8 +671,11 @@ class Pane {
       this.binding = this.bindDraft(data).catch(error => notify(error.message));
       this.blocks.clear(); this.transcript.replaceChildren();
       this.pendingKey = undefined;
+      this.visibleKey = undefined;
     }
+    this.historical = !!data?.historical;
     this.uiCards = !!data?.ui_cards;
+    this.uiRevision = data?.ui_revision;
     const uiKey = JSON.stringify([data?.generation, data?.ui_surfaces, view?.has_remote_ui]);
     if (uiKey !== this.uiKey) {
       this.uiKey = uiKey;
@@ -660,6 +715,8 @@ class Pane {
     }
     this.model.value = JSON.stringify(data.model);
     this.renderTranscript(data.transcript, changed);
+    this.renderInline(data.inline);
+    this.scheduleVisible();
     const pendingKey = JSON.stringify(data.pending);
     if (pendingKey !== this.pendingKey) {
       this.pendingKey = pendingKey;
@@ -680,7 +737,8 @@ class Pane {
         const node = element("article", `message ${block.role}`);
         const title = element("p", "message-title"); const text = element("div", "message-text"); const clipped = element("p", "omitted", "Text shortened in this view.");
         const sources = element("div", "actions source-actions");
-        node.append(title, text, clipped, sources); entry = { node, title, text, clipped, sources }; this.blocks.set(block.key, entry);
+        const inline = element("div", "inline-card"); inline.hidden = true;
+        node.append(title, text, clipped, inline, sources); entry = { node, title, text, clipped, inline, sources }; this.blocks.set(block.key, entry);
       }
       if (entry.title.textContent !== block.title) entry.title.textContent = block.title;
       if (entry.source !== block.text || entry.markdown !== Boolean(block.markdown)) {
@@ -747,7 +805,7 @@ function render(next) {
   rendererSlots = [];
   view = next;
   if (next.notice !== lastNotice) { lastNotice = next.notice; notify(next.notice); }
-  for (const [key, pane] of panes) if (!Object.hasOwn(next.surfaces, key)) { pane.reset(); pane.node.remove(); panes.delete(key); }
+  for (const [key, pane] of panes) if (!Object.hasOwn(next.surfaces, key)) { pane.resizeObserver.disconnect(); if (pane.visibleFrame) cancelAnimationFrame(pane.visibleFrame); pane.reset(); pane.node.remove(); panes.delete(key); }
   for (const [key, data] of Object.entries(next.surfaces)) {
     if (!panes.has(key)) panes.set(key, new Pane(key));
     const pane = panes.get(key);

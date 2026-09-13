@@ -35,6 +35,32 @@ impl SessionController {
         maximum: usize,
         stop: CancellationToken,
     ) -> BoxFuture<'static, Result<FieldWindow, SourceReadError>> {
+        self.source_window_inner(source, None, start, maximum, stop)
+    }
+
+    /// Reads a validated subfield of the exact Tool value using the same owned source path.
+    pub fn tool_value_window(
+        self: &Arc<Self>,
+        source: SourceRef,
+        path: rsi_conversation::ToolValuePath,
+        start: usize,
+        maximum: usize,
+        stop: CancellationToken,
+    ) -> BoxFuture<'static, Result<FieldWindow, SourceReadError>> {
+        if source.field != rsi_conversation::FactField::ToolValue {
+            return Box::pin(async { Err(SourceReadError::Unavailable) });
+        }
+        self.source_window_inner(source, Some(path), start, maximum, stop)
+    }
+
+    fn source_window_inner(
+        self: &Arc<Self>,
+        source: SourceRef,
+        path: Option<rsi_conversation::ToolValuePath>,
+        start: usize,
+        maximum: usize,
+        stop: CancellationToken,
+    ) -> BoxFuture<'static, Result<FieldWindow, SourceReadError>> {
         if let Err(error) = FieldWindow::text("", 0, maximum) {
             return Box::pin(async move { Err(error.into()) });
         }
@@ -66,8 +92,11 @@ impl SessionController {
                     .first()
                     .filter(|fact| fact.seq() == source.seq)
                     .ok_or(SourceReadError::Unavailable)?;
-                let value = rsi_conversation::select_field(fact, source)
-                    .ok_or(SourceReadError::Unavailable)?;
+                let value = match &path {
+                    Some(path) => rsi_conversation::select_tool_value_path(fact, source, path),
+                    None => rsi_conversation::select_field(fact, source),
+                }
+                .ok_or(SourceReadError::Unavailable)?;
                 let window = value.window(start, maximum)?;
                 if stop.is_cancelled() || controller.stop.is_cancelled() {
                     return Err(SourceReadError::Cancelled);

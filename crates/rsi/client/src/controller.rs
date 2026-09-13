@@ -19,6 +19,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub(super) mod commands;
 #[path = "source.rs"]
 pub(super) mod source;
+#[path = "tasks.rs"]
+mod task_status;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +38,9 @@ struct Admission {
 /// Surface-local submission and observation owner, created only by its plugin.
 #[derive(Debug)]
 pub struct SessionController {
+    projections: tokio::sync::watch::Sender<Option<rsi_session_protocol::ProjectionSnapshot>>,
+    goal: tokio::sync::watch::Sender<Option<rsi_session_protocol::Result<rsi_goal::GoalLiveState>>>,
+    goal_pending: Mutex<Option<rsi_goal::GoalControl>>,
     session_id: SessionId,
     handle: Arc<dyn SessionHandle>,
     sink: Arc<dyn ObservationSink>,
@@ -187,6 +192,8 @@ impl SessionController {
                 .lock()
                 .expect("controller admission poisoned");
             self.stop.cancel();
+            self.projections.send_replace(None);
+            self.goal.send_replace(None);
             self.submissions.close();
             self.tasks.close();
         }
@@ -197,7 +204,7 @@ impl SessionController {
         drop(self.execution.spawn(self.tasks.track_future(async move {
             tokio::select! { biased;
                 () = controller.stop.cancelled() => {},
-                result = crate::observe_projections(controller.handle.as_ref(), controller.sink.as_ref(), &controller.execution) => {
+                result = crate::observation::projection_updates(controller.handle.as_ref(), controller.sink.as_ref(), &controller.execution, Some(&controller.projections)) => {
                     if let Err(error) = result {
                         tokio::select! { biased;
                             () = controller.stop.cancelled() => {},
@@ -212,6 +219,8 @@ impl SessionController {
     async fn close(&self) {
         self.retire();
         self.tasks.wait().await;
+        self.projections.send_replace(None);
+        self.goal.send_replace(None);
     }
 }
 
@@ -248,6 +257,9 @@ impl PluginFactory for SessionControllerFactory {
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let controller = Arc::new(SessionController {
+            projections: tokio::sync::watch::channel(None).0,
+            goal: tokio::sync::watch::channel(None).0,
+            goal_pending: Mutex::new(None),
             session_id: config.session_id,
             handle,
             sink: plan.local::<ObservationSinkContract>()?,
@@ -282,6 +294,7 @@ impl PluginFactory for SessionControllerFactory {
             }),
         )?;
         controller.start_projections();
+        controller.start_goal();
         if let Some(cursor) = config.cursor {
             controller.start_observing(cursor);
         }

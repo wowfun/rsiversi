@@ -370,6 +370,7 @@ async fn pending_menu_waits_for_transient_read_capacity_without_losing_the_draft
         activation_phase: None,
         tree: StoreAgentSubtreeSnapshot {
             session: StoreAgentSessionStatus {
+                last_settled_control_seq: 0,
                 session_id: client.state.header.session_id().clone(),
                 durable_control_seq: 0,
                 has_open_turn: false,
@@ -516,6 +517,7 @@ async fn cancel_keeps_draft_and_targets_attached_turn_and_only_owned_pending_mes
         .collect();
     let turn = TurnId::new("attached-turn").unwrap();
     let status = StoreAgentSessionStatus {
+        last_settled_control_seq: 0,
         session_id: header.session_id().clone(),
         durable_control_seq: 2,
         has_open_turn: true,

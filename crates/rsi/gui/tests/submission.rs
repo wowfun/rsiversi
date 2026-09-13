@@ -14,6 +14,8 @@ mod files;
 mod frames;
 #[path = "submission/images.rs"]
 mod images;
+#[path = "submission/inline.rs"]
+mod inline;
 #[path = "submission/output.rs"]
 mod output;
 #[path = "submission/remote_ui.rs"]
@@ -22,6 +24,8 @@ mod remote_ui;
 mod settings;
 #[path = "submission/sources.rs"]
 mod sources;
+#[path = "submission/task_panels.rs"]
+mod task_panels;
 #[path = "submission/tree.rs"]
 mod tree;
 #[path = "submission/tree_replacement.rs"]
@@ -64,6 +68,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    task_panels: Arc<task_panels::Scenario>,
     unpublished: std::sync::atomic::AtomicBool,
     reject_submissions: std::sync::atomic::AtomicBool,
     header_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
@@ -138,6 +143,24 @@ impl SessionService for Service {
 }
 #[async_trait]
 impl SessionHandle for Backend {
+    async fn control_goal(
+        &self,
+        request: rsi_goal::GoalControl,
+    ) -> rsi_session_protocol::Result<rsi_goal::GoalControlReceipt> {
+        self.task_panels.control(self, request).await
+    }
+    async fn goal_status(&self) -> rsi_session_protocol::Result<rsi_goal::GoalLiveState> {
+        self.task_panels.live()
+    }
+    async fn observe_goal(&self) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
+        self.task_panels.observe_goal()
+    }
+    async fn read_jobs(
+        &self,
+        request: TurnJobsRequest,
+    ) -> rsi_session_protocol::Result<JobsSnapshot> {
+        self.task_panels.jobs(self, request).await
+    }
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
@@ -302,10 +325,11 @@ impl SessionHandle for Backend {
         Ok(StoreSessionInspection {
             tree: StoreAgentSubtreeSnapshot {
                 session: StoreAgentSessionStatus {
+                    last_settled_control_seq: 0,
                     session_id: header.session_id().clone(),
                     durable_control_seq: 1,
-                    has_open_turn: false,
-                    has_active_activation: false,
+                    has_open_turn: self.task_panels.jobs_active(),
+                    has_active_activation: self.task_panels.jobs_active(),
                     has_waking_message: false,
                 },
                 descendants: self.tree.lock().unwrap().clone(),
@@ -319,14 +343,20 @@ impl SessionHandle for Backend {
                 .map_or(0, SessionFact::seq),
             durable_control_seq: 1,
             pending: self.pending_messages.lock().unwrap().clone(),
-            active_turn_id: None,
-            activation_phase: None,
+            active_turn_id: self
+                .task_panels
+                .jobs_active()
+                .then(|| TurnId::new("jobs-turn").unwrap()),
+            activation_phase: self
+                .task_panels
+                .jobs_active()
+                .then_some(rsi_agent_store_protocol::StoreActivationPhase::Running),
         })
     }
     async fn observe(
         &self,
         _: ObservationCursor,
-    ) -> rsi_session_protocol::Result<SessionObservationStream> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionObservationStream> {
         self.observations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
@@ -334,6 +364,9 @@ impl SessionHandle for Backend {
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
+        if self.task_panels.enabled() {
+            return self.task_panels.projections(self.header().await?);
+        }
         self.observations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))

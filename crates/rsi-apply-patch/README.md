@@ -7,3 +7,6 @@ not pass through Bash, PowerShell, or a generic coding-tools bundle.
 The helper response is a closed protocol: every reported filesystem effect is
 one of `add`, `update`, `delete`, `move_write`, `move_delete`, or `mkdir`;
 unknown effect kinds are rejected before the response becomes a Tool result.
+Malformed model arguments return a bounded `invalid_arguments` Tool result
+before helper admission. Its diagnostic describes the expected schema without
+echoing untrusted keys or values.

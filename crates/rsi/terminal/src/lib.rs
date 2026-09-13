@@ -166,22 +166,22 @@ impl CliEvent {
     fn json_line(&self) -> std::result::Result<String, serde_json::Error> {
         match self {
             Self::Projections { snapshot } => serde_json::to_string(
-                &serde_json::json!({"version":4,"type":"projections","data":snapshot}),
+                &serde_json::json!({"version":5,"type":"projections","data":snapshot}),
             ),
             Self::Interactions { snapshot } => serde_json::to_string(&InteractionEnvelope {
-                version: 4,
+                version: 5,
                 kind: "interactions",
                 data: snapshot,
             }),
             Self::Notice { kind, value } => {
-                serde_json::to_string(&serde_json::json!({"version":4,"type":kind,"data":value}))
+                serde_json::to_string(&serde_json::json!({"version":5,"type":kind,"data":value}))
             }
             Self::Message {
                 session_id,
                 message_id,
                 accepted_control_seq,
             } => serde_json::to_string(&MessageEnvelope {
-                version: 4,
+                version: 5,
                 kind: "message",
                 session_id,
                 message_id,
@@ -193,7 +193,7 @@ impl CliEvent {
                 turn_id,
                 entered_fact_seq,
             } => serde_json::to_string(&TurnEnvelope {
-                version: 4,
+                version: 5,
                 kind: "turn",
                 session_id,
                 message_id,
@@ -205,7 +205,7 @@ impl CliEvent {
                 record,
                 durable_control_seq,
             } => serde_json::to_string(&ControlEnvelope {
-                version: 4,
+                version: 5,
                 kind: "control",
                 data: ControlData {
                     session_id,
@@ -218,7 +218,7 @@ impl CliEvent {
                 fact,
                 durable_seq,
             } => serde_json::to_string(&LiveFactEnvelope {
-                version: 4,
+                version: 5,
                 kind: "fact",
                 session_id,
                 fact,
@@ -230,7 +230,7 @@ impl CliEvent {
                 outcome,
                 durable_seq,
             } => serde_json::to_string(&OutcomeEnvelope {
-                version: 4,
+                version: 5,
                 kind: "outcome",
                 session_id,
                 turn_id,
@@ -1146,6 +1146,7 @@ pub(crate) fn write_text_event(
     };
     match fact.body() {
         SessionFactBody::ModelEvent {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
             event:
                 LanguageEvent::ContentDelta {
                     delta: ContentDelta::Text(text),

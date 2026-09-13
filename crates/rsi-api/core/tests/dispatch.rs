@@ -218,7 +218,7 @@ async fn caller_cannot_override_lane_or_effect_and_devices_have_independent_quot
     for (class, global, device) in [
         (OperationClass::Control, 16, 4),
         (OperationClass::Data, 16, 4),
-        (OperationClass::Subscription, 64, 8),
+        (OperationClass::Subscription, 64, 16),
     ] {
         let operation = spec("quota", class, OperationEffect::Read);
         let registration = registry.register(operation.clone(), gate.clone()).unwrap();

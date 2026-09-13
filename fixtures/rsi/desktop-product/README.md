@@ -1,5 +1,7 @@
 # RSI desktop product fixture
 
+The Python fixtures require Python 3.11 or newer.
+
 `verify.py --binary /absolute/rsi-desktop --driver /absolute/WebKitWebDriver
 --assets /absolute/bundle --report /absolute/new-directory` exercises the real
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
@@ -10,6 +12,20 @@ empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
 the draft editor through its input listener.
 Screenshots, capabilities, request summaries and native cleanup logs are evidence.
+Teardown attempts every owned process, stream and temporary-directory cleanup
+even if another cleanup fails. Cleanup diagnostics attach to an active primary
+failure; without one, cleanup failures make the run fail after all phases finish.
+Failures record their startup/product phase and child exit codes, and print at
+most 64 KiB from the daemon and WebDriver logs after replacing the exact live key.
+The final sweep redacts decoded JSON strings and literal or JSON-escaped key
+occurrences in text, log and HTML evidence. It rejects symlinks without reading
+or modifying their targets; it does not scrub images or arbitrary encodings. A detected key fails an
+otherwise successful run; during failure it adds a note to the original exception.
+CI independently runs
+conversation, missing-ACK and startup-close scenarios after the shared build.
+The Tool-using task scenario additionally requires the native sandbox preflight;
+missing-ACK and startup-close do not depend on that preflight. CI attempts artifact upload even on failure. A scenario
+that never starts cannot produce product evidence.
 The paired `rsi` companion must already be beside the desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
@@ -34,8 +50,17 @@ family while sharing the same canonical headless companion.
 on Send. It checks preserved text-node identity, exactly one real click and the
 resulting submission; this gates the WebKit draft-save/click interleaving.
 
+`--tasks` additionally drives recorded inline patch evidence, Goal pause/resume/
+cancel and a real background Bash job through the native window. Explicit
+provider gates expose the claimed round and original Jobs scope for observation.
+An unreported completed job must fail finalization after its readonly panel was
+used. These deterministic screenshots and native clicks remain separate from
+the opt-in live smoke; `--tasks` cannot be combined with live mode.
+The inline screenshot scrolls the recorded diff into view and records its full
+containment and center hit, so DOM text alone cannot stand in for visible evidence.
+
 `performance.py --binary ... --driver ... --documents /instrumented/documents
---report /new/report` compares ten 16/64/128-block scenes with actual WebDriver
+--report /new/report` compares ten runs of 16/64/128-block scenes, including a near-1-MiB text scene, with actual WebDriver
 input. Prepare the isolated document copies using the Web product fixture.
 PSS includes the desktop process plus all descendant WebKit web/network processes;
 all three settling samples are retained. `--smoke` checks harness admission only.

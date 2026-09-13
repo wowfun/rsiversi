@@ -338,6 +338,10 @@ fn validate_response_budget(
         delta_exact: true,
         effects,
         fuzzy_matches: fuzzy_matches.to_vec(),
+        evidence: super::evidence::PatchEvidence {
+            omitted: true,
+            ..Default::default()
+        },
         failure: Some(PatchFailure {
             operation: Some(usize::MAX),
             hunk: Some(usize::MAX),
@@ -346,7 +350,11 @@ fn validate_response_budget(
             path: Some("\0".repeat(MAXIMUM_PATCH_PATH_BYTES)),
         }),
     };
-    if !response.fits_capture() {
+    if !response.fits_capture()
+        || serde_json::to_vec(&response).map_or(true, |bytes| {
+            bytes.len() + super::evidence::MAXIMUM_EVIDENCE_BYTES > MAXIMUM_PATCH_RESPONSE_BYTES
+        })
+    {
         return Err(EngineFailure::new(
             "response_budget",
             format!(

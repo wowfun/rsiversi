@@ -137,7 +137,7 @@ fn session_header(
     let input =
         serde_json::to_vec(&json!({"session_id":scope.key})).map_err(|error| error.to_string())?;
     let header = Header::Call {
-        operation: rsi_api_protocol::OperationId::new("session", "attach", 1)
+        operation: rsi_api_protocol::OperationId::new("session", "attach", 2)
             .map_err(|error| error.to_string())?,
         bytes: input.len(),
     };

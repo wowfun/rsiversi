@@ -6,8 +6,7 @@ use rsi_agent_session_protocol::{
     TurnOutcome,
 };
 use rsi_agent_turn_protocol::{
-    CancelTarget, MessageReceipt, MessageState, ObservationCursor, ObservedFact,
-    SessionObservation, TurnError,
+    CancelTarget, MessageReceipt, MessageState, ObservationCursor, ObservedFact, SessionObservation,
 };
 use rsi_session_protocol::{SessionError, SessionHandle, SubmitInput};
 use tokio_util::sync::CancellationToken;
@@ -56,9 +55,6 @@ pub enum MessageRunError {
     /// Admission, mutation or observation opening failed.
     #[error(transparent)]
     Session(#[from] SessionError),
-    /// An opened observation failed.
-    #[error(transparent)]
-    Turn(#[from] TurnError),
     /// A finite transport ended before the required durable record.
     #[error("Session observation ended before {0}")]
     Ended(&'static str),

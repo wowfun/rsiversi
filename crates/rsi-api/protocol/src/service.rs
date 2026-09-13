@@ -107,7 +107,8 @@ pub struct ApiContext {
 pub enum ApiResponseCapacity {
     /// Reserved mutation/receiving storage or measured read delivery capacity.
     Finite(FiniteResponseCapacity),
-    /// Each item must acquire its maximum before reading or materializing domain state.
+    /// Each item admits encoded storage before allocation. Domain materialization
+    /// and typed retention require independent admission at their owning boundary.
     Subscription {
         /// Retention budget shared by all subscriptions in this dispatcher.
         budget: ByteBudget,

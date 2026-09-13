@@ -62,6 +62,12 @@ pub(crate) enum Command {
         generation: String,
         key: String,
     },
+    UiVisible {
+        pane: crate::SurfaceId,
+        generation: String,
+        sequence: String,
+        keys: Vec<String>,
+    },
     UiInvoke {
         ticket: String,
         name: String,
@@ -184,6 +190,7 @@ impl Command {
             | Self::RemoteUiNext { .. }
             | Self::RemoteUiSurface { .. }
             | Self::UiBlock { .. }
+            | Self::UiVisible { .. }
             | Self::UiInvoke { .. }
             | Self::Refresh
             | Self::WorkspacesNext
@@ -449,7 +456,13 @@ impl GuiApplication {
                 pane,
                 generation,
                 key,
-            } => self.ui_block(pane, &generation, &key),
+            } => self.ui_block(pane, &generation, &key).await,
+            Command::UiVisible {
+                pane,
+                generation,
+                sequence,
+                keys,
+            } => self.ui_visible(pane, &generation, &sequence, keys).await,
             Command::RemoteUiList { pane, generation } => {
                 self.remote_ui_list(pane, &generation, None).await
             }

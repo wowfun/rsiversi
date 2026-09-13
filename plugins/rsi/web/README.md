@@ -216,3 +216,14 @@ Closing a surface or the document saves every retained editor, including inactiv
 conversations with a previous write failure. Surface close fences editing while
 saving and restores input admission on failure. Ordinary submission saves only
 its selected editor. Unavailable draft storage reports that diagnosis consistently.
+
+The transcript reports at most four visible block keys per pane through a
+coalesced, monotonically numbered replacement command. Inline contribution models
+mount through the existing renderer table in the `pane` surface class. Scrolling,
+history or Session replacement releases mounts and their server presentations;
+late visibility commands cannot replace a newer selection. Inline actions and
+source reads use the same exact snapshot tickets as details.
+
+Visible-card hints retry once with the same sequence after a failed acknowledgement.
+This idempotent presentation hint does not retry user mutations. Generation change
+or disconnect stops the retry; a second failure remains visible to the user.

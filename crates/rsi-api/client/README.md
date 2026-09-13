@@ -4,7 +4,7 @@ This shared Rust library owns negotiated connection lifetime and API decoding fo
 native and browser connection plugins. It owns no socket, browser handle,
 credential store or domain state. `ClientConnection` requires an explicit
 Execution and a transport, verifies the connection description and exact operation
-catalog, admits 4/4/8 calls under independent input, receiving and completed-response
+catalog, admits 4/4/16 calls under independent input, receiving and completed-response
 byte pools, and drains
 owned work on close. Each pool has a separate 2 MiB control or 64 MiB data/subscription
 limit. A retained image or page does not consume the next finite call's maximum

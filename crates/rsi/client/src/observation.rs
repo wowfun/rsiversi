@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation, TurnError};
+use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
 use rsi_meta_execution::Execution;
 use rsi_session_protocol::{InteractionSnapshot, ProjectionSnapshot, SessionError, SessionHandle};
 use std::time::Duration;
@@ -11,9 +11,6 @@ pub enum ObservationFailure {
     /// Session or API admission/open failure.
     #[error(transparent)]
     Session(#[from] SessionError),
-    /// An already opened Fact/control stream failed.
-    #[error(transparent)]
-    Turn(#[from] TurnError),
     /// A live observation ended without continued service.
     #[error("Session observation ended")]
     Ended,
@@ -27,7 +24,7 @@ impl ObservationFailure {
             self,
             Self::Session(
                 SessionError::Capacity | SessionError::Api(rsi_api_protocol::ApiError::Capacity)
-            ) | Self::Turn(TurnError::Capacity | TurnError::ObserverCapacity)
+            )
         )
     }
 }
@@ -172,12 +169,25 @@ pub async fn observe_projections(
     sink: &dyn ObservationSink,
     execution: &Execution,
 ) -> Result<(), ObservationFailure> {
+    projection_updates(handle, sink, execution, None).await
+}
+
+pub(crate) async fn projection_updates(
+    handle: &dyn SessionHandle,
+    sink: &dyn ObservationSink,
+    execution: &Execution,
+    cache: Option<&tokio::sync::watch::Sender<Option<ProjectionSnapshot>>>,
+) -> Result<(), ObservationFailure> {
     let mut retry = Retry::default();
     loop {
         let result: Result<(), ObservationFailure> = async {
             let mut stream = handle.observe_projections().await?;
             while let Some(snapshot) = stream.next().await {
-                sink.projections(snapshot?).await?;
+                let snapshot = snapshot?;
+                sink.projections(snapshot.clone()).await?;
+                if let Some(cache) = cache {
+                    cache.send_replace(Some(snapshot));
+                }
                 retry = Retry::default();
             }
             Err(ObservationFailure::Ended)

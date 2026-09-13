@@ -11,9 +11,12 @@ from pathlib import Path
 import socket
 import shutil
 import subprocess
+from diagnostics import record_failure, redact_evidence, run_cleanup
+import sys
 import threading
 import tempfile
 import time
+from tasks import ProviderControl, verify as verify_tasks
 
 parser = argparse.ArgumentParser(description=__doc__)
 for option in ('binary', 'driver', 'assets', 'report'):
@@ -28,9 +31,12 @@ parser.add_argument('--ack-timeout', action='store_true')
 parser.add_argument('--save-failure', action='store_true')
 parser.add_argument('--startup-close', action='store_true')
 parser.add_argument('--refresh-during-click', action='store_true')
+parser.add_argument('--tasks', action='store_true')
 args = parser.parse_args()
 if bool(args.live_env_file) != bool(args.live_model):
     parser.error('live mode requires both an authorized environment file and a model')
+if args.tasks and (args.live_env_file or args.startup_close or args.ack_timeout):
+    parser.error('task mechanisms require the ordinary deterministic product scenario')
 if args.foreign_binary and not args.daemon: parser.error('foreign build check requires --daemon')
 if args.ack_timeout and args.restart: parser.error('ACK timeout and clean restart are distinct scenarios')
 if args.startup_close and (args.restart or args.save_failure or args.ack_timeout or args.live_env_file or args.refresh_during_click):
@@ -53,6 +59,7 @@ if args.startup_close:
     (args.report / 'startup-instrumentation.json').write_text(json.dumps({'originalAppSha256': hashlib.sha256(original).hexdigest(), 'stalledAppSha256': hashlib.sha256(bootstrap.read_bytes()).hexdigest(), 'boundary': 'isolated document module is stalled before startup; production Rust binary is unchanged'}, indent=2))
     args.assets = stalled_assets
 requests = []
+task_provider = ProviderControl()
 class Provider(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_POST(self):
@@ -61,6 +68,8 @@ class Provider(BaseHTTPRequestHandler):
             self.send_error(413); return
         body = json.loads(self.rfile.read(size))
         requests.append({'model': body.get('model'), 'messages': len(body.get('messages', []))})
+        if args.tasks and task_provider.handle(self, body):
+            return
         self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         delta = {'choices': [{'delta': {'role': 'assistant', 'content': 'Desktop conversation verified. 中文输入已收到。'}, 'finish_reason': None}]}
         done = {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 12}}
@@ -92,11 +101,10 @@ if args.daemon:
     assert not re.search(r'lib(?:gtk|webkit|javascriptcore)', libraries, re.I), libraries
     (args.report / 'headless-libraries.txt').write_text(libraries)
     daemon_log = (args.report / 'daemon.log').open('w')
-    daemon = subprocess.Popen([str(companion), 'host', 'serve', '--profile', 'fixture'], env=env, stdout=daemon_log, stderr=subprocess.STDOUT)
 with socket.socket() as sock:
     sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
 log = (args.report / 'webdriver.log').open('w')
-process = subprocess.Popen([str(args.driver.resolve()), '--host=127.0.0.1', f'--port={port}'], env=env, stdout=log, stderr=subprocess.STDOUT)
+process = None
 def call(method, path, body=None):
     connection = http.client.HTTPConnection('127.0.0.1', port, timeout=35)
     try:
@@ -113,10 +121,16 @@ def until(read, timeout=30):
         if time.monotonic() >= end: raise TimeoutError('WebDriver condition deadline')
         time.sleep(0.025)
 session = None
+phase = 'paired-daemon-startup' if args.daemon else 'webdriver-startup'
 try:
+    if args.daemon:
+        daemon = subprocess.Popen([str(companion), 'host', 'serve', '--profile', 'fixture'], env=env, stdout=daemon_log, stderr=subprocess.STDOUT)
+    phase = 'webdriver-startup'
+    process = subprocess.Popen([str(args.driver.resolve()), '--host=127.0.0.1', f'--port={port}'], env=env, stdout=log, stderr=subprocess.STDOUT)
     if daemon:
+        phase = 'paired-daemon-startup'
         def daemon_ready():
-            assert daemon.poll() is None, 'paired daemon exited during startup'
+            assert daemon.poll() is None, f'paired daemon exited during startup: {daemon.returncode}'
             files = list(Path(env['XDG_STATE_HOME']).rglob('owner.json'))
             if not files: return None
             value = json.loads(files[0].read_text())
@@ -130,13 +144,16 @@ try:
             (args.report / 'foreign-build.log').write_text(rejected.stdout + rejected.stderr)
             assert rejected.returncode != 0, 'foreign family unexpectedly attached'
             assert daemon.poll() is None and daemon_ready() == daemon_metadata
+    phase = 'webdriver-startup'
     def ready():
         try: return call('GET', '/status')
         except (OSError, http.client.HTTPException): return None
     until(ready)
+    phase = 'webview-startup'
     result = call('POST', '/session', {'capabilities': {'alwaysMatch': {'pageLoadStrategy': 'none' if args.startup_close else 'normal', 'webkitgtk:browserOptions': {
         'binary': str(args.binary.resolve()), 'args': ['--assets', str(args.assets.resolve()), '--host-profile', 'fixture']}}}})
     session = result['sessionId']; root = f'/session/{session}'
+    phase = 'product-scenario'
     def script(source, arguments=None): return call('POST', root + '/execute/sync', {'script': source, 'args': arguments or []})
     def element(css): return call('POST', root + '/element', {'using': 'css selector', 'value': css})
     def eid(value): return next(iter(value.values()))
@@ -152,7 +169,7 @@ try:
         call('POST', root + f'/element/{identity}/value', {'text': value, 'value': list(value)})
         until(lambda: script('return arguments[0].value', [item]) == value)
     def button(text):
-        item = until(lambda: script(r'return [...document.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0]&&!b.disabled)||null', [text]))
+        item = until(lambda: script(r'return [...document.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0]&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text]))
         call('POST', root + f'/element/{eid(item)}/click', {})
     def painted():
         script(r'window.fixturePaint=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.fixturePaint=true));return true')
@@ -225,6 +242,8 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
+    if args.tasks:
+        verify_tasks(script, button, fill, until, screenshot, workspace, args.report, task_provider)
     geometry = script(r'const input=document.querySelector("textarea[aria-label=\"Main message\"]"),send=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Send ↗"),r=send.getBoundingClientRect();return {input:input.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth,sendHit:send.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),origin:location.origin}')
     assert geometry['input'] >= 180 and geometry['overflow'] <= 1 and geometry['sendHit'], geometry
     script(r'''window.nativeAdmission=null;(async()=>{const cases=[['/_frame',undefined],['/_ack',JSON.stringify({frame_id:'18446744073709551615'})],['/_ack','x'.repeat(1025)],['/_call/command',undefined],['/_frame?'+ 'x'.repeat(2049),undefined]];const results=[];for(const [path,body] of cases){const response=await fetch(path,{method:body===undefined?'GET':'POST',body});results.push({status:response.status,text:await response.text()})}window.nativeAdmission=results})().catch(e=>window.nativeAdmission={error:String(e)});return true''')
@@ -279,7 +298,8 @@ try:
         assert daemon_ready() == daemon_metadata, 'desktop reconnect replaced the daemon generation'
     report = {'ok': True, 'capabilities': result['capabilities'], 'requests': requests, 'geometry': geometry, 'actualTyping': True, 'cleanupBeforeMainThreadExit': True, 'windowClose': args.window_close, 'restart': args.restart, 'liveModel': args.live_model, 'approvals': approvals, 'verifiedFileBytes': 12 if secret else None, 'borrowedDaemonPreserved': bool(daemon), 'foreignFamilyRejectedWithSameCompanion': bool(args.foreign_binary), 'daemonIdentity': daemon_metadata}
     (args.report / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)); print(json.dumps(report, ensure_ascii=False))
-except Exception:
+except Exception as error:
+    record_failure(args.report, phase, error, daemon, process, secret)
     if session:
         try:
             (args.report / 'failure.html').write_text(script(r'return document.documentElement.outerHTML'))
@@ -288,22 +308,32 @@ except Exception:
         except Exception: pass
     raise
 finally:
-    if session:
-        try: call('DELETE', f'/session/{session}')
-        except (OSError, RuntimeError, http.client.HTTPException): pass
-    process.terminate()
-    try: process.wait(timeout=10)
-    except subprocess.TimeoutExpired: process.kill(); process.wait()
-    log.close(); provider.shutdown(); provider.server_close()
-    if daemon:
-        if daemon.poll() is None:
+    failure = sys.exception()
+    def close_session():
+        if session:
+            try: call('DELETE', f'/session/{session}')
+            except (OSError, RuntimeError, http.client.HTTPException): pass
+    def stop_webdriver():
+        if process:
+            process.terminate()
+            try: process.wait(timeout=10)
+            except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=10)
+    def stop_daemon():
+        if daemon and daemon.poll() is None:
             subprocess.run([str(companion), 'host', 'stop'], env=env, check=True, timeout=45)
-        daemon.wait(timeout=10); daemon_log.close()
-    runtime_directory.cleanup()
-    if secret:
-        for path in args.report.rglob('*'):
-            if path.is_file() and path.suffix in ('.json', '.txt', '.log', '.html'):
-                source = path.read_text(errors='replace')
-                if secret in source:
-                    path.write_text(source.replace(secret, '[REDACTED]'))
-                    raise RuntimeError('Live evidence contained a credential and was redacted')
+    def wait_daemon():
+        if daemon:
+            try: daemon.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait(timeout=10)
+                raise
+    run_cleanup([
+        ('task provider', task_provider.close), ('WebDriver session', close_session),
+        ('WebDriver process', stop_webdriver), ('WebDriver log', log.close),
+        ('provider shutdown', provider.shutdown), ('provider socket', provider.server_close),
+        ('daemon stop', stop_daemon), ('daemon wait', wait_daemon),
+        ('daemon log', lambda: daemon_log.close() if daemon_log else None),
+        ('runtime directory', runtime_directory.cleanup),
+        ('evidence redaction', lambda: redact_evidence(args.report, secret, failure)),
+    ], failure)

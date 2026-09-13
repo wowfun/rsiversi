@@ -20,6 +20,8 @@ rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-ui-api = { path = "../ui-api" }
 rsi-ui = { path = "../ui" }
 rsi-client = { path = "../client" }
+rsi-goal = { path = "../goal" }
+rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-conversation = { path = "../conversation" }
 rsi-process = { path = "../../rsi-process/core" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }

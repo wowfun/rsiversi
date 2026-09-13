@@ -19,6 +19,26 @@ reads use the existing controller-owned exact Fact reader and closed `SourceRef`
 The plugin owns a 16 KiB raw UTF-8 page preference within the conversation window
 ceiling; neither the card nor paging payload retains a Fact.
 
+Completed `apply_patch` blocks additionally bind an inline Presentation. The
+source captures only their exact ToolValue reference. Its owned asynchronous
+model reads only the `evidence` subfield, bounded to 96 KiB pretty JSON, and
+validates the version-1 32 KiB compact envelope before rendering recorded diffs.
+Missing, oversized or unsupported evidence is explicit; it never triggers a
+filesystem or git read. Omission is shown separately from an empty effect list.
+The same model and standard renderer serve inline and detail presentations;
+complete result paging remains available through the existing source action.
+
+Goal and current-Turn Jobs are separate contributed surfaces. The target watches
+the controller's existing projection cache and its one live Goal observer, then
+invalidates only this target's presentations. Goal shows durable phase, allocated
+rounds, model report and process-local driving separately. Create requires an
+explicit positive round cap; Pause leaves claimed work running, Cancel targets
+the automatic round, and Resume never resets allocations. Unknown controls keep
+their exact identity and expose receipt checking without automatic resubmission.
+Jobs reads [finite current-Turn status pages](../session-protocol/README.md); controls offer refresh/paging,
+never acquire, wait, read output, report or kill. Terminal diagnostic previews are
+bounded and marked when shortened. Closed/finished scopes are shown unavailable.
+
 Tool cards expose independently issued stdout/stderr references when the target
 has the read-only Process output-cache capability. Output actions validate the
 closed cache identity and decimal-string offset before I/O, capture that target's
@@ -47,8 +67,9 @@ sink and target slots. It retains the ordinary Session controller and its domain
 facets; observation delivery invalidates only this binding's target through a
 private weak registration lease, attached after target activation. Before that
 activation no presentation exists; an early notice needs no retained replay.
-Projection delivery immediately releases
-the incoming projection lease. No Session read lease is held across UI observation.
+The export sink releases its incoming projection clone; the controller retains
+one shared latest snapshot for contribution models. Presentations never retain
+a separate Session observer or Fact-page lease.
 The UI API closes presentations and drains admitted actions before the binder
 closes this Profile. A cancelled startup waiter leaves owned startup and cleanup
 with the binder task tracker, including results which the waiter no longer receives.
