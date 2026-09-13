@@ -152,7 +152,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       for (const [size, viewport] of [["desktop", { width: 1440, height: 980 }], ["narrow", { width: 390, height: 844 }]]) {
         await page.setViewportSize(viewport);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        const expected_controls = await assertControls(page, isDetail ? detail : pane, expected);
+        const expected_controls = await assertControls(page, isDetail ? "#detail .ui-contribution" : paneSelector, expected);
         await assertNoNotices(page);
         const metric = await geometry(page, paneSelector, isDetail);
         assert(metric.page_width <= viewport.width, JSON.stringify(metric));

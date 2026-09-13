@@ -3,6 +3,9 @@
 Task captures require named controls to be present, enabled and reachable after
 scrolling, and reject product notices as well as JavaScript errors. The task
 probe accepts only Chromium or Firefox and cannot pass with no selected engine.
+Hit tests resolve and measure the current named button in one document execution,
+because a standard-view refresh can replace a button after actionability checks.
+This does not replay a control action or accept a connected but obscured button.
 It injects one rejected visible-card hint and requires an exact same-sequence
 retry through the document/Worker boundary. `task-checks.test.mjs` separately
 proves hidden, disabled, obscured and missing controls fail these assertions.
