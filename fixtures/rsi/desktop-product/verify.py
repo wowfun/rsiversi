@@ -210,7 +210,9 @@ try:
     fill('[aria-label="Model identifier 1"]', args.live_model or 'fixture-model')
     button('Apply provider')
     until(lambda: script(r'return document.body.textContent.includes("Desired 1 · Applied 1")'))
-    script(r'const e=document.querySelector("select[aria-label=\"Default model\"]");e.selectedIndex=1;e.dispatchEvent(new Event("change",{bubbles:true}));return true')
+    model_label = f'{args.live_model or "fixture-model"} · desktop-provider'
+    until(lambda: script(r'const e=document.querySelector("select[aria-label=\"Default model\"]");return e&&!e.disabled&&[...e.options].some(o=>o.textContent===arguments[0])', [model_label]))
+    script(r'const e=document.querySelector("select[aria-label=\"Default model\"]"),option=[...e.options].find(o=>o.textContent===arguments[0]);if(e.disabled||!option)throw new Error("Default model is not ready");e.value=option.value;e.dispatchEvent(new Event("change",{bubbles:true}));return true', [model_label])
     until(lambda: script(r'return document.body.textContent.includes("default_model · confirmed")&&!document.querySelector("select[aria-label=\"Default model\"]").disabled'))
     screenshot('setup.png'); button('Close settings'); click('#workspaces .nav-item')
     until(lambda: script(r'return document.querySelector("textarea[aria-label=\"Main message\"]")'))
@@ -303,7 +305,7 @@ except Exception as error:
     if session:
         try:
             (args.report / 'failure.html').write_text(script(r'return document.documentElement.outerHTML'))
-            (args.report / 'failure-state.json').write_text(json.dumps({'requests': requests, 'document': script(r'return {submissions:window.fixtureSubmissions,events:window.fixtureInputEvents,input:[...document.querySelectorAll("textarea")].map(e=>({label:e.getAttribute("aria-label"),value:e.value,disabled:e.disabled})),status:document.querySelector(".pane-status")?.textContent,notice:document.querySelector("#notice")?.textContent}')}, ensure_ascii=False, indent=2))
+            (args.report / 'failure-state.json').write_text(json.dumps({'requests': requests, 'document': script(r'return {goal:window.fixtureGoal,detail:document.querySelector("#detail")?.textContent?.slice(0,8192),submissions:window.fixtureSubmissions,events:window.fixtureInputEvents,input:[...document.querySelectorAll("textarea")].map(e=>({label:e.getAttribute("aria-label"),value:e.value,disabled:e.disabled})),status:document.querySelector(".pane-status")?.textContent,notice:document.querySelector("#notice")?.textContent}')}, ensure_ascii=False, indent=2))
             screenshot('failure.png')
         except Exception: pass
     raise

@@ -100,6 +100,14 @@ collection require a separate recovery protocol and remain a future milestone.
 
 ## Consequences
 
+Finite API reads must not monopolize receiving capacity while awaiting their
+headers. Session history can declare the entire Data ceiling even for a small
+page, otherwise rejecting a concurrent explicit Goal mutation before dispatch.
+The shared client admits reads by validated response length, with a full-ceiling
+fallback for unknown-length bodies, while mutations reserve before exchange.
+This keeps the existing byte bounds and unknown-outcome semantics without
+replaying controls or raising connection budgets.
+
 The terminal, Serve and Web applications share controllers and independent domain
 contracts. Profile replacement is ordinary graph convergence. Existing local and
 UDS model clients observe a changed provider Profile without acquiring a new

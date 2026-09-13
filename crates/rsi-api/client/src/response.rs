@@ -1,9 +1,11 @@
 use crate::{
-    FiniteDecoder, SseDecoder, SseEvent, decode_error, finite_response_head, invalid,
-    response_content_length, response_content_type as content_type, validate_error_status,
+    FiniteDecoder, FiniteEncoding, SseDecoder, SseEvent, decode_error, finite_response_head,
+    invalid, response_content_length, response_content_type as content_type, validate_error_status,
 };
 use futures_util::{Stream, StreamExt};
-use rsi_api_protocol::{ApiError, ApiMessage, ApiStream, ByteBudget, ByteReservation, Result};
+use rsi_api_protocol::{
+    ApiError, ApiMessage, ApiStream, ByteBudget, FiniteResponseCapacity, Result,
+};
 use rsi_meta_execution::Execution;
 use std::{pin::Pin, time::Duration};
 
@@ -16,13 +18,13 @@ fn uncertain(error: ApiError, mutation: bool) -> ApiError {
         error
     }
 }
-/// Decodes one finite HTTP response under already admitted body capacity.
+/// Admits and decodes one finite HTTP response before polling its body.
 /// The transport owns the absolute exchange deadline and I/O cancellation.
 pub async fn decode_response(
     status: u16,
     headers: &http::HeaderMap,
     mut source: ResponseBytes,
-    capacity: Option<ByteReservation>,
+    capacity: Option<FiniteResponseCapacity>,
     mutation: bool,
     retained: &ByteBudget,
 ) -> Result<ApiMessage> {
@@ -36,8 +38,17 @@ pub async fn decode_response(
         return Err(error);
     }
     let result = async {
-        let capacity = capacity.ok_or_else(invalid)?;
+        let mut capacity = capacity.ok_or_else(invalid)?;
         let head = finite_response_head(status, headers)?;
+        let capacity = if let Some(length) = head.length {
+            let payload = match head.encoding {
+                FiniteEncoding::Json => length,
+                FiniteEncoding::Binary => length.checked_sub(16).ok_or_else(invalid)?,
+            };
+            capacity.split(payload)?
+        } else {
+            capacity.reserve()?
+        };
         let mut decoder = FiniteDecoder::new(head.encoding, capacity, head.length)?;
         while let Some(chunk) = source.next().await {
             let chunk = chunk?;

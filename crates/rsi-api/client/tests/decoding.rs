@@ -121,7 +121,7 @@ fn exhausted_completed_retention_reports_unknown_for_a_delivered_mutation() {
                 status,
                 &headers,
                 source,
-                Some(receiving.reserve(128).unwrap()),
+                Some(receiving.reserve(128).unwrap().into()),
                 mutation,
                 &retained,
             )
@@ -140,6 +140,83 @@ fn exhausted_completed_retention_reports_unknown_for_a_delivered_mutation() {
             drop(previous);
             assert_eq!(retained.used(), 0);
         }
+    }
+}
+
+#[test]
+fn finite_reads_admit_declared_payloads_before_polling_and_keep_the_shared_bound() {
+    use futures_util::{FutureExt as _, StreamExt as _};
+    use rsi_api_protocol::FiniteResponseCapacity;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for (content_type, wire, payload) in [
+        ("application/json", b"{}".to_vec(), 2),
+        ("application/vnd.rsi.binary", binary(b"{}", b"abc"), 5),
+    ] {
+        let receiving = ByteBudget::new(8).unwrap();
+        let retained = ByteBudget::new(8).unwrap();
+        let held = receiving.reserve(6).unwrap();
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-type", content_type.parse().unwrap());
+        headers.insert("content-length", wire.len().to_string().parse().unwrap());
+        let decode = |headers: &http::HeaderMap, maximum| {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let source = Box::pin(
+                futures_util::stream::iter([Ok(bytes::Bytes::from(wire.clone()))]).inspect(
+                    move |_| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    },
+                ),
+            );
+            let result = rsi_api_client::decode_response(
+                200,
+                headers,
+                source,
+                Some(FiniteResponseCapacity::Measured {
+                    budget: receiving.clone(),
+                    maximum,
+                }),
+                false,
+                &retained,
+            )
+            .now_or_never()
+            .unwrap();
+            (result, polls.load(Ordering::SeqCst))
+        };
+        let (first, polls) = decode(&headers, 64 * 1024 * 1024);
+        if payload == 2 {
+            assert!(
+                first.is_ok(),
+                "small JSON must fit beside retained receiving storage"
+            );
+            assert_eq!(polls, 1);
+            drop(first);
+        } else {
+            assert!(matches!(first, Err(ApiError::Capacity)));
+            assert_eq!(polls, 0, "reject actual excess before polling the body");
+        }
+        assert_eq!(receiving.used(), 6);
+        drop(held);
+        let (reply, polls) = decode(&headers, 64 * 1024 * 1024);
+        let reply = reply.unwrap();
+        assert_eq!(polls, 1);
+        assert_eq!(reply.json.as_bytes(), b"{}");
+        assert_eq!(receiving.used(), 0);
+        assert_eq!(retained.used(), payload);
+        drop(reply);
+        let (oversize, polls) = decode(&headers, payload - 1);
+        assert!(oversize.is_err());
+        assert_eq!(polls, 0);
+        headers.remove("content-length");
+        let (unknown_length, polls) = decode(&headers, 64 * 1024 * 1024);
+        assert!(matches!(unknown_length, Err(ApiError::Capacity)));
+        assert_eq!(
+            polls, 0,
+            "unknown lengths reserve their ceiling before body polling"
+        );
     }
 }
 

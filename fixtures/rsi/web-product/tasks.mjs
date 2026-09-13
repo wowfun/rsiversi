@@ -85,7 +85,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
           this.addEventListener("message", ({ data }) => {
             if (data?.kind === "reply") {
               const invocation = window.taskInvocations.find(item => item.id === data.id);
-              if (invocation) invocation.reply = { time: performance.now(), error: data.error?.slice(0, 4096), notAdmitted: data.notAdmitted, result: typeof data.result === "string" ? data.result.slice(0, 4096) : data.result };
+              if (invocation) invocation.reply = { time: performance.now(), ok: !data.error, error: data.error?.slice(0, 4096), notAdmitted: data.notAdmitted, result: typeof data.result === "string" ? data.result.slice(0, 4096) : data.result ?? null };
             }
             if (data?.kind === "view") {
               const frame = JSON.parse(data.view);
@@ -202,26 +202,26 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await capture("goal-create", true, ["Create and start Goal"]);
     const beforeGoal = service.provider.requests.length;
     await detail.getByRole("button", { name: "Create and start Goal", exact: true }).click();
-    await detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 1 / 3" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Current driving: Armed" }).waitFor();
-    await until(() => service.provider.requests.length === beforeGoal + 1, "Goal stream entered");
-    await detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }).waitFor();
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 1 / 3" }), "first Goal allocation");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Current driving: Armed" }), "first Goal armed");
+    await goalUntil(() => service.provider.requests.length === beforeGoal + 1, "Goal stream entered");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }), "first Goal waiting");
     await capture("goal-armed", true, ["Pause after current round", "Cancel automatic round"]);
     await detail.getByRole("button", { name: "Pause after current round", exact: true }).click();
-    await detail.locator(".ui-field").filter({ hasText: "Durable phase: Paused" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Current driving: Disarmed" }).waitFor();
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Durable phase: Paused" }), "Goal paused");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Current driving: Disarmed" }), "Goal scheduling disarmed");
     assert.equal(service.provider.requests.length, beforeGoal + 1);
     await capture("goal-paused-claimed", true, ["Resume Goal", "Cancel automatic round"]);
     service.provider.release("UI Goal hold");
-    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }).waitFor();
+    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Completed" }), "first Goal completed");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "first Goal driver disarmed");
     await goalVisible(detail.getByRole("button", { name: "Create and start Goal", exact: true }), "Paused first-round settlement projection");
     await detail.getByRole("button", { name: "Resume Goal", exact: true }).click();
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 2 / 3" }), "second Goal allocation");
     await goalUntil(() => service.provider.requests.length === beforeGoal + 2, "resumed Goal stream entered");
     await detail.getByRole("button", { name: "Cancel automatic round", exact: true }).click();
-    await pane.locator(".pane-status").filter({ hasText: "Cancelled" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }).waitFor();
+    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Cancelled" }), "second Goal cancelled");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "cancelled Goal driver disarmed");
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);
 

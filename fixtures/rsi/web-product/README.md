@@ -32,6 +32,10 @@ provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in
 and recorded separately.
 
+The opt-in `live.mjs` checks actual tool-created bytes, a completed turn and a
+clean document before recording success. Product notices fail the live check;
+successful model output alone does not establish visual acceptance.
+
 The default runner includes `tasks.mjs`, which uses the same real Worker,
 Service and provider with explicit
 response gates. With `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new `RSI_WEB_REPORT`,

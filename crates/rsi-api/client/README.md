@@ -7,12 +7,18 @@ Execution and a transport, verifies the connection description and exact operati
 catalog, admits 4/4/16 calls under independent input, receiving and completed-response
 byte pools, and drains
 owned work on close. Each pool has a separate 2 MiB control or 64 MiB data/subscription
-limit. A retained image or page does not consume the next finite call's maximum
-receive reservation. Completed retention can still reject a reply when the
+limit. Reads reserve receiving bytes after validating response headers, using
+the declared payload length when available; an unknown-length finite body still
+requires its complete ceiling before body polling. A large read ceiling cannot
+occupy the receiving pool while waiting for the server. Mutations retain their
+maximum reservation before exchange, so receive admission cannot reject their
+execution after dispatch. A retained image or page does not consume another
+call's receiving pool. Completed retention can still reject a reply when the
 application holds too much data. Domain clients consume the resulting ApiClient capability.
 
 `ConnectionTransport` owns one exchange's I/O, exact generation headers,
-deadlines and delivery uncertainty. It receives already-admitted response storage
+deadlines and delivery uncertainty. It receives reserved mutation storage or a
+bounded read receiving pool
 and a destination budget for completed responses, plus the connection's cancellation
 signal. Dropping its exchange or stream must
 release the corresponding local I/O. A returned stream has no hidden unbounded
@@ -21,7 +27,7 @@ slot until that driver settles. Admitted mutation jobs survive response-waiter
 drop. Connection retirement fences admission and cancels local exchanges; it
 never stops the remote deployment or undoes a remote mutation.
 
-Finite decoding acquires its response reservation before receiving body bytes.
+Finite decoding acquires its response reservation before polling body bytes.
 Shared HTTP response validation checks single-valued identity, content type and
 length headers before body decoding. Native and browser transports supply header
 values; neither owns an independent interpretation of those response fields.
