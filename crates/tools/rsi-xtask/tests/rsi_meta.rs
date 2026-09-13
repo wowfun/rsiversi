@@ -276,12 +276,31 @@ fn every_workspace_package_belongs_to_one_ci_failure_domain() {
 }
 
 fn cargo_package_patterns(command: &str) -> Vec<String> {
-    let tokens = command.split_whitespace().collect::<Vec<_>>();
-    tokens
-        .windows(2)
-        .filter(|pair| pair[0] == "-p" || pair[0] == "--package")
-        .map(|pair| pair[1].trim_matches(['\'', '"']).to_owned())
+    command
+        .lines()
+        .flat_map(|line| {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            if !tokens.contains(&"--all-targets") {
+                return Vec::new();
+            }
+            tokens
+                .windows(2)
+                .filter(|pair| pair[0] == "-p" || pair[0] == "--package")
+                .map(|pair| pair[1].trim_matches(['\'', '"']).to_owned())
+                .collect()
+        })
         .collect()
+}
+#[test]
+fn targeted_preflight_does_not_reassign_whole_package_ci_ownership() {
+    let preflight = "cargo test --locked -p rsi-sandbox-local --test local native_enforcement -- --ignored --exact";
+    assert!(cargo_package_patterns(preflight).is_empty());
+    assert_eq!(
+        cargo_package_patterns(&format!(
+            "{preflight}\ncargo clippy --locked -p rsi-desktop --all-targets -- -D warnings"
+        )),
+        vec!["rsi-desktop"]
+    );
 }
 
 fn package_matches(pattern: &str, package: &str) -> bool {
@@ -506,4 +525,57 @@ fn gui_jobs_exercise_document_types_and_native_failure_boundaries() {
     ] {
         assert!(desktop.contains(seam), "native boundary omitted: {seam}");
     }
+}
+
+#[test]
+fn evaluation_evidence_is_independent_of_standard_tests_and_always_retained() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let jobs = workflow["jobs"].as_mapping().unwrap();
+    let steps = jobs
+        .values()
+        .find_map(|job| {
+            let steps = job["steps"].as_sequence()?;
+            steps
+                .iter()
+                .any(|step| step["id"].as_str() == Some("session_eval_build"))
+                .then_some(steps)
+        })
+        .unwrap();
+    let evaluation = steps
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("session_api.py --self-test"))
+        })
+        .unwrap();
+    let run = evaluation["run"].as_str().unwrap();
+    assert!(!run.contains("cargo test") && !run.contains("dev tui"));
+    assert!(
+        !run.contains("python-tests.py"),
+        "eval unit failures must not suppress oracle/API evidence"
+    );
+    let unit = steps
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("python-tests.py crates/rsi/core/eval"))
+        })
+        .unwrap();
+    assert!(unit["if"].as_str().unwrap().contains("!cancelled()"));
+    assert!(evaluation["if"].as_str().unwrap().contains("!cancelled()"));
+    assert!(evaluation["timeout-minutes"].as_u64().unwrap() >= 3 * 8 + 20);
+    let upload = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("rsi-session-api-evaluation"))
+        .unwrap();
+    assert!(upload["if"].as_str().unwrap().contains("always()"));
+    assert!(
+        upload["with"]["path"]
+            .as_str()
+            .unwrap()
+            .contains("rsi-session-api-evaluation")
+    );
 }

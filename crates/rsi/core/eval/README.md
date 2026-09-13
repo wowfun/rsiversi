@@ -1,5 +1,70 @@
 # Coding evaluation
 
+The Session API Goal evaluator uses the same immutable tasks, source admission,
+oracle and Linux namespace/process supervision as the terminal evaluator. Its
+separate driver must connect to the real local Service API, freeze explicit Goal
+round allowances and record canonical API/Goal/Turn evidence. Provider and Tool
+budgets multiply across allocated parent rounds; reports distinguish them from
+elapsed task deadlines and model token Usage. Restarted processes first verify
+disarmed state and require an explicit new control. GUI smoke and API long-task
+reports are separate acceptance surfaces. Live execution requires an explicit
+opt-in, one fixed attempt per task and an unused evidence directory.
+The classifier compares the objective, constraints and all five canonical Turn
+budget fields to the values used to configure the run. Durable provider and Tool
+starts must fit both each Turn's allowance and the aggregate parent-round cap.
+These checks reject infrastructure drift even when the external oracle passes.
+
+Build its driver with `CARGO_BUILD_JOBS=2 cargo build -p rsi --example
+session-api-eval`. Run `python3 crates/rsi/core/eval/session_api.py --self-test
+--output /absolute/new-report` for the existing oracle self-tests plus scripted
+API continuation and process restart across all three fixed tasks. The scripted
+provider deliberately finishes the first parent Turn, then repairs and reports
+completion in the second. This is mechanism evidence, not model scoring.
+Before finishing that first Turn, an actual Bash Tool attempts to overwrite
+the isolated Host configuration and SQLite state, checks that credentials are
+absent, and proves the source workspace remains writable. The evaluator requires
+its canonical successful Tool result and restricted enforcement stamp. Configured
+files are hashed before and after every task; drift invalidates the run. Host
+state remains writable by its owning daemon so it can persist canonical Facts.
+`--live --key-file .local/dev/.env --model deepseek-flash --output
+/absolute/new-report` replaces only that provider. Each stage has two automatic
+parent rounds, 16 provider attempts and 120 seconds per round. The 48 Tool-call
+allowance is divided across all stage/round combinations. The outer task deadline
+is eight minutes including initial and final grading. A subsequent requirement
+after restart creates an explicit new Goal in the same Session; it does not
+silently change the earlier Goal's frozen objective. Reports count compaction
+intents and Finished events separately; Finished-event counts alone are not
+proof that a summary was installed or usable on a later fork.
+
+Each API setup/control/read and owner shutdown has a 30-second infrastructure
+deadline, separate from waiting for automatic rounds. The outer supervisor
+retains the task deadline and process cleanup authority. Final grading receives
+only the remaining task allowance (at most 30 seconds); expiry cannot become a
+pass. Evidence collection and cleanup may finish after that allowance.
+Shutdown attempts the client Runtime, cancels the daemon token, awaits the
+daemon and shuts down the Host even if an earlier phase fails or expires.
+Cleanup errors remain infrastructure failures and retain any completed API
+outcome for diagnosis. Eval unit checks and the oracle/API run are independent
+CI steps after the driver build.
+Every admitted task returns an inspectable classified report on evidence or
+decoding exceptions. Credential-bearing artifacts are refused; the failure
+report retains a redacted partial result. An unwritable report directory can
+still prevent persistence and fails the runner. The Linux runtime temporary
+directory is rooted at `/tmp` to bound the Unix socket address independently
+of ambient `TMPDIR`. Rejection of the pristine source layout, or oracle compiler
+timeout/output overflow/incomplete cleanup, is infrastructure failure.
+
+`--self-test --pressure --task utf8-truncate` adds a bounded large scripted
+first-round answer and matching pressure Usage. It requires a tool-free summary
+request, matches each exchange to its ordered durable intent and Finished output,
+and requires the exact framed summary in a later ordinary provider input with
+the large selected answer removed. Evidence records the plan and input hashes
+for every task stage while the same
+two-round Goal still passes the immutable oracle. This is Session API compaction
+mechanism evidence over compatible Chat Completions SSE; live DeepSeek uses its
+Responses path. The deterministic pressure signal is not real model Usage, and
+this restart scenario does not establish fork behavior.
+
 `python3 crates/rsi/core/eval/coding.py --self-test` checks that each initial
 fixture fails and the reference repair passes the external Rust oracle, then
 exercises source-admission rejection. It needs no key or service. The evaluator
@@ -42,6 +107,8 @@ Agent stdout/stderr each have a separate 128 MiB operational bound, allowing
 JSONL envelopes around the 64 MiB generated-Fact budget. This bound differs
 from the oracle's 1 MiB streams; exceeding it invalidates the run as an
 infrastructure failure and preserves the truncated evidence.
+Incomplete process cleanup is also an infrastructure failure, even when the
+leader returned success or the task deadline expired. Such a run cannot pass.
 
 The oracle copies only allowlisted regular source files into a fresh project,
 uses a fixed manifest, lockfile, and function runner, and runs Cargo offline with
@@ -95,3 +162,11 @@ does not authorize replacing a valid failed attempt with a better sample.
 Report preservation is a runner policy: an existing output directory is
 rejected and prior reports are never rewritten by a new run. These files are
 not tamper-proof against their owning user or a compromised Host.
+
+Pressure evidence recomputes the selected source's canonical Fact chain and
+requires its actual large Conversation answer to be inside a selected message
+range. This reconstruction is limited to the fixed single-Session fixture.
+The canonical view, prepared LanguageRequest and HTTP messages hashes describe
+different byte domains; they are retained as identifiers, not asserted equal.
+Exchange pairing remains ordered under the fixture's single-flight provider.
+Restart evidence samples live state both before and after read-only operations.

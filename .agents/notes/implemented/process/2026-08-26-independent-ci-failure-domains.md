@@ -36,12 +36,27 @@ and runs within the standard-product test step's policy lifetime, with its own
 failure log emitted before restoration. The deterministic required-backend failure test also
 runs without relaxing policy.
 
+Whole-package lint/test commands establish a package's single CI owner. A
+focused integration or environment preflight in a consuming product job does
+not transfer that ownership; the coverage check recognizes whole-target commands
+rather than treating every package selector as another owning test suite.
+
 The Linux desktop job owns native admission, standalone-versus-paired build
 rejection, frame-ACK failure, startup-close deadlines, and the normal conversation
 close/restart path. Its frozen distribution uses a fresh target directory; the
 budget includes that cold build rather than assuming the ordinary Cargo cache
-covers it. The browser job also runs the shared document typecheck and ownership
+covers it. Independent desktop fault scenarios run after a successful shared build and
+sandbox preflight even when another scenario fails. Their phase diagnostics and
+bounded redacted child logs are always uploaded. Sandbox policy remains active
+through those scenarios and is restored by an always-running final step.
+The browser job also runs the shared document typecheck and ownership
 tests before product interaction.
+
+Session API oracle/pressure evaluation has its own driver-build and execution
+steps, independent of standard unit/TUI outcomes, with always-uploaded evidence.
+Its execution budget includes cold oracle fault checks and three task deadlines.
+Desktop diagnostic unit tests run after the native scenarios, so a diagnostic
+assertion cannot suppress otherwise available WebKit evidence.
 
 The always-running `ci-required` job depends on every independent contract and
 fails unless each result is `success`. A repository-tool test derives the set

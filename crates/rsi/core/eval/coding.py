@@ -436,7 +436,9 @@ def oracle(workspace, task, stage, timeout_seconds=30):
         report.update({**build, "phase": "compile"})
         if "launch_error" in build:
             return {**report, "infrastructure_error": "oracle compiler could not start"}
-        if build["exit_code"] != 0 or build["timed_out"] or build["output_limit_exceeded"]:
+        if build["timed_out"] or build["output_limit_exceeded"] or build.get("cleanup_pending"):
+            return {**report, "infrastructure_error": "oracle compiler exceeded capacity or could not clean up"}
+        if build["exit_code"] != 0:
             return report
         artifacts = []
         for line in build["stdout"].splitlines():

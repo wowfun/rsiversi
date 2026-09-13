@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "workbench-addon"
 path = "../../../fixtures/rsi/addon-workbench/main.rs"
 
+[[example]]
+name = "session-api-eval"
+path = "eval/session.rs"
+
 [dependencies]
 rsi-navigation = { path = "../navigation" }
 rsi-navigation-api = { path = "../navigation-api" }
