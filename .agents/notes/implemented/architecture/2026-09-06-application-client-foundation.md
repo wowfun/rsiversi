@@ -107,6 +107,10 @@ The shared client admits reads by validated response length, with a full-ceiling
 fallback for unknown-length bodies, while mutations reserve before exchange.
 This keeps the existing byte bounds and unknown-outcome semantics without
 replaying controls or raising connection budgets.
+The HTTP owner explicitly declares finite wire lengths. Its delivery frame
+wrapper cannot preserve a generic body's size hint, so relying on the HTTP codec
+to infer Content-Length would send these reads back through full-ceiling
+fallback on HTTP/2. Explicit lengths retain the existing delivery guards.
 
 The terminal, Serve and Web applications share controllers and independent domain
 contracts. Profile replacement is ordinary graph convergence. Existing local and
