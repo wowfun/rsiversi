@@ -177,5 +177,9 @@ export async function startService({ binary, assets, report, configure, onReques
         return receipt;
       },
     };
-  } catch (error) { await close(); throw error; }
+  } catch (error) {
+    try { await close(); }
+    catch (cleanup) { throw new AggregateError([error, cleanup], "Service startup and cleanup failed", { cause: error }); }
+    throw error;
+  }
 }
