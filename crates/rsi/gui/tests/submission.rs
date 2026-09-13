@@ -150,7 +150,7 @@ impl SessionHandle for Backend {
         self.task_panels.control(self, request).await
     }
     async fn goal_status(&self) -> rsi_session_protocol::Result<rsi_goal::GoalLiveState> {
-        self.task_panels.live()
+        Ok(self.task_panels.reply(self.task_panels.live()?).await)
     }
     async fn observe_goal(&self) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
         self.task_panels.observe_goal()
@@ -210,9 +210,12 @@ impl SessionHandle for Backend {
     }
     async fn command_status(
         &self,
-        _: &rsi_agent_session_protocol::DomainRequestId,
+        request: &rsi_agent_session_protocol::DomainRequestId,
     ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SessionCommandReceipt>>
     {
+        if self.task_panels.enabled() && self.task_panels.record_query(request) {
+            return Ok(None);
+        }
         Ok(self.command_receipt.lock().unwrap().clone())
     }
 

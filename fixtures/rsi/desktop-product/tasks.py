@@ -67,11 +67,46 @@ class ProviderControl:
 
 
 def verify(script, button, fill, until, screenshot, workspace, report, provider):
+    script(r'''
+        window.fixtureGoal={invocations:[],errors:[]};
+        const push=(list,value)=>{list.push(value);if(list.length>64)list.shift()};
+        const original=window.fetch;
+        window.fetch=(path,options)=>{
+            let entry;
+            if(String(path)==='/_call/command'&&typeof options?.body==='string'){
+                const request=JSON.parse(options.body),value=request.input?.value;
+                if(request.action==='ui_invoke'){
+                    entry={time:performance.now(),ticket:request.ticket,name:request.name,kind:value?.kind,
+                        request_id:value?.request?.request_id??value?.request,
+                        expected_revision:value?.request?.expected_revision??value?.revision,reply:null};
+                    push(window.fixtureGoal.invocations,entry);
+                }
+            }
+            return original(path,options).then(response=>{
+                if(entry)void response.clone().text().then(reply=>entry.reply={time:performance.now(),status:response.status,text:reply.slice(0,4096)});
+                return response;
+            });
+        };
+        new MutationObserver(()=>{
+            const text=document.querySelector('#detail')?.textContent??'';
+            if(/Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved|UI action or surface has retired/.test(text)){
+                const diagnostic=text.slice(0,4096);
+                if(window.fixtureGoal.errors.at(-1)?.diagnostic!==diagnostic)push(window.fixtureGoal.errors,{time:performance.now(),diagnostic});
+            }
+        }).observe(document.body,{subtree:true,childList:true,characterData:true});
+        return true;
+    ''')
     button('Trajectory')
     def text(selector):
         return script('return document.querySelector(arguments[0])?.innerText??""', [selector])
     def has(value):
         return value in text('#detail .ui-contribution')
+    def goal_until(predicate):
+        def checked():
+            detail = text('#detail')
+            assert not re.search(r'Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved|UI action or surface has retired', detail), detail
+            return predicate()
+        return until(checked)
     def close():
         button('Close details')
         until(lambda: script('return !document.querySelector("#detail").open'))
@@ -108,20 +143,20 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     fill('[aria-label="Goal objective"]', 'Native Goal hold for control evidence')
     fill('[aria-label="Maximum automatic rounds"]', '3')
     button('Create and start Goal')
-    until(lambda: has('Allocated rounds: 1 / 3') and has('Current driving: Armed'))
-    until(lambda: 'Waiting for native fixture release.' in text('.transcript'))
+    goal_until(lambda: has('Allocated rounds: 1 / 3') and has('Current driving: Armed'))
+    goal_until(lambda: 'Waiting for native fixture release.' in text('.transcript'))
     screenshot('tasks-goal-armed.png')
     button('Pause after current round')
-    until(lambda: has('Durable phase: Paused') and has('Current driving: Disarmed'))
+    goal_until(lambda: has('Durable phase: Paused') and has('Current driving: Disarmed'))
     screenshot('tasks-goal-paused.png')
     provider.release('Native Goal hold')
-    until(lambda: has('Driver: Disarmed') and text('.pane-status') == 'Completed')
+    goal_until(lambda: has('Driver: Disarmed') and text('.pane-status') == 'Completed' and has('Create and start Goal'))
     button('Resume Goal')
-    until(lambda: has('Allocated rounds: 2 / 3') and has('Driver: Waiting'))
-    until(lambda: text('.transcript').count('Waiting for native fixture release.') == 2)
+    goal_until(lambda: has('Allocated rounds: 2 / 3') and has('Driver: Waiting'))
+    goal_until(lambda: text('.transcript').count('Waiting for native fixture release.') == 2)
     screenshot('tasks-goal-resumed.png')
     button('Cancel automatic round')
-    until(lambda: text('.pane-status') == 'Cancelled' and has('Driver: Disarmed'))
+    goal_until(lambda: text('.pane-status') == 'Cancelled' and has('Driver: Disarmed'))
     provider.release('Native Goal hold')
     screenshot('tasks-goal-cancelled.png')
     goal_text = text('#detail')
@@ -147,6 +182,7 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     screenshot('tasks-jobs-revoked.png')
     close()
     (report / 'tasks.json').write_text(json.dumps({'ok': True, 'native_clicks': True,
+        'goal_trace': script('return window.fixtureGoal'),
         'recorded_patch': True, 'inline_geometry': inline_geometry, 'goal_allocations_after_resume': allocated, 'goal_cap': cap,
         'goal_after_cancel_text': goal_text, 'jobs_terminal_text': jobs_terminal_text,
         'jobs_terminal': 'failed_unreported_job'}, indent=2))

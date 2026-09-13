@@ -2,7 +2,9 @@ use futures_util::StreamExt as _;
 pub(crate) use rsi_api_client::{
     response_content_type as content_type, response_identity as identity,
 };
-use rsi_api_protocol::{ApiError, ApiMessage, ApiStream, ByteBudget, ByteReservation, Result};
+use rsi_api_protocol::{
+    ApiError, ApiMessage, ApiStream, ByteBudget, FiniteResponseCapacity, Result,
+};
 use rsi_meta::Execution;
 
 pub(crate) fn invalid() -> ApiError {
@@ -24,7 +26,7 @@ fn body(response: reqwest::Response) -> rsi_api_client::ResponseBytes {
 }
 pub(crate) async fn finite(
     response: reqwest::Response,
-    capacity: Option<ByteReservation>,
+    capacity: Option<FiniteResponseCapacity>,
     mutation: bool,
     retained: &ByteBudget,
 ) -> Result<ApiMessage> {

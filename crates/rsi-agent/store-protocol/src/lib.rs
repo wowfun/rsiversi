@@ -26,7 +26,7 @@ pub use domain::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 18;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 19;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -655,6 +655,8 @@ pub struct StoreReadyMessage {
     pub session_id: SessionId,
     /// Accepted message identity.
     pub message_id: MessageId,
+    /// Authority-neutral source classification from the mailbox index.
+    pub source_kind: rsi_agent_session_protocol::AgentMessageSourceKind,
     /// Durable control sequence at which the message became waking input.
     pub control_seq: u64,
     /// Timestamp at which the message became waking input.

@@ -1459,7 +1459,8 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     assert!(
         lines
             .iter()
-            .any(|line| { line["type"] == "fact" && line["fact"]["type"] == "cancel_requested" })
+            .any(|line| { line["type"] == "fact" && line["fact"]["type"] == "cancel_requested" }),
+        "SIGINT output: {lines:#?}"
     );
     assert_eq!(lines.last().unwrap()["type"], "outcome", "{lines:#?}");
     assert_eq!(lines.last().unwrap()["outcome"]["status"], "cancelled");

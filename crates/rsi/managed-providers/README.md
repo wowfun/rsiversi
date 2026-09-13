@@ -20,7 +20,9 @@ owns deployment generations. Configurations are preflighted before the desired
 document is durably published, then applied using that Profile's input updater.
 The owner requires the enclosing Profile control publication, so the source
 Profile completes its initial route publication before saved managed routes are
-restored. Desired and successfully applied revisions remain separate through convergence,
+restored. Generic Host initial convergence can therefore return while this owner
+is Pending; standard product startup waits for its Active Profile status.
+Desired and successfully applied revisions remain separate through convergence,
 rollback and uncertain replies. Startup creates the child scope and reconstructs
 the saved desired configuration; provider activation failure remains a visible
 configuration diagnostic so the management API can repair it. Malformed durable

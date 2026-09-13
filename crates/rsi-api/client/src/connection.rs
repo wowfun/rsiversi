@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rsi_api_protocol::{
-    ApiClient, ApiError, ApiOutput, ApiResponseCapacity, ByteBudget, ByteReservation,
-    ConnectionDescription, ConnectionHello, EndpointId, HostEpoch, OperationCatalog,
+    ApiClient, ApiError, ApiOutput, ApiResponseCapacity, ByteBudget, ConnectionDescription,
+    ConnectionHello, EndpointId, FiniteResponseCapacity, HostEpoch, OperationCatalog,
     OperationClass, OperationEffect, OperationSpec, Result, RetainedBytes, describe_operation,
     operations_operation, supervised_stream,
 };
@@ -91,7 +91,7 @@ impl Drop for WorkLease {
 }
 struct Admission {
     permit: OwnedSemaphorePermit,
-    capacity: Option<ByteReservation>,
+    capacity: Option<FiniteResponseCapacity>,
     work: WorkLease,
 }
 fn budgets() -> [ByteBudget; 3] {
@@ -317,7 +317,16 @@ impl Connection {
         let capacity = if operation.class == OperationClass::Subscription {
             None
         } else {
-            Some(self.output[lane].reserve(operation.maximum_response_bytes)?)
+            Some(if operation.effect == OperationEffect::Mutation {
+                self.output[lane]
+                    .reserve(operation.maximum_response_bytes)?
+                    .into()
+            } else {
+                FiniteResponseCapacity::Measured {
+                    budget: self.output[lane].clone(),
+                    maximum: operation.maximum_response_bytes,
+                }
+            })
         };
         state.active += 1;
         Ok(Admission {
@@ -339,7 +348,7 @@ impl Connection {
             work,
         } = admission;
         let output = match capacity {
-            Some(capacity) => ApiResponseCapacity::Finite(capacity.into()),
+            Some(capacity) => ApiResponseCapacity::Finite(capacity),
             None => ApiResponseCapacity::Subscription {
                 budget: self.output[lane(operation.class)].clone(),
                 maximum: operation.maximum_response_bytes,

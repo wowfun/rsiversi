@@ -27,8 +27,9 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Header format
-12 and SQLite schema 18 include model-effect purpose and continuation provenance; earlier
-authoritative formats are rejected without rewriting their files.
+12 includes model-effect purpose and continuation provenance. The
+[SQLite contract](../store-sqlite/README.md) owns the exact database version;
+earlier authoritative formats are rejected without rewriting their files.
 
 Client command receipts are compact validated projections of canonical command
 controls or lease-local draft mutations. DraftChanged binds the successor draft

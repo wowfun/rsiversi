@@ -714,3 +714,136 @@ async fn restart_ready_scan_discards_auto_before_any_new_turn_is_claimed() {
     drop(executor);
     kernel.shutdown(workers).await.unwrap();
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Legal same-tree admission, stale cleanup and claim order share one fixture.
+async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_cleaned() {
+    for backlog in [1, 16, 64] {
+        let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+        let fixture = Fixture::start(store.clone(), false).await;
+        let kernel = &fixture.kernel;
+        kernel
+            .submit_message(SubmitMessage {
+                session: super::super::resume(kernel, fixture.session_id.clone()).await,
+                message: mailbox_message("root-active"),
+                delivery: MessageDelivery::NextTurn,
+            })
+            .await
+            .unwrap();
+        let _root = kernel.register("root".into()).unwrap();
+        let root = kernel
+            .claim("root", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let busy_id = SessionId::new("busy-child").unwrap();
+        let spawn = |id: SessionId, name: &str| SpawnAgentRequest {
+            cancellation: CancellationToken::new(),
+            caller: kernel.agent_caller(&root).unwrap(),
+            child_session_id: id,
+            task_name: name.into(),
+            message_id: MessageId::new(format!("start-{name}")).unwrap(),
+            message: name.into(),
+            fork_turns: ForkTurnSelection::None,
+        };
+        kernel
+            .spawn_agent(spawn(busy_id.clone(), "busy"))
+            .await
+            .unwrap();
+        let _busy = kernel.register("busy".into()).unwrap();
+        let busy = kernel
+            .claim("busy", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(busy.session_id(), &busy_id);
+        for index in 0..backlog {
+            kernel
+                .submit_message(SubmitMessage {
+                    session: super::super::resume(kernel, busy_id.clone()).await,
+                    message: mailbox_message(&format!("backlog-{index}")),
+                    delivery: MessageDelivery::NextTurn,
+                })
+                .await
+                .unwrap();
+        }
+        let lease = arm(&fixture).await;
+        let reservation = reserve(&fixture, &lease).await;
+        submit(&fixture, &lease, &reservation).await.unwrap();
+        lease.revoke();
+        let idle_id = SessionId::new("idle-child").unwrap();
+        kernel
+            .spawn_agent(spawn(idle_id.clone(), "idle"))
+            .await
+            .unwrap();
+        let ready = store
+            .list_ready_messages(&fixture.session_id, None, 256)
+            .await
+            .unwrap();
+        assert_eq!(ready.messages.len(), backlog + 2);
+        assert!(ready.messages.windows(2).all(|pair| {
+            let a = &pair[0];
+            let b = &pair[1];
+            (a.timestamp_ms, &a.session_id, a.control_seq)
+                < (b.timestamp_ms, &b.session_id, b.control_seq)
+        }));
+        store.mailbox_reads.lock().unwrap().clear();
+        let _idle = kernel.register("idle".into()).unwrap();
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            kernel.claim("idle", CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(idle.session_id(), &idle_id);
+        assert_eq!(
+            store
+                .mailbox_reads
+                .lock()
+                .unwrap()
+                .get(&busy_id)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert!(
+            store
+                .mailbox_reads
+                .lock()
+                .unwrap()
+                .get(&fixture.session_id)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(matches!(
+            store
+                .read_agent_mailbox(&fixture.session_id, Some(&input().message_id))
+                .await
+                .unwrap()
+                .selected
+                .unwrap()
+                .state,
+            rsi_agent_store_protocol::StoreAgentMessageState::Discarded {
+                reason: MessageDiscardReason::ContinuationDisarmed,
+                ..
+            }
+        ));
+        kernel
+            .finish_turn(&idle, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        kernel
+            .finish_turn(&busy, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        kernel
+            .finish_turn(&root, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        drop(lease);
+        fixture.stop().await;
+    }
+}

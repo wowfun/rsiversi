@@ -9,6 +9,10 @@ elapsed task deadlines and model token Usage. Restarted processes first verify
 disarmed state and require an explicit new control. GUI smoke and API long-task
 reports are separate acceptance surfaces. Live execution requires an explicit
 opt-in, one fixed attempt per task and an unused evidence directory.
+The runner records the frozen driver's SHA-256 in `binary.json` before oracle
+self-tests or task execution. CI retains that identity and the evaluation
+evidence, excluding the `session-api-eval` executable copy; the archive cannot
+restore that program for binary replay.
 The classifier compares the objective, constraints and all five canonical Turn
 budget fields to the values used to configure the run. Durable provider and Tool
 starts must fit both each Turn's allowance and the aggregate parent-round cap.

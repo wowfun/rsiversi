@@ -310,6 +310,136 @@ fn package_matches(pattern: &str, package: &str) -> bool {
 }
 
 #[test]
+fn ci_events_separate_pull_requests_main_pushes_and_manual_runs() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let events = workflow["on"].as_mapping().unwrap();
+    assert_eq!(
+        events
+            .keys()
+            .map(|key| key.as_str().unwrap())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["pull_request", "push", "workflow_dispatch"])
+    );
+    assert_eq!(workflow["on"]["push"]["branches"][0].as_str(), Some("main"));
+    assert_eq!(
+        workflow["on"]["push"]["branches"]
+            .as_sequence()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(workflow["on"]["pull_request"].is_null());
+    assert!(workflow["on"]["workflow_dispatch"].is_null());
+    assert_eq!(
+        workflow["concurrency"]["group"].as_str(),
+        Some(
+            "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
+        )
+    );
+    assert_eq!(
+        workflow["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(true)
+    );
+    let documentation = workflow["jobs"]["documentation"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let verify = documentation
+        .iter()
+        .find(|step| step["run"].as_str() == Some("cargo xtask verify-docs"))
+        .unwrap();
+    assert_eq!(
+        verify["env"]["RSI_AGENT_NOTES_BASE"].as_str(),
+        Some("${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn ci_audit_selects_only_tracked_lockfiles_and_fetches_advisories_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["dependency-audit"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let audit = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Audit every committed Cargo lockfile"))
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for path in [
+        "Cargo.lock",
+        "nested with spaces/Cargo.lock",
+        "untracked/Cargo.lock",
+        "target/Cargo.lock",
+    ] {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "fixture").unwrap();
+    }
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["add", "Cargo.lock", "nested with spaces/Cargo.lock"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    fs::write(&cargo, "#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps([arg.removeprefix('./') for arg in sys.argv[1:]]))\n").unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            audit["run"].as_str().unwrap(),
+        ])
+        .current_dir(root)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let calls = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![
+            vec!["audit", "--file", "Cargo.lock"],
+            vec![
+                "audit",
+                "--no-fetch",
+                "--file",
+                "nested with spaces/Cargo.lock"
+            ],
+        ]
+    );
+}
+
+#[test]
 fn ci_required_aggregates_every_independent_job_result() {
     #[derive(Deserialize)]
     struct Workflow {
@@ -331,6 +461,7 @@ fn ci_required_aggregates_every_independent_job_result() {
         name: Option<String>,
         #[serde(default)]
         env: BTreeMap<String, String>,
+        shell: Option<String>,
         run: Option<String>,
     }
 
@@ -365,28 +496,43 @@ fn ci_required_aggregates_every_independent_job_result() {
         .iter()
         .find(|step| step.name.as_deref() == Some("Require every CI contract"))
         .expect("aggregate contract step");
-    let result_variables = contract
-        .env
-        .iter()
-        .filter_map(|(variable, expression)| {
-            let job = expression
-                .strip_prefix("${{ needs.")?
-                .strip_suffix(".result }}")?;
-            Some((job, variable.as_str()))
-        })
-        .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        result_variables.keys().copied().collect::<BTreeSet<_>>(),
-        expected,
-        "ci-required does not observe every needed result"
+        contract.env,
+        BTreeMap::from([("NEEDS_JSON".into(), "${{ toJSON(needs) }}".into())]),
+        "the aggregate consumes every result without a second job inventory"
     );
+    assert_eq!(contract.shell.as_deref(), Some("python3 {0}"));
     let run = contract.run.as_deref().expect("aggregate contract script");
-    for variable in result_variables.values() {
-        assert!(
-            run.contains(&format!("test \"${variable}\" = success")),
-            "ci-required does not require `{variable}` to succeed"
-        );
+    let execute = |input: &serde_json::Value| {
+        Command::new("python3")
+            .args(["-c", run])
+            .env("NEEDS_JSON", input.to_string())
+            .output()
+            .expect("run the workflow's aggregate script")
+    };
+    let successful: serde_json::Value = expected
+        .iter()
+        .map(|job| ((*job).to_owned(), serde_json::json!({"result": "success"})))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    let output = execute(&successful);
+    assert!(output.status.success(), "{}", stderr(&output));
+    for job in &expected {
+        assert!(String::from_utf8_lossy(&output.stdout).contains(job));
+        for result in [
+            serde_json::json!({"result": "failure"}),
+            serde_json::json!({"result": "cancelled"}),
+            serde_json::json!({"result": "skipped"}),
+            serde_json::json!({"result": "unknown"}),
+            serde_json::json!({"result": null}),
+            serde_json::json!({}),
+        ] {
+            let mut input = successful.clone();
+            input[job] = result;
+            assert!(!execute(&input).status.success(), "accepted {input}");
+        }
     }
+    assert!(!execute(&serde_json::json!({})).status.success());
 }
 
 #[test]

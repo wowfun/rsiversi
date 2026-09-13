@@ -35,6 +35,9 @@ rounds, model report and process-local driving separately. Create requires an
 explicit positive round cap; Pause leaves claimed work running, Cancel targets
 the automatic round, and Resume never resets allocations. Unknown controls keep
 their exact identity and expose receipt checking without automatic resubmission.
+Known control rejections remain visible across live and durable refreshes until
+the next explicit control. Live Disarmed alone does not prove that the independent
+durable projection has delivered the preceding round's settlement.
 Jobs reads [finite current-Turn status pages](../session-protocol/README.md); controls offer refresh/paging,
 never acquire, wait, read output, report or kill. Terminal diagnostic previews are
 bounded and marked when shortened. Closed/finished scopes are shown unavailable.

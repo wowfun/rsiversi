@@ -93,6 +93,7 @@ struct FactReadRaceStore {
     read_attempts: AtomicUsize,
     control_read_attempts: AtomicUsize,
     count_control_reads_for: Mutex<Option<SessionId>>,
+    mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     read_captured: Notify,
     release_read: Notify,
     read_error: Mutex<Option<String>>,
@@ -164,6 +165,7 @@ impl FactReadRaceStore {
             read_attempts: AtomicUsize::new(0),
             control_read_attempts: AtomicUsize::new(0),
             count_control_reads_for: Mutex::new(None),
+            mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
             read_captured: Notify::new(),
             release_read: Notify::new(),
             read_error: Mutex::new(None),
@@ -789,6 +791,12 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         selected_message_id: Option<&MessageId>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailbox> {
+        *self
+            .mailbox_reads
+            .lock()
+            .unwrap()
+            .entry(session_id.clone())
+            .or_default() += 1;
         self.inner
             .read_agent_mailbox(session_id, selected_message_id)
             .await

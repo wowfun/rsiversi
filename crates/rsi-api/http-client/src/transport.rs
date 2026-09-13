@@ -35,7 +35,7 @@ impl ConnectionTransport for NativeTransport {
             retained,
         } = output;
         let (capacity, subscription_budget) = match output {
-            ApiResponseCapacity::Finite(capacity) => (Some(capacity.reserve()?), None),
+            ApiResponseCapacity::Finite(capacity) => (Some(capacity), None),
             ApiResponseCapacity::Subscription { budget, .. } => (None, Some(budget)),
         };
         let url = format!(
@@ -95,7 +95,8 @@ impl ConnectionTransport for NativeTransport {
             Some(
                 subscription_budget
                     .expect("subscription response admission")
-                    .reserve(operation.maximum_response_bytes)?,
+                    .reserve(operation.maximum_response_bytes)?
+                    .into(),
             )
         } else {
             capacity

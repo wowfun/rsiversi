@@ -3,6 +3,34 @@ use futures_util::StreamExt;
 use rsi_goal::{GoalControl, GoalControlReceipt, GoalLiveState};
 use rsi_session_protocol::{JobsSnapshot, ProjectionSnapshot};
 
+/// Latest explicitly admitted Goal control and its retained feedback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoalControlState {
+    /// No unresolved control or retained rejection.
+    Idle,
+    /// Original request retained until its outcome is known; never implicitly replayed.
+    Pending(GoalControl),
+    /// Known rejection retained across ordinary observation refreshes.
+    Rejected {
+        /// Identity of the rejected request.
+        request_id: rsi_agent_session_protocol::DomainRequestId,
+        /// UTF-8 diagnostic bounded by the Session diagnostic limit.
+        diagnostic: String,
+    },
+}
+
+fn rejection_diagnostic(error: &SessionError) -> String {
+    let mut diagnostic = error.to_string();
+    let mut length = diagnostic
+        .len()
+        .min(rsi_agent_session_protocol::MAXIMUM_AGENT_DIAGNOSTIC_BYTES);
+    while !diagnostic.is_char_boundary(length) {
+        length -= 1;
+    }
+    diagnostic.truncate(length);
+    diagnostic
+}
+
 impl SessionController {
     fn publish_goal(&self, value: GoalLiveState) {
         self.goal.send_if_modified(|previous| {
@@ -25,15 +53,9 @@ impl SessionController {
     pub fn goal_changes(&self) -> tokio::sync::watch::Receiver<Option<Result<GoalLiveState>>> {
         self.goal.subscribe()
     }
-    /// Returns an unresolved exact control; callers must not replace its identity.
-    ///
-    /// # Panics
-    /// Panics if a prior panic poisoned pending control storage.
-    pub fn pending_goal(&self) -> Option<GoalControl> {
-        self.goal_pending
-            .lock()
-            .expect("Goal pending poisoned")
-            .clone()
+    /// Observes exact pending identity and known rejection independently of live/projection updates.
+    pub fn goal_control_changes(&self) -> tokio::sync::watch::Receiver<GoalControlState> {
+        self.goal_control.subscribe()
     }
 
     pub(super) fn start_goal(self: &Arc<Self>) {
@@ -89,7 +111,7 @@ impl SessionController {
     }
     /// Reads the pending control's receipt and current live state without arming a driver.
     pub fn reconcile_goal(self: &Arc<Self>) -> BoxFuture<'static, Result<GoalControlReceipt>> {
-        let Some(request) = self.pending_goal() else {
+        let GoalControlState::Pending(request) = self.goal_control.borrow().clone() else {
             return Box::pin(async {
                 Err(SessionError::Invalid("No unresolved Goal control".into()))
             });
@@ -111,20 +133,21 @@ impl SessionController {
         let Ok(permit) = self.submissions.clone().try_acquire_owned() else {
             return Box::pin(async { Err(SessionError::Capacity) });
         };
+        if matches!(&*self.goal_control.borrow(), GoalControlState::Pending(pending) if !query || *pending != request)
         {
-            let mut pending = self.goal_pending.lock().expect("Goal pending poisoned");
-            if pending
-                .as_ref()
-                .is_some_and(|pending| !query || *pending != request)
-            {
-                return Box::pin(async {
-                    Err(SessionError::Invalid(
-                        "Reconcile the unresolved Goal control first".into(),
-                    ))
-                });
-            }
-            *pending = Some(request.clone());
+            return Box::pin(async {
+                Err(SessionError::Invalid(
+                    "Reconcile the unresolved Goal control first".into(),
+                ))
+            });
         }
+        self.goal_control.send_if_modified(|state| {
+            if matches!(state, GoalControlState::Pending(pending) if *pending == request) {
+                return false;
+            }
+            *state = GoalControlState::Pending(request.clone());
+            true
+        });
         let unknown = SessionError::CommandOutcomeUnknown {
             request_id: request.request_id.clone(),
         };
@@ -145,14 +168,30 @@ impl SessionController {
                 } => result,
             };
             let uncertain = matches!(&result, Err(SessionError::CommandOutcomeUnknown { .. } | SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)));
-            if !uncertain {
-                let mut pending = controller.goal_pending.lock().expect("Goal pending poisoned");
-                if pending.as_ref().is_some_and(|request| request.request_id == request_id) { pending.take(); }
-            }
-            if let Ok(receipt) = &result { controller.publish_goal(receipt.live.clone()); }
+            controller.goal_control.send_if_modified(|state| {
+                if !matches!(state, GoalControlState::Pending(request) if request.request_id == request_id) { return false; }
+                if uncertain { return false; }
+                *state = match &result {
+                    Ok(_) => GoalControlState::Idle,
+                    Err(error) => GoalControlState::Rejected { request_id, diagnostic: rejection_diagnostic(error) },
+                };
+                true
+            });
             if result.is_ok() || uncertain { controller.start_observing(ObservationCursor::default()); }
             result
         }));
         Box::pin(async move { task.await.unwrap_or(Err(fallback)) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rejection_diagnostic_preserves_utf8_within_the_session_bound() {
+        let error = super::SessionError::Invalid("证".repeat(4096));
+        let diagnostic = super::rejection_diagnostic(&error);
+        assert!(diagnostic.len() <= rsi_agent_session_protocol::MAXIMUM_AGENT_DIAGNOSTIC_BYTES);
+        assert!(error.to_string().starts_with(&diagnostic));
+        assert!(diagnostic.ends_with('证'));
     }
 }

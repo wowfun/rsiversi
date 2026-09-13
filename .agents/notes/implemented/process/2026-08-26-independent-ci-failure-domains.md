@@ -14,6 +14,13 @@ that silently omits a newly added job.
 
 ## Decision
 
+The complete workflow runs on pull requests, pushes to `main`, and manual
+dispatch. Concurrency separates event types and identifies a pull request by
+number, so a manual diagnostic cannot cancel its required checks. Feature-branch
+pushes do not compete with the pull request's merge-tree verification. Document
+archive validation uses the pull request base, push predecessor, or `origin/main`
+for a manual run; an absent event field must not become an empty base reference.
+
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
 dependency audit, and Windows `rsi-meta`.
@@ -58,10 +65,25 @@ Its execution budget includes cold oracle fault checks and three task deadlines.
 Desktop diagnostic unit tests run after the native scenarios, so a diagnostic
 assertion cannot suppress otherwise available WebKit evidence.
 
+The browser job caches root workspace dependencies and installed Rust tools;
+dependency audit caches installed tools without a target directory. Both use
+the existing pinned Rust cache action and retain locked tool installation.
+Standalone fixtures keep their own lockfiles and targets. Audit enumerates
+Git-tracked lockfiles, fetching advisories for the root and reusing that database
+for the remaining files.
+
+Acceptance uploads retain diagnostics and build identities while excluding the
+native executable copies used to freeze scenarios. The owning fixtures record
+those hashes before execution, including failure paths; desktop uploads also
+retain its distribution receipt, frozen input manifest, and build log.
+
 The always-running `ci-required` job depends on every independent contract and
-fails unless each result is `success`. A repository-tool test derives the set
+consumes the complete `needs` object, failing if it is empty or any result is
+not `success`. There is no second per-job result mapping. A repository-tool test derives the set
 of top-level workflow jobs and proves that the aggregate names every other job,
-so adding a job without aggregation is a test failure.
+so adding a job without aggregation is a test failure. Behavior tests execute
+the actual aggregate script with successful, failed, cancelled, skipped and
+missing results.
 
 ## Alternatives considered
 
@@ -72,6 +94,13 @@ renames and matrix expansion would turn repository policy into a second CI
 inventory. Reimplementing `rsi-meta` package enumeration in separate jobs was
 rejected because it would create competing conformance authorities.
 
+Combining the product jobs behind a shared dispatcher was rejected: removing
+setup lines would introduce conditional routing without measured critical-path
+savings. Dropping browsers or the desktop's second build would discard distinct
+platform and build-family evidence. Native executables dominate the measured
+acceptance archives, so excluding those copies removes upload work without
+weakening the scenarios or adding another packaging mechanism.
+
 ## Consequences
 
 Failures report the owning product directly and independent jobs can execute in
@@ -81,6 +110,11 @@ measured closely enough to call it small or bounded; job consolidation requires
 CI timing evidence and must preserve product failure ownership. `ci-required`
 remains a stable protection seam, and its topology test prevents silent
 weakening when the workflow grows.
+Feature branches without a pull request require manual dispatch, which GitHub
+only exposes after the workflow exists on the default branch. Evidence archives
+identify the tested binaries but cannot restore them for exact binary replay.
+Cache and artifact timing improvements require measured runs; smaller archives
+alone do not establish an application or CI latency improvement.
 Job deadlines cover the sum of explicit step deadlines plus ten minutes of setup
 headroom, including conditionally selected platform steps. Every browser job
 command has an explicit step deadline; setup actions share the headroom. The repository budget

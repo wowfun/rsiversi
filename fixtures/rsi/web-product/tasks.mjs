@@ -15,6 +15,7 @@ const binary = join(report, "rsi");
 await copyFile(process.env.RSI_WEB_BINARY ?? resolve("target/debug/rsi"), binary);
 await chmod(binary, 0o700);
 const binaryHash = createHash("sha256").update(await readFile(binary)).digest("hex");
+await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: binaryHash }));
 
 async function until(predicate, label, maximum = 30000) {
   const deadline = Date.now() + maximum;
@@ -65,10 +66,43 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       const identities = new WeakMap(); let sequence = 0;
       window.taskInputEvents = [];
       window.taskVisibleRequests = [];
+      window.taskInvocations = [];
+      window.taskGoalErrors = [];
+      const observed = new WeakSet();
+      const boundedPush = (list, item) => { list.push(item); if (list.length > 64) list.shift(); };
+      const observeGoalError = (text, source) => {
+        if (!/Goal control rejected|Goal control:|command revision conflict|UI action or surface has retired|Control outcome is unresolved/.test(text)) return;
+        const diagnostic = text.slice(0, 4096);
+        if (window.taskGoalErrors.at(-1)?.diagnostic !== diagnostic) boundedPush(window.taskGoalErrors, { time: performance.now(), source, diagnostic });
+      };
+      document.addEventListener("DOMContentLoaded", () => {
+        new MutationObserver(() => observeGoalError(document.querySelector("#detail")?.textContent ?? "", "DOM"))
+          .observe(document.body, { subtree: true, childList: true, characterData: true });
+      });
       const post = Worker.prototype.postMessage;
       Worker.prototype.postMessage = function(message, ...rest) {
+        if (!observed.has(this)) {
+          observed.add(this);
+          this.addEventListener("message", ({ data }) => {
+            if (data?.kind === "reply") {
+              const invocation = window.taskInvocations.find(item => item.id === data.id);
+              if (invocation) invocation.reply = { time: performance.now(), ok: !data.error, error: data.error?.slice(0, 4096), notAdmitted: data.notAdmitted, result: typeof data.result === "string" ? data.result.slice(0, 4096) : data.result ?? null };
+            }
+            if (data?.kind === "view") {
+              const frame = JSON.parse(data.view);
+              observeGoalError(JSON.stringify(frame.view?.ui_detail ?? frame.sections?.ui_detail ?? {}), "Worker frame");
+            }
+          });
+        }
         if (message?.method === "command") {
           const request = JSON.parse(message.payload);
+          if (request.action === "ui_invoke") {
+            const value = request.input?.value;
+            boundedPush(window.taskInvocations, { id: message.id, time: performance.now(), ticket: request.ticket, name: request.name,
+              kind: value?.kind, request_id: value?.request?.request_id ?? value?.request,
+              expected_revision: value?.request?.expected_revision ?? value?.revision,
+              action: value?.request?.action, reply: null });
+          }
           if (request.action === "ui_visible" && request.keys.length) {
             window.taskVisibleRequests.push(request);
             if (window.taskVisibleRequests.length === 1) {
@@ -104,6 +138,12 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     const paneSelector = '[aria-label="Main conversation"]';
     const pane = page.locator(paneSelector);
     const detail = page.locator("#detail .ui-contribution");
+    const goalUntil = async (predicate, label) => until(async () => {
+      const evidence = await page.evaluate(() => ({ errors: window.taskGoalErrors, replies: window.taskInvocations.filter(item => item.name === "goal" && item.reply?.error) }));
+      assert.deepEqual(evidence, { errors: [], replies: [] }, `${label}: explicit Goal failure ${JSON.stringify(evidence)}`);
+      return predicate();
+    }, label);
+    const goalVisible = async (locator, label) => goalUntil(() => locator.isVisible(), label);
     const close = async () => {
       if (await page.locator("#detail").isVisible()) await page.getByRole("button", { name: "Close details", exact: true }).click();
       await page.locator("#detail").waitFor({ state: "hidden" });
@@ -113,7 +153,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       for (const [size, viewport] of [["desktop", { width: 1440, height: 980 }], ["narrow", { width: 390, height: 844 }]]) {
         await page.setViewportSize(viewport);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        const expected_controls = await assertControls(page, isDetail ? detail : pane, expected);
+        const expected_controls = await assertControls(page, isDetail ? "#detail .ui-contribution" : paneSelector, expected);
         await assertNoNotices(page);
         const metric = await geometry(page, paneSelector, isDetail);
         assert(metric.page_width <= viewport.width, JSON.stringify(metric));
@@ -163,29 +203,37 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await capture("goal-create", true, ["Create and start Goal"]);
     const beforeGoal = service.provider.requests.length;
     await detail.getByRole("button", { name: "Create and start Goal", exact: true }).click();
-    await detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 1 / 3" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Current driving: Armed" }).waitFor();
-    await until(() => service.provider.requests.length === beforeGoal + 1, "Goal stream entered");
-    await detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }).waitFor();
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 1 / 3" }), "first Goal allocation");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Current driving: Armed" }), "first Goal armed");
+    await goalUntil(() => service.provider.requests.length === beforeGoal + 1, "Goal stream entered");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }), "first Goal waiting");
     await capture("goal-armed", true, ["Pause after current round", "Cancel automatic round"]);
     await detail.getByRole("button", { name: "Pause after current round", exact: true }).click();
-    await detail.locator(".ui-field").filter({ hasText: "Durable phase: Paused" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Current driving: Disarmed" }).waitFor();
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Durable phase: Paused" }), "Goal paused");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Current driving: Disarmed" }), "Goal scheduling disarmed");
     assert.equal(service.provider.requests.length, beforeGoal + 1);
     await capture("goal-paused-claimed", true, ["Resume Goal", "Cancel automatic round"]);
     service.provider.release("UI Goal hold");
-    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }).waitFor();
+    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Completed" }), "first Goal completed");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "first Goal driver disarmed");
+    await goalVisible(detail.getByRole("button", { name: "Create and start Goal", exact: true }), "Paused first-round settlement projection");
     await detail.getByRole("button", { name: "Resume Goal", exact: true }).click();
-    await detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 2 / 3" }).waitFor();
-    await until(() => service.provider.requests.length === beforeGoal + 2, "resumed Goal stream entered");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 2 / 3" }), "second Goal allocation");
+    await goalUntil(() => service.provider.requests.length === beforeGoal + 2, "resumed Goal stream entered");
     await detail.getByRole("button", { name: "Cancel automatic round", exact: true }).click();
-    await pane.locator(".pane-status").filter({ hasText: "Cancelled" }).waitFor();
-    await detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }).waitFor();
+    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Cancelled" }), "second Goal cancelled");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "cancelled Goal driver disarmed");
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);
 
+    const beforeJob = service.provider.requests.length;
     await send("Please observe background job");
+    await until(() => {
+      const requests = service.provider.requests.slice(beforeJob);
+      assert(requests.length <= 2, "background job must use exactly one tool request and one held follow-up");
+      return requests.length === 2 && requests.every(request => request.prompt === "Please observe background job") &&
+        !requests[0].completedTool && requests[1].completedTool;
+    }, "current background job tool-result follow-up entered provider gate");
     await surface("Current-Turn Jobs");
     await detail.locator("pre").filter({ hasText: "Running" }).waitFor();
     assert.match(await detail.innerText(), /Reported: false/);
@@ -211,9 +259,12 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.locator("#login").waitFor({ state: "visible" });
     assert.deepEqual(errors, []);
     results.push({ browser: name, version: browser.version(), binary_sha256: binaryHash, ok: true,
+      ui_invocations: await page.evaluate(() => window.taskInvocations), goal_errors: await page.evaluate(() => window.taskGoalErrors),
       measurements, visibility_retry: visibilityRetry, requests: service.provider.requests, jobs_terminal: "failed_unreported_job", clean_sign_out: true });
   } catch (error) {
     await recordTaskFailure(page, directory, { error: String(error), errors, measurements, requests: service?.provider.requests,
+      ui_invocations: await page?.evaluate(() => window.taskInvocations).catch(() => []),
+      goal_errors: await page?.evaluate(() => window.taskGoalErrors).catch(() => []),
       input_events: await page?.evaluate(() => window.taskInputEvents).catch(() => []) }).catch(reportError => { error.cause = reportError; });
     throw error;
   } finally {

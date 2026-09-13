@@ -42,6 +42,14 @@ Message identity, never proof of non-execution. Dropping an ordinary submission
 waiter still leaves reconciliation owned; the client contract distinguishes
 explicit cancellation from waiter lifetime.
 
+The Goal observer is the single writer of retained live driver state. A control
+or reconciliation response can arrive after a newer observation; publishing its
+earlier snapshot can leave the UI at Reserving while the driver is already
+Waiting. Receipts retain their captured live snapshot for callers, but the client
+does not merge it into the observer's watch. This avoids introducing a second
+ordering protocol for snapshots that carry no observation sequence. Gated GUI
+tests deliver Waiting before releasing an older control or reconciliation reply.
+
 The [Session protocol](../../../../crates/rsi/session-protocol/README.md) is
 separate from its native implementation. Models and completed Output are
 independent capabilities. Registered Workspace identities resolve to the existing
@@ -99,6 +107,18 @@ for reconciliation; cross-service staging, reference tracking and garbage
 collection require a separate recovery protocol and remain a future milestone.
 
 ## Consequences
+
+Finite API reads must not monopolize receiving capacity while awaiting their
+headers. Session history can declare the entire Data ceiling even for a small
+page, otherwise rejecting a concurrent explicit Goal mutation before dispatch.
+The shared client admits reads by validated response length, with a full-ceiling
+fallback for unknown-length bodies, while mutations reserve before exchange.
+This keeps the existing byte bounds and unknown-outcome semantics without
+replaying controls or raising connection budgets.
+The HTTP owner explicitly declares finite wire lengths. Its delivery frame
+wrapper cannot preserve a generic body's size hint, so relying on the HTTP codec
+to infer Content-Length would send these reads back through full-ceiling
+fallback on HTTP/2. Explicit lengths retain the existing delivery guards.
 
 The terminal, Serve and Web applications share controllers and independent domain
 contracts. Profile replacement is ordinary graph convergence. Existing local and

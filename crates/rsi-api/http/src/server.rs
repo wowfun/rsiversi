@@ -506,6 +506,11 @@ pub(crate) fn full(bytes: Bytes) -> Body {
         .boxed_unsync()
 }
 fn reply(message: ApiMessage) -> Response<Body> {
+    let length = message.json.len()
+        + message
+            .binary
+            .as_ref()
+            .map_or(0, |binary| 16 + binary.len());
     let (body, mime) = if let Some(binary) = message.binary {
         let mut prefix = [0; 16];
         prefix[..8].copy_from_slice(&(message.json.len() as u64).to_be_bytes());
@@ -529,6 +534,9 @@ fn reply(message: ApiMessage) -> Response<Body> {
     response
         .headers_mut()
         .insert("content-type", http::HeaderValue::from_static(mime));
+    response
+        .headers_mut()
+        .insert("content-length", http::HeaderValue::from(length));
     response
 }
 
@@ -575,10 +583,14 @@ pub(crate) fn failure(error: ApiError) -> Response<Body> {
             "application/vnd.rsi.domain-error+json",
         ),
     };
+    let length = bytes.len();
     let mut response = Response::new(full(bytes));
     *response.status_mut() = status;
     response
         .headers_mut()
         .insert("content-type", http::HeaderValue::from_static(mime));
+    response
+        .headers_mut()
+        .insert("content-length", http::HeaderValue::from(length));
     response
 }
