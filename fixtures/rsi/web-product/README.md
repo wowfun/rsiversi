@@ -49,6 +49,9 @@ hold the model stream while the fixture observes actual process state; they
 measure lifecycle mechanisms, not model ability. The unreported completed job
 must still fail its Turn at finalization, proving that panel reads did not report
 the job or consume its retained output.
+The no-new-model-request assertion begins only after the current job's tool-result
+follow-up enters the provider gate. A running job or retained assistant text does
+not establish that the executor has sent this normal follow-up request.
 
 Files scenarios browse an actual unpublished Session through authenticated HTTP,
 including directory snapshots, byte pagination, text/hex display, Linux non-UTF8

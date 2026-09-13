@@ -225,7 +225,14 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);
 
+    const beforeJob = service.provider.requests.length;
     await send("Please observe background job");
+    await until(() => {
+      const requests = service.provider.requests.slice(beforeJob);
+      assert(requests.length <= 2, "background job must use exactly one tool request and one held follow-up");
+      return requests.length === 2 && requests.every(request => request.prompt === "Please observe background job") &&
+        !requests[0].completedTool && requests[1].completedTool;
+    }, "current background job tool-result follow-up entered provider gate");
     await surface("Current-Turn Jobs");
     await detail.locator("pre").filter({ hasText: "Running" }).waitFor();
     assert.match(await detail.innerText(), /Reported: false/);
