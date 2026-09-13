@@ -1930,6 +1930,7 @@ fn apply_ready_updates(
                     StoreReadyMessage {
                         session_id: session_id.clone(),
                         message_id: message.message_id.clone(),
+                        source_kind: message.source.kind(),
                         control_seq: record.seq(),
                         timestamp_ms: record.timestamp_ms(),
                         target: *target,
@@ -1967,6 +1968,7 @@ fn apply_ready_updates(
                     StoreReadyMessage {
                         session_id: session_id.clone(),
                         message_id: message_id.clone(),
+                        source_kind: entry.message.source.kind(),
                         control_seq,
                         timestamp_ms,
                         target: MessageTarget::NextTurn,

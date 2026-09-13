@@ -109,6 +109,10 @@ rather than scanning the complete sessions table. Cursor-paged ready-message,
 Agent-child, waiting-activation, and ready-root reads select distinct first-page
 and continuation SQL. A continuation keeps the complete cursor tuple as an
 index range constraint rather than hiding it behind a nullable `OR` predicate.
+Ready pages join mailbox source metadata by its complete primary key, rejecting
+missing or inconsistent projections without decoding message bodies. Waiting
+pages use a partial Session-id index containing only waiting activations, so
+unrelated running or parked activations do not determine page work.
 CAS file work has a separate single-slot blocking admission. Hashing and
 immutable file publication do not hold a SQLite connection mutex; metadata is
 checked or inserted only after the file phase completes.
@@ -133,7 +137,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact schema version 18 admits only the current mandatory Agent-preset
+The exact schema version 19 admits only the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one

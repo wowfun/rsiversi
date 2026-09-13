@@ -16,7 +16,9 @@ pub use controller::commands::{
     command_invocation, execute_command_once, query_command_result, slash_command,
 };
 pub use controller::source::SourceReadError;
-pub use controller::{SessionController, SessionControllerContract, SessionControllerFactory};
+pub use controller::{
+    GoalControlState, SessionController, SessionControllerContract, SessionControllerFactory,
+};
 pub use lifetime::{ConnectionLifetime, ConnectionLifetimeContract};
 pub use message::{MessageEvent, MessageRunError, MessageSink, drive_message};
 pub use observation::ObservationSinkContract;

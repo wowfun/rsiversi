@@ -147,11 +147,14 @@ async fn exchange(
     .await
     .map_err(|error| uncertain(error, mutation))?;
     match (result, output.receiving) {
-        (Header::Reply { json, binary }, ApiResponseCapacity::Finite(capacity)) => {
+        (Header::Reply { json, binary }, ApiResponseCapacity::Finite(mut capacity)) => {
+            let bytes = json
+                .checked_add(binary.unwrap_or(0))
+                .ok_or_else(|| uncertain(wire::invalid(), mutation))?;
             let message = wire::message(
                 &mut call,
                 capacity
-                    .reserve()
+                    .split(bytes)
                     .map_err(|error| uncertain(error, mutation))?,
                 &output.retained,
                 json,
@@ -167,8 +170,8 @@ async fn exchange(
         }
         (Header::Error { code, domain }, capacity) => {
             let reservation = match capacity {
-                ApiResponseCapacity::Finite(capacity) => capacity
-                    .reserve()
+                ApiResponseCapacity::Finite(mut capacity) => capacity
+                    .split(domain.unwrap_or(0))
                     .map_err(|error| uncertain(error, mutation))?,
                 ApiResponseCapacity::Subscription { budget, maximum } => {
                     budget.reserve(domain.unwrap_or(0).min(maximum))?

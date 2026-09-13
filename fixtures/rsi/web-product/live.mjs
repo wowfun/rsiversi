@@ -4,6 +4,7 @@ import {readFile,writeFile,mkdir,copyFile,chmod,readdir,lstat} from 'node:fs/pro
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService} from './service.mjs';
+import {assertNoNotices} from './task-checks.mjs';
 
 const envPath=process.env.RSI_LIVE_ENV_FILE, report=process.env.RSI_WEB_REPORT;
 if(!envPath || !report || !process.env.RSI_WEB_ASSETS || !process.env.RSI_LIVE_MODEL) throw new Error('Set explicit RSI_LIVE_ENV_FILE, RSI_LIVE_MODEL, RSI_WEB_REPORT and RSI_WEB_ASSETS');
@@ -59,6 +60,7 @@ try {
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   await page.screenshot({path:join(report,'live-conversation.png'),fullPage:true});
   await writeFile(join(report,'transcript.txt'),transcript);
+  await assertNoNotices(page);
   await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);
   await writeFile(join(report,'result.json'),JSON.stringify({ok:true,browser:browser.version(),model:process.env.RSI_LIVE_MODEL,protocol:'chat-completions',elapsed_ms:Date.now()-started,approvals,file_bytes:bytes.length,file_text:bytes.toString(),mock_requests:0,clean_sign_out:true},null,2));
 } catch(error) {

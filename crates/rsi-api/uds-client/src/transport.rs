@@ -87,7 +87,7 @@ impl ConnectionTransport for LocalTransport {
         .map_err(|error| uncertain(error, mutation))?;
         let source = crate::io::source(connection, body, ended);
         let (capacity, subscription) = match output {
-            ApiResponseCapacity::Finite(capacity) => (Some(capacity.reserve()?), None),
+            ApiResponseCapacity::Finite(capacity) => (Some(capacity), None),
             ApiResponseCapacity::Subscription { budget, maximum } => {
                 (None, Some((budget, maximum)))
             }
@@ -109,7 +109,7 @@ impl ConnectionTransport for LocalTransport {
         }
         let capacity = if capacity.is_none() && head.status.as_u16() == 422 {
             let (budget, maximum) = subscription.expect("subscription response admission");
-            Some(budget.reserve(maximum)?)
+            Some(budget.reserve(maximum)?.into())
         } else {
             capacity
         };

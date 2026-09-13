@@ -1,18 +1,26 @@
 use super::*;
 
 pub(super) const LIST_READY_MESSAGES_AFTER_SQL: &str =
-    "SELECT session_id, message_id, ready_control_seq, timestamp_ms, target
-     FROM ready_messages
-     WHERE root_session_id = ?1
-       AND (timestamp_ms, session_id, ready_control_seq) > (?2, ?3, ?4)
-     ORDER BY timestamp_ms, session_id, ready_control_seq
-     LIMIT ?5";
+    "SELECT r.session_id, r.message_id, r.ready_control_seq, r.timestamp_ms, r.target,
+            CASE WHEN length(CAST(m.message_source AS BLOB)) <= 12
+                 THEN CAST(m.message_source AS BLOB) ELSE X'' END,
+            COALESCE(m.root_session_id = r.root_session_id AND m.state = 'pending'
+                     AND m.target = r.target AND m.wake_required = 1, 0)
+     FROM ready_messages AS r
+     LEFT JOIN agent_messages AS m ON m.session_id = r.session_id AND m.message_id = r.message_id
+     WHERE r.root_session_id = ?1
+       AND (r.timestamp_ms, r.session_id, r.ready_control_seq) > (?2, ?3, ?4)
+     ORDER BY r.timestamp_ms, r.session_id, r.ready_control_seq LIMIT ?5";
 const LIST_READY_MESSAGES_FIRST_SQL: &str =
-    "SELECT session_id, message_id, ready_control_seq, timestamp_ms, target
-     FROM ready_messages
-     WHERE root_session_id = ?1
-     ORDER BY timestamp_ms, session_id, ready_control_seq
-     LIMIT ?5";
+    "SELECT r.session_id, r.message_id, r.ready_control_seq, r.timestamp_ms, r.target,
+            CASE WHEN length(CAST(m.message_source AS BLOB)) <= 12
+                 THEN CAST(m.message_source AS BLOB) ELSE X'' END,
+            COALESCE(m.root_session_id = r.root_session_id AND m.state = 'pending'
+                     AND m.target = r.target AND m.wake_required = 1, 0)
+     FROM ready_messages AS r
+     LEFT JOIN agent_messages AS m ON m.session_id = r.session_id AND m.message_id = r.message_id
+     WHERE r.root_session_id = ?1
+     ORDER BY r.timestamp_ms, r.session_id, r.ready_control_seq LIMIT ?5";
 pub(super) const LIST_AGENT_CHILDREN_AFTER_SQL: &str =
     "SELECT session_id, path_json, task_name FROM agent_nodes
      WHERE parent_session_id = ?1 AND session_id > ?2
@@ -25,7 +33,8 @@ pub(super) const LIST_WAITING_ACTIVATIONS_AFTER_SQL: &str =
     "SELECT session_id FROM active_activations
      WHERE phase = 'waiting' AND session_id > ?1
      ORDER BY session_id LIMIT ?2";
-const LIST_WAITING_ACTIVATIONS_FIRST_SQL: &str = "SELECT session_id FROM active_activations
+pub(super) const LIST_WAITING_ACTIVATIONS_FIRST_SQL: &str =
+    "SELECT session_id FROM active_activations
      WHERE phase = 'waiting'
      ORDER BY session_id LIMIT ?2";
 pub(super) const LIST_READY_ROOTS_AFTER_SQL: &str =
@@ -706,22 +715,23 @@ impl SessionStore for SqliteStore {
                     turn: invoking_turn_id.to_string(),
                 })
                 .and_then(|value| decode_u64("invoking acceptance sequence", value))?;
-            let available_completed_turns = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM turns
-                     WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2",
-                    params![
-                        session_id.as_str(),
-                        sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?,
-                    ],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(sql_error)
-                .and_then(|value| decode_u64("completed turn count", value))?;
             let effective_turns = match selection {
                 ForkTurnSelection::None => 0,
-                ForkTurnSelection::All => available_completed_turns,
-                ForkTurnSelection::Last(count) => available_completed_turns.min(count),
+                ForkTurnSelection::All => transaction.query_row(
+                    "SELECT COUNT(*) FROM turns
+                     WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2",
+                    params![session_id.as_str(), sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?],
+                    |row| row.get::<_, i64>(0),
+                ).map_err(sql_error).and_then(|value| decode_u64("completed turn count", value))?,
+                ForkTurnSelection::Last(count) => transaction.query_row(
+                    "SELECT COUNT(*) FROM (
+                       SELECT 1 FROM turns
+                       WHERE session_id = ?1 AND terminal_seq IS NOT NULL AND terminal_seq < ?2
+                       ORDER BY terminal_seq DESC LIMIT ?3
+                     )",
+                    params![session_id.as_str(), sqlite_u64("invoking acceptance sequence", invoking_accepted_seq)?, i64::try_from(count).unwrap_or(i64::MAX)],
+                    |row| row.get::<_, i64>(0),
+                ).map_err(sql_error).and_then(|value| decode_u64("completed turn count", value))?,
             };
             let (resolved_after_seq, resolved_terminal_seq, terminal_prefix_sha256, resolved_terminal_control_seq, terminal_control_prefix_sha256) =
                 if effective_turns == 0 {
@@ -1142,6 +1152,8 @@ impl SessionStore for SqliteStore {
                             row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
                             row.get::<_, String>(4)?,
+                            row.get::<_, Vec<u8>>(5)?,
+                            row.get::<_, bool>(6)?,
                         ))
                     },
                 )

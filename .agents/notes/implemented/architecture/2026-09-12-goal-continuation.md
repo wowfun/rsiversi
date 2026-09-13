@@ -89,3 +89,11 @@ binding, so the caller can issue a fresh explicit control. Mapping that
 rejection to a backend failure would falsely make its outcome unknown on Session
 API and trap the caller in receipt reconciliation. Revocation alone does not
 claim that the durable phase changed or the active Turn was cancelled.
+
+Client control feedback retains a known rejection independently of live and
+durable observations. Those streams can arrive in either order, so an observed
+Disarmed driver does not establish that a displayed control includes the latest
+settlement revision. Rebasing a displayed control automatically was rejected:
+the same Goal identity can already name another round, especially for Cancel.
+A new explicit action uses the newly displayed snapshot; an unknown action
+keeps its original identity for receipt reconciliation.

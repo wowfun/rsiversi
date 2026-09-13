@@ -628,6 +628,9 @@ impl AgentKernel {
         root_session_id: &SessionId,
         cancellation: &CancellationToken,
     ) -> TurnResult<bool> {
+        if cancellation.is_cancelled() {
+            return Ok(false);
+        }
         let snapshot = self
             .inner
             .store
@@ -646,6 +649,9 @@ impl AgentKernel {
         }
         let mut after = None;
         loop {
+            if cancellation.is_cancelled() {
+                return Ok(false);
+            }
             let ready = self
                 .inner
                 .store
@@ -654,16 +660,21 @@ impl AgentKernel {
                 .map_err(turn_store_error)?;
             ready.validate().map_err(turn_store_error)?;
             for message in &ready.messages {
-                if self
-                    .discard_stale_continuation(&message.session_id, &message.message_id)
-                    .await?
-                {
-                    continue;
+                if cancellation.is_cancelled() {
+                    return Ok(false);
                 }
                 if message.target != MessageTarget::NextTurn {
                     return Err(TurnError::Invariant(
                         "ready index contains a waking next-Step message".into(),
                     ));
+                }
+                if message.source_kind
+                    == rsi_agent_session_protocol::AgentMessageSourceKind::Continuation
+                    && self
+                        .discard_stale_continuation(&message.session_id, &message.message_id)
+                        .await?
+                {
+                    continue;
                 }
                 if !claimable_sessions
                     .get(&message.session_id)

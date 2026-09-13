@@ -183,6 +183,96 @@ async fn retained_binary_reply_does_not_block_the_next_maximum_sized_receive_res
     harness.close().await;
 }
 
+#[derive(Debug)]
+struct GatedRead {
+    entered: Semaphore,
+    release: Semaphore,
+}
+#[async_trait]
+impl ApiHandler for GatedRead {
+    async fn invoke(
+        &self,
+        _: ApiContext,
+        _: RetainedBytes,
+        output: ApiResponseCapacity,
+    ) -> Result<ApiOutput> {
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        let ApiResponseCapacity::Finite(capacity) = output else {
+            panic!("finite read");
+        };
+        Ok(ApiOutput::Reply(ApiMessage {
+            json: capacity.copy(b"{}")?,
+            binary: None,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_pending_maximum_ceiling_read_does_not_reject_a_small_explicit_mutation() {
+    pending_receiving_probe(OperationEffect::Read).await;
+}
+
+#[tokio::test]
+async fn a_pending_mutation_keeps_its_maximum_reservation_before_dispatch() {
+    pending_receiving_probe(OperationEffect::Mutation).await;
+}
+
+async fn pending_receiving_probe(effect: OperationEffect) {
+    let harness = Harness::start(true).await;
+    let gate = Arc::new(GatedRead {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let mut read = spec("held-response", OperationClass::Data, effect);
+    read.maximum_response_bytes = MAXIMUM_API_BYTES;
+    let mutation = spec(
+        "explicit-mutation",
+        OperationClass::Data,
+        OperationEffect::Mutation,
+    );
+    let echo = Arc::new(Echo(AtomicUsize::new(0)));
+    let _read = harness
+        .registry
+        .register(read.clone(), gate.clone())
+        .unwrap();
+    let _mutation = harness
+        .registry
+        .register(mutation.clone(), echo.clone())
+        .unwrap();
+    let client = Arc::new(harness.connect().await);
+    let pending = {
+        let client = client.clone();
+        tokio::spawn(async move { client.call(&read, input(&client, &read)).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let result = client.call(&mutation, input(&client, &mutation)).await;
+    gate.release.add_permits(1);
+    let first = pending.await.unwrap();
+    assert!(first.is_ok(), "read: {first:?}");
+    if effect == OperationEffect::Read {
+        assert!(result.is_ok(), "explicit mutation was rejected: {result:?}");
+        assert_eq!(
+            echo.0.load(Ordering::SeqCst),
+            1,
+            "one mutation, without retry"
+        );
+    } else {
+        assert!(matches!(result, Err(ApiError::Capacity)));
+        assert_eq!(
+            echo.0.load(Ordering::SeqCst),
+            0,
+            "reject before mutation dispatch"
+        );
+    }
+    client.close().await;
+    harness.close().await;
+}
+
 #[tokio::test]
 async fn actual_tls_negotiation_binary_sse_and_client_retirement_preserve_the_remote_host() {
     let harness = Harness::start(true).await;

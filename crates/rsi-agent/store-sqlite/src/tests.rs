@@ -3,6 +3,12 @@ use super::*;
 #[path = "tests/settlement.rs"]
 mod settlement;
 
+#[path = "tests/selection_work.rs"]
+mod selection_work;
+
+#[path = "tests/ready_metadata.rs"]
+mod ready_metadata;
+
 #[tokio::test]
 #[ignore = "report-only actual SQLite validation VM and full-scan work"]
 async fn online_validation_sql_work() {

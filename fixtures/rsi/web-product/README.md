@@ -3,12 +3,25 @@
 Task captures require named controls to be present, enabled and reachable after
 scrolling, and reject product notices as well as JavaScript errors. The task
 probe accepts only Chromium or Firefox and cannot pass with no selected engine.
+Hit tests resolve and measure the current named button in one document execution,
+because a standard-view refresh can replace a button after actionability checks.
+This does not replay a control action or accept a connected but obscured button.
 It injects one rejected visible-card hint and requires an exact same-sequence
 retry through the document/Worker boundary. `task-checks.test.mjs` separately
 proves hidden, disabled, obscured and missing controls fail these assertions.
 CI retains reports under `RSI_WEB_REPORT` and fails artifact upload if none exist.
+Recovery and task probes write `binary.json` with the frozen executable's SHA-256
+before starting the scenario. CI excludes their executable copies while retaining
+hashes, screenshots, action receipts, logs, assets and durable diagnostic data.
+The archive identifies the executable but does not contain it for binary replay.
 Failure metadata is written even when a crashed renderer prevents HTML or
 screenshot capture; capture diagnostics supplement the original task error.
+Service startup also retains its original failure when teardown fails; cleanup
+diagnostics cannot replace the readiness or startup error.
+Goal controls retain bounded Worker invocation/reply evidence and intermediate
+control errors. Resume after a completed paused round waits for both the live
+driver and the delivered durable settlement projection, rather than treating
+their independent streams as one notification.
 
 First install the shared document's pinned build dependencies with
 `npm ci --ignore-scripts --prefix ../../../plugins/rsi/web` from this directory.
@@ -28,6 +41,10 @@ provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in
 and recorded separately.
 
+The opt-in `live.mjs` checks actual tool-created bytes, a completed turn and a
+clean document before recording success. Product notices fail the live check;
+successful model output alone does not establish visual acceptance.
+
 The default runner includes `tasks.mjs`, which uses the same real Worker,
 Service and provider with explicit
 response gates. With `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new `RSI_WEB_REPORT`,
@@ -39,6 +56,9 @@ hold the model stream while the fixture observes actual process state; they
 measure lifecycle mechanisms, not model ability. The unreported completed job
 must still fail its Turn at finalization, proving that panel reads did not report
 the job or consume its retained output.
+The no-new-model-request assertion begins only after the current job's tool-result
+follow-up enters the provider gate. A running job or retained assistant text does
+not establish that the executor has sent this normal follow-up request.
 
 Files scenarios browse an actual unpublished Session through authenticated HTTP,
 including directory snapshots, byte pagination, text/hex display, Linux non-UTF8
@@ -76,6 +96,9 @@ including revision conflicts, record reincarnation, origin quotas, opaque u64
 requests and receipts, transaction aborts and malformed durable metadata.
 Document composer tests gate saves before repeated Send/reconcile input and
 automatic recovery, checking single admission and the absence of false conflicts.
+They also hold draft loading after a Session header changes. Switching acceptance
+waits for the enabled composer before checking exact saved text, since the header
+can arrive while IndexedDB is still loading the draft.
 They also check cached UTF-8 accounting without re-encoding inactive editors.
 These use the shipped document methods with a controlled Worker reply, not a
 live Session or provider. `recovery.mjs` owns

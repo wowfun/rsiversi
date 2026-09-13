@@ -163,7 +163,7 @@ async fn response_driver_probe(execution: Execution) {
         200,
         &headers,
         source,
-        Some(budget.reserve(128).unwrap()),
+        Some(budget.reserve(128).unwrap().into()),
         false,
         &ByteBudget::default(),
     )
@@ -180,7 +180,7 @@ async fn response_driver_probe(execution: Execution) {
             200,
             &headers,
             source,
-            Some(budget.reserve(128).unwrap()),
+            Some(budget.reserve(128).unwrap().into()),
             true,
             &ByteBudget::default(),
         )

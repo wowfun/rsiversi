@@ -171,7 +171,11 @@ accepted commits, not every subsequently eligible ancestor transition.
 
 Durable waking-message selection rotates a cursor and caches at most 256 roots
 under a short scheduler lock. Page reads and preparation run outside that lock,
-with at most four preparation jobs and one job per root. New durable input
+and ordinary candidates use source metadata without reading their mailbox.
+Continuation candidates retain pending-only cleanup under submission admission,
+even when their Session cannot be claimed. Cancellation stops new scan work;
+an admitted discard keeps its existing commit ownership.
+Preparation has at most four jobs and one job per root. New durable input
 requests another root scan even while the previous final page still has a
 blocked preparation; retained preparations continue to count against the bound.
 A generation-bound reservation releases the exact root on completion. A candidate reserves one of

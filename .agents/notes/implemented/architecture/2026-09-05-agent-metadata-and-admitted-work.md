@@ -54,6 +54,15 @@ Replay releases completed message payloads immediately and retains the bounded
 pending set. Scheduler failure diagnostics include transient ready enumeration
 failures even when retry later succeeds without losing executor registration.
 
+Ready selection reads the mailbox's existing source discriminator through a
+bounded metadata join. Ordinary candidates do not acquire Session submission
+admission or decode pending payloads merely to reject a busy Session. Automatic
+input still uses the existing admitted cleanup and durable watermark checks.
+Warm bounded fork selection counts only its selected suffix; interval and
+digest validation retain their own work. Waiting enumeration has a predicate
+index in the exact Store schema. These choices reduce unnecessary work without
+adding a mutable mailbox cache or another scheduling owner.
+
 ## Alternatives considered
 
 Revalidating history for every metadata row repeats work without increasing the

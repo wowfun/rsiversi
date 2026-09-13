@@ -106,6 +106,7 @@ fn continuation_input_and_mailbox_decode_reject_invalid_bounds_and_changed_text(
         },
         text_sha256: input.text_sha256(),
     };
+    assert_source_kind_projection(&source);
     let record = AgentControlRecord::new(
         2,
         1,
@@ -939,4 +940,47 @@ fn terminal_control_rejects_a_zero_fact_reference_on_construction_and_decode() {
     let mut encoded = serde_json::to_value(valid).unwrap();
     encoded["terminal_fact_seq"] = json!(0);
     assert!(serde_json::from_value::<AgentControlRecord>(encoded).is_err());
+}
+
+fn assert_source_kind_projection(source: &ContinuationSource) {
+    for (source, kind, tag) in [
+        (
+            AgentMessageSource::Human,
+            AgentMessageSourceKind::Human,
+            "human",
+        ),
+        (
+            AgentMessageSource::Agent {
+                source_session_id: SessionId::new("parent").unwrap(),
+            },
+            AgentMessageSourceKind::Agent,
+            "agent",
+        ),
+        (
+            AgentMessageSource::Completion {
+                child_session_id: SessionId::new("child").unwrap(),
+                activation_id: ActivationId::new("activation").unwrap(),
+            },
+            AgentMessageSourceKind::Completion,
+            "completion",
+        ),
+        (
+            AgentMessageSource::Continuation {
+                source: source.clone(),
+            },
+            AgentMessageSourceKind::Continuation,
+            "continuation",
+        ),
+    ] {
+        assert_eq!(source.kind(), kind);
+        let wire = serde_json::to_value(&source).unwrap();
+        assert_eq!(wire["type"], tag);
+        assert!(wire.get("kind").is_none());
+        assert_eq!(
+            serde_json::from_value::<AgentMessageSource>(wire)
+                .unwrap()
+                .kind(),
+            kind
+        );
+    }
 }

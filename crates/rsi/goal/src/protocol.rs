@@ -54,7 +54,7 @@ impl GoalControl {
 pub struct GoalControlReceipt {
     /// Canonical state command result; it never encodes live authority.
     pub command: SessionCommandReceipt,
-    /// Current process-local driver observation.
+    /// Captured driver snapshot; delivery may follow newer live observations.
     pub live: GoalLiveState,
 }
 

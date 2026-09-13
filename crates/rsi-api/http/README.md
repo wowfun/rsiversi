@@ -5,6 +5,12 @@ admission. After admission the registered operation still checks its exact JSON
 or binary encoding. Listener connection failures include rejected connection and
 handshake capacity, making overload visible even before an HTTP request exists.
 
+Finite operation replies declare their exact Content-Length, including the
+16-byte prefix of a binary reply. This length survives delivery wrappers and
+HTTP/2 framing so clients can admit the actual payload before polling its body.
+Delivery guards still retain admission through buffering and completed flush;
+the declared length does not shorten that ownership.
+
 StaticHttpFactory adds an explicitly required HttpAssets capability to the same
 listener and delivery machinery. The ordinary HttpFactory remains API-only.
 Assets use exact GET paths without queries, bodies, Range or encoded requests;

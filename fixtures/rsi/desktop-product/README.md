@@ -11,6 +11,8 @@ Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
 the draft editor through its input listener.
+Model selection waits for the completed setup action and the exact deployment's
+enabled option; the earlier provider receipt alone does not finish its readback.
 Screenshots, capabilities, request summaries and native cleanup logs are evidence.
 Teardown attempts every owned process, stream and temporary-directory cleanup
 even if another cleanup fails. Cleanup diagnostics attach to an active primary
@@ -26,6 +28,11 @@ conversation, missing-ACK and startup-close scenarios after the shared build.
 The Tool-using task scenario additionally requires the native sandbox preflight;
 missing-ACK and startup-close do not depend on that preflight. CI attempts artifact upload even on failure. A scenario
 that never starts cannot produce product evidence.
+Before launching a foreign build, the fixture records its frozen executable's
+SHA-256 in `foreign-build/binary.json`. CI excludes the two native executable
+paths in that directory, retaining the scenario evidence and the distribution's
+receipt, build-family manifest and build log. The receipt identifies both paired
+executables; these hashes cannot restore the programs for binary replay.
 The paired `rsi` companion must already be beside the desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
@@ -53,6 +60,11 @@ resulting submission; this gates the WebKit draft-save/click interleaving.
 `--tasks` additionally drives recorded inline patch evidence, Goal pause/resume/
 cancel and a real background Bash job through the native window. Explicit
 provider gates expose the claimed round and original Jobs scope for observation.
+Resume waits for both the disarmed driver and the settled Paused projection,
+whose creation control is visible only after settlement. Known Goal rejection
+ends every Goal-state wait immediately. The fixture retains bounded control
+inputs (ticket, request ID and displayed revision), matching native replies and
+observed Goal feedback on both success and failure.
 An unreported completed job must fail finalization after its readonly panel was
 used. These deterministic screenshots and native clicks remain separate from
 the opt-in live smoke; `--tasks` cannot be combined with live mode.

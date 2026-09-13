@@ -388,6 +388,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     frozen = output / "session-api-eval"
     shutil.copy2(args.binary.resolve(), frozen)
+    with frozen.open("rb") as executable:
+        (output / "binary.json").write_text(json.dumps({"sha256": hashlib.file_digest(executable, "sha256").hexdigest()}) + "\n")
     key = coding.read_key(args.key_file) if args.live else "session-api-fixture-secret"
     provider = Provider(args.pressure) if args.self_test else None
     reports = []

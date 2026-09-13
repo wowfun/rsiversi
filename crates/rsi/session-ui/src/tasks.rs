@@ -58,7 +58,17 @@ fn goal_button(label: &str, input: GoalInput) -> UiElement {
 fn goal_view(controller: &SessionController) -> Result<UiView> {
     let cache = controller.projection_changes().borrow().clone();
     let live = controller.goal_changes().borrow().clone();
+    let control = controller.goal_control_changes().borrow().clone();
     let mut elements = Vec::new();
+    if let rsi_client::GoalControlState::Rejected {
+        request_id,
+        diagnostic,
+    } = &control
+    {
+        elements.push(text(format!(
+            "Goal control rejected. Request {request_id}: {diagnostic}"
+        )));
+    }
     let available = match live {
         Some(Ok(live)) => {
             elements.push(field(
@@ -130,7 +140,7 @@ fn goal_view(controller: &SessionController) -> Result<UiView> {
             ));
         }
     }
-    if let Some(pending) = controller.pending_goal() {
+    if let rsi_client::GoalControlState::Pending(pending) = &control {
         elements.push(text(format!("Control outcome is unresolved. Request {}. Check its receipt before sending another control.", pending.request_id)));
         elements.push(goal_button("Check control result", GoalInput::Reconcile));
         return Ok(view("Goal", elements));
@@ -224,6 +234,7 @@ impl UiAction for GoalAction {
     ) -> BoxFuture<'static, Result<UiView>> {
         Box::pin(async move {
             let controller = controller(target.context())?;
+            let mut control_requested = false;
             let result: Result<_> = async {
                 let request: GoalInput = serde_json::from_value(input.value).map_err(invalid)?;
                 match request {
@@ -231,6 +242,7 @@ impl UiAction for GoalAction {
                         if !input.fields.is_empty() {
                             return Err(invalid("Receipt checking accepts no fields"));
                         }
+                        control_requested = true;
                         controller.reconcile_goal().await
                     }
                     GoalInput::Control { request } => {
@@ -239,6 +251,7 @@ impl UiAction for GoalAction {
                         }) {
                             return Err(invalid("Unexpected Goal form field"));
                         }
+                        control_requested = true;
                         controller.control_goal(request).await
                     }
                     GoalInput::Create {
@@ -263,6 +276,7 @@ impl UiAction for GoalAction {
                             .ok_or_else(|| {
                                 invalid("Maximum automatic rounds must be a positive integer")
                             })?;
+                        control_requested = true;
                         controller
                             .control_goal(GoalControl {
                                 request_id: request,
@@ -281,7 +295,13 @@ impl UiAction for GoalAction {
             }
             .await;
             let mut result_view = goal_view(&controller)?;
-            if let Err(error) = result {
+            if let Err(error) = result
+                && (!control_requested
+                    || matches!(
+                        *controller.goal_control_changes().borrow(),
+                        rsi_client::GoalControlState::Idle
+                    ))
+            {
                 result_view
                     .elements
                     .insert(0, text(format!("Goal control: {error}")));

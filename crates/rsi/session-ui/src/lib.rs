@@ -88,6 +88,7 @@ fn watch_target(
     let controller = plan.local::<SessionControllerContract>()?;
     let mut projections = controller.projection_changes();
     let mut goal = controller.goal_changes();
+    let mut control = controller.goal_control_changes();
     let stop = CancellationToken::new();
     let stopping = stop.clone();
     let task = plan.context().runtime().execution().spawn(async move {
@@ -96,6 +97,7 @@ fn watch_target(
                 () = stopping.cancelled() => break,
                 result = projections.changed() => { if result.is_err() { break; } },
                 result = goal.changed() => { if result.is_err() { break; } },
+                result = control.changed() => { if result.is_err() { break; } },
             }
             let Some(lease) = weak.upgrade() else {
                 break;

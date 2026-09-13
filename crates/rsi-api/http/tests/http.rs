@@ -432,6 +432,80 @@ impl ApiHandler for Payloads {
 }
 
 #[tokio::test]
+async fn finite_wire_lengths_survive_http2_delivery_and_http1_binary_framing() {
+    for tls in [true, false] {
+        let harness = Harness::start_with_tls(tls).await;
+        let client = if tls {
+            slow_http2_client()
+        } else {
+            Harness::client()
+        };
+        let binary = harness
+            .registry
+            .register(
+                spec("binary", OperationClass::Data, OperationEffect::Read),
+                Arc::new(Payloads {
+                    subscription: false,
+                }),
+            )
+            .unwrap();
+        for (operation, input, status) in [
+            ("connection/describe", r#"{"wire_version":1}"#, 200),
+            ("test/binary", "{}", 200),
+            ("connection/describe", r#"{"wire_version":2}"#, 404),
+        ] {
+            let reply = client
+                .post(format!("{}/api/v1/{operation}/1", harness.origin))
+                .bearer_auth(TOKEN)
+                .header("content-type", "application/json")
+                .header("x-rsi-wire-version", "1")
+                .header("x-rsi-host-epoch", harness.epoch.as_str())
+                .body(input)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), status);
+            assert_eq!(
+                reply.version(),
+                if tls {
+                    http::Version::HTTP_2
+                } else {
+                    http::Version::HTTP_11
+                }
+            );
+            let length = reply
+                .headers()
+                .get("content-length")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{operation} under {:?} must declare its finite wire length: {:?}",
+                        reply.version(),
+                        reply.headers()
+                    )
+                })
+                .to_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let bytes = reply.bytes().await.unwrap();
+            assert_eq!(length, bytes.len());
+            if operation == "test/binary" {
+                assert_eq!(length, 16 + br#"{"length":4}"#.len() + 4);
+                assert_eq!(&bytes[16..length - 4], br#"{"length":4}"#);
+                assert_eq!(&bytes[length - 4..], &[0, 127, 128, 255]);
+            } else if status == 200 {
+                serde_json::from_slice::<rsi_api_protocol::ConnectionDescription>(&bytes).unwrap();
+            } else {
+                assert_eq!(bytes, br#"{"code":"unavailable"}"#.as_slice());
+            }
+        }
+        binary.close().await;
+        drop(client);
+        harness.close().await;
+    }
+}
+
+#[tokio::test]
 async fn binary_payloads_have_exact_lengths_and_sse_preserves_numbers_and_explicit_end() {
     let harness = Harness::start().await;
     let binary = harness

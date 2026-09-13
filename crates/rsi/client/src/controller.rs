@@ -21,6 +21,7 @@ pub(super) mod commands;
 pub(super) mod source;
 #[path = "tasks.rs"]
 mod task_status;
+pub use task_status::GoalControlState;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +41,7 @@ struct Admission {
 pub struct SessionController {
     projections: tokio::sync::watch::Sender<Option<rsi_session_protocol::ProjectionSnapshot>>,
     goal: tokio::sync::watch::Sender<Option<rsi_session_protocol::Result<rsi_goal::GoalLiveState>>>,
-    goal_pending: Mutex<Option<rsi_goal::GoalControl>>,
+    goal_control: tokio::sync::watch::Sender<GoalControlState>,
     session_id: SessionId,
     handle: Arc<dyn SessionHandle>,
     sink: Arc<dyn ObservationSink>,
@@ -259,7 +260,7 @@ impl PluginFactory for SessionControllerFactory {
         let controller = Arc::new(SessionController {
             projections: tokio::sync::watch::channel(None).0,
             goal: tokio::sync::watch::channel(None).0,
-            goal_pending: Mutex::new(None),
+            goal_control: tokio::sync::watch::channel(GoalControlState::Idle).0,
             session_id: config.session_id,
             handle,
             sink: plan.local::<ObservationSinkContract>()?,

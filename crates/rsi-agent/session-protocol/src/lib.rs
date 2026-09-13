@@ -379,6 +379,31 @@ pub enum AgentMessageSource {
     },
 }
 
+/// Authority-neutral, in-process classification of an accepted message source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentMessageSourceKind {
+    /// Direct application/user input.
+    Human,
+    /// Kernel-authenticated automatic input.
+    Continuation,
+    /// Another Agent activation.
+    Agent,
+    /// Child-settlement notification.
+    Completion,
+}
+
+impl AgentMessageSource {
+    /// Classifies provenance without materializing its payload or granting authority.
+    pub const fn kind(&self) -> AgentMessageSourceKind {
+        match self {
+            Self::Human => AgentMessageSourceKind::Human,
+            Self::Continuation { .. } => AgentMessageSourceKind::Continuation,
+            Self::Agent { .. } => AgentMessageSourceKind::Agent,
+            Self::Completion { .. } => AgentMessageSourceKind::Completion,
+        }
+    }
+}
+
 /// Delivery horizon for one accepted message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

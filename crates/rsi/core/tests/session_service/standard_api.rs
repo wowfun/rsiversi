@@ -268,6 +268,11 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .start_file(&fixture.profile)
         .await
         .unwrap();
+    managed_ready(
+        host.subscribe_profile(),
+        host.lookup_local::<ApiDispatchContract>().unwrap(),
+    )
+    .await;
     let description = host
         .lookup_local::<ConnectionDescriptionContract>()
         .unwrap();
@@ -435,6 +440,21 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .start_file(&fixture.profile)
         .await
         .unwrap();
+    managed_ready(
+        restarted.subscribe_profile(),
+        restarted.lookup_local::<ApiDispatchContract>().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        domains,
+        restarted
+            .lookup_local::<ApiDispatchContract>()
+            .unwrap()
+            .operations()
+            .into_iter()
+            .map(|spec| spec.id.domain().to_owned())
+            .collect()
+    );
     let next = restarted
         .lookup_local::<ConnectionDescriptionContract>()
         .unwrap();
@@ -556,4 +576,181 @@ async fn remote_ui(
     assert!(view.elements.iter().any(|element| matches!(element, rsi_ui::UiElement::Field { label, value } if label == "Session" && value == session.as_str())));
     assert!(item.ticket.is_some());
     stream
+}
+
+async fn managed_ready(
+    mut changes: tokio::sync::watch::Receiver<rsi_host::ProfileStatus>,
+    dispatch: Arc<dyn rsi_api_protocol::ApiDispatch>,
+) {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            {
+                let status = changes.borrow_and_update();
+                assert!(
+                    status
+                        .target()
+                        .iter()
+                        .any(|target| target.id().as_str() == "rsi.managed-providers"),
+                    "managed owner absent: {status:?}"
+                );
+                match status
+                    .observed()
+                    .iter()
+                    .find(|instance| instance.id().as_str() == "rsi.managed-providers")
+                    .map(rsi_host::ProfileInstanceStatus::state)
+                {
+                    Some(rsi_host::ProfileInstanceState::Active) => return Ok(()),
+                    Some(
+                        rsi_host::ProfileInstanceState::Failed
+                        | rsi_host::ProfileInstanceState::Disposed
+                        | rsi_host::ProfileInstanceState::Unloading,
+                    ) => return Err("managed owner failed or unloaded"),
+                    None
+                    | Some(
+                        rsi_host::ProfileInstanceState::Pending(_)
+                        | rsi_host::ProfileInstanceState::Loading,
+                    ) => {}
+                }
+            }
+            if changes.changed().await.is_err() {
+                return Err("Profile subscription closed");
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(result, Ok(Ok(()))),
+        "managed readiness {result:?}; ProfileStatus={:?}; domains={:?}",
+        *changes.borrow(),
+        dispatch
+            .operations()
+            .iter()
+            .map(|spec| spec.id.domain())
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+}
+
+#[derive(Debug, Default)]
+struct SourceGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl rsi_meta::PluginFactory for SourceGate {
+    fn prepare(
+        &self,
+        config: &rsi_meta::ConfigValue,
+    ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        Ok(rsi_meta::PreparedActivation::new(config.clone())
+            .requiring_local::<ApiDispatchContract>())
+    }
+    async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        assert!(
+            plan.context()
+                .lookup_local::<rsi_host::ProfileControlContract>()
+                .is_none()
+        );
+        assert!(
+            !plan
+                .local::<ApiDispatchContract>()?
+                .operations()
+                .iter()
+                .any(|spec| spec.id.domain() == "providers")
+        );
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn managed_owner_waits_for_parent_profile_publication() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let gate = Arc::new(SourceGate::default());
+    let mut addon = rsi::StandardAddonBuilder::new("fixture.source-gate");
+    addon
+        .register_factory(
+            rsi::AddonScope::Service,
+            "fixture.source-gate",
+            "1",
+            rsi_meta::UpdateMode::Replayable,
+            gate.clone(),
+        )
+        .unwrap();
+    let source = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(&fixture.profile, format!("{source}\n[[steps]]\nkind = 'plugin'\nid = 'source-gate'\nplugin = 'fixture.source-gate'\n")).unwrap();
+    let host = composition(fixture.paths.clone())
+        .with_addons(rsi::StandardAddonSet::new([addon.build().unwrap()]).unwrap())
+        .build()
+        .unwrap();
+    let runtime = rsi_meta::Runtime::default();
+    let context = host.isolate_local_context(runtime.root()).unwrap();
+    let bootstrap = host
+        .prepare_in(
+            &runtime,
+            rsi_host::ProfileProgram::from_file(&fixture.profile),
+        )
+        .await
+        .unwrap();
+    let control = bootstrap.control();
+    let changes = control.subscribe();
+    let starting = tokio::spawn({
+        let context = context.clone();
+        async move {
+            context
+                .apply(
+                    rsi_meta::ResolvedFactory::linked(
+                        "fixture.profile",
+                        "1",
+                        rsi_meta::UpdateMode::RestartRequired,
+                        bootstrap.factory(),
+                    ),
+                    serde_json::Value::Null,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), gate.entered.notified())
+        .await
+        .unwrap();
+    let snapshot = runtime.snapshot();
+    let managed = snapshot.fibers.iter().find(|fiber| matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == "rsi.managed-providers")).expect("managed source prefix created before the gated source leaf");
+    assert!(
+        matches!(&managed.state, rsi_meta::FiberState::Pending(report) if report.reasons.iter().any(|reason| matches!(reason, rsi_meta::PendingReason::MissingLocal { contract, .. } if contract.as_str() == "rsi.meta.profile.control"))),
+        "{managed:?}"
+    );
+    assert!(!starting.is_finished());
+    assert!(
+        context
+            .lookup_local::<rsi_host::ProfileControlContract>()
+            .is_none()
+    );
+    let dispatch = context.lookup_local::<ApiDispatchContract>().unwrap();
+    assert!(
+        !dispatch
+            .operations()
+            .iter()
+            .any(|spec| spec.id.domain() == "providers")
+    );
+    gate.release.notify_one();
+    let parent = starting.await.unwrap().unwrap();
+    assert_eq!(parent.snapshot().state, rsi_meta::FiberState::Active);
+    managed_ready(changes, dispatch.clone()).await;
+    assert!(
+        context
+            .lookup_local::<rsi_host::ProfileControlContract>()
+            .is_some()
+    );
+    let operation = rsi_configuration_api::ProvidersOperation::Read.spec();
+    let input = rsi_api_protocol::ByteBudget::default()
+        .encode(&serde_json::json!({}), operation.maximum_request_bytes)
+        .unwrap();
+    let reply = dispatch
+        .admit(&operation.id, rsi_api_protocol::CallOrigin::Local)
+        .unwrap()
+        .invoke(input)
+        .await
+        .unwrap();
+    assert!(matches!(reply, rsi_api_protocol::ApiOutput::Reply(_)));
+    assert!(runtime.shutdown().await.is_clean());
 }

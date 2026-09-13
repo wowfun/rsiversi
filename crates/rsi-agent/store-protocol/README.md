@@ -63,6 +63,19 @@ promoted at terminal settlement. Human-steer ready keys retain their acceptance
 timestamp/control sequence; Completion ready keys retain promotion order.
 Both adapters validate this against the canonical control stream.
 
+Ready-message pages carry the authority-neutral source kind without message
+bodies. The source kind comes from the same classifier as the mailbox index;
+it does not replace canonical Session validation or continuation admission.
+Missing mailbox rows and inconsistent ready routing remain corruption, including
+the pagination lookahead row. Ordinary ready selection does not materialize a
+pending mailbox merely to classify its selected message.
+
+With the Session validation proof warm, fork `none` does not query completed
+history, and fixed `Last(k)` selection visits only the bounded completed suffix.
+Invoking-Turn identity, terminal digests and the selected Fact interval are still
+validated. Cold canonical validation and work proportional to selected history
+are outside that selection-work bound.
+
 This crate owns the mechanical durable seam for Agent sessions. A Store accepts
 one immutable header, contiguous compare-and-append Fact batches, bounded
 reads, session enumeration for recovery, and immutable CAS objects.

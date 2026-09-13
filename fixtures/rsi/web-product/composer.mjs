@@ -2,6 +2,33 @@ import assert from "node:assert/strict";
 
 // Actual document methods and IndexedDB, with gated persistence and Worker replies.
 export async function verifyComposer(page) {
+  const switching = await page.evaluate(async () => {
+    const pane = panes.get("main"), store = connection.drafts;
+    renderDetail({ detail: null });
+    const snapshot = (session, generation = session) => ({ generation, session, header: "c".repeat(64), path: "/workspace",
+      model: { deployment: "test", model: "model" }, transcript: { blocks: [], status: "Ready", omitted: false }, pending: [], notice: "" });
+    pane.render(snapshot("saved-switch"), []); await pane.binding;
+    pane.edit("Keep this draft while switching"); await pane.flush();
+    pane.render(snapshot("other-switch"), []); await pane.binding;
+    const ensure = store.ensure;
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    store.ensure = async function (...args) { await held; return ensure.apply(this, args); };
+    window.releaseDraftSwitch = async () => {
+      release();
+      try { await pane.binding; } finally { store.ensure = ensure; delete window.releaseDraftSwitch; }
+    };
+    pane.render(snapshot("saved-switch", "restored-switch"), []);
+    return { header: pane.session.textContent, disabled: pane.input.disabled, text: pane.input.value };
+  });
+  assert.deepEqual(switching, { header: "/workspace · saved-switch", disabled: true, text: "" });
+  const restored = page.getByRole("textbox", { name: "Main message", exact: true });
+  try {
+    const actionable = restored.click({ trial: true });
+    await page.evaluate(() => window.releaseDraftSwitch());
+    await actionable;
+    assert.equal(await restored.inputValue(), "Keep this draft while switching");
+  } finally { await page.evaluate(() => window.releaseDraftSwitch?.()); }
   const races = await page.evaluate(async () => {
     const pane = panes.get("main"), originalCall = call, results = [];
     try {
@@ -126,5 +153,5 @@ export async function verifyComposer(page) {
     return {error, preserved, saved:(await store.get("main", "failed-inactive")).text};
   });
   assert.deepEqual(close, {error:"injected inactive save failure",preserved:true,saved:"unsaved inactive input"});
-  return { overlapping_flows: races.length, automatic_reconciliation: true, failed_save_releases_admission: true, cached_utf8_accounting: true, inactive_close_recovery: true };
+  return { header_before_draft: switching, restored_draft: true, overlapping_flows: races.length, automatic_reconciliation: true, failed_save_releases_admission: true, cached_utf8_accounting: true, inactive_close_recovery: true };
 }

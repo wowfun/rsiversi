@@ -212,7 +212,7 @@ impl ConnectionTransport for BrowserTransport {
         self.protocol(&head.headers)
             .map_err(|e| uncertain(e, mutation))?;
         let (capacity, subscription) = match output {
-            ApiResponseCapacity::Finite(capacity) => (Some(capacity.reserve()?), None),
+            ApiResponseCapacity::Finite(capacity) => (Some(capacity), None),
             ApiResponseCapacity::Subscription { budget, maximum } => {
                 (None, Some((budget, maximum)))
             }
@@ -234,7 +234,7 @@ impl ConnectionTransport for BrowserTransport {
         }
         let capacity = if capacity.is_none() && head.status == 422 {
             let (budget, maximum) = subscription.expect("subscription response admission");
-            Some(budget.reserve(maximum)?)
+            Some(budget.reserve(maximum)?.into())
         } else {
             capacity
         };

@@ -2,13 +2,15 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +31,7 @@ jobs:
       - name: Verify documentation
         timeout-minutes: 10
         env:
-          RSI_AGENT_NOTES_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          RSI_AGENT_NOTES_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
         run: cargo xtask verify-docs
       - name: Build public Rust documentation
         timeout-minutes: 15
@@ -80,6 +82,9 @@ jobs:
         with:
           toolchain: 1.97.0
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: . -> target
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.2
@@ -159,7 +164,12 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: rsi-web-evidence
-          path: ${{ runner.temp }}/rsi-web-evidence
+          path: |
+            ${{ runner.temp }}/rsi-web-evidence
+            !${{ runner.temp }}/rsi-web-evidence/chromium-recovery/rsi
+            !${{ runner.temp }}/rsi-web-evidence/firefox-recovery/rsi
+            !${{ runner.temp }}/rsi-web-evidence/chromium-tasks/rsi
+            !${{ runner.temp }}/rsi-web-evidence/firefox-tasks/rsi
           if-no-files-found: error
 
   rsi-base:
@@ -181,7 +191,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes bubblewrap libdbus-1-dev pkg-config
+          sudo apt-get install --no-install-recommends --yes ripgrep bubblewrap libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
@@ -394,7 +404,9 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: rsi-session-api-evaluation
-          path: ${{ runner.temp }}/rsi-session-api-evaluation
+          path: |
+            ${{ runner.temp }}/rsi-session-api-evaluation
+            !${{ runner.temp }}/rsi-session-api-evaluation/session-api-eval
           if-no-files-found: warn
       - name: Exercise standard rsi on macOS
         if: runner.os == 'macOS'
@@ -431,6 +443,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-targets: false
       - run: cargo install cargo-audit --locked --version 0.22.2
         timeout-minutes: 15
       - name: Audit every committed Cargo lockfile
@@ -438,9 +453,9 @@ jobs:
         shell: bash
         run: |
           cargo audit --file ./Cargo.lock
-          while IFS= read -r lockfile; do
+          while IFS= read -r -d '' lockfile; do
             cargo audit --no-fetch --file "$lockfile"
-          done < <(find . -name Cargo.lock -not -path '*/target/*' ! -path './Cargo.lock' -print | sort)
+          done < <(git ls-files -z -- '**/Cargo.lock')
 
   windows-rsi-meta:
     runs-on: windows-2025
@@ -482,29 +497,14 @@ jobs:
     steps:
       - name: Require every CI contract
         env:
-          DOCUMENTATION: ${{ needs.documentation.result }}
-          RSI_META_CONFORMANCE: ${{ needs.rsi-meta-conformance.result }}
-          RSI_META_BROWSER: ${{ needs.rsi-meta-browser.result }}
-          RSI_BASE: ${{ needs.rsi-base.result }}
-          RSI_AI: ${{ needs.rsi-ai.result }}
-          RSI_AGENT: ${{ needs.rsi-agent.result }}
-          RSI: ${{ needs.rsi.result }}
-          RSI_DESKTOP: ${{ needs.rsi-desktop.result }}
-          REPOSITORY_TOOLS: ${{ needs.repository-tools.result }}
-          DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
-          WINDOWS_RSI_META: ${{ needs.windows-rsi-meta.result }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        shell: python3 {0}
         run: |
-          test "$DOCUMENTATION" = success
-          test "$RSI_META_CONFORMANCE" = success
-          test "$RSI_META_BROWSER" = success
-          test "$RSI_BASE" = success
-          test "$RSI_AI" = success
-          test "$RSI_AGENT" = success
-          test "$RSI" = success
-          test "$RSI_DESKTOP" = success
-          test "$REPOSITORY_TOOLS" = success
-          test "$DEPENDENCY_AUDIT" = success
-          test "$WINDOWS_RSI_META" = success
+          import json, os, sys
+          results = {job: state.get("result") for job, state in json.loads(os.environ["NEEDS_JSON"]).items()}
+          for job, result in results.items():
+              print(f"{job}: {result}")
+          sys.exit(not results or any(result != "success" for result in results.values()))
 
   rsi-desktop:
     runs-on: ubuntu-24.04
@@ -515,7 +515,7 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev webkit2gtk-driver xvfb dbus-x11 bubblewrap
+          sudo apt-get install --no-install-recommends --yes ripgrep libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev webkit2gtk-driver xvfb dbus-x11 bubblewrap
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.97.0
@@ -588,4 +588,9 @@ jobs:
             ${{ runner.temp }}/rsi-desktop-evidence
             ${{ runner.temp }}/rsi-desktop-ack-evidence
             ${{ runner.temp }}/rsi-desktop-startup-evidence
+            ${{ runner.temp }}/rsi-desktop-dist/bundle/receipt.json
+            ${{ runner.temp }}/rsi-desktop-dist/build-family.json
+            ${{ runner.temp }}/rsi-desktop-dist/build.log
+            !${{ runner.temp }}/rsi-desktop-evidence/foreign-build/rsi
+            !${{ runner.temp }}/rsi-desktop-evidence/foreign-build/rsi-desktop
           if-no-files-found: warn
