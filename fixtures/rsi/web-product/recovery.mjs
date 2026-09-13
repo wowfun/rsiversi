@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { chromium, firefox } from "playwright";
 import { startService, waitUntil } from "./service.mjs";
@@ -13,6 +15,9 @@ const report = process.env.RSI_WEB_REPORT;
 await mkdir(report, { recursive: true });
 const binary=join(report,"rsi");
 await copyFile(process.env.RSI_WEB_BINARY ?? join(root,"target/debug/rsi"),binary);
+const hash = createHash("sha256");
+for await (const chunk of createReadStream(binary)) hash.update(chunk);
+await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: hash.digest("hex") }));
 const browser = await (name === "chromium" ? chromium : firefox).launch();
 let service, page;
 try {

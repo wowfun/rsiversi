@@ -140,6 +140,8 @@ try:
             foreign = args.report / 'foreign-build'; foreign.mkdir()
             shutil.copy2(args.foreign_binary, foreign / 'rsi-desktop')
             (foreign / 'rsi').symlink_to(companion)
+            with (foreign / 'rsi-desktop').open('rb') as executable:
+                (foreign / 'binary.json').write_text(json.dumps({'sha256': hashlib.file_digest(executable, 'sha256').hexdigest()}) + '\n')
             rejected = subprocess.run([str((foreign / 'rsi-desktop').resolve()), '--assets', str(args.assets.resolve()), '--host-profile', 'fixture'], env=env, capture_output=True, text=True, timeout=45)
             (args.report / 'foreign-build.log').write_text(rejected.stdout + rejected.stderr)
             assert rejected.returncode != 0, 'foreign family unexpectedly attached'

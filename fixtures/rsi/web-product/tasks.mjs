@@ -15,6 +15,7 @@ const binary = join(report, "rsi");
 await copyFile(process.env.RSI_WEB_BINARY ?? resolve("target/debug/rsi"), binary);
 await chmod(binary, 0o700);
 const binaryHash = createHash("sha256").update(await readFile(binary)).digest("hex");
+await writeFile(join(report, "binary.json"), JSON.stringify({ sha256: binaryHash }));
 
 async function until(predicate, label, maximum = 30000) {
   const deadline = Date.now() + maximum;

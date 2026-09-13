@@ -28,6 +28,11 @@ conversation, missing-ACK and startup-close scenarios after the shared build.
 The Tool-using task scenario additionally requires the native sandbox preflight;
 missing-ACK and startup-close do not depend on that preflight. CI attempts artifact upload even on failure. A scenario
 that never starts cannot produce product evidence.
+Before launching a foreign build, the fixture records its frozen executable's
+SHA-256 in `foreign-build/binary.json`. CI excludes the two native executable
+paths in that directory, retaining the scenario evidence and the distribution's
+receipt, build-family manifest and build log. The receipt identifies both paired
+executables; these hashes cannot restore the programs for binary replay.
 The paired `rsi` companion must already be beside the desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables

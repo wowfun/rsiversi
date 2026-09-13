@@ -10,6 +10,10 @@ It injects one rejected visible-card hint and requires an exact same-sequence
 retry through the document/Worker boundary. `task-checks.test.mjs` separately
 proves hidden, disabled, obscured and missing controls fail these assertions.
 CI retains reports under `RSI_WEB_REPORT` and fails artifact upload if none exist.
+Recovery and task probes write `binary.json` with the frozen executable's SHA-256
+before starting the scenario. CI excludes their executable copies while retaining
+hashes, screenshots, action receipts, logs, assets and durable diagnostic data.
+The archive identifies the executable but does not contain it for binary replay.
 Failure metadata is written even when a crashed renderer prevents HTML or
 screenshot capture; capture diagnostics supplement the original task error.
 Service startup also retains its original failure when teardown fails; cleanup

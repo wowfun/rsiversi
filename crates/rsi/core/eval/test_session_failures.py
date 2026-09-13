@@ -1,6 +1,7 @@
 import copy
 import contextlib
 import io
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -12,6 +13,22 @@ import session_api
 
 
 class EvidenceFailures(unittest.TestCase):
+    def test_main_retains_frozen_driver_identity_before_oracle_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "driver"
+            binary.write_bytes(b"unused executable\n")
+            output = root / "results"
+            arguments = ["session_api.py", "--self-test", "--binary", str(binary), "--output", str(output)]
+            with patch("sys.argv", arguments), patch.object(coding, "self_test", side_effect=RuntimeError("oracle preflight failed")):
+                with self.assertRaisesRegex(RuntimeError, "oracle preflight failed"):
+                    session_api.main()
+            self.assertEqual(json.loads((output / "results.json").read_text()), [])
+            self.assertEqual(json.loads((output / "binary.json").read_text()), {
+                "sha256": hashlib.sha256(b"unused executable\n").hexdigest(),
+            })
+            self.assertEqual((output / "session-api-eval").read_bytes(), b"unused executable\n")
+
     def test_runtime_path_ignores_an_oversized_ambient_tempdir(self):
         with tempfile.TemporaryDirectory() as directory:
             long = Path(directory) / ("ambient-" + "x" * 150)
