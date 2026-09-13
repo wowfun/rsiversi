@@ -13,6 +13,12 @@ mechanical persistence seam and its compare-and-append rules.
 and outcome service. Runtime scheduling and recovery policy belong to the
 Kernel. Model prompt projection and compaction belong to
 `rsi-agent-context`, not to the executor or Store.
+The [Goal domain](../goal/README.md) composes pure allocation, reporting and
+settlement callbacks over these contracts. Its scheduling owner belongs to the
+standard Host; Kernel authenticates the separate continuation lease, reservation
+receipt and mailbox input. Kernel's read-only Jobs port consumes public Jobs
+status types and validates an executor-published source against the live claim;
+it cannot create or own the underlying Jobs scope.
 
 ```text
 SQLite Store --Local--> Kernel --Local Turn service--> callers

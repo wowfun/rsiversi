@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-goal = { path = "../goal" }
+rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 bytes.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
@@ -31,6 +33,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
+rsi-client = { path = "../client" }
 rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
 rsi-agent-context = { path = "../../rsi-agent/context" }
 tempfile.workspace = true

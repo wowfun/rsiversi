@@ -946,7 +946,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lines.first().unwrap()["type"], "message");
-    assert_eq!(lines.first().unwrap()["version"], 4);
+    assert_eq!(lines.first().unwrap()["version"], 5);
     assert_eq!(lines.first().unwrap()["session_id"], "session-binary");
     assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert_eq!(lines.last().unwrap()["type"], "outcome");
@@ -1041,6 +1041,7 @@ async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_pr
     let binary = env!("CARGO_BIN_EXE_rsi");
     let workspace = tempfile::tempdir().unwrap();
     let patch = concat!(
+        "{\"version\":2,\"evidence_bytes\":32768}\n",
         "*** Begin Patch\n",
         "*** Add File: direct.txt\n",
         "+direct helper\n",
@@ -1069,6 +1070,12 @@ async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_pr
     let response: serde_json::Value =
         serde_json::from_slice(&output.stdout[..output.stdout.len() - 1]).unwrap();
     assert_eq!(response["status"], "applied");
+    assert!(
+        response["evidence"]["diffs"][0]["unified_diff"]
+            .as_str()
+            .unwrap()
+            .contains("+direct helper")
+    );
     assert_eq!(
         std::fs::read(workspace.path().join("direct.txt")).unwrap(),
         b"direct helper\n"
@@ -1166,6 +1173,7 @@ async fn built_binary_runs_the_complete_real_coding_tool_flow() {
             "job_output",
             "list_agents",
             "output_read",
+            "report_goal",
             "send_message",
             "spawn_agent",
             "wait_agent",
@@ -1310,7 +1318,16 @@ async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
         .find(|line| line["type"] == "fact" && line["fact"]["type"] == "tool_result")
         .unwrap();
     assert_eq!(result["fact"]["result"]["is_error"], true);
-    assert_eq!(result["fact"]["result"]["value"], evidence);
+    let mut stored = result["fact"]["result"]["value"].clone();
+    let presentation = stored.as_object_mut().unwrap().remove("evidence").unwrap();
+    assert_eq!(
+        presentation,
+        serde_json::json!({"version":1,"omitted":false,"diffs":[]})
+    );
+    assert_eq!(
+        stored, evidence,
+        "the model receives the complete ledger without presentation data"
+    );
     assert_eq!(lines.last().unwrap()["outcome"]["status"], "completed");
     server.abort();
 }

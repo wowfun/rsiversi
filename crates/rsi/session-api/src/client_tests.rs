@@ -5,6 +5,8 @@ mod commands;
 
 #[path = "client_tests/draft.rs"]
 mod draft;
+#[path = "client_tests/jobs.rs"]
+mod jobs;
 #[path = "client_tests/projections.rs"]
 mod projections;
 use futures_util::{StreamExt as _, stream};
@@ -13,7 +15,7 @@ use rsi_agent_session_protocol::{
     AgentPresetId, FrozenAgentSettings, MessageDelivery, MessageOptions, SessionFact,
     SessionFactBody, TurnId,
 };
-use rsi_agent_turn_protocol::{MessageState, SessionObservation, TurnError};
+use rsi_agent_turn_protocol::{MessageState, SessionObservation};
 use rsi_api_protocol::{
     ApiMessage, ApiOutput, ByteBudget, ConnectionDescription, EndpointId, HostEpoch,
     OperationClass, OperationSpec, RetainedBytes,
@@ -201,6 +203,123 @@ fn observed_fact(seq: u64, durable: u64) -> Value {
 }
 
 #[tokio::test]
+async fn subscription_handlers_admit_actual_delivery_bytes() {
+    use rsi_api_protocol::{ApiContext, ApiHandler as _, ApiResponseCapacity, CallOrigin};
+    for operation in [
+        Operation::Observe,
+        Operation::Interactions,
+        Operation::Projections,
+    ] {
+        let remote = Remote::new();
+        let client = SessionClient::new(remote.clone()).unwrap();
+        remote.reply(&header());
+        let body = if operation == Operation::Observe {
+            observed_fact(1, 1)
+        } else if operation == Operation::Projections {
+            envelope(projections::snapshot(
+                rsi_agent_session_protocol::ProjectionCursor::Draft { revision: 0 },
+            ))
+        } else {
+            envelope(json!({"approvals":[],"questions":[]}))
+        };
+        let second = if operation == Operation::Observe {
+            observed_fact(2, 2)
+        } else {
+            body.clone()
+        };
+        remote.stream(&[body, second]);
+        let input = envelope(if operation == Operation::Observe {
+            serde_json::to_value(ObservationCursor::default()).unwrap()
+        } else {
+            Value::Null
+        });
+        let input = json!({"target":input["target"],"input":input["body"]});
+        let budget = ByteBudget::new(64 * 1024 * 1024).unwrap();
+        let held_bytes = budget.limit() - 1_024;
+        assert!(operation.spec().maximum_response_bytes > 1_024);
+        let held = budget.reserve(held_bytes).unwrap();
+        let handler = crate::server_stream::Handler {
+            service: Arc::new(client),
+            operation,
+        };
+        let output = handler
+            .invoke(
+                ApiContext {
+                    origin: CallOrigin::Local,
+                    retiring: tokio_util::sync::CancellationToken::new(),
+                },
+                remote.input.encode(&input, 16 * 1024).unwrap(),
+                ApiResponseCapacity::Subscription {
+                    budget: budget.clone(),
+                    maximum: operation.spec().maximum_response_bytes,
+                },
+            )
+            .await
+            .unwrap();
+        let ApiOutput::Stream(mut source) = output else {
+            panic!("subscription")
+        };
+        assert_eq!(budget.used(), held_bytes, "idle source reserves no output");
+        let item = source.next().await.unwrap().unwrap();
+        assert!(item.json.len() < 1_024);
+        assert_eq!(budget.used(), held_bytes + item.json.len());
+        let clone = item.json.clone();
+        drop(item);
+        assert_eq!(budget.used(), held_bytes + clone.len());
+        drop(clone);
+        let occupied = budget.reserve(budget.limit() - budget.used() - 1).unwrap();
+        assert!(
+            matches!(source.next().await.unwrap(), Err(ApiError::Capacity)),
+            "actual encoded bytes must still be admitted"
+        );
+        drop(source);
+        drop(occupied);
+        drop(held);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
+#[tokio::test]
+async fn opened_observation_preserves_api_and_domain_failures() {
+    let (remote, _, handle) = fixture().await;
+    for (error, expected) in [
+        (ApiError::Capacity, SessionError::Api(ApiError::Capacity)),
+        (
+            ApiError::ShuttingDown,
+            SessionError::Api(ApiError::ShuttingDown),
+        ),
+        (
+            ApiError::Domain(
+                remote
+                    .output
+                    .encode(&json!({"code":"capacity"}), 1_024)
+                    .unwrap(),
+            ),
+            SessionError::Capacity,
+        ),
+        (
+            ApiError::Domain(
+                remote
+                    .output
+                    .encode(&json!({"code":"shutting_down"}), 1_024)
+                    .unwrap(),
+            ),
+            SessionError::ShuttingDown,
+        ),
+    ] {
+        remote
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(Ok(ApiOutput::Stream(Box::pin(stream::iter([Err(error)])))));
+        let mut source = handle.observe(ObservationCursor::default()).await.unwrap();
+        assert_eq!(source.next().await.unwrap().unwrap_err(), expected);
+        drop(source);
+    }
+    assert_eq!(remote.output.used(), 0);
+}
+
+#[tokio::test]
 async fn submit_never_replays_and_preserves_caller_identity_when_reply_is_untrustworthy() {
     for change in 0..7 {
         let (remote, _, handle) = fixture().await;
@@ -312,7 +431,7 @@ async fn observation_checks_each_cursor_and_retains_decoded_payload_after_wire_r
     ));
     assert!(matches!(
         stream.next().await.unwrap(),
-        Err(TurnError::Invariant(_))
+        Err(SessionError::Api(ApiError::Invalid(_)))
     ));
     drop(stream);
     assert_eq!(remote.output.used(), 0);
@@ -332,7 +451,7 @@ async fn observation_checks_each_cursor_and_retains_decoded_payload_after_wire_r
         let mut stream = handle.observe(ObservationCursor::default()).await.unwrap();
         assert!(matches!(
             stream.next().await.unwrap(),
-            Err(TurnError::Invariant(_))
+            Err(SessionError::Api(ApiError::Invalid(_)))
         ));
     }
     assert_eq!(
@@ -385,6 +504,7 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
     for foreign in [false, true] {
         let (remote, client, handle) = fixture().await;
         let status = |session_id| StoreAgentSessionStatus {
+            last_settled_control_seq: 0,
             session_id,
             durable_control_seq: 0,
             has_open_turn: false,

@@ -4,10 +4,9 @@ use crate::{
 };
 use futures_util::StreamExt as _;
 use rsi_agent_session_protocol::{AgentControlRecord, SessionFact};
-use rsi_agent_turn_protocol::{
-    ObservationCursor, SessionObservation, SessionObservationStream, TurnError,
-};
+use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation, TurnError};
 use rsi_api_protocol::{ApiError, ApiMessage, ApiOutput, ApiStream};
+use rsi_session_protocol::SessionObservationStream;
 use rsi_session_protocol::{InteractionStream, SessionError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeSet, sync::Arc};
@@ -60,16 +59,28 @@ fn decode<T: DeserializeOwned>(
     }
     Ok(reply.body)
 }
-fn turn_error(error: &SessionError) -> TurnError {
+fn retention_error(error: &TurnError) -> SessionError {
     match error {
-        SessionError::Capacity | SessionError::Api(ApiError::Capacity) => {
-            TurnError::ObserverCapacity
-        }
-        SessionError::ShuttingDown | SessionError::Api(ApiError::ShuttingDown) => {
-            TurnError::ShuttingDown
-        }
-        _ => TurnError::Invariant("invalid or failed remote Session observation".into()),
+        TurnError::Capacity => SessionError::Capacity,
+        _ => SessionError::Backend("Session observation retention failed".into()),
     }
+}
+
+pub(super) async fn goal(
+    handle: &Handle,
+) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
+    let handle = handle.frozen();
+    let operation = Operation::GoalObserve;
+    let mut source = open(&handle, operation, ()).await?;
+    Ok(Box::pin(async_stream::try_stream! {
+        while let Some(message) = source.next().await {
+            let message = message.map_err(|error| stream_error(operation, error))?;
+            let state: rsi_goal::GoalLiveState = decode(&handle, operation, &message)?;
+            state.validate().map_err(|_| client::malformed(operation))?;
+            drop(message);
+            yield state;
+        }
+    }))
 }
 
 pub(super) async fn projections(
@@ -106,17 +117,17 @@ pub(super) async fn observe(
     let mut durable = cursor;
     Ok(Box::pin(async_stream::try_stream! {
         while let Some(message) = source.next().await {
-            let message = message.map_err(|error| turn_error(&stream_error(Operation::Observe, error)))?;
-            let update: wire::Observation<AgentControlRecord, SessionFact> = decode(&handle, Operation::Observe, &message).map_err(|error| turn_error(&error))?;
+            let message = message.map_err(|error| stream_error(Operation::Observe, error))?;
+            let update: wire::Observation<AgentControlRecord, SessionFact> = decode(&handle, Operation::Observe, &message)?;
             let retained = match update {
                 wire::Observation::Control { record, durable_control_seq } => {
                     advance(&mut observed.control_seq, &mut durable.control_seq, record.seq(), durable_control_seq)?;
-                    let record = handle.state.observations.retain_controls(vec![Arc::new(record)])?.pop().expect("one admitted control");
+                    let record = handle.state.observations.retain_controls(vec![Arc::new(record)]).map_err(|error| retention_error(&error))?.pop().expect("one admitted control");
                     SessionObservation::Control { record, durable_control_seq }
                 }
                 wire::Observation::Fact { fact, durable_fact_seq } => {
                     advance(&mut observed.fact_seq, &mut durable.fact_seq, fact.seq(), durable_fact_seq)?;
-                    let fact = handle.state.observations.retain_fact(Arc::new(fact))?;
+                    let fact = handle.state.observations.retain_fact(Arc::new(fact)).map_err(|error| retention_error(&error))?;
                     SessionObservation::Fact { fact, durable_fact_seq }
                 }
             };
@@ -130,11 +141,9 @@ fn advance(
     durable: &mut u64,
     sequence: u64,
     watermark: u64,
-) -> rsi_agent_turn_protocol::Result<()> {
+) -> rsi_session_protocol::Result<()> {
     if observed.checked_add(1) != Some(sequence) || watermark < sequence || watermark < *durable {
-        return Err(TurnError::Invariant(
-            "remote Session sequence is discontinuous or regressing".into(),
-        ));
+        return Err(client::malformed(Operation::Observe));
     }
     *observed = sequence;
     *durable = watermark;

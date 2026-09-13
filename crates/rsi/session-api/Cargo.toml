@@ -13,6 +13,7 @@ futures-util.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-session-protocol = { path = "../session-protocol" }
+rsi-goal = { path = "../goal" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }

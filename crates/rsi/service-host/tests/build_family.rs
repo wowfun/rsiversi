@@ -11,7 +11,7 @@ fn family_manifest_rejects_stale_or_escaping_source() {
     let manifest = json!({"format":1,"files":{"source.rs":{"kind":"file","bytes":8,"executable":false,"sha256":format!("{:x}", Sha256::digest(b"original"))}}});
     assert_eq!(
         build_family::validate(root.path(), &manifest).unwrap(),
-        vec![file.clone()]
+        vec![file.canonicalize().unwrap()]
     );
     std::fs::write(&file, b"modified").unwrap();
     assert!(
@@ -26,6 +26,22 @@ fn family_manifest_rejects_stale_or_escaping_source() {
         build_family::validate(root.path(), &escaping)
             .unwrap_err()
             .contains("invalid frozen input path")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn family_manifest_returns_canonical_sources_through_a_root_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("source.rs"), b"original").unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let manifest = json!({"format":1,"files":{"source.rs":{"kind":"file","bytes":8,"executable":false,"sha256":format!("{:x}", Sha256::digest(b"original"))}}});
+    assert_eq!(
+        build_family::validate(&alias, &manifest).unwrap(),
+        vec![real.join("source.rs").canonicalize().unwrap()]
     );
 }
 

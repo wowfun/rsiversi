@@ -1,7 +1,7 @@
 use super::*;
 use rsi_agent_session_protocol::{ProjectionCursor, SessionProjectionSnapshot};
 
-fn snapshot(cursor: ProjectionCursor) -> Value {
+pub(super) fn snapshot(cursor: ProjectionCursor) -> Value {
     serde_json::to_value(
         SessionProjectionSnapshot::new(
             header().session_id().clone(),

@@ -31,6 +31,8 @@ mod files;
 
 #[path = "session_service/addon_acceptance.rs"]
 mod addon_acceptance;
+#[path = "session_service/goal.rs"]
+mod goal;
 #[path = "session_service/managed_providers.rs"]
 mod managed_providers;
 #[path = "session_service/navigation.rs"]

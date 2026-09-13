@@ -547,7 +547,7 @@ impl JsonClient {
                     .expect("client closed JSONL stream");
                 let value: serde_json::Value =
                     serde_json::from_str(&line).expect("stdout must contain only JSONL");
-                assert_eq!(value["version"], 4);
+                assert_eq!(value["version"], 5);
                 assert_ne!(value["type"], "error", "{value}");
                 self.seen.push(value.clone());
                 if predicate(&value) {
@@ -577,7 +577,7 @@ impl JsonClient {
                 .unwrap()
         {
             let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(value["version"], 4);
+            assert_eq!(value["version"], 5);
             self.seen.push(value);
         }
         let output = tokio::time::timeout(

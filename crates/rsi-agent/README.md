@@ -18,6 +18,10 @@ Workspace Context owns bounded trust-aware instruction and skill discovery;
 Kernel alone turns complete snapshots into durable input Facts. Agent Tools owns
 the six model-facing subagent controls as thin adapters over the process-local
 Turn service and receives caller authority only from an exact live claim.
+The [Goal domain](goal/README.md) owns pure task allocation and report state;
+the standard Host owns its driver through Kernel continuation admission. The
+[product architecture](docs/architecture.md) defines that ownership and the
+claim-bound, read-only Jobs port.
 
 All runtime components are ordinary plugins over public `rsi-meta`
 `Runtime -> Context -> Fiber` semantics. `rsi-meta` remains unaware of Agent

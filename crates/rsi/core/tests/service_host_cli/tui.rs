@@ -188,6 +188,7 @@ async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
     terminal.send(b"\x10");
     terminal.select_menu("Card details").await;
     terminal.until("bash · command failed").await;
+    terminal.until("Card details · Enter actions").await;
     terminal.send(b"\r");
     terminal.select_menu("Read stdout").await;
     terminal.until("Completed stdout").await;
@@ -205,6 +206,8 @@ async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
     terminal.absent("Completed stdout").await;
     terminal.send(b"\x10");
     terminal.select_menu("Card details").await;
+    terminal.until("bash · command failed").await;
+    terminal.until("Card details · Enter actions").await;
     terminal.send(b"\r");
     terminal.select_menu("Read stderr").await;
     terminal.until("fixture stderr").await;
@@ -576,9 +579,17 @@ plugin = "rsi.application.tui"
     async fn select_menu(&mut self, label: &str) {
         self.until("Enter select · Esc close").await;
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut previous = None;
         loop {
             let screen = self.screen.lock().unwrap().screen().contents();
-            if screen.contains(&format!("› {label}")) {
+            let selected = screen.lines().find_map(|line| {
+                line.split_once("› ")
+                    .map(|(_, label)| label.trim().to_owned())
+            });
+            if selected
+                .as_ref()
+                .is_some_and(|selected| selected.starts_with(label))
+            {
                 self.send(b"\r");
                 self.absent(&format!("› {label}")).await;
                 return;
@@ -587,8 +598,11 @@ plugin = "rsi.application.tui"
                 Instant::now() < deadline,
                 "menu never selected {label}: {screen}"
             );
-            self.send(b"\x1b[B");
-            tokio::time::sleep(Duration::from_millis(60)).await;
+            if selected.is_some() && selected != previous {
+                previous = selected;
+                self.send(b"\x1b[B");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

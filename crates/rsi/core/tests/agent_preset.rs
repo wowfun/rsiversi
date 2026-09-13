@@ -201,7 +201,10 @@ async fn independent_managers_detect_a_concurrent_default_write_without_clobberi
         .find_map(|result| result.as_ref().err())
         .unwrap()
         .to_string();
-    assert!(failure.contains("settings document changed concurrently"));
+    assert!(
+        failure.contains("settings document changed concurrently"),
+        "{failure}"
+    );
     assert!(first.shutdown().await.is_clean());
     assert!(second.shutdown().await.is_clean());
 

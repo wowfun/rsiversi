@@ -150,7 +150,7 @@ leading colon. `:exit` or EOF detaches a remote client; an embedded owner shuts
 down and interrupts active work while preserving accepted mailbox input.
 
 One renderer owns output: model text uses stdout and status, Tool feedback,
-and human prompts use stderr. JSONL version 4 emits only structured envelopes
+and human prompts use stderr. JSONL version 5 emits only structured envelopes
 on stdout, including live interaction snapshots. These snapshots report live
 Host state; their absence in history never authorizes replay of a human wait.
 Turn cancellation does not discard terminal Fact or Outcome envelopes queued for
@@ -422,6 +422,12 @@ The standard [repeat reminder](../rsi-agent/repeat-tool-reminder/README.md)
 adds source-attributed advice after repeated identical settled Tool calls.
 Its bounded domain cursor and advice commit together; inspecting history never
 replays the heuristic.
+
+The standard preset includes the pure [Goal domain](../rsi-agent/goal/README.md).
+The separate Host [Goal controller](goal/README.md) runs only after an explicit
+Session create/resume control. Reading a Goal or attaching a client leaves it
+disarmed. The Session owner depends on that controller, whose cleanup retains
+the Kernel until automatic inputs have been discarded or settled.
 
 On Linux, linking the standard coding Tools makes a successfully probed
 restricted sandbox backend a Host activation requirement. The Host does not

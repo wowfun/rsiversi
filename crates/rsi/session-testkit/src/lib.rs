@@ -8,9 +8,10 @@ use rsi_agent_session_protocol::{
     AgentControlRecordBody, MessageId, SessionFactBody, SessionId, TurnId,
 };
 use rsi_agent_turn_protocol::{
-    MessageReceipt, MessageState, ObservationCursor, SessionObservation, SessionObservationStream,
+    MessageReceipt, MessageState, ObservationCursor, SessionObservation,
 };
 use rsi_meta_execution::Execution;
+use rsi_session_protocol::SessionObservationStream;
 use rsi_session_protocol::{
     CreateSession, SessionError, SessionInput, SessionService, SubmitInput,
 };

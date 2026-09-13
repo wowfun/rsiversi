@@ -30,7 +30,10 @@ impl PluginFactory for SessionFactory {
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<TurnServiceContract>()
+            .requiring_local::<rsi_agent_turn_protocol::TurnJobsContract>()
             .requiring_local::<SessionCommandsContract>()
+            .requiring_local::<rsi_agent_turn_protocol::SessionContinuationsContract>()
+            .requiring_local::<rsi_goal::GoalControllerContract>()
             .requiring_local::<SessionProjectionsContract>()
             .requiring_local::<SessionStoreContract>()
             .requiring_local::<AgentCompositionContract>()
@@ -58,7 +61,12 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
-        .with_questions(Some(plan.local::<UserQuestionsContract>()?));
+        .with_questions(Some(plan.local::<UserQuestionsContract>()?))
+        .with_jobs(plan.local::<rsi_agent_turn_protocol::TurnJobsContract>()?)
+        .with_goals(
+            plan.local::<rsi_goal::GoalControllerContract>()?,
+            plan.local::<rsi_agent_turn_protocol::SessionContinuationsContract>()?,
+        );
         let service = Arc::new(service);
         let cleanup = service.clone();
         plan.defer(

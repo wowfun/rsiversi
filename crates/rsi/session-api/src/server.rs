@@ -21,9 +21,11 @@ impl Scratch {
     ) -> rsi_api_protocol::Result<tokio::sync::OwnedSemaphorePermit> {
         let spec = operation.spec();
         let maximum = match operation {
+            Operation::Jobs => 8 * 1024 * 1024,
             Operation::Commands
             | Operation::ExecuteCommand
             | Operation::CommandStatus
+            | Operation::GoalControl
             | Operation::SelectPreset => wire::LARGE_REPLY,
             _ => spec.maximum_response_bytes,
         };
@@ -134,9 +136,10 @@ impl SessionApi {
             Operation::Observe,
             Operation::Interactions,
             Operation::Projections,
+            Operation::GoalObserve,
         ]
         .into_iter()
-        .zip([service.clone(), service.clone(), service])
+        .zip([service.clone(), service.clone(), service.clone(), service])
         {
             registrations.push(registrar.register(
                 operation.spec(),
@@ -222,6 +225,7 @@ fn root_operations(
     )?;
     Ok(vec![create, attach, recent])
 }
+#[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.
 fn handle_operations(
     service: &Arc<dyn SessionService>,
     scratch: &Scratch,
@@ -240,6 +244,22 @@ fn handle_operations(
         };
     }
     vec![
+        add!(
+            Jobs,
+            |owner, request: rsi_agent_turn_protocol::TurnJobsRequest| async move {
+                request.validate().map_err(|error| {
+                    rsi_session_protocol::SessionError::Invalid(error.to_string())
+                })?;
+                owner.read_jobs(request).await
+            }
+        ),
+        add!(
+            GoalControl,
+            |owner, request: rsi_goal::GoalControl| async move { owner.control_goal(request).await }
+        ),
+        add!(GoalStatus, |owner, (): ()| async move {
+            owner.goal_status().await
+        }),
         add!(DraftSnapshot, |owner, (): ()| async move {
             owner.draft_snapshot().await
         }),
@@ -351,6 +371,7 @@ mod tests {
                 sequence,
                 1,
                 SessionFactBody::ModelEvent {
+                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation,
                     turn_id: TurnId::new("turn").unwrap(),
                     effect_id: EffectId::new("effect").unwrap(),
                     event: rsi_ai_protocol::LanguageEvent::ContentDelta {

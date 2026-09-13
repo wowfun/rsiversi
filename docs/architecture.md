@@ -44,6 +44,11 @@ the exact generation pin retained by drafts, resident sessions, delayed Tool
 work and checkpoint maintenance.
 Runtime-composed implementations are independent ordinary plugins; protocol
 and test-support packages are libraries.
+The [Agent Goal domain](../crates/rsi-agent/goal/README.md) owns frozen objectives,
+round allocation and report settlement through those composition contracts.
+Kernel continuation admission provides live authority separately from durable
+state. Kernel also consumes the public Jobs status types to relay an executor's
+existing claim-bound read port; Jobs scope ownership stays with the executor.
 
 The standard [`rsi`](../crates/rsi/README.md) product owns Base composition,
 applications, and the single local Service Host for one standard
@@ -71,6 +76,9 @@ The binary owns launcher and management parsing, explicit daemon process control
 process signals, and construction of the Tokio runtime. The Agent Kernel remains the sole durable session state-machine
 owner; the product Host adds live multiplexing and process ownership without
 moving Agent semantics into a wire adapter.
+The standard [Host Goal controller](../crates/rsi/goal/README.md) drives explicitly
+armed continuation through the Session bridge. Reading Goal state or reopening
+an application does not recreate that scheduling authority.
 
 Dependencies point from the standard product through product implementations
 and protocols toward `rsi-meta`; foundation packages never depend back on a

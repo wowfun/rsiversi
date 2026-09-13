@@ -32,6 +32,11 @@ activity or separate generation pin. A changed Header ends the old stream; a new
 subscription rebinds instead of reinterpreting old results against new identity.
 The [API contract](../../../../crates/rsi/session-api/README.md) independently bounds
 and validates envelopes, decoded snapshot identity and both durable watermarks.
+All Session subscription streams preserve Session errors, including distinct API
+and domain admission failures. Wire admission counts the actual envelope before
+allocation; reserving the largest legal domain delivery for every tiny event
+unnecessarily rejects traffic under an otherwise sufficient output byte budget.
+Domain materialization remains independently admitted.
 
 ## Alternatives considered
 

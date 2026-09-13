@@ -67,6 +67,8 @@ rsi-agent-composition = { path = "../../rsi-agent/composition" }
 rsi-agent-context = { path = "../../rsi-agent/context" }
 rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
 rsi-agent-kernel = { path = "../../rsi-agent/kernel" }
+rsi-agent-goal = { path = "../../rsi-agent/goal" }
+rsi-goal = { path = "../goal" }
 rsi-agent-presets = { path = "../../rsi-agent/presets" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }

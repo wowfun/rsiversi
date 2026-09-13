@@ -10,7 +10,7 @@ use rsi_agent_session_protocol::{
     MessageId, SessionFact, SessionHeader, SessionId, TurnId, WorkspaceTrust,
 };
 use rsi_agent_turn_protocol::{
-    CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SessionObservationStream,
+    CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SessionObservation,
     SubmittedTurn,
 };
 use rsi_ai_protocol::{ImageRequest, ModelRef};
@@ -25,6 +25,8 @@ mod reads;
 pub use reads::{SessionReadContract, SessionReadLease, SessionReads, SessionTarget};
 
 mod interactions;
+mod jobs;
+pub use jobs::{JobsCollection, JobsRetention, JobsSnapshot};
 mod projections;
 pub use interactions::{
     InteractionCollection, InteractionRetention, InteractionSnapshot, InteractionStream,
@@ -32,6 +34,16 @@ pub use interactions::{
 pub use projections::{
     ProjectionCollection, ProjectionRetention, ProjectionSnapshot, ProjectionStream,
 };
+
+/// Coalesced bounded live Goal snapshots with Session-domain or API item failures.
+pub type GoalStream = std::pin::Pin<
+    Box<dyn futures_util::Stream<Item = Result<rsi_goal::GoalLiveState>> + Send + 'static>,
+>;
+
+/// Durable Fact/control observations with Session-domain or API item failures.
+pub type SessionObservationStream = std::pin::Pin<
+    Box<dyn futures_util::Stream<Item = Result<SessionObservation>> + Send + 'static>,
+>;
 
 /// Maximum aggregate canonical media bytes referenced by one Session message.
 pub const MAXIMUM_SESSION_INPUT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
@@ -317,6 +329,30 @@ pub struct RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Reads current-Turn process-local status without reporting or acquiring Jobs.
+    async fn read_jobs(
+        &self,
+        request: rsi_agent_turn_protocol::TurnJobsRequest,
+    ) -> Result<JobsSnapshot> {
+        let _ = request;
+        Err(SessionError::NotFound("current-Turn Jobs".into()))
+    }
+    /// Controls an optional Host-owned Goal; reading state never substitutes for this action.
+    async fn control_goal(
+        &self,
+        request: rsi_goal::GoalControl,
+    ) -> Result<rsi_goal::GoalControlReceipt> {
+        let _ = request;
+        Err(SessionError::NotFound("Goal controller".into()))
+    }
+    /// Reads current process-local Goal driving independently of its durable projection.
+    async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
+        Err(SessionError::NotFound("Goal controller".into()))
+    }
+    /// Observes bounded complete live Goal snapshots; detach does not cancel execution.
+    async fn observe_goal(&self) -> Result<GoalStream> {
+        Err(SessionError::NotFound("Goal controller".into()))
+    }
     /// Reads the current Header and revision from one live draft snapshot.
     /// Returns `NotFound` when this handle has no unpublished draft; other failures
     /// do not establish that durable history is available.

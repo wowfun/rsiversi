@@ -29,6 +29,7 @@ async fn capture_capacity_precedes_callbacks_and_drop_retirement_cancel_all_acti
         }));
     }
     gate.entered.acquire_many(9).await.unwrap().forget();
+    assert_eq!(fixture.kernel.observer_snapshot().projection.current, 9);
     assert!(matches!(
         handle.observe_projections().await,
         Err(SessionError::Capacity)
@@ -56,6 +57,7 @@ async fn capture_capacity_precedes_callbacks_and_drop_retirement_cancel_all_acti
         ));
     }
     assert!(next.next().await.is_none());
+    assert_eq!(fixture.kernel.observer_snapshot().total.current, 0);
     assert!(
         gate.tokens
             .lock()

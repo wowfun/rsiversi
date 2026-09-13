@@ -34,6 +34,10 @@ pub(crate) enum Operation {
     Observe,
     Interactions,
     Projections,
+    GoalControl,
+    GoalStatus,
+    GoalObserve,
+    Jobs,
     Inspect,
     Questions,
     AnswerQuestion,
@@ -41,7 +45,7 @@ pub(crate) enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 26] = [
         Self::Create,
         Self::Attach,
         Self::Recent,
@@ -59,6 +63,10 @@ impl Operation {
         Self::Observe,
         Self::Interactions,
         Self::Projections,
+        Self::GoalControl,
+        Self::GoalStatus,
+        Self::GoalObserve,
+        Self::Jobs,
         Self::Inspect,
         Self::Questions,
         Self::AnswerQuestion,
@@ -86,6 +94,16 @@ impl Operation {
             Self::Observe => ("observe", Subscription, Read, 8192, OBSERVATION_REPLY),
             Self::Interactions => ("interactions", Subscription, Read, 8192, INTERACTION_REPLY),
             Self::Projections => ("projections", Subscription, Read, 8192, PROJECTION_REPLY),
+            Self::GoalControl => ("goal-control", Data, Mutation, 32 * 1024, 16 * 1024),
+            Self::GoalStatus => ("goal-status", Control, Read, 8192, 16 * 1024),
+            Self::GoalObserve => ("goal-observe", Subscription, Read, 8192, 16 * 1024),
+            Self::Jobs => (
+                "jobs",
+                Data,
+                Read,
+                8192,
+                rsi_agent_turn_protocol::MAXIMUM_TURN_JOBS_BYTES + 8192,
+            ),
             Self::Inspect => ("inspect", Data, Read, 8192, LARGE_REPLY),
             Self::Questions => ("questions", Data, Read, 8192, INTERACTION_REPLY),
             Self::AnswerQuestion => ("answer-question", Control, Mutation, 128 * 1024, 8192),
@@ -93,8 +111,24 @@ impl Operation {
             Self::AnswerApproval => ("answer-approval", Control, Mutation, 128 * 1024, 8192),
         };
         OperationSpec {
-            id: OperationId::new("session", name, if self == Self::Create { 2 } else { 1 })
-                .expect("constant operation"),
+            id: OperationId::new(
+                "session",
+                name,
+                match self {
+                    Self::Create => 3,
+                    Self::Attach
+                    | Self::Recent
+                    | Self::DraftSnapshot
+                    | Self::SelectPreset
+                    | Self::History
+                    | Self::Observe
+                    | Self::Inspect
+                    | Self::ReadMessage
+                    | Self::MessageStatus => 2,
+                    _ => 1,
+                },
+            )
+            .expect("constant operation"),
             class,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,

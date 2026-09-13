@@ -1,5 +1,29 @@
 # rsi-session
 
+Goal control revision and identity conflicts remain typed command conflicts,
+bound to the original request ID, across Session API. A rejected pause/cancel
+still revokes live scheduling before its command gate; it does not claim a
+durable phase change or cancellation of the current Turn. The caller can issue
+a new explicit control from a fresh revision after a known rejection. Unknown
+outcomes retain their original identity and require receipt reconciliation.
+
+Current-Turn Jobs reads delegate to the Kernel's read-only claim relay through
+this handle's exact Header. Capture and returned-page retention have a separate
+bounded owner. No Jobs scope is acquired by Session, and a missing, finalized or
+replaced claim returns unavailable rather than a fabricated empty historical list.
+Page semantics and bounds belong to the [shared Jobs contract](../session-protocol/README.md).
+
+Goal controls delegate to the separately owned Host Goal controller. The Session
+adapter supplies a narrow `GoalSession` bridge: current typed domain plus command
+revision from one Store snapshot, staged draft freeze under its mutation lock,
+ordinary command receipt reconciliation, Workspace preparation and exact Kernel
+continuation submission. It retains the existing Header and selected composition;
+the controller cannot choose another preset or execution policy.
+Outcome waiting subscribes before reading canonical message/Turn state and uses
+coalesced changes, bounded reads and cancellation. Live Goal status is separate
+from the durable Goal projection. A Session without this optional Host capability
+returns an explicit unavailable result; observation never arms execution.
+
 This package implements the native Session domain service over the Agent Kernel,
 Store, Agent composition, Workspace and Media. Its transport-independent
 [contract](../session-protocol/README.md) owns requests, handles, receipts,

@@ -7,10 +7,10 @@ use rsi_agent_store_protocol::{
 };
 use rsi_agent_turn_protocol::{
     CancelResult, CancelTarget, MessageReceipt, ObservationCursor, ObservationRetention,
-    SessionObservationStream,
 };
 use rsi_api_protocol::{ApiClient, ApiError, OperationEffect, call_json};
 use rsi_approval_protocol::{ApprovalDecision, ApprovalRequest};
+use rsi_session_protocol::SessionObservationStream;
 use rsi_session_protocol::{
     CreateSession, InteractionRetention, InteractionStream, RecentSessionCursor, RecentSessionPage,
     SessionError, SessionHandle, SessionHistoryPage, SessionService, SessionSummary,
@@ -32,6 +32,7 @@ pub(super) struct State {
     pub observations: ObservationRetention,
     pub interactions: InteractionRetention,
     pub projections: rsi_session_protocol::ProjectionRetention,
+    pub jobs: rsi_session_protocol::JobsRetention,
 }
 /// Shared Session application proxy over one negotiated API generation.
 #[derive(Clone, Debug)]
@@ -64,6 +65,7 @@ impl SessionClient {
                 observations: ObservationRetention::default(),
                 interactions: InteractionRetention::default(),
                 projections: rsi_session_protocol::ProjectionRetention::default(),
+                jobs: rsi_session_protocol::JobsRetention::default(),
             }),
         }
     }
@@ -109,13 +111,16 @@ pub(super) fn failure(
         }
         Failure::CommandConflict { .. } => matches!(
             operation,
-            Operation::ExecuteCommand | Operation::CommandStatus
+            Operation::ExecuteCommand | Operation::CommandStatus | Operation::GoalControl
         ),
-        Failure::CommandOutcomeUnknown { .. } => operation == Operation::ExecuteCommand,
+        Failure::CommandOutcomeUnknown { .. } => matches!(
+            operation,
+            Operation::ExecuteCommand | Operation::GoalControl
+        ),
         Failure::CommandRevisionConflict { expected, actual } => {
             matches!(
                 operation,
-                Operation::ExecuteCommand | Operation::SelectPreset
+                Operation::ExecuteCommand | Operation::SelectPreset | Operation::GoalControl
             ) && expected != actual
         }
         _ => true,
@@ -318,6 +323,37 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn read_jobs(
+        &self,
+        request: rsi_agent_turn_protocol::TurnJobsRequest,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::JobsSnapshot> {
+        request
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let handle = self.frozen();
+        let reservation = handle.state.jobs.reserve_decode()?;
+        let page: rsi_agent_turn_protocol::TurnJobsPage =
+            handle.call(Operation::Jobs, &request).await?;
+        page.validate_for(&handle.session_id, &handle.target().header_key, &request)
+            .map_err(|_| malformed(Operation::Jobs))?;
+        reservation.retain(page)
+    }
+    async fn control_goal(
+        &self,
+        request: rsi_goal::GoalControl,
+    ) -> rsi_session_protocol::Result<rsi_goal::GoalControlReceipt> {
+        self.control_checked_goal(request).await
+    }
+    async fn goal_status(&self) -> rsi_session_protocol::Result<rsi_goal::GoalLiveState> {
+        let state: rsi_goal::GoalLiveState = self.call(Operation::GoalStatus, &()).await?;
+        state
+            .validate()
+            .map_err(|_| malformed(Operation::GoalStatus))?;
+        Ok(state)
+    }
+    async fn observe_goal(&self) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
+        crate::client_stream::goal(self).await
+    }
     async fn observe_projections(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {

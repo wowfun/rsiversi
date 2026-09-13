@@ -4195,6 +4195,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-executor",
+ "rsi-agent-goal",
  "rsi-agent-kernel",
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
@@ -4239,6 +4240,7 @@ dependencies = [
  "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-files-tools",
+ "rsi-goal",
  "rsi-host",
  "rsi-inspector",
  "rsi-jobs",
@@ -4402,6 +4404,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-agent-goal"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-context",
+ "rsi-agent-kernel",
+ "rsi-agent-presets",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-meta-profile",
+ "rsi-meta-scope",
+ "rsi-sandbox",
+ "rsi-tools",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-agent-kernel"
 version = "0.0.1"
 dependencies = [
@@ -4415,6 +4446,7 @@ dependencies = [
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-jobs",
  "rsi-meta",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -5146,6 +5178,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-conversation",
+ "rsi-goal",
  "rsi-meta",
  "rsi-meta-execution",
  "rsi-meta-scope",
@@ -5390,6 +5423,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-goal"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "rsi-agent-goal",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-gui"
 version = "0.0.1"
 dependencies = [
@@ -5398,6 +5449,7 @@ dependencies = [
  "futures-util",
  "image",
  "pulldown-cmark",
+ "rsi-agent-goal",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
@@ -5410,6 +5462,7 @@ dependencies = [
  "rsi-client-preferences",
  "rsi-conversation",
  "rsi-files-protocol",
+ "rsi-goal",
  "rsi-host",
  "rsi-media-protocol",
  "rsi-meta",
@@ -5926,6 +5979,7 @@ dependencies = [
  "futures-util",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
+ "rsi-agent-goal",
  "rsi-agent-kernel",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -5934,6 +5988,8 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-approval-protocol",
+ "rsi-client",
+ "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta",
  "rsi-sandbox",
@@ -5963,6 +6019,7 @@ dependencies = [
  "rsi-api",
  "rsi-api-protocol",
  "rsi-approval-protocol",
+ "rsi-goal",
  "rsi-meta",
  "rsi-sandbox",
  "rsi-session-protocol",
@@ -6034,6 +6091,7 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-approval-protocol",
+ "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-sandbox",
@@ -6083,12 +6141,14 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-agent-goal",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
  "rsi-application",
  "rsi-client",
  "rsi-conversation",
+ "rsi-goal",
  "rsi-host",
  "rsi-meta",
  "rsi-process",

@@ -1,5 +1,11 @@
 # rsi-session-api
 
+The current Session format is 12. Operations carrying changed Header, Fact or
+message shapes negotiate their own versions: create v3; attach, recent,
+draft-snapshot, select-preset, history, observe, inspect, message-status and read-message v2.
+Other operation schemas keep their existing versions. ModelEvent purpose tags
+remain present in bounded partial history and observation payloads.
+
 Ordinary endpoint and client plugins expose the Session domain through registered
 versioned operations. The server consumes the shared Session service and its
 trusted ingress; it owns no draft table, execution pin, provider or durable log.
@@ -49,6 +55,24 @@ resolving a compact receipt or command catalog can still load Headers, canonical
 controls and complete domain snapshots. Its wire response remains independently
 bounded (512 KiB for discovery, 8 KiB for receipts).
 
+`goal-control` is an owned Data mutation carrying the immutable Goal request and
+expected command revision. It reserves the command materialization ceiling and
+returns a verified canonical command receipt plus a separate small live snapshot.
+`goal-status` is a Control read and `goal-observe` is a disposable Subscription;
+neither arms a controller. All three are version 1, bind the exact Session/Header,
+and limit live diagnostics to 4 KiB. A malformed control reply preserves the
+original request as `CommandOutcomeUnknown`. Disconnect never retries or cancels
+an owned Goal. Durable Goal values use the existing projection subscription.
+
+`jobs` v1 is a finite Data read for the exact current active Turn. Its capture
+and page bounds follow the [shared Jobs contract](../session-protocol/README.md),
+with a separate bounded transport envelope.
+Both sides validate Session/Header/Turn, claim generation, cursor, ordering and
+summary semantics. The decoder reserves its independent Jobs page budget before
+decoding; retained snapshots own the final bytes after transport delivery ends.
+Unavailable claims are not read from history, and no output or reporting operation
+is exposed by this status port.
+
 The authenticated `session/projections` Subscription returns complete retained
 extension snapshots with a separate 5 MiB payload plus 64 KiB envelope limit.
 Both the envelope and snapshot bind the captured Session/Header; the client also
@@ -57,6 +81,10 @@ subscription. Each decoder reserves its bounded projection collection before
 JSON decode and retains the resulting snapshot before releasing wire ownership.
 Server capture admission belongs to the Session service, independently of API
 delivery-byte admission; idle streams reserve no maximum reply buffer.
+Fact/control and interaction items follow the same separation: their already
+admitted immutable payload is measured, then encoded under its exact wire charge
+and the registered maximum. Domain capacity remains a Session failure; API
+delivery capacity remains an API failure throughout an opened stream.
 
 Create, input, direct Image and interaction answers are owned mutations. Unknown
 message outcomes retain the caller's MessageId for status/retry reconciliation.
@@ -82,3 +110,6 @@ Page count is an upper bound; callers continue using the returned cursor and
 Tests use the shared Session testkit against actual isolated services and domain
 adapters. Transport-specific authentication, delivery and disconnect checks belong
 to the API adapter fixtures.
+
+Goal status and observation replies each allow 16 KiB encoded, including the
+target envelope and maximum JSON escaping of the 4 KiB diagnostic.

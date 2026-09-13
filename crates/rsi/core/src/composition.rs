@@ -76,6 +76,8 @@ const CREDENTIALS_FACTORY: &str = "rsi.credentials.local";
 const MEDIA_LOCAL_FACTORY: &str = "rsi.media.local";
 const MEDIA_FACTORY: &str = "rsi.media";
 const SESSION_FACTORY: &str = "rsi.session";
+const GOAL_CONTROLLER_FACTORY: &str = "rsi.goal.controller";
+const GOAL_DOMAIN_FACTORY: &str = "rsi.agent.goal";
 const APPROVAL_BROKER_FACTORY: &str = "rsi.approval.broker";
 const QUESTIONS_FACTORY: &str = "rsi.user-questions";
 const QUESTION_TOOLS_FACTORY: &str = "rsi.agent.questions";
@@ -211,6 +213,7 @@ fn standard_agent_addon(
         Arc::new(rsi_files_tools::FilesToolsFactory),
     )?;
     register(AGENT_TOOLS_FACTORY, Arc::new(AgentToolsFactory))?;
+    register(GOAL_DOMAIN_FACTORY, Arc::new(rsi_agent_goal::GoalFactory))?;
     register(
         CONTEXT_BUILDER_FACTORY,
         Arc::new(rsi_agent_context::DefaultContextBuilderFactory),
@@ -1367,11 +1370,10 @@ impl StandardComposition {
         builder.register_fragment(session_fragment(&agent))?;
         builder.register_fragment(ProfileFragment::new(
             "rsi.standard.session",
-            vec![ProfileEntry::new(
-                "rsi-session",
-                SESSION_FACTORY,
-                Value::Null,
-            )],
+            vec![
+                ProfileEntry::new("rsi-goal-controller", GOAL_CONTROLLER_FACTORY, Value::Null),
+                ProfileEntry::new("rsi-session", SESSION_FACTORY, Value::Null),
+            ],
         ))?;
         crate::api_composition::register(&mut builder)?;
         if let Some(launch_key) = local_api {
@@ -1518,6 +1520,12 @@ fn register_factories(
         SESSION_FACTORY,
         UpdateMode::RestartRequired,
         rsi_session::SessionFactory,
+    )?;
+    register(
+        builder,
+        GOAL_CONTROLLER_FACTORY,
+        UpdateMode::RestartRequired,
+        rsi_goal::GoalControllerFactory,
     )?;
     register(
         builder,
@@ -1763,6 +1771,9 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<ImageRegistrarContract>()?;
     builder.register_local_contract::<SessionStoreContract>()?;
     builder.register_local_contract::<TurnServiceContract>()?;
+    builder.register_local_contract::<rsi_agent_turn_protocol::TurnJobsContract>()?;
+    builder.register_local_contract::<rsi_agent_turn_protocol::SessionContinuationsContract>()?;
+    builder.register_local_contract::<rsi_goal::GoalControllerContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionCommandsContract>()?;
     builder.register_local_contract::<rsi_agent_turn_protocol::SessionProjectionsContract>()?;
     builder.register_local_contract::<TurnExecutionContract>()?;
@@ -2140,6 +2151,7 @@ mod tests {
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
                 PLAN_POLICY_FACTORY,
+                GOAL_DOMAIN_FACTORY,
                 REPEAT_REMINDER_FACTORY,
                 OUTPUT_READ_FACTORY,
                 BASH_TOOL_FACTORY,
@@ -2163,6 +2175,7 @@ mod tests {
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 TIME_CONTEXT_FACTORY,
                 PLAN_POLICY_FACTORY,
+                GOAL_DOMAIN_FACTORY,
                 REPEAT_REMINDER_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,

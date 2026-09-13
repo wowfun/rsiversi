@@ -30,6 +30,7 @@ impl ApiHandler for Handler {
             ));
         };
         match self.operation {
+            Operation::GoalObserve => goal(self.service.as_ref(), input, budget, maximum).await,
             Operation::Projections => {
                 projections(self.service.as_ref(), input, budget, maximum).await
             }
@@ -51,13 +52,12 @@ impl ApiHandler for Handler {
                 };
                 Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
                     while let Some(update) = source.next().await {
-                        let update = update.map_err(|error| turn_error(&error))?;
-                        let reservation = budget.reserve(maximum)?;
+                        let update = match wire::domain(update)? { Ok(update) => update, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
                         let body = match &update {
                             SessionObservation::Control { record, durable_control_seq } => wire::Observation::Control { record: &**record, durable_control_seq: *durable_control_seq },
                             SessionObservation::Fact { fact, durable_fact_seq } => wire::Observation::Fact { fact: &**fact, durable_fact_seq: *durable_fact_seq },
                         };
-                        let json = reservation.encode(&HandleReply { target: request.target.clone(), body }).map_err(|_| ApiError::Backend("Session observation encoding failed".into()))?;
+                        let json = budget.encode(&HandleReply { target: request.target.clone(), body }, maximum)?;
                         yield ApiMessage { json, binary: None };
                     }
                 })))
@@ -81,8 +81,7 @@ impl ApiHandler for Handler {
                 Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
                     while let Some(snapshot) = source.next().await {
                         let snapshot = match wire::domain(snapshot)? { Ok(snapshot) => snapshot, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
-                        let reservation = budget.reserve(maximum)?;
-                        let json = reservation.encode(&HandleReply { target: request.target.clone(), body: snapshot }).map_err(|_| ApiError::Backend("Session interaction encoding failed".into()))?;
+                        let json = budget.encode(&HandleReply { target: request.target.clone(), body: snapshot }, maximum)?;
                         yield ApiMessage { json, binary: None };
                     }
                 })))
@@ -92,6 +91,31 @@ impl ApiHandler for Handler {
             )),
         }
     }
+}
+async fn goal(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    let request: HandleRequest<()> = serde_json::from_slice(input.as_bytes())
+        .map_err(|_| ApiError::Invalid("invalid Session Goal observation request".into()))?;
+    let result = async { handle(service, &request.target).await?.observe_goal().await }.await;
+    let mut source = match wire::domain(result)? {
+        Ok(source) => source,
+        Err(failure) => return Err(ApiError::Domain(budget.encode(&failure, maximum)?)),
+    };
+    Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+        while let Some(snapshot) = source.next().await {
+            let snapshot = match wire::domain(snapshot)? {
+                Ok(snapshot) => snapshot,
+                Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))?,
+            };
+            snapshot.validate().map_err(|_| ApiError::Backend("invalid Goal snapshot".into()))?;
+            let json = budget.encode(&HandleReply { target: request.target.clone(), body: snapshot }, maximum)?;
+            yield ApiMessage { json, binary: None };
+        }
+    })))
 }
 async fn projections(
     service: &dyn SessionService,
@@ -126,12 +150,4 @@ async fn projections(
             yield ApiMessage { json, binary: None };
         }
     })))
-}
-fn turn_error(error: &rsi_agent_turn_protocol::TurnError) -> ApiError {
-    match error {
-        rsi_agent_turn_protocol::TurnError::Capacity
-        | rsi_agent_turn_protocol::TurnError::ObserverCapacity => ApiError::Capacity,
-        rsi_agent_turn_protocol::TurnError::ShuttingDown => ApiError::ShuttingDown,
-        _ => ApiError::Backend("Session observation failed".into()),
-    }
 }

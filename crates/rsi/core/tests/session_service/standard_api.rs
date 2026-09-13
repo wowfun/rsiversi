@@ -523,15 +523,25 @@ async fn remote_ui(
         })
         .await
         .unwrap();
-    assert_eq!(page.entries.len(), 1);
-    assert_eq!(page.entries[0].bundle, "rsi.session.inspection");
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.surface.as_str())
+            .collect::<Vec<_>>(),
+        ["goal", "jobs", "session"]
+    );
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.bundle == "rsi.session.inspection")
+    );
     assert!(page.next.is_none());
     let request = Observe {
         application: "http-ui-fixture".into(),
         selections: vec![Selection {
             scope,
-            bundle: page.entries[0].bundle.clone(),
-            surface: page.entries[0].surface.clone(),
+            bundle: page.entries[2].bundle.clone(),
+            surface: page.entries[2].surface.clone(),
         }],
     };
     let mut stream = client.observe(&request).await.unwrap();

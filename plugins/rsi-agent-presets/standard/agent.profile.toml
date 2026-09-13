@@ -22,6 +22,11 @@ plugin = "rsi.agent.plan-policy"
 
 [[steps]]
 kind = "plugin"
+id = "goal"
+plugin = "rsi.agent.goal"
+
+[[steps]]
+kind = "plugin"
 id = "repeat-tool-reminder"
 plugin = "rsi.agent.repeat-tool-reminder"
 

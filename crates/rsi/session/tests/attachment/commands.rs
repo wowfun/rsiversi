@@ -4,6 +4,8 @@ use super::*;
 mod preset;
 #[path = "commands/projections.rs"]
 mod projections;
+#[path = "commands/resources.rs"]
+mod resources;
 use rsi_agent_composition_protocol::{
     ContributionCatalog, ContributionKind, ContributionRegistration, ContributionResult,
     DomainCatalog, DomainDefinition, DomainHandle, SessionCommand, SessionCommandContext,

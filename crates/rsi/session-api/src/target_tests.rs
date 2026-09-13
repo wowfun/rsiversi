@@ -56,7 +56,7 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         SessionId::new("allowed").unwrap(),
     )
     .unwrap();
-    assert_eq!(local.operations().len(), 20);
+    assert_eq!(local.operations().len(), 24);
     let client =
         SessionTargetClient::new(Arc::new(local), SessionId::new("allowed").unwrap()).unwrap();
     let target = |id: &str| serde_json::json!({"session_id":id,"header_key":"a".repeat(64)});

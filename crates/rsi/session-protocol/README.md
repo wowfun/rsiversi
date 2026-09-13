@@ -1,5 +1,23 @@
 # rsi-session-protocol
 
+The optional current-Turn Jobs status read binds a caller-selected active Turn
+to this handle's exact Session/Header. It returns at most 32 summaries / 64 KiB
+encoded per page and retains that page's bytes through its final clone. One
+adapter or decoder uses a separate 64 MiB pool; local capture reserves 8 MiB
+before sampling the bounded Jobs list, and wire decode reserves 64 KiB before
+materializing a page. The view cannot acquire scopes or read/report/kill jobs.
+The exclusive job-id cursor is lexicographic and scoped to that live Turn.
+Independent pages may observe different status instants and tombstone eviction;
+callers discard pages after the active Turn changes. Unavailable claims are not
+read from durable history.
+
+The optional Goal capability exposes explicit `control_goal`, current
+`goal_status`, and coalesced `observe_goal` on the attached Session. Controls bind
+an immutable command request identity and expected revision. Live state is a
+bounded process-local observation, separate from the pure durable Goal projection.
+History, status, projection and receipt reads never arm a Goal. An absent Host
+controller is reported as unavailable instead of inferring execution from state.
+
 This library owns the standard product's transport-independent Session
 contracts and bounded retained observation values. `SessionService` creates, attaches, and lists sessions;
 `SessionHandle` hides Agent draft tokens, Kernel admission, Store cursors,
@@ -50,7 +68,9 @@ before capture; no periodic polling or Fact replay is needed.
 Creation, input, receipt and page values have closed Serde representations.
 They describe domain API values, not a new durable Session or Store format.
 
-API-backed capabilities retain common transport failures in `SessionError::Api`.
+All three observation streams use `SessionError` for opening and item failures.
+The Fact/control stream retains the Agent's typed payload without adopting its
+service error type. API-backed capabilities retain common transport failures in `SessionError::Api`.
 Authentication, capacity and uncertain outcomes are not converted into domain
 rejections. A message's caller-owned identity remains the reconciliation key.
 

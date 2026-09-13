@@ -14,8 +14,8 @@ use rsi_agent_store_protocol::{
     MAXIMUM_SESSIONS_PER_READ, SessionStore, StoreError, StoreRecentSessionCursor,
 };
 use rsi_agent_turn_protocol::{
-    CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SessionObservationStream,
-    SubmitImage, SubmitMessage as SubmitAgentMessage, SubmitSession, TurnError, TurnService,
+    CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SubmitImage,
+    SubmitMessage as SubmitAgentMessage, SubmitSession, TurnError, TurnService,
 };
 use rsi_ai_protocol::{ImageCall, LanguageCall};
 use rsi_approval_protocol::{ApprovalDecision, ApprovalRequest};
@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 
 mod commands;
 mod drafts;
+mod goal;
 mod interactions;
 mod plugin;
 mod projections;
@@ -38,13 +39,17 @@ pub use plugin::SessionFactory;
 use rsi_session_protocol::{
     AgentSettingsSource, CreateSession, InteractionRetention, RecentSessionCursor,
     RecentSessionPage, Result, SessionApprovalControl, SessionError, SessionHandle,
-    SessionHistoryPage, SessionInput, SessionService, SessionSummary, SubmitDirectImage,
-    SubmitInput, TurnReceipt, validate_session_input,
+    SessionHistoryPage, SessionInput, SessionObservationStream, SessionService, SessionSummary,
+    SubmitDirectImage, SubmitInput, TurnReceipt, validate_session_input,
 };
 
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
+    jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
+    jobs_retention: rsi_session_protocol::JobsRetention,
+    goals: Option<Arc<dyn rsi_goal::GoalController>>,
+    continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
     projection_retention: rsi_session_protocol::ProjectionRetention,
     projection_stopped: tokio_util::sync::CancellationToken,
@@ -91,6 +96,10 @@ impl LocalSessionService {
         approvals: Arc<dyn SessionApprovalControl>,
     ) -> Self {
         Self {
+            goals: None,
+            jobs: None,
+            jobs_retention: rsi_session_protocol::JobsRetention::default(),
+            continuations: None,
             projection_service: projections,
             projection_retention: rsi_session_protocol::ProjectionRetention::default(),
             projection_stopped: tokio_util::sync::CancellationToken::new(),
@@ -122,12 +131,35 @@ impl LocalSessionService {
         self
     }
 
+    /// Supplies the independently owned Host Goal controller and its Kernel admission seam.
+    #[must_use]
+    pub fn with_goals(
+        mut self,
+        goals: Arc<dyn rsi_goal::GoalController>,
+        continuations: Arc<dyn rsi_agent_turn_protocol::SessionContinuations>,
+    ) -> Self {
+        self.goals = Some(goals);
+        self.continuations = Some(continuations);
+        self
+    }
+
+    /// Supplies the Kernel's current-claim read-only Jobs relay.
+    #[must_use]
+    pub fn with_jobs(mut self, jobs: Arc<dyn rsi_agent_turn_protocol::TurnJobs>) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
     fn handle_from_state(
         &self,
         state: HandleState,
         lease: Option<drafts::DraftLease>,
     ) -> Arc<LocalSessionHandle> {
         Arc::new(LocalSessionHandle {
+            goals: self.goals.clone(),
+            continuations: self.continuations.clone(),
+            jobs: self.jobs.clone(),
+            jobs_retention: self.jobs_retention.clone(),
             projection_service: self.projection_service.clone(),
             projection_retention: self.projection_retention.clone(),
             projection_stopped: self.projection_stopped.clone(),
@@ -317,6 +349,10 @@ impl HandleState {
 
 #[derive(Clone)]
 struct LocalSessionHandle {
+    jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
+    jobs_retention: rsi_session_protocol::JobsRetention,
+    goals: Option<Arc<dyn rsi_goal::GoalController>>,
+    continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
     projection_retention: rsi_session_protocol::ProjectionRetention,
     projection_stopped: tokio_util::sync::CancellationToken,
@@ -487,6 +523,72 @@ impl LocalSessionHandle {
 
 #[async_trait]
 impl SessionHandle for LocalSessionHandle {
+    async fn read_jobs(
+        &self,
+        request: rsi_agent_turn_protocol::TurnJobsRequest,
+    ) -> Result<rsi_session_protocol::JobsSnapshot> {
+        request.validate().map_err(map_turn_error)?;
+        let service = self
+            .jobs
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("current-Turn Jobs".into()))?;
+        let reservation = self.jobs_retention.reserve_capture()?;
+        let header = self
+            .header_snapshot()
+            .await?
+            .fingerprint()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let cancellation = self.projection_stopped.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let page = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            service.read_jobs(self.session_id(), &header, request.clone(), cancellation),
+        )
+        .await
+        .map_err(|_| SessionError::Backend("Jobs status read deadline elapsed".into()))?
+        .map_err(|error| match error {
+            TurnError::StaleClaim => SessionError::NotFound("current-Turn Jobs source".into()),
+            error => map_turn_error(error),
+        })?;
+        page.validate_for(self.session_id(), &header, &request)
+            .map_err(map_turn_error)?;
+        reservation.retain(page)
+    }
+    async fn control_goal(
+        &self,
+        request: rsi_goal::GoalControl,
+    ) -> Result<rsi_goal::GoalControlReceipt> {
+        let _activity = self.begin_activity()?;
+        let request_id = request.request_id.clone();
+        self.goals
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
+            .control(Arc::new(self.clone()), request)
+            .await
+            .map_err(|error| match error {
+                rsi_goal::GoalError::Conflict => SessionError::CommandConflict { request_id },
+                other => goal::session_error(other),
+            })
+    }
+    async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
+        self.goals
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
+            .status(self.session_id())
+            .map_err(goal::session_error)
+    }
+    async fn observe_goal(&self) -> Result<rsi_session_protocol::GoalStream> {
+        use futures_util::StreamExt;
+        let stream = self
+            .goals
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
+            .observe(self.session_id())
+            .map_err(goal::session_error)?;
+        Ok(Box::pin(
+            stream.map(|item| item.map_err(goal::session_error)),
+        ))
+    }
     async fn observe_projections(&self) -> Result<rsi_session_protocol::ProjectionStream> {
         self.projection_stream().await
     }
@@ -699,11 +801,14 @@ impl SessionHandle for LocalSessionHandle {
     }
 
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream> {
+        use futures_util::StreamExt as _;
         let _activity = self.begin_activity()?;
-        self.turns
+        let source = self
+            .turns
             .observe_session(self.session_id(), cursor)
             .await
-            .map_err(map_turn_error)
+            .map_err(map_turn_error)?;
+        Ok(Box::pin(source.map(|item| item.map_err(map_turn_error))))
     }
 
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
@@ -829,7 +934,9 @@ fn map_turn_error(error: TurnError) -> SessionError {
         TurnError::MessageConflict { session, message } => {
             SessionError::MessageConflict { session, message }
         }
-        TurnError::Capacity | TurnError::ObserverCapacity => SessionError::Capacity,
+        TurnError::Capacity | TurnError::ObserverCapacity | TurnError::ProjectionCapacity => {
+            SessionError::Capacity
+        }
         TurnError::ShuttingDown => SessionError::ShuttingDown,
         other => SessionError::Backend(other.to_string()),
     }
