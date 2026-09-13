@@ -42,6 +42,14 @@ Message identity, never proof of non-execution. Dropping an ordinary submission
 waiter still leaves reconciliation owned; the client contract distinguishes
 explicit cancellation from waiter lifetime.
 
+The Goal observer is the single writer of retained live driver state. A control
+or reconciliation response can arrive after a newer observation; publishing its
+earlier snapshot can leave the UI at Reserving while the driver is already
+Waiting. Receipts retain their captured live snapshot for callers, but the client
+does not merge it into the observer's watch. This avoids introducing a second
+ordering protocol for snapshots that carry no observation sequence. Gated GUI
+tests deliver Waiting before releasing an older control or reconciliation reply.
+
 The [Session protocol](../../../../crates/rsi/session-protocol/README.md) is
 separate from its native implementation. Models and completed Output are
 independent capabilities. Registered Workspace identities resolve to the existing

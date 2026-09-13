@@ -17,6 +17,10 @@ pub(super) struct Scenario {
     changed: tokio::sync::watch::Sender<u64>,
     live: Mutex<GoalLiveState>,
     live_changed: tokio::sync::watch::Sender<()>,
+    block_reply: AtomicBool,
+    reply_entered: tokio::sync::Notify,
+    reply_release: tokio::sync::Notify,
+    waiting_observed: tokio::sync::Notify,
     block_projections: AtomicBool,
     projection_entered: tokio::sync::Notify,
     projection_release: tokio::sync::Notify,
@@ -39,6 +43,10 @@ impl Default for Scenario {
             changed: tokio::sync::watch::channel(0).0,
             live: Mutex::default(),
             live_changed: tokio::sync::watch::channel(()).0,
+            block_reply: AtomicBool::new(false),
+            reply_entered: tokio::sync::Notify::new(),
+            reply_release: tokio::sync::Notify::new(),
+            waiting_observed: tokio::sync::Notify::new(),
             block_projections: AtomicBool::new(false),
             projection_entered: tokio::sync::Notify::new(),
             projection_release: tokio::sync::Notify::new(),
@@ -71,6 +79,13 @@ impl Scenario {
         }
         Ok(self.live.lock().unwrap().clone())
     }
+    pub(super) async fn reply(&self, captured: GoalLiveState) -> GoalLiveState {
+        if self.block_reply.swap(false, Ordering::SeqCst) {
+            self.reply_entered.notify_one();
+            self.reply_release.notified().await;
+        }
+        captured
+    }
     pub(super) async fn control(
         &self,
         backend: &Backend,
@@ -101,7 +116,7 @@ impl Scenario {
         let live = GoalLiveState {
             armed,
             stage: if armed {
-                GoalDriverStage::Waiting
+                GoalDriverStage::Reserving
             } else {
                 GoalDriverStage::Disarmed
             },
@@ -120,16 +135,25 @@ impl Scenario {
                 request_id: request.request_id,
             });
         }
+        let live = self.reply(live).await;
         Ok(GoalControlReceipt { command, live })
     }
     pub(super) fn observe_goal(self: &Arc<Self>) -> rsi_session_protocol::Result<GoalStream> {
         let initial = self.live()?;
         let stream = futures_util::stream::unfold(
-            (self.clone(), self.live_changed.subscribe()),
-            |(owner, mut changed)| async move {
+            (self.clone(), self.live_changed.subscribe(), false),
+            |(owner, mut changed, delivered_waiting)| async move {
+                // A subsequent poll proves the consumer processed the preceding item.
+                if delivered_waiting {
+                    owner.waiting_observed.notify_one();
+                }
                 changed.changed().await.ok()?;
                 changed.borrow_and_update();
-                Some((owner.live(), (owner, changed)))
+                let value = owner.live();
+                let delivered_waiting = value
+                    .as_ref()
+                    .is_ok_and(|live| live.stage == GoalDriverStage::Waiting);
+                Some((value, (owner, changed, delivered_waiting)))
             },
         );
         Ok(Box::pin(

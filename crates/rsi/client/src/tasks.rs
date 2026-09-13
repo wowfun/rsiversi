@@ -168,10 +168,8 @@ impl SessionController {
                 } => result,
             };
             let uncertain = matches!(&result, Err(SessionError::CommandOutcomeUnknown { .. } | SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown)));
-            let mut current = false;
             controller.goal_control.send_if_modified(|state| {
                 if !matches!(state, GoalControlState::Pending(request) if request.request_id == request_id) { return false; }
-                current = true;
                 if uncertain { return false; }
                 *state = match &result {
                     Ok(_) => GoalControlState::Idle,
@@ -179,7 +177,6 @@ impl SessionController {
                 };
                 true
             });
-            if current && let Ok(receipt) = &result { controller.publish_goal(receipt.live.clone()); }
             if result.is_ok() || uncertain { controller.start_observing(ObservationCursor::default()); }
             result
         }));

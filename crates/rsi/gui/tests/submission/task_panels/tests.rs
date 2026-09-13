@@ -35,6 +35,59 @@ fn detail(app: &rsi_gui::GuiApplication) -> Value {
 }
 
 #[tokio::test]
+async fn late_goal_control_and_reconciliation_replies_preserve_observed_driver_state() {
+    for reconcile in [false, true] {
+        let (runtime, backend, app) = prepared().await;
+        app.command(&open(&app, "goal")).await.unwrap();
+        until(|| detail(&app).to_string().contains("Create and start Goal")).await;
+        let mut action = crate::ui::button(&detail(&app), Some("Create and start Goal"));
+        action["input"]["fields"] =
+            json!({"objective":"Delayed control reply", "constraints":"", "rounds":"3"});
+        let scenario = &backend.task_panels;
+        if reconcile {
+            scenario.unknown.store(true, Ordering::SeqCst);
+            app.command(&action.to_string()).await.unwrap();
+            until(|| detail(&app).to_string().contains("Check control result")).await;
+            action = crate::ui::button(&detail(&app), Some("Check control result"));
+        }
+        scenario.block_reply.store(true, Ordering::SeqCst);
+        let pending = app.command(&action.to_string());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            scenario.reply_entered.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            scenario.live.lock().unwrap().stage,
+            GoalDriverStage::Reserving
+        );
+        scenario.live.lock().unwrap().stage = GoalDriverStage::Waiting;
+        scenario.live_changed.send_replace(());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            scenario.waiting_observed.notified(),
+        )
+        .await
+        .unwrap();
+        scenario.reply_release.notify_one();
+        pending.await.unwrap();
+        let model = detail(&app).to_string();
+        assert!(
+            model.contains("Waiting") && !model.contains("Reserving"),
+            "late receipt regressed live state (reconcile={reconcile}): {model}"
+        );
+        assert!(!model.contains("outcome is unresolved"));
+        assert_eq!(scenario.controls.lock().unwrap().len(), 1);
+        assert_eq!(
+            scenario.receipt_queries.lock().unwrap().len(),
+            usize::from(reconcile)
+        );
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
 async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying() {
     let (runtime, backend, app) = prepared().await;
     app.command(&open(&app, "goal")).await.unwrap();

@@ -6,6 +6,9 @@ holds only a clone of the same byte lease. One optional live Goal observer belon
 to the controller generation. Its small state remains separate from durable
 projections. Retirement clears both watches. Goal controls retain an uncertain
 invocation until explicit receipt reconciliation; reads never arm execution.
+The live observer alone updates retained driver state. A control or reconciliation
+receipt contains a separately captured live snapshot without an observation
+sequence; its later delivery must not replace a newer stream value or error.
 `GoalControlState` observes idle, an exact pending request, or a known rejection
 with its request identity and at most 4 KiB of diagnostic text. Live and durable
 refreshes never erase a rejection. A later explicit admitted control or receipt
