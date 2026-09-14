@@ -1,4 +1,4 @@
-//! OS-keyring and captured-environment credential provider.
+//! Private-file and captured-environment credential provider.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -6,10 +6,10 @@
 
 use async_trait::async_trait;
 use rsi_credentials_protocol::{
-    CredentialAvailability, CredentialRef, CredentialSource, CredentialStatus, CredentialsAdmin,
-    CredentialsAdminContract, CredentialsError, CredentialsResolve, CredentialsResolveContract,
-    CredentialsStatus, CredentialsStatusContract, ResolvedCredential, Result, SecretValue,
-    validate_environment_name, validate_segment,
+    CredentialAvailability, CredentialRef, CredentialSource, CredentialStatus,
+    CredentialStoreFailure, CredentialsAdmin, CredentialsAdminContract, CredentialsError,
+    CredentialsResolve, CredentialsResolveContract, CredentialsStatus, CredentialsStatusContract,
+    ResolvedCredential, Result, SecretValue, validate_environment_name,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
@@ -24,45 +24,20 @@ const MAXIMUM_CONCURRENT_STORE_OPERATIONS: usize = 64;
 const DEFAULT_RESOLUTION_TIMEOUT_MS: u64 = 30_000;
 const MAXIMUM_RESOLUTION_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 
-/// Minimal secret-store seam used by the local provider.
+mod file;
+pub use file::FileSecretStore;
+
+/// Exact-reference secret-store seam used by the local provider.
 pub trait SecretStore: fmt::Debug + Send + Sync + 'static {
-    /// Reads one exact service/account entry.
-    fn get(&self, service: &str, account: &str) -> Result<Option<SecretValue>>;
-    /// Sets one exact service/account entry.
-    fn set(&self, service: &str, account: &str, secret: &SecretValue) -> Result<()>;
-    /// Deletes one exact entry and reports whether it existed.
-    fn unset(&self, service: &str, account: &str) -> Result<bool>;
-}
-
-/// Platform keyring-backed secret store.
-#[derive(Clone, Debug, Default)]
-pub struct KeyringSecretStore;
-
-impl SecretStore for KeyringSecretStore {
-    fn get(&self, service: &str, account: &str) -> Result<Option<SecretValue>> {
-        let entry = keyring::Entry::new(service, account)
-            .map_err(|error| CredentialsError::Store(error.to_string()))?;
-        match entry.get_password() {
-            Ok(secret) => SecretValue::new(secret).map(Some),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(CredentialsError::Store(error.to_string())),
-        }
-    }
-
-    fn set(&self, service: &str, account: &str, secret: &SecretValue) -> Result<()> {
-        keyring::Entry::new(service, account)
-            .and_then(|entry| entry.set_password(secret.expose_secret()))
-            .map_err(|error| CredentialsError::Store(error.to_string()))
-    }
-
-    fn unset(&self, service: &str, account: &str) -> Result<bool> {
-        let entry = keyring::Entry::new(service, account)
-            .map_err(|error| CredentialsError::Store(error.to_string()))?;
-        match entry.delete_credential() {
-            Ok(()) => Ok(true),
-            Err(keyring::Error::NoEntry) => Ok(false),
-            Err(error) => Err(CredentialsError::Store(error.to_string())),
-        }
+    /// Reads one full owner/slot reference.
+    fn get(&self, reference: &CredentialRef) -> Result<Option<SecretValue>>;
+    /// Replaces one entry independently of other configuration.
+    fn set(&self, reference: &CredentialRef, secret: &SecretValue) -> Result<()>;
+    /// Deletes a stored entry, allowing environment fallback again.
+    fn unset(&self, reference: &CredentialRef) -> Result<bool>;
+    /// Safe bounded filesystem location, absent for non-file test stores.
+    fn location(&self) -> Option<String> {
+        None
     }
 }
 
@@ -80,8 +55,6 @@ pub struct EnvironmentBinding {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialsLocalConfig {
-    /// Stable OS keyring service name.
-    pub service: String,
     /// Explicit environment fallback mapping.
     #[serde(default)]
     pub environment: Vec<EnvironmentBinding>,
@@ -103,7 +76,6 @@ const fn default_resolution_timeout_ms() -> u64 {
 
 impl CredentialsLocalConfig {
     fn validate(&self) -> Result<()> {
-        validate_segment("keyring service", &self.service)?;
         if self.maximum_concurrent_store_operations == 0
             || self.maximum_concurrent_store_operations > MAXIMUM_CONCURRENT_STORE_OPERATIONS
         {
@@ -135,7 +107,6 @@ impl CredentialsLocalConfig {
 
 #[derive(Debug)]
 struct Service {
-    name: String,
     store: Arc<dyn SecretStore>,
     environment: HashMap<CredentialRef, EnvironmentValue>,
     flights: Arc<Mutex<HashMap<CredentialRef, ResolutionFlight>>>,
@@ -170,16 +141,17 @@ impl CredentialsStatus for Service {
                 source: resolved.source,
             },
             Err(CredentialsError::NotConfigured(_)) => CredentialAvailability::Missing,
-            Err(CredentialsError::Store(_) | CredentialsError::Timeout(_)) => {
-                CredentialAvailability::Unavailable
-            }
+            Err(CredentialsError::Store(reason)) => CredentialAvailability::Unavailable { reason },
+            Err(CredentialsError::Timeout(_)) => CredentialAvailability::Unavailable {
+                reason: CredentialStoreFailure::Timeout,
+            },
             Err(error) => return Err(error),
         };
-        let editable = !self.environment.contains_key(reference)
-            && availability != CredentialAvailability::Unavailable;
+        let editable = !matches!(availability, CredentialAvailability::Unavailable { .. });
         Ok(CredentialStatus {
             availability,
             editable,
+            store_path: self.store.location(),
         })
     }
 }
@@ -200,11 +172,7 @@ impl Service {
         let permit = Arc::clone(&self.admission)
             .acquire_owned()
             .await
-            .map_err(|error| {
-                CredentialsError::Store(format!(
-                    "credential admission unexpectedly closed: {error}"
-                ))
-            })?;
+            .map_err(|_| CredentialsError::Store(CredentialStoreFailure::Io))?;
         let receiver = {
             let mut flights = self
                 .flights
@@ -217,25 +185,27 @@ impl Service {
                 let (sender, receiver) = watch::channel(None);
                 flights.insert(reference.clone(), sender.clone());
                 let store = Arc::clone(&self.store);
-                let name = self.name.clone();
                 let reference = reference.clone();
                 let environment = self.environment.get(&reference).cloned();
                 let flights = Arc::clone(&self.flights);
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let account = reference.account();
-                    let stored = tokio::task::spawn_blocking(move || store.get(&name, &account))
+                    let lookup = reference.clone();
+                    let stored = tokio::task::spawn_blocking(move || store.get(&lookup))
                         .await
-                        .map_err(|error| {
-                            CredentialsError::Store(format!("keyring task failed: {error}"))
-                        })
+                        .map_err(|_| CredentialsError::Store(CredentialStoreFailure::Io))
                         .and_then(std::convert::identity);
                     let result = resolve_stored(&reference, environment, stored);
                     let _ignored = sender.send(Some(result));
-                    flights
+                    let mut flights = flights
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&reference);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if flights
+                        .get(&reference)
+                        .is_some_and(|current| current.same_channel(&sender))
+                    {
+                        flights.remove(&reference);
+                    }
                 });
                 receiver
             }
@@ -252,9 +222,7 @@ async fn wait_for_resolution(
             return result;
         }
         if receiver.changed().await.is_err() {
-            return Err(CredentialsError::Store(
-                "credential resolution ended without a result".into(),
-            ));
+            return Err(CredentialsError::Store(CredentialStoreFailure::Io));
         }
     }
 }
@@ -268,10 +236,9 @@ fn resolve_stored(
         Ok(Some(secret)) => {
             return Ok(ResolvedCredential {
                 secret,
-                source: CredentialSource::Keyring,
+                source: CredentialSource::File,
             });
         }
-        Ok(None) | Err(_) if environment.is_some() => {}
         Ok(None) => {}
         Err(error) => return Err(error),
     }
@@ -286,54 +253,61 @@ fn resolve_stored(
     Err(CredentialsError::NotConfigured(reference.account()))
 }
 
+struct WriteInvalidation {
+    reference: CredentialRef,
+    flights: Arc<Mutex<HashMap<CredentialRef, ResolutionFlight>>>,
+}
+impl Drop for WriteInvalidation {
+    fn drop(&mut self) {
+        self.flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.reference);
+    }
+}
+
 #[async_trait]
 impl CredentialsAdmin for Service {
     async fn set(&self, reference: &CredentialRef, secret: SecretValue) -> Result<()> {
         reference.validate()?;
-        if let Some(value) = self.environment.get(reference) {
-            return Err(CredentialsError::EnvironmentShadow(value.variable.clone()));
-        }
         let store = Arc::clone(&self.store);
-        let name = self.name.clone();
-        let account = reference.account();
+        let flights = Arc::clone(&self.flights);
+        let reference = reference.clone();
         let permit = Arc::clone(&self.admission)
             .acquire_owned()
             .await
-            .map_err(|error| {
-                CredentialsError::Store(format!(
-                    "credential admission unexpectedly closed: {error}"
-                ))
-            })?;
+            .map_err(|_| CredentialsError::Store(CredentialStoreFailure::Io))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            store.set(&name, &account, &secret)
+            let _invalidate = WriteInvalidation {
+                reference: reference.clone(),
+                flights,
+            };
+            store.set(&reference, &secret)
         })
         .await
-        .map_err(|error| CredentialsError::Store(format!("keyring task failed: {error}")))?
+        .map_err(|_| CredentialsError::OutcomeUnknown)?
     }
 
     async fn unset(&self, reference: &CredentialRef) -> Result<bool> {
         reference.validate()?;
-        if let Some(value) = self.environment.get(reference) {
-            return Err(CredentialsError::EnvironmentShadow(value.variable.clone()));
-        }
         let store = Arc::clone(&self.store);
-        let name = self.name.clone();
-        let account = reference.account();
+        let flights = Arc::clone(&self.flights);
+        let reference = reference.clone();
         let permit = Arc::clone(&self.admission)
             .acquire_owned()
             .await
-            .map_err(|error| {
-                CredentialsError::Store(format!(
-                    "credential admission unexpectedly closed: {error}"
-                ))
-            })?;
+            .map_err(|_| CredentialsError::Store(CredentialStoreFailure::Io))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            store.unset(&name, &account)
+            let _invalidate = WriteInvalidation {
+                reference: reference.clone(),
+                flights,
+            };
+            store.unset(&reference)
         })
         .await
-        .map_err(|error| CredentialsError::Store(format!("keyring task failed: {error}")))?
+        .map_err(|_| CredentialsError::OutcomeUnknown)?
     }
 }
 
@@ -342,15 +316,6 @@ impl CredentialsAdmin for Service {
 pub struct CredentialsLocalFactory {
     store: Arc<dyn SecretStore>,
     captured_environment: BTreeMap<String, SecretValue>,
-}
-
-impl Default for CredentialsLocalFactory {
-    fn default() -> Self {
-        Self {
-            store: Arc::new(KeyringSecretStore),
-            captured_environment: BTreeMap::new(),
-        }
-    }
 }
 
 impl CredentialsLocalFactory {
@@ -374,12 +339,11 @@ impl PluginFactory for CredentialsLocalFactory {
         config
             .validate()
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        let retained = config.service.len()
-            + config
-                .environment
-                .iter()
-                .map(|binding| binding.reference.account().len() + binding.variable.len())
-                .sum::<usize>();
+        let retained = config
+            .environment
+            .iter()
+            .map(|binding| binding.reference.account().len() + binding.variable.len())
+            .sum::<usize>();
         Ok(PreparedActivation::with_state(
             desired.clone(),
             config,
@@ -402,7 +366,6 @@ impl PluginFactory for CredentialsLocalFactory {
             }
         }
         let service = Arc::new(Service {
-            name: config.service,
             store: Arc::clone(&self.store),
             environment,
             flights: Arc::new(Mutex::new(HashMap::new())),
@@ -438,33 +401,33 @@ impl PluginFactory for CredentialsLocalFactory {
 /// Memory store used to inject deterministic local-provider tests.
 #[derive(Debug, Default)]
 pub struct MemorySecretStore {
-    values: Mutex<HashMap<(String, String), SecretValue>>,
+    values: Mutex<HashMap<CredentialRef, SecretValue>>,
 }
 
 impl SecretStore for MemorySecretStore {
-    fn get(&self, service: &str, account: &str) -> Result<Option<SecretValue>> {
+    fn get(&self, reference: &CredentialRef) -> Result<Option<SecretValue>> {
         Ok(self
             .values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&(service.to_owned(), account.to_owned()))
+            .get(reference)
             .cloned())
     }
 
-    fn set(&self, service: &str, account: &str, secret: &SecretValue) -> Result<()> {
+    fn set(&self, reference: &CredentialRef, secret: &SecretValue) -> Result<()> {
         self.values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((service.to_owned(), account.to_owned()), secret.clone());
+            .insert(reference.clone(), secret.clone());
         Ok(())
     }
 
-    fn unset(&self, service: &str, account: &str) -> Result<bool> {
+    fn unset(&self, reference: &CredentialRef) -> Result<bool> {
         Ok(self
             .values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(service.to_owned(), account.to_owned()))
+            .remove(reference)
             .is_some())
     }
 }

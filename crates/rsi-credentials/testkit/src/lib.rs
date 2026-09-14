@@ -30,7 +30,7 @@ impl CredentialsResolve for MemoryCredentials {
             .cloned()
             .map(|secret| ResolvedCredential {
                 secret,
-                source: CredentialSource::Keyring,
+                source: CredentialSource::File,
             })
             .ok_or_else(|| CredentialsError::NotConfigured(reference.account()))
     }

@@ -8,14 +8,21 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-keyring.workspace = true
 rsi-credentials-protocol = { path = "../protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+cap-std.workspace = true
+rustix.workspace = true
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [lints]

@@ -1,30 +1,57 @@
 # rsi-credentials-local
 
-The Status capability follows Resolve's keyring/environment precedence and
-returns only redacted availability, effective source and current editability.
-Store failures and resolution deadlines become unavailable, with no diagnostic
-or secret in that value. Captured environment bindings disable editing exactly
-as Admin does. Status shares the existing bounded resolution admission.
+The ordinary local plugin resolves exact credential references from a private
+file first and an explicitly captured startup environment snapshot second.
+Only an absent file or entry permits fallback. Corruption, permission failures,
+unsafe paths and I/O errors never select another secret. Admin may replace an
+environment credential; deleting a stored entry reveals the captured fallback.
+Status reports the effective source, editability, store location and a closed
+safe failure category. It contains neither secrets nor backend error text.
 
-This ordinary plugin resolves exact credential references from an injected OS
-keyring store first and an explicitly captured startup environment snapshot
-second. Profile configuration maps references to allowed variable names but
-cannot contain values. Administrative writes are rejected while an environment
-fallback exists, so an unset operation cannot silently reveal a different
-secret source.
+Composition injects the store and captured environment. The standard product
+selects the path; this module never discovers a home directory. Tests inject
+memory stores or private temporary files, never real user credentials.
 
-The default factory uses the platform keyring. Tests inject a memory
-`SecretStore`; they never touch a real keyring or ambient environment.
+## File contract
 
-Provider configuration owns one blocking-store admission boundary shared by
-resolve, set, and unset. `maximum_concurrent_store_operations` defaults to 8
-and accepts 1 through 64. Calls
-for one full credential reference share one in-flight lookup; settled results
-are not cached. `resolution_timeout_ms` defaults to 30 seconds and accepts 1
-millisecond through 5 minutes. A timeout detaches only that waiter; admitted
-synchronous work keeps its permit until the backend returns. Distinct work
-waits for admission before creating a background task or singleflight entry,
-so timed-out queued callers cannot leave an unobserved backlog.
-Administrative writes have no waiter timeout: they wait for their exact Store
-result, and a dropped caller cannot release the permit while its blocking
-closure is still running.
+The JSON document is `{"version":1,"entries":[{"reference":{"owner":"provider",
+"slot":"default"},"secret":"value"}]}`. The whole file is at most 4 MiB with at
+most 4,096 distinct references. Reference and secret limits belong to the
+[protocol](../protocol/README.md). Unknown fields, versions, duplicate object
+fields or references, invalid content and oversized files fail closed.
+The file codec and authenticated credential API explicitly encode secret text.
+Secret wrappers and the file codec's owned input/output buffers are zeroized on
+drop. Serde's escape scratch space and API/transport buffers do not promise
+zeroization; this is not a guarantee that every transient plaintext copy is erased.
+
+Unix directory authority is acquired component by component without following
+links. The private credential directory must belong to the effective user with
+mode 0700; credential, lock and temporary files must be single-link regular
+files owned by that user with mode 0600. Existing permissions are never silently
+repaired. Missing directories and files are created only by mutation. A retained
+directory handle owns each operation; subsequent file operations do not reopen
+its absolute path. Other targets fail explicitly as unsupported when equivalent
+native access controls are unavailable; they never write an unprotected file.
+
+Writers acquire a stable private lock file with a one-second bounded wait, reread
+the current document under the lock and preserve unrelated entries. A unique
+same-directory temporary file is written and synced before atomic replacement;
+the directory is then synced. Pre-publication failures preserve the old document.
+A failure after replacement reports an unknown mutation outcome, never a false
+failure or automatic retry. Temporary-file cleanup also runs when metadata
+validation fails. No in-place rewrite or corruption recovery occurs.
+
+## Work ownership
+
+Resolve, set and unset share `maximum_concurrent_store_operations`, default 8,
+range 1..=64. One full reference shares one in-flight lookup; settled results are
+not cached. `resolution_timeout_ms` defaults to 30 seconds, range 1 ms through
+5 minutes. A timeout detaches only that waiter; admitted blocking work retains
+its permit until completion. Queued callers acquire admission before allocating
+a background task or singleflight entry. Admin awaits its exact result; dropping
+a caller cannot cancel accepted writes or release their permits early.
+Mutation completion invalidates older lookups for that reference, including when
+the waiter was dropped. A resolution started after completion cannot join a pre-write lookup; an
+old lookup's cleanup cannot remove a newer flight. A resolve overlapping a write
+may still finish with the earlier value, as may a provider call that already
+froze that value. Rotation does not revoke already issued secret values.

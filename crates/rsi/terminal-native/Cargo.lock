@@ -1091,6 +1091,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rsi-agent-composition-protocol"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-agent-context",
+ "rsi-agent-session-protocol",
+ "rsi-meta",
+ "rsi-meta-contract",
+ "rsi-sandbox",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-context"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rsi-agent-session-protocol"
 version = "0.0.1"
 dependencies = [
@@ -1105,6 +1140,20 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rsi-agent-todo"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1289,6 +1338,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "rsi-agent-session-protocol",
+ "rsi-agent-todo",
  "rsi-ai-protocol",
  "rsi-conversation",
  "rsi-media-protocol",

@@ -60,7 +60,7 @@ impl CredentialRef {
         validate_segment("credential slot", &self.slot)
     }
 
-    /// Returns the stable keyring account string.
+    /// Returns the stable non-secret address string.
     pub fn account(&self) -> String {
         format!("{}/{}", self.owner, self.slot)
     }
@@ -73,13 +73,13 @@ pub struct SecretValue(Zeroizing<String>);
 impl SecretValue {
     /// Creates a bounded secret without exposing it to formatting traits.
     pub fn new(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
+        let value = Zeroizing::new(value.into());
         if value.is_empty() || value.len() > MAXIMUM_SECRET_BYTES {
             return Err(CredentialsError::InvalidInput(format!(
                 "secret length must be within 1..={MAXIMUM_SECRET_BYTES} bytes"
             )));
         }
-        Ok(Self(Zeroizing::new(value)))
+        Ok(Self(value))
     }
 
     /// Borrows the secret text for immediate use.
@@ -98,8 +98,10 @@ impl fmt::Debug for SecretValue {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CredentialSource {
-    /// OS keyring entry.
+    /// Historical OS keyring provenance in durable call facts.
     Keyring,
+    /// Private credential file entry.
+    File,
     /// Explicitly captured startup environment variable.
     Environment {
         /// Non-secret environment variable name.
@@ -111,7 +113,7 @@ impl CredentialSource {
     /// Revalidates non-secret provenance decoded from durable facts.
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Keyring => Ok(()),
+            Self::Keyring | Self::File => Ok(()),
             Self::Environment { variable } => validate_environment_name(variable),
         }
     }
@@ -126,11 +128,13 @@ impl<'de> Deserialize<'de> for CredentialSource {
         #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum WireCredentialSource {
             Keyring,
+            File,
             Environment { variable: String },
         }
 
         let source = match WireCredentialSource::deserialize(deserializer)? {
             WireCredentialSource::Keyring => Self::Keyring,
+            WireCredentialSource::File => Self::File,
             WireCredentialSource::Environment { variable } => Self::Environment { variable },
         };
         source
@@ -158,15 +162,45 @@ pub enum CredentialsError {
     /// No configured source resolved this reference.
     #[error("credential is not configured: {0}")]
     NotConfigured(String),
-    /// An environment fallback shadows an attempted administrative mutation.
-    #[error("credential is supplied by captured environment variable `{0}`")]
-    EnvironmentShadow(String),
-    /// OS keyring or provider storage failed.
+    /// A definite failure before mutation publication.
     #[error("credential store failed: {0}")]
-    Store(String),
+    Store(CredentialStoreFailure),
+    /// Publication may have occurred; callers must reconcile, never replay.
+    #[error("credential write outcome is unknown; refresh before taking further action")]
+    OutcomeUnknown,
     /// This waiter exceeded the configured resolution deadline.
     #[error("credential resolution timed out: {0}")]
     Timeout(String),
+}
+
+/// Safe, closed storage failures; no backend diagnostic or secret text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Error)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStoreFailure {
+    /// Ownership, mode or filesystem access is unsuitable.
+    #[error("credential file permissions or ownership are invalid")]
+    Permissions,
+    /// A link, special file or invalid path was rejected.
+    #[error("credential path must contain private directories and regular files without links")]
+    UnsafePath,
+    /// Invalid JSON, duplicate record, version or field.
+    #[error("credential file is invalid; repair it before retrying")]
+    Corrupt,
+    /// Encoded document or record count exceeds its contract.
+    #[error("credential file exceeds its size or record limit")]
+    TooLarge,
+    /// Another process retained the writer lock past the deadline.
+    #[error("credential file is busy; retry after the other writer completes")]
+    LockTimeout,
+    /// Filesystem operation failed before publication.
+    #[error("credential file could not be accessed; check the filesystem and retry")]
+    Io,
+    /// No equivalent private file implementation exists on this platform.
+    #[error("private credential files are unsupported on this platform")]
+    Unsupported,
+    /// A read waiter exceeded its deadline.
+    #[error("credential status timed out; retry")]
+    Timeout,
 }
 
 /// Credential result.
@@ -182,9 +216,9 @@ pub trait CredentialsResolve: fmt::Debug + Send + Sync + 'static {
 /// Privileged credential mutation service.
 #[async_trait]
 pub trait CredentialsAdmin: fmt::Debug + Send + Sync + 'static {
-    /// Sets one exact keyring entry.
+    /// Sets one exact stored entry, overriding any environment fallback.
     async fn set(&self, reference: &CredentialRef, secret: SecretValue) -> Result<()>;
-    /// Deletes one exact keyring entry and reports whether one existed.
+    /// Deletes one stored entry; a captured environment fallback may become effective.
     async fn unset(&self, reference: &CredentialRef) -> Result<bool>;
 }
 
@@ -200,17 +234,51 @@ pub enum CredentialAvailability {
     /// All configured sources were read successfully and contain no value.
     Missing,
     /// The provider could not determine availability.
-    Unavailable,
+    Unavailable {
+        /// Safe failure category, independent of backend diagnostic text.
+        reason: CredentialStoreFailure,
+    },
 }
 
 /// A safe status projection; this type cannot contain secret material.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialStatus {
     /// Effective availability at the time of the read.
     pub availability: CredentialAvailability,
     /// Whether the current provider permits administrative mutation.
     pub editable: bool,
+    /// Connected Host's credential file path, at most 2048 UTF-8 bytes.
+    /// Absent for injected stores without a filesystem location.
+    pub store_path: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CredentialStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            availability: CredentialAvailability,
+            editable: bool,
+            store_path: Option<String>,
+        }
+        let wire = Wire::deserialize(decoder)?;
+        if wire.store_path.as_ref().is_some_and(|path| {
+            path.is_empty() || path.len() > 2048 || path.chars().any(char::is_control)
+        }) || wire.editable
+            && matches!(
+                wire.availability,
+                CredentialAvailability::Unavailable { .. }
+            )
+        {
+            return Err(serde::de::Error::custom("invalid credential status"));
+        }
+        Ok(Self {
+            availability: wire.availability,
+            editable: wire.editable,
+            store_path: wire.store_path,
+        })
+    }
 }
 
 /// Read-only credential setup information, independent of secret resolution authority.

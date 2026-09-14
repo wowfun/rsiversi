@@ -20,18 +20,35 @@ async fn redacted_status_preserves_source_precedence_and_admin_editability() {
         if stored {
             store
                 .set(
-                    "fixture",
-                    &reference.account(),
+                    &reference,
                     &SecretValue::new("stored-secret-marker").unwrap(),
                 )
                 .unwrap();
         }
         let runtime = Runtime::default();
-        runtime.root().apply(ResolvedFactory::linked("credentials", "test", UpdateMode::Replayable,
-            Arc::new(CredentialsLocalFactory::with_store(store, if environment {
-                BTreeMap::from([("FIXTURE_KEY".into(), SecretValue::new("environment-secret-marker").unwrap())])
-            } else { BTreeMap::new() }))),
-            json!({"service":"fixture", "environment":[{"reference":reference,"variable":"FIXTURE_KEY"}]})).await.unwrap();
+        runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "credentials",
+                    "test",
+                    UpdateMode::Replayable,
+                    Arc::new(CredentialsLocalFactory::with_store(
+                        store,
+                        if environment {
+                            BTreeMap::from([(
+                                "FIXTURE_KEY".into(),
+                                SecretValue::new("environment-secret-marker").unwrap(),
+                            )])
+                        } else {
+                            BTreeMap::new()
+                        },
+                    )),
+                ),
+                json!({ "environment":[{"reference":reference,"variable":"FIXTURE_KEY"}]}),
+            )
+            .await
+            .unwrap();
         let status = runtime
             .root()
             .lookup_local::<CredentialsStatusContract>()
@@ -41,7 +58,7 @@ async fn redacted_status_preserves_source_precedence_and_admin_editability() {
             .unwrap();
         let expected = if stored {
             CredentialAvailability::Configured {
-                source: CredentialSource::Keyring,
+                source: CredentialSource::File,
             }
         } else if environment {
             CredentialAvailability::Configured {
@@ -53,7 +70,7 @@ async fn redacted_status_preserves_source_precedence_and_admin_editability() {
             CredentialAvailability::Missing
         };
         assert_eq!(status.availability, expected);
-        assert_eq!(status.editable, !environment);
+        assert!(status.editable);
         let wire = serde_json::to_string(&status).unwrap();
         assert!(!wire.contains("secret-marker"));
         assert_eq!(
@@ -75,7 +92,7 @@ async fn redacted_status_preserves_source_precedence_and_admin_editability() {
                     BTreeMap::new(),
                 )),
             ),
-            json!({"service":"fixture"}),
+            json!({}),
         )
         .await
         .unwrap();
@@ -86,7 +103,12 @@ async fn redacted_status_preserves_source_precedence_and_admin_editability() {
         .status(&reference)
         .await
         .unwrap();
-    assert_eq!(status.availability, CredentialAvailability::Unavailable);
+    assert_eq!(
+        status.availability,
+        CredentialAvailability::Unavailable {
+            reason: rsi_credentials_protocol::CredentialStoreFailure::Io
+        }
+    );
     assert!(!status.editable);
     assert!(!serde_json::to_string(&status).unwrap().contains("backend"));
     assert!(runtime.shutdown().await.is_clean());
@@ -98,24 +120,104 @@ struct FailingStore;
 impl SecretStore for FailingStore {
     fn get(
         &self,
-        _service: &str,
-        _account: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
     ) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
-        Err(CredentialsError::Store("backend unavailable".into()))
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
 
     fn set(
         &self,
-        _service: &str,
-        _account: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
         _secret: &SecretValue,
     ) -> rsi_credentials_protocol::Result<()> {
-        Err(CredentialsError::Store("backend unavailable".into()))
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
 
-    fn unset(&self, _service: &str, _account: &str) -> rsi_credentials_protocol::Result<bool> {
-        Err(CredentialsError::Store("backend unavailable".into()))
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> rsi_credentials_protocol::Result<bool> {
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io,
+        ))
     }
+}
+
+#[derive(Debug)]
+struct OldReadStore {
+    value: Mutex<SecretValue>,
+    first: std::sync::atomic::AtomicBool,
+    gate: BlockingStore,
+}
+impl SecretStore for OldReadStore {
+    fn get(&self, _: &CredentialRef) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
+        let value = self.value.lock().unwrap().clone();
+        if self.first.swap(false, Ordering::SeqCst) {
+            self.gate.block();
+        }
+        Ok(Some(value))
+    }
+    fn set(&self, _: &CredentialRef, secret: &SecretValue) -> rsi_credentials_protocol::Result<()> {
+        *self.value.lock().unwrap() = secret.clone();
+        Ok(())
+    }
+    fn unset(&self, _: &CredentialRef) -> rsi_credentials_protocol::Result<bool> {
+        unreachable!()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_replacement_cannot_join_a_lookup_started_before_the_write() {
+    let store = Arc::new(OldReadStore {
+        value: Mutex::new(SecretValue::new("old").unwrap()),
+        first: std::sync::atomic::AtomicBool::new(true),
+        gate: BlockingStore::default(),
+    });
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "credentials",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(CredentialsLocalFactory::with_store(
+                    store.clone(),
+                    BTreeMap::new(),
+                )),
+            ),
+            json!({"resolution_timeout_ms":200}),
+        )
+        .await
+        .unwrap();
+    let reference = CredentialRef::new("fixture", "primary").unwrap();
+    let resolver = runtime
+        .root()
+        .lookup_local::<CredentialsResolveContract>()
+        .unwrap();
+    let admin = runtime
+        .root()
+        .lookup_local::<CredentialsAdminContract>()
+        .unwrap();
+    let first = {
+        let resolver = resolver.clone();
+        let reference = reference.clone();
+        tokio::spawn(async move { resolver.resolve(&reference).await })
+    };
+    store.gate.entered.notified().await;
+    admin
+        .set(&reference, SecretValue::new("new").unwrap())
+        .await
+        .unwrap();
+    let next = resolver.resolve(&reference).await;
+    store.gate.release();
+    let _ = first.await.unwrap();
+    assert_eq!(next.unwrap().secret.expose_secret(), "new");
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[derive(Debug, Default)]
@@ -126,8 +228,7 @@ struct PanickingStore {
 impl SecretStore for PanickingStore {
     fn get(
         &self,
-        _service: &str,
-        _account: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
     ) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("fixture keyring panic");
@@ -135,14 +236,16 @@ impl SecretStore for PanickingStore {
 
     fn set(
         &self,
-        _service: &str,
-        _account: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
         _secret: &SecretValue,
     ) -> rsi_credentials_protocol::Result<()> {
         unreachable!("panic cleanup test does not mutate credentials")
     }
 
-    fn unset(&self, _service: &str, _account: &str) -> rsi_credentials_protocol::Result<bool> {
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> rsi_credentials_protocol::Result<bool> {
         unreachable!("panic cleanup test does not mutate credentials")
     }
 }
@@ -176,8 +279,7 @@ impl BlockingStore {
 impl SecretStore for BlockingStore {
     fn get(
         &self,
-        _service: &str,
-        _account: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
     ) -> rsi_credentials_protocol::Result<Option<SecretValue>> {
         self.block();
         Ok(Some(SecretValue::new("secret").unwrap()))
@@ -185,15 +287,17 @@ impl SecretStore for BlockingStore {
 
     fn set(
         &self,
-        _service: &str,
-        _account: &str,
+        _reference: &rsi_credentials_protocol::CredentialRef,
         _secret: &SecretValue,
     ) -> rsi_credentials_protocol::Result<()> {
         self.block();
         Ok(())
     }
 
-    fn unset(&self, _service: &str, _account: &str) -> rsi_credentials_protocol::Result<bool> {
+    fn unset(
+        &self,
+        _reference: &rsi_credentials_protocol::CredentialRef,
+    ) -> rsi_credentials_protocol::Result<bool> {
         self.block();
         Ok(true)
     }
@@ -218,7 +322,7 @@ async fn admin_and_resolve_share_admission_and_dropped_admin_waiter_keeps_its_pe
                 )),
             ),
             json!({
-                "service":"rsiversi",
+
                 "maximum_concurrent_store_operations":1
             }),
         )
@@ -292,7 +396,7 @@ async fn synchronous_backend_lookup_does_not_block_the_async_runtime() {
                     BTreeMap::new(),
                 )),
             ),
-            json!({"service":"rsiversi"}),
+            json!({}),
         )
         .await
         .unwrap();
@@ -352,7 +456,7 @@ async fn concurrent_resolution_of_one_reference_uses_one_backend_call() {
                 UpdateMode::Replayable,
                 Arc::new(factory),
             ),
-            json!({"service":"rsiversi"}),
+            json!({}),
         )
         .await
         .unwrap();
@@ -408,7 +512,7 @@ async fn a_panicking_backend_does_not_leave_a_dead_singleflight_entry() {
                     BTreeMap::new(),
                 )),
             ),
-            json!({"service":"rsiversi","resolution_timeout_ms":1000}),
+            json!({"resolution_timeout_ms":1000}),
         )
         .await
         .unwrap();
@@ -420,7 +524,9 @@ async fn a_panicking_backend_does_not_leave_a_dead_singleflight_entry() {
     for _ in 0..2 {
         assert!(matches!(
             resolve.resolve(&reference).await,
-            Err(CredentialsError::Store(message)) if message.contains("keyring task failed")
+            Err(CredentialsError::Store(
+                rsi_credentials_protocol::CredentialStoreFailure::Io
+            ))
         ));
     }
     assert_eq!(store.calls.load(Ordering::SeqCst), 2);
@@ -446,7 +552,7 @@ async fn different_references_obey_the_configured_backend_admission_limit() {
                 Arc::new(factory),
             ),
             json!({
-                "service":"rsiversi",
+
                 "maximum_concurrent_store_operations":1
             }),
         )
@@ -507,7 +613,7 @@ async fn timed_out_unadmitted_reference_does_not_leave_background_work() {
                 )),
             ),
             json!({
-                "service":"rsiversi",
+
                 "maximum_concurrent_store_operations":1,
                 "resolution_timeout_ms":50
             }),
@@ -563,7 +669,7 @@ async fn resolution_timeout_detaches_the_waiter_without_abandoning_backend_work(
                 Arc::new(factory),
             ),
             json!({
-                "service":"rsiversi",
+
                 "resolution_timeout_ms":50
             }),
         )
@@ -588,15 +694,11 @@ async fn resolution_timeout_detaches_the_waiter_without_abandoning_backend_work(
 }
 
 #[tokio::test]
-async fn keyring_precedence_environment_shadow_and_redaction_are_explicit() {
+async fn file_precedence_replacement_and_redaction_are_explicit() {
     let reference = CredentialRef::new("rsi.ai.openai", "primary").unwrap();
     let store = Arc::new(MemorySecretStore::default());
     store
-        .set(
-            "rsiversi",
-            &reference.account(),
-            &SecretValue::new("keyring-secret").unwrap(),
-        )
+        .set(&reference, &SecretValue::new("file-secret").unwrap())
         .unwrap();
     let factory = CredentialsLocalFactory::with_store(
         store.clone(),
@@ -616,7 +718,7 @@ async fn keyring_precedence_environment_shadow_and_redaction_are_explicit() {
                 Arc::new(factory),
             ),
             json!({
-                "service":"rsiversi",
+
                 "environment":[{
                     "reference":{"owner":"rsi.ai.openai","slot":"primary"},
                     "variable":"OPENAI_API_KEY"
@@ -634,17 +736,26 @@ async fn keyring_precedence_environment_shadow_and_redaction_are_explicit() {
         .lookup_local::<CredentialsAdminContract>()
         .unwrap();
     let resolved = resolve.resolve(&reference).await.unwrap();
-    assert_eq!(resolved.source, CredentialSource::Keyring);
-    assert_eq!(resolved.secret.expose_secret(), "keyring-secret");
+    assert_eq!(resolved.source, CredentialSource::File);
+    assert_eq!(resolved.secret.expose_secret(), "file-secret");
     let diagnostic = format!("{resolved:?}");
-    assert!(!diagnostic.contains("keyring-secret"));
+    assert!(!diagnostic.contains("file-secret"));
     assert!(!diagnostic.contains("environment-secret"));
 
+    admin
+        .set(&reference, SecretValue::new("replacement-secret").unwrap())
+        .await
+        .unwrap();
     assert_eq!(
-        admin.unset(&reference).await,
-        Err(CredentialsError::EnvironmentShadow("OPENAI_API_KEY".into()))
+        resolve
+            .resolve(&reference)
+            .await
+            .unwrap()
+            .secret
+            .expose_secret(),
+        "replacement-secret"
     );
-    store.unset("rsiversi", &reference.account()).unwrap();
+    assert!(admin.unset(&reference).await.unwrap());
     let fallback = resolve.resolve(&reference).await.unwrap();
     assert_eq!(
         fallback.source,
@@ -660,7 +771,7 @@ async fn keyring_precedence_environment_shadow_and_redaction_are_explicit() {
 }
 
 #[tokio::test]
-async fn explicitly_captured_environment_survives_an_unavailable_keyring_backend() {
+async fn file_failure_never_selects_captured_environment() {
     let reference = CredentialRef::new("rsi.ai.openai", "primary").unwrap();
     let factory = CredentialsLocalFactory::with_store(
         Arc::new(FailingStore),
@@ -680,7 +791,7 @@ async fn explicitly_captured_environment_survives_an_unavailable_keyring_backend
                 Arc::new(factory),
             ),
             json!({
-                "service":"rsiversi",
+
                 "environment":[{
                     "reference":{"owner":"rsi.ai.openai","slot":"primary"},
                     "variable":"OPENAI_API_KEY"
@@ -693,19 +804,19 @@ async fn explicitly_captured_environment_survives_an_unavailable_keyring_backend
         .root()
         .lookup_local::<CredentialsResolveContract>()
         .unwrap();
-    let fallback = resolve.resolve(&reference).await.unwrap();
-    assert_eq!(
-        fallback.source,
-        CredentialSource::Environment {
-            variable: "OPENAI_API_KEY".into()
-        }
-    );
-    assert_eq!(fallback.secret.expose_secret(), "environment-secret");
+    assert!(matches!(
+        resolve.resolve(&reference).await,
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io
+        ))
+    ));
 
     let unbound = CredentialRef::new("rsi.ai.openai", "unbound").unwrap();
     assert!(matches!(
         resolve.resolve(&unbound).await,
-        Err(CredentialsError::Store(message)) if message == "backend unavailable"
+        Err(CredentialsError::Store(
+            rsi_credentials_protocol::CredentialStoreFailure::Io
+        ))
     ));
     drop(resolve);
     assert!(fiber.dispose().await.is_clean());
